@@ -28,4 +28,5 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ROBLOSECURITY_COOKIE: ${{ secrets.ROBLOSECURITY_COOKIE }}
-        run: python suggest.py
+          PYTHONUNBUFFERED: "1"
+        run: python -u suggest.py
