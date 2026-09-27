@@ -5,6 +5,10 @@ on:
     - cron: '0 2 * * *'  # Runs daily at 2 AM UTC
   workflow_dispatch:      # Allows manual trigger from GitHub
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
