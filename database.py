@@ -9,7 +9,7 @@ def get_db_connection():
     return psycopg2.connect(
         DATABASE_URL,
         sslmode='require',
-        connect_timeout=10,           # give up after 10s if Supabase is unreachable
+        connect_timeout=10,
         keepalives=1,
         keepalives_idle=30,
         keepalives_interval=10,
@@ -21,6 +21,7 @@ def setup_database():
     conn = get_db_connection()
     cur = conn.cursor()
 
+    # ---- CORE TABLES ----
     cur.execute('''
         CREATE TABLE IF NOT EXISTS discovered_items (
             id BIGINT PRIMARY KEY
@@ -87,7 +88,75 @@ def setup_database():
         ON learned_keywords (score DESC);
     ''')
 
+    # ---- ELITE GUIDE TABLES ----
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            discord_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            total_consultations INTEGER DEFAULT 0,
+            notes TEXT
+        );
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS saved_consultations (
+            id SERIAL PRIMARY KEY,
+            discord_id BIGINT,
+            seed TEXT,
+            verdict_label TEXT,
+            verdict_emoji TEXT,
+            full_report TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    cur.execute('''
+        CREATE INDEX IF NOT EXISTS idx_saved_consult_discord 
+        ON saved_consultations (discord_id);
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id SERIAL PRIMARY KEY,
+            discord_id BIGINT,
+            keyword TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            baseline_favs INTEGER DEFAULT 0,
+            last_checked TIMESTAMP,
+            alert_sent BOOLEAN DEFAULT FALSE,
+            UNIQUE(discord_id, keyword)
+        );
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS competitor_tracking (
+            id SERIAL PRIMARY KEY,
+            discord_id BIGINT,
+            creator_name TEXT,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(discord_id, creator_name)
+        );
+    ''')
+
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS item_tracker (
+            id SERIAL PRIMARY KEY,
+            discord_id BIGINT,
+            item_id BIGINT,
+            item_name TEXT,
+            claimed_keywords TEXT,
+            claimed_price INTEGER,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(discord_id, item_id)
+        );
+    ''')
+
     conn.commit()
     cur.close()
     conn.close()
     print("✅ Database tables ready.", flush=True)
+
+
+if __name__ == "__main__":
+    setup_database()
