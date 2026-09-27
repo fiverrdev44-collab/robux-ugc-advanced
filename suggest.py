@@ -3,13 +3,15 @@ import requests
 import time
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from database import get_db_connection, setup_database
 
 # Try multiple endpoints — Roblox changes these often
 ENDPOINTS = [
+    "https://apis.roblox.com/search-suggestions/v1/suggest",
     "https://apis.roblox.com/search-suggestions/v1/omni-suggest/keywords",
     "https://www.roblox.com/search/suggest",
-    "https://apis.roblox.com/search-suggestions/v1/suggest",
+    "https://catalog.roblox.com/v1/search/suggestions",
 ]
 WORKERS = 10
 
@@ -19,6 +21,7 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.roblox.com/",
+    "Origin": "https://www.roblox.com",
 }
 
 UGC_SEEDS = [
@@ -57,32 +60,45 @@ STOP_WORDS = {
 
 
 def try_endpoint(endpoint, seed):
-    """Try one endpoint with one seed. Return list of suggestion strings or None."""
+    """Try one endpoint with one seed. Return list of suggestion strings or []."""
     try:
-        # Some endpoints use 'query', some use 'keyword'
-        for param_name in ["query", "keyword"]:
+        for param_name in ["query", "keyword", "q"]:
             params = {param_name: seed, "limit": 10, "maxResults": 10}
-            resp = requests.get(endpoint, params=params, headers=HEADERS, timeout=8)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception:
-                    continue
-                # Handle different response shapes
-                items = (data.get("suggestions") 
-                         or data.get("keywords") 
-                         or data.get("data") 
-                         or [])
-                parsed = []
-                for s in items:
-                    if isinstance(s, str):
-                        parsed.append(s.strip().lower())
-                    elif isinstance(s, dict):
-                        kw = s.get("keyword") or s.get("text") or s.get("name")
-                        if kw:
-                            parsed.append(kw.strip().lower())
-                if parsed:
-                    return parsed
+            try:
+                resp = requests.get(endpoint, params=params, headers=HEADERS, timeout=8)
+            except Exception:
+                continue
+            if resp.status_code != 200:
+                continue
+            # Try to parse JSON
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+
+            # Handle different possible shapes
+            items = None
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ["suggestions", "keywords", "data", "results", "items"]:
+                    if key in data and isinstance(data[key], list):
+                        items = data[key]
+                        break
+            if not items:
+                continue
+
+            parsed = []
+            for s in items:
+                if isinstance(s, str):
+                    parsed.append(s.strip().lower())
+                elif isinstance(s, dict):
+                    kw = (s.get("keyword") or s.get("text") 
+                          or s.get("name") or s.get("query"))
+                    if kw:
+                        parsed.append(str(kw).strip().lower())
+            if parsed:
+                return parsed
         return []
     except Exception:
         return []
@@ -98,7 +114,6 @@ def fetch_suggestions(seed):
 
 
 def get_dynamic_seeds():
-    """Pull top seeds from suggestions we already collected."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -128,35 +143,35 @@ def get_dynamic_seeds():
 
 
 def mine_database_keywords():
-    """
-    Fallback: extract top bigrams from our own items table.
-    Used when Roblox API returns nothing.
-    """
+    """Fallback: extract top keywords from our own items table."""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # Removed favorite_count filter — some items might have NULL
         cur.execute("""
             SELECT name FROM items 
-            WHERE favorite_count > 0 
-            ORDER BY favorite_count DESC LIMIT 5000
+            WHERE name IS NOT NULL AND name != ''
+            ORDER BY COALESCE(favorite_count, 0) DESC 
+            LIMIT 10000
         """)
         rows = cur.fetchall()
         cur.close(); conn.close()
 
-        from collections import Counter
+        print(f"   Loaded {len(rows)} item names from DB.")
+
         counter = Counter()
         for (name,) in rows:
             if not name: continue
             words = [w.lower() for w in re.findall(r"[a-zA-Z]+", name) 
                      if len(w) > 2 and w.lower() not in STOP_WORDS]
-            # singles + bigrams
             for w in words:
                 counter[w] += 1
             for i in range(len(words) - 1):
                 counter[f"{words[i]} {words[i+1]}"] += 1
 
-        # Keep top 500 as fallback suggestions
-        return [(w, c) for w, c in counter.most_common(500)]
+        top = counter.most_common(800)
+        print(f"   Mined {len(top)} unique keywords from titles.")
+        return top
     except Exception as e:
         print(f"⚠️ DB mining error: {e}")
         return []
@@ -189,7 +204,8 @@ def run_suggest():
     cur = conn.cursor()
 
     if results:
-        print(f"💾 Saving {sum(len(s) for _, s in results)} real suggestions...")
+        real_suggestions = sum(len(s) for _, s in results)
+        print(f"💾 Saving {real_suggestions} real suggestions from {len(results)} seeds...")
         for seed, suggs in results:
             for s in suggs:
                 cur.execute(
@@ -199,9 +215,9 @@ def run_suggest():
                 total += 1
         conn.commit()
 
-    # ---- FALLBACK: if Roblox returned nothing, mine our own DB ----
+    # ---- FALLBACK: mine our own DB ----
     if total == 0:
-        print("⚠️ No suggestions from Roblox. Mining our own database instead...")
+        print("⚠️ No suggestions from Roblox. Mining our own database...")
         fallback = mine_database_keywords()
         for phrase, count in fallback:
             cur.execute(
@@ -210,7 +226,6 @@ def run_suggest():
             )
             total += 1
         conn.commit()
-        print(f"✅ Stored {total} DB-mined keywords as fallback.")
 
     cur.close()
     conn.close()
