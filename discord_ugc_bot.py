@@ -36,7 +36,6 @@ STOP_WORDS = {
     "credits","inspired","based","similar","style","styles","design","designed",
     "really","actually","literally","basically","super","still","even",
     "ever","never","always","sometimes","maybe",
-    # Emoji-related junk
     "emoji","emojis","emoticon","emoticons","twemoji","twemojis"
 }
 
@@ -55,25 +54,23 @@ def extract_words(text):
 
 
 def word_boundary_pattern(word):
-    """Postgres whole-word match pattern."""
     return r'\m' + re.escape(word) + r'\M'
 
 
 def matches_seed(suggestion, seed):
-    """Python whole-word match for a suggestion."""
     return re.search(r'\b' + re.escape(seed) + r'\b', suggestion) is not None
 
 
 def fast_opportunity(cur, kw):
-    """Fast whole-word opportunity analysis."""
-    # 1. Get candidates via broad LIKE
+    """Fast whole-word opportunity analysis with bigram extraction."""
+    # 1. Get suggestions matching seed
     cur.execute("""
         SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 200
+        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
     """, (f"%{kw}%", f"%{kw}%"))
     candidates = [r[0] for r in cur.fetchall()]
 
-    # 2. STRICT FILTER: whole-word match + junk filter
+    # 2. Strict whole-word filter + junk filter
     suggs = []
     for s in candidates:
         s = s.strip().lower()
@@ -86,11 +83,11 @@ def fast_opportunity(cur, kw):
         if matches_seed(s, kw):
             suggs.append(s)
 
-    suggs = list(set(suggs))[:30]
+    suggs = list(set(suggs))[:50]
     if not suggs:
         suggs = [kw]
 
-    # 3. Query items containing any suggestion
+    # 3. Query matching items
     cur.execute("""
         SELECT LOWER(name), favorite_count FROM items
         WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
@@ -100,7 +97,7 @@ def fast_opportunity(cur, kw):
     if not rows:
         return []
 
-    # 4. Aggregate with strict whole-word matching
+    # 4. Aggregate suggestion stats
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, favs in rows:
         for s in suggs:
@@ -108,6 +105,32 @@ def fast_opportunity(cur, kw):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
+    # 5. Extract bigrams from matching items to find extra phrases
+    extra_phrases = set()
+    for name, _ in rows:
+        words = name.split()
+        for i in range(len(words) - 1):
+            bigram = f"{words[i]} {words[i+1]}".strip()
+            if kw in bigram and 3 < len(bigram) < 40:
+                # Only keep if kw is a whole word in the bigram
+                if re.search(r'\b' + re.escape(kw) + r'\b', bigram):
+                    extra_phrases.add(bigram)
+
+    # Score the extra bigrams
+    for phrase in extra_phrases:
+        if phrase in stats:
+            continue
+        matched_favs = 0
+        matched_count = 0
+        for name, favs in rows:
+            if re.search(r'\b' + re.escape(phrase) + r'\b', name):
+                matched_favs += favs or 0
+                matched_count += 1
+        if matched_count >= 2:
+            stats[phrase]["favs"] = matched_favs
+            stats[phrase]["count"] = matched_count
+
+    # 6. Calculate final scores
     results = []
     for s, data in stats.items():
         if data["count"] == 0:
@@ -200,7 +223,7 @@ async def analyze(ctx, *, keyword: str):
     embed = discord.Embed(title=f"🧠 Deep Analysis for `{kw}`",
                           description=f"Analyzed **{len(rows)}** items.",
                           color=0x00ff88)
-    for i, (w, af, c, sc) in enumerate(results[:10], 1):
+    for i, (w, af, c, sc) in enumerate(results[:15], 1):
         embed.add_field(name=f"{i}. {w}",
                         value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                         inline=False)
@@ -245,10 +268,10 @@ async def opportunity(ctx, *, keyword: str):
         return
     embed = discord.Embed(
         title=f"💎 Opportunity Finder: `{kw}`",
-        description="Whole-word matching. Higher score = better opportunity.",
+        description="Whole-word matching + bigram extraction. Higher score = better opportunity.",
         color=0xff00cc
     )
-    for i, (p, af, c, sc) in enumerate(results[:10], 1):
+    for i, (p, af, c, sc) in enumerate(results[:15], 1):
         embed.add_field(
             name=f"{i}. {p}",
             value=f"Opportunity: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
@@ -270,7 +293,7 @@ async def emote(ctx, *, keyword: str):
         await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
         return
     embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`", color=0xff66aa)
-    for i, (p, af, c, sc) in enumerate(results[:10], 1):
+    for i, (p, af, c, sc) in enumerate(results[:15], 1):
         embed.add_field(name=f"{i}. {p}",
                         value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                         inline=False)
@@ -290,7 +313,7 @@ async def classic(ctx, *, keyword: str):
         await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
         return
     embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`", color=0x66ccff)
-    for i, (p, af, c, sc) in enumerate(results[:10], 1):
+    for i, (p, af, c, sc) in enumerate(results[:15], 1):
         embed.add_field(name=f"{i}. {p}",
                         value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                         inline=False)
@@ -333,7 +356,7 @@ async def gap(ctx, *, keyword: str):
                           color=0x00ffcc)
     if not gaps:
         embed.add_field(name="No gaps found", value="Try a different seed.")
-    for i, (w, af, c) in enumerate(gaps[:10], 1):
+    for i, (w, af, c) in enumerate(gaps[:15], 1):
         embed.add_field(name=f"{i}. {w}",
                         value=f"AvgFav: **{af:,.0f}** | Comp: **{c}**",
                         inline=False)
