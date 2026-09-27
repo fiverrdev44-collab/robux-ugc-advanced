@@ -12,12 +12,22 @@ def log(msg):
 CATALOG_API = "https://catalog.roblox.com/v1/search/items"
 CATEGORIES = [11, 3, 4, 12]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
-WORKERS = 6
-DELAY = 0.1
+WORKERS = 3              # lowered from 6 to avoid rate limits
+DELAY = 0.2              # slightly slower between pages
 MAX_PAGES_PER_QUERY = 10
-HTTP_TIMEOUT = 6
+HTTP_TIMEOUT = 8
 MAX_429_RETRIES = 3
-QUERY_TIMEOUT = 45          # hard cap per future (seconds)
+QUERY_TIMEOUT = 45
+
+# ⚠️ CRITICAL: Roblox silently returns EMPTY results without a browser User-Agent
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.roblox.com/",
+    "Origin": "https://www.roblox.com",
+}
 
 UGC_KEYWORDS = [
     "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
@@ -63,7 +73,7 @@ def get_dynamic_keywords():
 
 
 def scan_query(params):
-    """Hardened: capped retries, no infinite loops."""
+    """Hardened: capped retries, no infinite loops, WITH headers."""
     found = set()
     cursor = ""
     pages = 0
@@ -73,18 +83,22 @@ def scan_query(params):
         p = params.copy()
         p["cursor"] = cursor
         try:
-            resp = requests.get(CATALOG_API, params=p, timeout=HTTP_TIMEOUT)
+            resp = requests.get(
+                CATALOG_API,
+                params=p,
+                headers=HEADERS,          # ← THE FIX
+                timeout=HTTP_TIMEOUT
+            )
 
-            # ---- RATE LIMIT: hard cap ----
             if resp.status_code == 429:
                 retries_429 += 1
                 if retries_429 > MAX_429_RETRIES:
-                    return found  # give up on this query, keep what we have
+                    return found
                 time.sleep(1)
                 continue
 
             if resp.status_code != 200:
-                return found  # any other error = bail
+                return found
 
             data = resp.json()
             for item in data.get("data", []):
@@ -92,11 +106,11 @@ def scan_query(params):
 
             cursor = data.get("nextPageCursor")
             if not cursor:
-                return found  # no more pages
+                return found
 
             pages += 1
         except Exception:
-            return found  # timeout/network error = bail
+            return found
 
         time.sleep(DELAY)
 
@@ -149,7 +163,6 @@ def run_scanner():
             except Exception as e:
                 log(f"  Query #{done} failed: {e}")
 
-            # Log every query so we always see progress
             if done <= 10 or done % 10 == 0:
                 log(f"  {done}/{len(queries)} — {len(all_ids)} IDs")
 
