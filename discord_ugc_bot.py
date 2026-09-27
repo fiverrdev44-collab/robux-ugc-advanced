@@ -57,12 +57,29 @@ def word_boundary_pattern(word):
     return r'\m' + re.escape(word) + r'\M'
 
 
-def matches_seed(suggestion, seed):
-    return re.search(r'\b' + re.escape(seed) + r'\b', suggestion) is not None
+def matches_seed(text, seed):
+    return re.search(r'\b' + re.escape(seed) + r'\b', text) is not None
 
 
-def fast_opportunity(cur, kw):
-    """Fast whole-word opportunity analysis with bigram extraction."""
+def analyze_opportunity(cur, kw):
+    """Rich, multi-source opportunity analysis."""
+    pattern = word_boundary_pattern(kw)
+
+    # ---- 1. Get all matching items (titles + descriptions) ----
+    cur.execute("""
+        SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+               favorite_count, price, creator_name
+        FROM items
+        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+          AND favorite_count > 0
+        LIMIT 3000
+    """, (pattern, pattern))
+    all_items = cur.fetchall()
+
+    if not all_items:
+        return None
+
+    # ---- 2. Get search suggestions for seed ----
     cur.execute("""
         SELECT DISTINCT suggestion FROM search_suggestions 
         WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
@@ -80,59 +97,111 @@ def fast_opportunity(cur, kw):
             continue
         if matches_seed(s, kw):
             suggs.append(s)
-
     suggs = list(set(suggs))[:50]
-    if not suggs:
-        suggs = [kw]
 
-    cur.execute("""
-        SELECT LOWER(name), favorite_count FROM items
-        WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
-    """, ([f"%{s}%" for s in suggs],))
-    rows = cur.fetchall()
-
-    if not rows:
-        return []
-
+    # ---- 3. Score seed-containing keywords ----
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
-    for name, favs in rows:
+    for _, name, desc, favs, price, creator in all_items:
+        # From suggestions - match against title
         for s in suggs:
-            if re.search(r'\b' + re.escape(s) + r'\b', name):
+            if matches_seed(name, s):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
-    # Bigram extraction from matching items
-    extra_phrases = set()
-    for name, _ in rows:
+    # Bigrams from titles
+    for _, name, _, favs, _, _ in all_items:
         words = name.split()
         for i in range(len(words) - 1):
-            bigram = f"{words[i]} {words[i+1]}".strip()
+            bigram = f"{words[i]} {words[i+1]}"
             if kw in bigram and 3 < len(bigram) < 40:
-                if re.search(r'\b' + re.escape(kw) + r'\b', bigram):
-                    extra_phrases.add(bigram)
+                if matches_seed(bigram, kw):
+                    stats[bigram]["favs"] += favs or 0
+                    stats[bigram]["count"] += 1
 
-    for phrase in extra_phrases:
-        if phrase in stats:
-            continue
-        matched_favs = 0
-        matched_count = 0
-        for name, favs in rows:
-            if re.search(r'\b' + re.escape(phrase) + r'\b', name):
-                matched_favs += favs or 0
-                matched_count += 1
-        if matched_count >= 2:
-            stats[phrase]["favs"] = matched_favs
-            stats[phrase]["count"] = matched_count
-
-    results = []
+    top_keywords = []
     for s, data in stats.items():
-        if data["count"] == 0:
+        if data["count"] < 2:
             continue
-        avg_f = data["favs"] / data["count"]
-        results.append((s, avg_f, data["count"], avg_f / math.log1p(data["count"])))
+        af = data["favs"] / data["count"]
+        top_keywords.append((s, af, data["count"], af / math.log1p(data["count"])))
+    top_keywords.sort(key=lambda x: x[3], reverse=True)
+    top_keywords = top_keywords[:10]
 
-    results.sort(key=lambda x: x[3], reverse=True)
-    return results
+    # ---- 4. ADJACENT keywords (words that co-occur but don't contain seed) ----
+    adjacent_counter = Counter()
+    for _, name, desc, favs, _, _ in all_items:
+        # Count words from titles that appear alongside the seed
+        words = set(extract_words(name))
+        for w in words:
+            if w != kw and not matches_seed(w, kw):
+                adjacent_counter[w] += 1
+    adjacent = [w for w, _ in adjacent_counter.most_common(50) if _ >= 3][:10]
+
+    # ---- 5. DESCRIPTION keywords (hidden SEO) ----
+    desc_counter = Counter()
+    for _, _, desc, _, _, _ in all_items:
+        desc_counter.update(extract_words(desc))
+    # Remove seed and adjacent dupes
+    desc_only = [w for w, _ in desc_counter.most_common(50) 
+                 if w != kw and w not in adjacent and _ >= 2][:8]
+
+    # ---- 6. PRICE analysis ----
+    prices = [p for _, _, _, _, p, _ in all_items if p and p > 0]
+    median_price = sorted(prices)[len(prices) // 2] if prices else 0
+    # Find price of top-favourited items
+    top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:20]
+    top_prices = [p for _, _, _, _, p, _ in top_items if p and p > 0]
+    best_price = sorted(top_prices)[len(top_prices) // 2] if top_prices else median_price
+
+    # ---- 7. CREATOR diversity ----
+    creators = [c for _, _, _, _, _, c in all_items if c]
+    unique_creators = len(set(creators))
+    top_creator_counts = Counter(creators).most_common(1)
+    top_creator_share = (top_creator_counts[0][1] / len(all_items) * 100) if top_creator_counts else 0
+
+    # ---- 8. MARKET HEALTH ----
+    total_competitors = len(all_items)
+    avg_favs = sum(f or 0 for _, _, _, f, _, _ in all_items) / len(all_items)
+    if total_competitors < 20:
+        saturation = "🟢 Low — untapped!"
+    elif total_competitors < 100:
+        saturation = "🟡 Medium — healthy"
+    elif total_competitors < 500:
+        saturation = "🟠 High — competitive"
+    else:
+        saturation = "🔴 Saturated — hard to rank"
+
+    # ---- 9. STYLE patterns ----
+    style_words = ["gothic", "cute", "emo", "y2k", "pastel", "kawaii", "grunge",
+                   "cyber", "coquette", "anime", "dark", "light", "fluffy",
+                   "cyberpunk", "retro", "vintage", "aesthetic", "preppy",
+                   "streetwear", "cottagecore", "fairycore", "academia"]
+    style_counts = Counter()
+    for _, name, desc, _, _, _ in all_items:
+        text = f"{name} {desc}"
+        for style in style_words:
+            if re.search(r'\b' + style + r'\b', text):
+                style_counts[style] += 1
+    top_styles = style_counts.most_common(5)
+
+    # ---- 10. TOP ITEMS to study ----
+    study_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:3]
+
+    return {
+        "seed": kw,
+        "total_matches": len(all_items),
+        "top_keywords": top_keywords,
+        "adjacent": adjacent,
+        "description_keywords": desc_only,
+        "median_price": median_price,
+        "best_price": best_price,
+        "unique_creators": unique_creators,
+        "top_creator_share": round(top_creator_share, 1),
+        "saturation": saturation,
+        "avg_favs": round(avg_favs, 0),
+        "top_styles": top_styles,
+        "study_items": study_items,
+    }
 
 
 @bot.event
@@ -204,8 +273,6 @@ async def analyze(ctx, *, keyword: str):
             if w == kw: continue
             stats[w]["favs"] += (favs or 0)
             stats[w]["count"] += 1
-
-    # Bulk competition count
     cur.execute("SELECT LOWER(name) FROM items WHERE favorite_count > 0")
     all_names = [r[0] for r in cur.fetchall()]
     word_list = [w for w, s in stats.items() if s["count"] >= 3]
@@ -214,7 +281,6 @@ async def analyze(ctx, *, keyword: str):
         for w in word_list:
             if re.search(r'\b' + re.escape(w) + r'\b', name):
                 comp_map[w] += 1
-
     results = []
     for w in word_list:
         s = stats[w]
@@ -261,25 +327,75 @@ async def desc_analyze(ctx, *, keyword: str):
 async def opportunity(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword like `!opportunity bear`")
+        await ctx.send("❌ Provide a keyword like `!opportunity beanie`")
         return
+
     conn = get_db(); cur = conn.cursor()
-    results = fast_opportunity(cur, kw)
+    data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
-    if not results:
-        await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `bear`, `beanie`, `grunge`.")
+
+    if not data:
+        await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `bear`.")
         return
+
+    # ---- Build the rich embed ----
     embed = discord.Embed(
-        title=f"💎 Opportunity Finder: `{kw}`",
-        description="Higher score = better opportunity.",
+        title=f"💎 Full Opportunity Analysis: `{kw}`",
+        description=f"Analyzed **{data['total_matches']}** matching items across titles + descriptions.",
         color=0xff00cc
     )
-    for i, (p, af, c, sc) in enumerate(results[:15], 1):
-        embed.add_field(
-            name=f"{i}. {p}",
-            value=f"Opportunity: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-            inline=False
+
+    # 1. Top keywords
+    if data["top_keywords"]:
+        lines = []
+        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:7], 1):
+            lines.append(f"**{i}. {p}**\nOpp: `{sc:,.0f}` | AvgFav: `{af:,.0f}` | Comp: `{c}`")
+        embed.add_field(name="🎯 Top Keywords (contain your seed)",
+                        value="\n".join(lines), inline=False)
+
+    # 2. Adjacent keywords
+    if data["adjacent"]:
+        adj_str = " · ".join(f"`{w}`" for w in data["adjacent"])
+        embed.add_field(name="🔗 Adjacent Keywords (new angles)",
+                        value=adj_str, inline=False)
+
+    # 3. Description keywords
+    if data["description_keywords"]:
+        desc_str = " · ".join(f"`{w}`" for w in data["description_keywords"])
+        embed.add_field(name="📝 Hidden Description Keywords",
+                        value=desc_str, inline=False)
+
+    # 4. Price insight
+    embed.add_field(
+        name="💰 Price Insight",
+        value=f"Median: **{data['median_price']} R$** | Best-seller price: **{data['best_price']} R$**",
+        inline=False
+    )
+
+    # 5. Market health
+    embed.add_field(
+        name="📊 Market Health",
+        value=f"Competitors: **{data['total_matches']}** | Saturation: **{data['saturation']}**\n"
+              f"Unique creators: **{data['unique_creators']}** | Top creator owns **{data['top_creator_share']}%**",
+        inline=False
+    )
+
+    # 6. Style patterns
+    if data["top_styles"]:
+        styles_str = " · ".join(f"`{s}` ({c})" for s, c in data["top_styles"])
+        embed.add_field(name="🎨 Style Patterns",
+                        value=styles_str, inline=False)
+
+    # 7. Study items
+    if data["study_items"]:
+        study_str = "\n".join(
+            f"`{iid}` — {name[:35]}... ({favs:,} favs)"
+            for iid, name, _, favs, _, _ in data["study_items"]
         )
+        embed.add_field(name="👀 Study These Top Items",
+                        value=study_str, inline=False)
+
+    embed.set_footer(text="Use the keywords + description words in your next item.")
     await ctx.send(embed=embed)
 
 
@@ -290,16 +406,20 @@ async def emote(ctx, *, keyword: str):
         await ctx.send("❌ Provide a keyword like `!emote dance`")
         return
     conn = get_db(); cur = conn.cursor()
-    results = fast_opportunity(cur, kw)
+    data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
-    if not results:
+    if not data:
         await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
         return
-    embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`", color=0xff66aa)
-    for i, (p, af, c, sc) in enumerate(results[:15], 1):
-        embed.add_field(name=f"{i}. {p}",
-                        value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-                        inline=False)
+    embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`",
+                          color=0xff66aa)
+    if data["top_keywords"]:
+        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:10], 1):
+            embed.add_field(name=f"{i}. {p}",
+                            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c}**",
+                            inline=False)
+    if data["adjacent"]:
+        embed.add_field(name="🔗 Adjacent", value=" · ".join(f"`{w}`" for w in data["adjacent"]), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -310,16 +430,20 @@ async def classic(ctx, *, keyword: str):
         await ctx.send("❌ Provide a keyword like `!classic flannel`")
         return
     conn = get_db(); cur = conn.cursor()
-    results = fast_opportunity(cur, kw)
+    data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
-    if not results:
+    if not data:
         await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
         return
-    embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`", color=0x66ccff)
-    for i, (p, af, c, sc) in enumerate(results[:15], 1):
-        embed.add_field(name=f"{i}. {p}",
-                        value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-                        inline=False)
+    embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`",
+                          color=0x66ccff)
+    if data["top_keywords"]:
+        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:10], 1):
+            embed.add_field(name=f"{i}. {p}",
+                            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c}**",
+                            inline=False)
+    if data["adjacent"]:
+        embed.add_field(name="🔗 Adjacent", value=" · ".join(f"`{w}`" for w in data["adjacent"]), inline=False)
     await ctx.send(embed=embed)
 
 
@@ -331,49 +455,30 @@ async def gap(ctx, *, keyword: str):
         return
     conn = get_db(); cur = conn.cursor()
     pattern = word_boundary_pattern(kw)
-
     cur.execute("""
         SELECT name, COALESCE(description, ''), favorite_count FROM items 
         WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
           AND favorite_count > 50 LIMIT 2000
     """, (pattern, pattern))
     rows = cur.fetchall()
-
     if not rows:
-        embed = discord.Embed(title=f"🕳️ Market Gaps for `{kw}`",
-                              description="High demand + low competition.",
-                              color=0x00ffcc)
-        embed.add_field(name="No data found",
-                        value="Try `emo`, `beanie`, `grunge`, `chains`, `crown`.",
-                        inline=False)
-        await ctx.send(embed=embed)
+        await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `chains`.")
         cur.close(); conn.close(); return
-
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
         for w in set(extract_words(f"{name} {desc}")):
             if w == kw: continue
             stats[w]["favs"] += (favs or 0)
             stats[w]["count"] += 1
-
     candidates = []
     for w, s in stats.items():
         if s["count"] < 2 or s["count"] > 20: continue
         af = s["favs"] / s["count"]
         if af < 500: continue
         candidates.append((w, af))
-
     if not candidates:
-        embed = discord.Embed(title=f"🕳️ Market Gaps for `{kw}`",
-                              description="High demand + low competition.",
-                              color=0x00ffcc)
-        embed.add_field(name="No gaps found",
-                        value="Try `emo`, `beanie`, `grunge`, `chains`.",
-                        inline=False)
-        await ctx.send(embed=embed)
+        await ctx.send(f"⚠️ No gaps for `{kw}`. Try `emo`, `beanie`, `grunge`.")
         cur.close(); conn.close(); return
-
-    # Bulk competition count
     cur.execute("SELECT LOWER(name) FROM items WHERE favorite_count > 0")
     all_names = [r[0] for r in cur.fetchall()]
     word_list = [c[0] for c in candidates]
@@ -382,23 +487,18 @@ async def gap(ctx, *, keyword: str):
         for w in word_list:
             if re.search(r'\b' + re.escape(w) + r'\b', name):
                 comp_map[w] += 1
-
     gaps = []
     for w, af in candidates:
         c = comp_map.get(w, 0)
         if c < 50:
             gaps.append((w, af, c))
-
     cur.close(); conn.close()
     gaps.sort(key=lambda x: x[1], reverse=True)
-
     embed = discord.Embed(title=f"🕳️ Market Gaps for `{kw}`",
                           description="High demand + low competition (<50 items).",
                           color=0x00ffcc)
     if not gaps:
-        embed.add_field(name="No gaps found",
-                        value="Try `emo`, `beanie`, `grunge`, `chains`.",
-                        inline=False)
+        embed.add_field(name="No gaps found", value="Try `emo`, `beanie`, `grunge`.", inline=False)
     for i, (w, af, c) in enumerate(gaps[:15], 1):
         embed.add_field(name=f"{i}. {w}",
                         value=f"AvgFav: **{af:,.0f}** | Comp: **{c}**",
