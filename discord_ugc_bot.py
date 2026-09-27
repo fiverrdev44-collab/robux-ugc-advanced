@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 import discord
 from discord.ext import commands
 import psycopg2
@@ -78,7 +79,6 @@ def analyze_opportunity(cur, kw):
     if not all_items:
         return None
 
-    # Seed-matching suggestions
     cur.execute("""
         SELECT DISTINCT suggestion FROM search_suggestions 
         WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 1000
@@ -98,7 +98,6 @@ def analyze_opportunity(cur, kw):
             suggs.append(s)
     suggs = list(set(suggs))[:80]
 
-    # Score keywords containing seed
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for _, name, desc, favs, price, creator in all_items:
         for s in suggs:
@@ -106,7 +105,6 @@ def analyze_opportunity(cur, kw):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
-    # Bigrams from titles
     for _, name, _, favs, _, _ in all_items:
         words = name.split()
         for i in range(len(words) - 1):
@@ -124,7 +122,6 @@ def analyze_opportunity(cur, kw):
         top_keywords.append((s, af, data["count"], af / math.log1p(data["count"])))
     top_keywords.sort(key=lambda x: x[3], reverse=True)
 
-    # Adjacent keywords
     adjacent_counter = Counter()
     for _, name, desc, favs, _, _ in all_items:
         for w in set(extract_words(name)):
@@ -132,27 +129,23 @@ def analyze_opportunity(cur, kw):
                 adjacent_counter[w] += 1
     adjacent = [w for w, c in adjacent_counter.most_common(60) if c >= 3]
 
-    # Description keywords
     desc_counter = Counter()
     for _, _, desc, _, _, _ in all_items:
         desc_counter.update(extract_words(desc))
     desc_only = [w for w, c in desc_counter.most_common(60)
                  if w != kw and w not in adjacent and c >= 2]
 
-    # Prices
     prices = [p for _, _, _, _, p, _ in all_items if p and p > 0]
     median_price = sorted(prices)[len(prices) // 2] if prices else 0
     top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:30]
     top_prices = [p for _, _, _, _, p, _ in top_items if p and p > 0]
     best_price = sorted(top_prices)[len(top_prices) // 2] if top_prices else median_price
 
-    # Creators
     creators = [c for _, _, _, _, _, c in all_items if c]
     unique_creators = len(set(creators))
     top_creator_counts = Counter(creators).most_common(1)
     top_creator_share = (top_creator_counts[0][1] / len(all_items) * 100) if top_creator_counts else 0
 
-    # Saturation
     total_competitors = len(all_items)
     if total_competitors < 20:
         saturation = "🟢 Low — untapped!"
@@ -163,7 +156,6 @@ def analyze_opportunity(cur, kw):
     else:
         saturation = "🔴 Saturated — hard to rank"
 
-    # Styles
     style_words = ["gothic", "cute", "emo", "y2k", "pastel", "kawaii", "grunge",
                    "cyber", "coquette", "anime", "dark", "light", "fluffy",
                    "cyberpunk", "retro", "vintage", "aesthetic", "preppy",
@@ -176,7 +168,6 @@ def analyze_opportunity(cur, kw):
                 style_counts[style] += 1
     top_styles = style_counts.most_common(8)
 
-    # Study items
     study_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:5]
 
     return {
@@ -196,10 +187,9 @@ def analyze_opportunity(cur, kw):
 
 
 # ============================================================
-# MULTI-VIEW PAGINATOR (Tabs + Pagination)
+# MULTI-VIEW PAGINATOR
 # ============================================================
 class MultiViewPaginator(discord.ui.View):
-    """Pagination with category tabs: Keywords / Adjacent / Description / Market."""
     def __init__(self, data):
         super().__init__(timeout=300)
         self.data = data
@@ -236,7 +226,7 @@ class MultiViewPaginator(discord.ui.View):
             adjs = d["adjacent"]
             embed = discord.Embed(
                 title=f"🔗 Adjacent Keywords for `{seed}`",
-                description=f"Words that appear alongside `{seed}` — new angles to expand your niche.",
+                description=f"Words that appear alongside `{seed}` — new angles.",
                 color=0x66ccff
             )
             if adjs:
@@ -254,7 +244,7 @@ class MultiViewPaginator(discord.ui.View):
             descs = d["description_keywords"]
             embed = discord.Embed(
                 title=f"📝 Hidden Description Keywords for `{seed}`",
-                description="SEO words top sellers bury in descriptions. Copy into YOUR descriptions.",
+                description="SEO words top sellers bury in descriptions.",
                 color=0xaa66ff
             )
             if descs:
@@ -271,7 +261,7 @@ class MultiViewPaginator(discord.ui.View):
         elif self.view_mode == "market":
             embed = discord.Embed(
                 title=f"💰 Market Info for `{seed}`",
-                description="Competitive intelligence for this niche.",
+                description="Competitive intelligence.",
                 color=0xffaa00
             )
             embed.add_field(
@@ -305,7 +295,6 @@ class MultiViewPaginator(discord.ui.View):
         self.clear_items()
         d = self.data
 
-        # ---- TAB BUTTONS (row 1) ----
         kw_btn = discord.ui.Button(
             label=f"🎯 Keywords ({len(d['top_keywords'])})",
             style=discord.ButtonStyle.success if self.view_mode == "keywords" else discord.ButtonStyle.secondary,
@@ -338,7 +327,6 @@ class MultiViewPaginator(discord.ui.View):
         market_btn.callback = self.set_market
         self.add_item(market_btn)
 
-        # ---- PAGINATION (row 0, only for keywords view) ----
         if self.view_mode == "keywords":
             total = len(d["top_keywords"])
             max_page = max(0, (total - 1) // self.per_page)
@@ -369,7 +357,6 @@ class MultiViewPaginator(discord.ui.View):
             last.callback = self.last_page
             self.add_item(last)
 
-    # ---- TAB CALLBACKS ----
     async def set_keywords(self, interaction):
         self.view_mode = "keywords"
         self.page = 0
@@ -391,7 +378,6 @@ class MultiViewPaginator(discord.ui.View):
         self.rebuild_buttons()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    # ---- PAGINATION CALLBACKS ----
     async def first_page(self, interaction):
         self.page = 0
         self.rebuild_buttons()
@@ -418,7 +404,7 @@ class MultiViewPaginator(discord.ui.View):
 
 
 # ============================================================
-# SIMPLE PAGINATOR (for analyze, desc_analyze, gap)
+# SIMPLE PAGINATOR
 # ============================================================
 class SimplePaginator(discord.ui.View):
     def __init__(self, keyword, items, title_prefix, color, per_page=10):
@@ -499,6 +485,330 @@ class SimplePaginator(discord.ui.View):
         self.page = self.max_page
         self.rebuild()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+# ============================================================
+# GUIDE HELPERS
+# ============================================================
+def _analyze_word(cur, word):
+    pattern = word_boundary_pattern(word)
+    cur.execute("""
+        SELECT COUNT(*), AVG(favorite_count), AVG(price)
+        FROM items
+        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+          AND favorite_count > 0
+    """, (pattern, pattern))
+    row = cur.fetchone()
+    return {
+        "word": word,
+        "count": row[0] or 0,
+        "avg_favs": row[1] or 0,
+        "avg_price": row[2] or 0,
+    }
+
+
+def _analyze_combo(cur, words):
+    if len(words) < 2:
+        return {"count": 0, "avg_favs": 0, "avg_price": 0}
+    conditions = " AND ".join(["name ~* %s"] * len(words))
+    patterns = [word_boundary_pattern(w) for w in words]
+    cur.execute(f"""
+        SELECT COUNT(*), AVG(favorite_count), AVG(price)
+        FROM items
+        WHERE {conditions} AND favorite_count > 0
+    """, tuple(patterns))
+    row = cur.fetchone()
+    return {
+        "count": row[0] or 0,
+        "avg_favs": row[1] or 0,
+        "avg_price": row[2] or 0,
+    }
+
+
+def _get_adjacent_for(cur, word, limit=15):
+    pattern = word_boundary_pattern(word)
+    cur.execute("""
+        SELECT name FROM items
+        WHERE name ~* %s AND favorite_count > 0
+        LIMIT 500
+    """, (pattern,))
+    rows = cur.fetchall()
+    counter = Counter()
+    for (name,) in rows:
+        for w in set(extract_words(name)):
+            if w != word and not matches_seed(w, word):
+                counter[w] += 1
+    return [w for w, c in counter.most_common(limit * 2) if c >= 2][:limit]
+
+
+def _find_alternatives(cur, modifier, item_type, limit=6):
+    pattern = word_boundary_pattern(item_type)
+    cur.execute("""
+        SELECT name FROM items
+        WHERE name ~* %s AND favorite_count > 0
+        LIMIT 500
+    """, (pattern,))
+    rows = cur.fetchall()
+    counter = Counter()
+    for (name,) in rows:
+        for w in set(extract_words(name)):
+            if w != item_type and not matches_seed(w, item_type):
+                counter[w] += 1
+    alternatives = []
+    for w, c in counter.most_common(50):
+        if w == modifier.lower():
+            continue
+        if c < 2:
+            continue
+        stats = _analyze_word(cur, w)
+        if stats["avg_favs"] > 1000:
+            alternatives.append({"word": w, "count": c, "avg_favs": stats["avg_favs"]})
+        if len(alternatives) >= limit:
+            break
+    return alternatives
+
+
+def _verdict(combo_count, combo_favs, item_count, modifier_count):
+    if combo_count == 0:
+        if modifier_count > 0 and item_count > 100:
+            return ("🔥", "JACKPOT", "Nobody has combined these words yet. Both exist and work.")
+        return ("🟡", "UNTESTED", "No items combine these words. Could be a hit OR dead demand.")
+    elif combo_count < 10:
+        return ("🟢", "UNTAPPED", f"Only {combo_count} items combine these words. Underserved niche.")
+    elif combo_count < 50:
+        return ("🟡", "SWEET SPOT", f"{combo_count} items — proven demand with manageable competition.")
+    elif combo_count < 200:
+        return ("🟠", "COMPETITIVE", f"{combo_count} items. Need better design/price to stand out.")
+    else:
+        return ("🔴", "SATURATED", f"{combo_count} items. Too crowded — try a different combo.")
+
+
+# ============================================================
+# ULTRA-SMART GUIDE
+# ============================================================
+@bot.command(name="guide")
+async def guide(ctx, *, idea: str = None):
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    if not idea:
+        await ctx.send(
+            "🧠 **UGC Research Guide**\n\n"
+            "Type your idea (1–3 words):\n"
+            "*Examples: `beanie` · `transparent beanie` · `emo bear hat`*\n\n"
+            "Type `cancel` to exit."
+        )
+        try:
+            msg = await bot.wait_for("message", check=check, timeout=90)
+            idea = msg.content.strip().lower()
+        except asyncio.TimeoutError:
+            await ctx.send("⏰ Guide timed out.")
+            return
+
+    if idea in ("cancel", "exit", "stop"):
+        await ctx.send("❌ Cancelled.")
+        return
+
+    idea_clean = re.sub(r'[^a-z0-9\s]', '', idea.lower()).strip()
+    words = [w for w in idea_clean.split() if len(w) >= 3]
+
+    if not words:
+        await ctx.send("❌ Idea needs at least one real word (3+ letters).")
+        return
+
+    await ctx.send(f"🔍 **Analyzing `{idea_clean}`**...")
+
+    conn = get_db(); cur = conn.cursor()
+
+    word_stats = [_analyze_word(cur, w) for w in words]
+    combo_stats = _analyze_combo(cur, words) if len(words) >= 2 else None
+
+    if combo_stats:
+        emoji, label, explanation = _verdict(
+            combo_stats["count"], combo_stats["avg_favs"],
+            word_stats[-1]["count"], word_stats[0]["count"]
+        )
+    else:
+        w = word_stats[0]
+        if w["count"] < 5:
+            emoji, label, explanation = ("🟡", "RARE", f"Only {w['count']} items use this word.")
+        elif w["count"] < 50:
+            emoji, label, explanation = ("🟢", "UNTAPPED", f"Only {w['count']} items — nice niche.")
+        elif w["count"] < 200:
+            emoji, label, explanation = ("🟡", "HEALTHY", f"{w['count']} items — good balance.")
+        elif w["count"] < 1000:
+            emoji, label, explanation = ("🟠", "COMPETITIVE", f"{w['count']} items — crowded.")
+        else:
+            emoji, label, explanation = ("🔴", "SATURATED", f"{w['count']} items — very crowded.")
+
+    alternatives = []
+    if len(words) >= 2 and word_stats[0]["count"] < 100:
+        alternatives = _find_alternatives(cur, words[0], words[-1], limit=6)
+
+    adjacent = _get_adjacent_for(cur, words[-1], limit=15)
+    data = analyze_opportunity(cur, words[-1])
+
+    cur.close(); conn.close()
+
+    color_map = {"🔥": 0xff2266, "🟢": 0x00ff88, "🟡": 0xffaa00, "🟠": 0xff6600, "🔴": 0xff2222}
+    master = discord.Embed(
+        title=f"{emoji} Verdict for `{idea_clean}`",
+        description=f"**{label}** — {explanation}",
+        color=color_map.get(emoji, 0x00ff88)
+    )
+
+    for i, w in enumerate(word_stats, 1):
+        master.add_field(
+            name=f"📊 Word {i}: `{w['word']}`",
+            value=(
+                f"Items: **{w['count']:,}** | "
+                f"Avg Favs: **{w['avg_favs']:,.0f}** | "
+                f"Avg Price: **{w['avg_price']:,.0f} R$**"
+            ),
+            inline=False
+        )
+
+    if combo_stats:
+        master.add_field(
+            name="🎯 Combo Match",
+            value=(
+                f"Items with ALL words: **{combo_stats['count']:,}** | "
+                f"Avg Favs: **{combo_stats['avg_favs']:,.0f}** | "
+                f"Avg Price: **{combo_stats['avg_price']:,.0f} R$**"
+            ),
+            inline=False
+        )
+
+    if alternatives:
+        alt_str = "\n".join(
+            f"• `{a['word']}` — {a['count']} items, avg {a['avg_favs']:,.0f} favs"
+            for a in alternatives
+        )
+        master.add_field(
+            name="🎨 Proven Alternatives",
+            value=f"Instead of `{words[0]}`, try:\n{alt_str}",
+            inline=False
+        )
+
+    if adjacent:
+        master.add_field(
+            name=f"🔗 Words that go with `{words[-1]}`",
+            value=" · ".join(f"`{w}`" for w in adjacent[:12]),
+            inline=False
+        )
+
+    master.set_footer(text="Full analysis below — use tabs to explore.")
+    await ctx.send(embed=master)
+
+    if data:
+        view = MultiViewPaginator(data)
+        await ctx.send(
+            f"💎 **Full analysis of `{words[-1]}`**:",
+            embed=view.build_embed(),
+            view=view
+        )
+
+    await ctx.send(
+        "🎨 **Want me to generate a title?**\n"
+        "Reply `yes` to build one from data, or `no` to stop."
+    )
+
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=90)
+        reply = msg.content.strip().lower()
+    except asyncio.TimeoutError:
+        await ctx.send("⏰ Guide complete. Use `!guide` anytime.")
+        return
+
+    if reply not in ("yes", "y", "yeah", "yep", "ok", "sure", "go"):
+        await ctx.send("✅ Guide complete. Good luck!")
+        return
+
+    title_parts = []
+
+    if combo_stats and combo_stats["count"] > 0:
+        title_parts.append(" ".join(w.capitalize() for w in words))
+    elif alternatives:
+        alt = alternatives[0]["word"]
+        title_parts.append(f"{alt.capitalize()} {' '.join(w.capitalize() for w in words[1:])}")
+    else:
+        title_parts.append(" ".join(w.capitalize() for w in words))
+
+    added_adj = None
+    for a in adjacent:
+        if a.lower() not in " ".join(title_parts).lower() and len(a) > 3:
+            added_adj = a
+            break
+
+    if added_adj:
+        title_parts.append(f"– {added_adj.capitalize()}")
+
+    suggested_title = " ".join(title_parts)[:80]
+
+    if combo_stats and combo_stats["count"] >= 3 and combo_stats["avg_price"] > 0:
+        suggested_price = int(combo_stats["avg_price"])
+        price_source = "combo median"
+    elif data and data["best_price"] > 0:
+        suggested_price = data["best_price"]
+        price_source = "best-seller median"
+    elif word_stats[-1]["avg_price"] > 0:
+        suggested_price = int(word_stats[-1]["avg_price"])
+        price_source = f"average of `{words[-1]}` items"
+    else:
+        suggested_price = 100
+        price_source = "default fallback"
+
+    desc_words = []
+    if data and data["description_keywords"]:
+        desc_words = data["description_keywords"][:8]
+
+    final = discord.Embed(
+        title="🎨 Your Data-Backed Item",
+        description="Everything below is based on real market data.",
+        color=0x00ffcc
+    )
+
+    final.add_field(name="📌 Suggested Title", value=f"**{suggested_title}**", inline=False)
+    final.add_field(
+        name="💰 Suggested Price",
+        value=f"**{suggested_price} R$** — based on {price_source}",
+        inline=True
+    )
+
+    if combo_stats and combo_stats["count"] > 0:
+        final.add_field(
+            name="📊 Combo Data",
+            value=f"{combo_stats['count']} existing items\nAvg {combo_stats['avg_favs']:,.0f} favs",
+            inline=True
+        )
+    else:
+        final.add_field(
+            name="🚀 Status",
+            value="First-mover advantage!\n0 existing items",
+            inline=True
+        )
+
+    if desc_words:
+        final.add_field(
+            name="📝 Description Keywords",
+            value=" · ".join(f"`{w}`" for w in desc_words),
+            inline=False
+        )
+
+    final.add_field(
+        name="✅ Next Steps",
+        value=(
+            "1. Design your UGC model\n"
+            "2. Paste the title above into Roblox\n"
+            "3. Copy description keywords into your item description\n"
+            f"4. Set price to **{suggested_price} R$**\n"
+            "5. Upload and monitor favourites for 48h"
+        ),
+        inline=False
+    )
+
+    await ctx.send(embed=final)
+    await ctx.send("🎉 **Guide complete!** Run `!guide` again for a new idea.")
 
 
 # ============================================================
@@ -605,23 +915,61 @@ async def analyze(ctx, *, keyword: str):
 @bot.command(name="desc_analyze")
 async def desc_analyze(ctx, *, keyword: str):
     kw = keyword.strip().lower()
+    if not kw:
+        await ctx.send("❌ Provide a keyword like `!desc_analyze emo`")
+        return
     conn = get_db(); cur = conn.cursor()
+    pattern = word_boundary_pattern(kw)
     cur.execute("""
-        SELECT description FROM items 
-        WHERE name ~* %s AND description IS NOT NULL AND description != ''
+        SELECT name, COALESCE(description, ''), favorite_count FROM items 
+        WHERE name ~* %s 
+          AND description IS NOT NULL AND description != ''
+          AND favorite_count > 0
         LIMIT 2000
-    """, (word_boundary_pattern(kw),))
+    """, (pattern,))
     rows = cur.fetchall()
-    cur.close(); conn.close()
     if not rows:
         await ctx.send(f"⚠️ No descriptions for `{kw}`.")
-        return
+        cur.close(); conn.close(); return
+
     counter = Counter()
-    for (d,) in rows:
-        counter.update(extract_words(d))
-    items = [(w, c, 0, c) for w, c in counter.most_common(100)]
-    view = SimplePaginator(kw, items, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
-    await ctx.send(embed=view.build_embed(), view=view)
+    word_favs = defaultdict(int)
+    for name, desc, favs in rows:
+        for w in set(extract_words(desc)):
+            counter[w] += 1
+            word_favs[w] += favs or 0
+
+    cur.execute("SELECT LOWER(name), COALESCE(LOWER(description), '') FROM items WHERE favorite_count > 0")
+    all_rows = cur.fetchall()
+    cur.close(); conn.close()
+
+    word_list = [w for w, _ in counter.most_common(100)]
+    comp_map = defaultdict(int)
+    for name, desc in all_rows:
+        text = f"{name} {desc}"
+        for w in word_list:
+            if re.search(r'\b' + re.escape(w) + r'\b', text):
+                comp_map[w] += 1
+
+    results = []
+    for w, count in counter.most_common(100):
+        if count < 2:
+            continue
+        avg_favs = word_favs[w] / count
+        comp = comp_map.get(w, 1) or 1
+        score = avg_favs / math.log1p(comp)
+        results.append((w, avg_favs, comp, score))
+
+    results.sort(key=lambda x: x[3], reverse=True)
+
+    if not results:
+        await ctx.send(f"⚠️ Not enough description data for `{kw}`.")
+        return
+
+    view = SimplePaginator(kw, results, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
+    embed = view.build_embed()
+    embed.description = f"Analyzed **{len(rows)}** descriptions from items with `{kw}` in title."
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.command(name="opportunity")
@@ -630,15 +978,12 @@ async def opportunity(ctx, *, keyword: str):
     if not kw:
         await ctx.send("❌ Provide a keyword like `!opportunity beanie`")
         return
-
     conn = get_db(); cur = conn.cursor()
     data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
-
     if not data:
         await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `bear`.")
         return
-
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -754,7 +1099,7 @@ async def velocity(ctx):
 
     embed = discord.Embed(
         title="🚀 Fastest Rising Items",
-        description=f"Top **{len(items)}** fastest-rising items since tracking began.",
+        description=f"Top **{len(items)}** fastest-rising items.",
         color=0xff5500
     )
     for i, (name, growth, price, _) in enumerate(items[:10], 1):
