@@ -1,11 +1,17 @@
 import os
 import requests
 import time
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
+from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
 CATALOG_API = "https://catalog.roblox.com/v1/search/items"
 CATEGORIES = [11, 3, 4, 12]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
+WORKERS = 8   # parallel queries (safe for Roblox)
+DELAY = 0.15  # per-page delay per worker
 
 UGC_KEYWORDS = [
     "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
@@ -37,81 +43,149 @@ EMOTE_KEYWORDS = [
 ]
 
 PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100), (101, 500), (501, 10000)]
-DELAY = 0.4
+
+STOP_WORDS = {
+    "the","a","an","and","of","in","to","for","is","on","that","by","with",
+    "from","as","it","at","be","or","no","not","but","all","are","was","were",
+    "they","them","his","her","my","your","its","i","you","he","she","we","me",
+    "us","our","new","one","if","so","up","out","just","can","also","do","get"
+}
 
 
-def fetch_and_store_ids(params):
-    conn = get_db_connection()
-    cur = conn.cursor()
+def get_dynamic_keywords():
+    """Pull top words from items we already have. Self-expanding keyword pool."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT name FROM items 
+            WHERE favorite_count > 100 
+            ORDER BY favorite_count DESC LIMIT 5000
+        """)
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+
+        counter = Counter()
+        for (name,) in rows:
+            if not name:
+                continue
+            words = [w.lower() for w in re.findall(r"[a-zA-Z]+", name)
+                     if len(w) > 3 and w.lower() not in STOP_WORDS]
+            counter.update(words)
+
+        # Top 100 new words we haven't already hardcoded
+        existing = set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS)
+        dynamic = [w for w, _ in counter.most_common(300) if w not in existing][:100]
+        print(f"🧠 Learned {len(dynamic)} new dynamic keywords from database.")
+        return dynamic
+    except Exception as e:
+        print(f"⚠️ Could not load dynamic keywords: {e}")
+        return []
+
+
+def scan_query(params):
+    """Run one query, paginate, return a set of IDs. Thread-safe."""
+    found = set()
     cursor = ""
-    new_ids = 0
+    pages = 0
     while True:
         p = params.copy()
         p["cursor"] = cursor
         try:
             resp = requests.get(CATALOG_API, params=p, timeout=10)
             if resp.status_code == 429:
-                print("Rate limited. Sleeping 60s...")
-                time.sleep(60)
+                time.sleep(2)
                 continue
             if resp.status_code != 200:
                 break
             data = resp.json()
-            items = data.get("data", [])
-            for item in items:
-                cur.execute(
-                    "INSERT INTO discovered_items (id) VALUES (%s) ON CONFLICT (id) DO NOTHING",
-                    (item["id"],)
-                )
-                if cur.rowcount > 0:
-                    new_ids += 1
-            conn.commit()
+            for item in data.get("data", []):
+                found.add(item["id"])
             cursor = data.get("nextPageCursor")
-            if not cursor:
+            if not cursor or pages > 40:
                 break
-        except Exception as e:
-            print(f"Error: {e}")
+            pages += 1
+        except Exception:
             break
         time.sleep(DELAY)
-    cur.close()
-    conn.close()
-    return new_ids
+    return found
+
+
+def build_all_queries():
+    queries = []
+    # Categories × sort types
+    for cat in CATEGORIES:
+        for sort in SORT_TYPES:
+            queries.append({"category": cat, "sortType": sort, "limit": 30})
+
+    # UGC keywords
+    for kw in UGC_KEYWORDS:
+        for sort in [0, 2]:
+            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 11})
+
+    # Classic keywords
+    for kw in CLASSIC_KEYWORDS:
+        for sort in [0, 2]:
+            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 3})
+
+    # Emote keywords
+    for kw in EMOTE_KEYWORDS:
+        for sort in [0, 2]:
+            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 12})
+
+    # Price ranges
+    for min_p, max_p in PRICE_RANGES:
+        for cat in [11, 3, 12]:
+            queries.append({"minPrice": min_p, "maxPrice": max_p, "category": cat, "sortType": 2, "limit": 30})
+
+    # NEW: dynamic learned keywords (from DB history)
+    dynamic = get_dynamic_keywords()
+    for kw in dynamic:
+        queries.append({"keyword": kw, "sortType": 2, "limit": 30})
+
+    return queries
 
 
 def run_scanner():
     setup_database()
-    print("🚀 Starting Full Catalog Scanner...")
-    total = 0
+    queries = build_all_queries()
+    print(f"🚀 Running {len(queries)} queries with {WORKERS} parallel workers...")
+    start = time.time()
 
-    for cat in CATEGORIES:
-        for sort in SORT_TYPES:
-            print(f"  Category {cat}, Sort {sort}...")
-            total += fetch_and_store_ids({"category": cat, "sortType": sort, "limit": 30})
+    all_ids = set()
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(scan_query, q): q for q in queries}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                found = future.result()
+                all_ids.update(found)
+            except Exception as e:
+                print(f"Query failed: {e}")
+            if i % 20 == 0:
+                print(f"  {i}/{len(queries)} queries done — {len(all_ids)} unique IDs so far")
 
-    print("\n  --- UGC Keywords ---")
-    for kw in UGC_KEYWORDS:
-        for sort in [0, 2]:
-            print(f"  UGC '{kw}' sort {sort}...")
-            total += fetch_and_store_ids({"keyword": kw, "sortType": sort, "limit": 30, "category": 11})
+    print(f"✅ Scan collected {len(all_ids)} unique IDs in {time.time()-start:.1f}s")
 
-    print("\n  --- Classic Clothing Keywords ---")
-    for kw in CLASSIC_KEYWORDS:
-        for sort in [0, 2]:
-            print(f"  Classic '{kw}' sort {sort}...")
-            total += fetch_and_store_ids({"keyword": kw, "sortType": sort, "limit": 30, "category": 3})
+    # ---- BULK INSERT ----
+    conn = get_db_connection()
+    cur = conn.cursor()
+    ids_list = [(iid,) for iid in all_ids]
 
-    print("\n  --- Emote Keywords ---")
-    for kw in EMOTE_KEYWORDS:
-        for sort in [0, 2]:
-            print(f"  Emote '{kw}' sort {sort}...")
-            total += fetch_and_store_ids({"keyword": kw, "sortType": sort, "limit": 30, "category": 12})
+    new_count = 0
+    chunk_size = 1000
+    for i in range(0, len(ids_list), chunk_size):
+        chunk = ids_list[i:i+chunk_size]
+        execute_values(
+            cur,
+            "INSERT INTO discovered_items (id) VALUES %s ON CONFLICT (id) DO NOTHING",
+            chunk
+        )
+        new_count += cur.rowcount
+        conn.commit()
 
-    for min_p, max_p in PRICE_RANGES:
-        for cat in [11, 3, 12]:
-            print(f"  Price {min_p}-{max_p}, Cat {cat}...")
-            total += fetch_and_store_ids({"minPrice": min_p, "maxPrice": max_p, "category": cat, "sortType": 2, "limit": 30})
-
-    print(f"\n✅ Scanner done. {total} new IDs.")
+    cur.close()
+    conn.close()
+    print(f"✅ Inserted {new_count} NEW item IDs into the database.")
 
 
 if __name__ == "__main__":
