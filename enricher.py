@@ -7,8 +7,10 @@ CATALOG_DETAILS_API = "https://catalog.roblox.com/v1/catalog/items/details"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
 BATCH_SIZE = 500
-CHUNK_SIZE = 120
-CHUNK_DELAY = 8           # seconds between chunks — respects Roblox rate limit
+CHUNK_SIZE = 100           # reduced from 120 — smaller requests = less likely to trigger 429
+CHUNK_DELAY = 15           # seconds between chunks — much slower, but reliable
+MAX_429_RETRIES = 5        # retries on rate-limit before giving up on a chunk
+RETRY_WAIT = 10            # seconds to wait between 429 retries
 
 COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
 if not COOKIE:
@@ -27,7 +29,6 @@ session.headers.update(HEADERS)
 
 
 def get_csrf_token():
-    """Fetch X-CSRF-Token using the session cookie."""
     print("🔐 Fetching X-CSRF-Token...", flush=True)
     try:
         resp = session.post(AUTH_URL, timeout=10)
@@ -36,33 +37,42 @@ def get_csrf_token():
             session.headers["X-CSRF-Token"] = token
             print(f"✅ Got CSRF token: {token[:8]}...", flush=True)
             return True
-        print(f"❌ Failed to get CSRF token. Status: {resp.status_code}", flush=True)
+        print(f"❌ Failed. Status: {resp.status_code}", flush=True)
         return False
     except Exception as e:
-        print(f"❌ CSRF request error: {e}", flush=True)
+        print(f"❌ CSRF error: {e}", flush=True)
         return False
 
 
 def fetch_batch(item_ids):
-    """Fetch details for up to 120 items in ONE POST request."""
+    """Fetch one batch with aggressive retry on 429."""
     payload = {"items": [{"itemType": "Asset", "id": iid} for iid in item_ids]}
-    for attempt in range(3):
+
+    for attempt in range(MAX_429_RETRIES):
         try:
-            resp = session.post(CATALOG_DETAILS_API, json=payload, timeout=15)
+            resp = session.post(CATALOG_DETAILS_API, json=payload, timeout=20)
+
             if resp.status_code == 200:
                 return resp.json().get("data", [])
+
             if resp.status_code == 403:
-                print("  CSRF token expired, refreshing...", flush=True)
+                print("  CSRF expired, refreshing...", flush=True)
                 if get_csrf_token():
                     continue
+
             if resp.status_code == 429:
-                print("  Rate-limited, waiting 5s...", flush=True)
-                time.sleep(5)
+                wait = RETRY_WAIT * (attempt + 1)   # exponential: 10, 20, 30, 40, 50s
+                print(f"  429 — waiting {wait}s (attempt {attempt+1}/{MAX_429_RETRIES})...", flush=True)
+                time.sleep(wait)
                 continue
-            print(f"  Batch HTTP {resp.status_code}", flush=True)
+
+            print(f"  HTTP {resp.status_code}", flush=True)
+            time.sleep(2)
+
         except Exception as e:
             print(f"  Batch error: {e}", flush=True)
-            time.sleep(1)
+            time.sleep(3)
+
     return []
 
 
@@ -90,17 +100,21 @@ def enrich_items():
         print("✅ Nothing to enrich.", flush=True)
         return
 
-    print(f"🔧 Enriching {len(ids)} items in batches of {CHUNK_SIZE}...", flush=True)
+    print(f"🔧 Enriching {len(ids)} items in chunks of {CHUNK_SIZE}...", flush=True)
     start = time.time()
 
     all_data = []
     for i in range(0, len(ids), CHUNK_SIZE):
         chunk = ids[i:i+CHUNK_SIZE]
+        chunk_num = i // CHUNK_SIZE + 1
         batch = fetch_batch(chunk)
         all_data.extend(batch)
-        print(f"  Chunk {i//CHUNK_SIZE + 1}: got {len(batch)}/{len(chunk)} items", flush=True)
-        # Roblox rate limit: ~1 batch request every 8-10 seconds
-        time.sleep(CHUNK_DELAY)
+        print(f"  Chunk {chunk_num}: {len(batch)}/{len(chunk)} items", flush=True)
+
+        # Only delay if there are more chunks to process
+        if i + CHUNK_SIZE < len(ids):
+            print(f"  Sleeping {CHUNK_DELAY}s before next chunk...", flush=True)
+            time.sleep(CHUNK_DELAY)
 
     print(f"✅ Downloaded {len(all_data)} items in {time.time()-start:.1f}s", flush=True)
 
