@@ -48,12 +48,20 @@ COLOR_WORDS = {"black","white","pink","blue","red","green","purple","yellow","or
 STYLE_WORDS = {"emo","goth","y2k","pastel","kawaii","grunge","cyber","coquette","anime","dark","fluffy","preppy","streetwear","academia","vkei","harajuku","cottagecore","fairycore","vintage","retro","gothic","aesthetic","cottage","boho","hipster","punk","scene","soft"}
 ITEM_WORDS = {"hat","beanie","crown","cap","hoodie","shirt","shoes","wing","wings","tail","ears","horn","horns","glasses","mask","necklace","chain","backpack","headphones","emote","dance","hair","face","pants","jacket","sword","pet","bag","purse","scarf","bandana","beret","visor","lens","ear","head","snapback","bonnet","balaclava"}
 
+EMOTE_KEYWORDS_HINT = {"dance", "emote", "floss", "griddy", "wave", "dab", "shuffle",
+                       "moonwalk", "spin", "flip", "kick", "pose", "salute", "clap"}
+
 MIN_PRICE = 5
 MAX_PRICE = 10000
 
 
 def get_db():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
+
+
+def rollback_quietly(cur):
+    try: cur.connection.rollback()
+    except Exception: pass
 
 
 def get_db_stats(cur):
@@ -68,8 +76,7 @@ def get_db_stats(cur):
             cur.execute(f"SELECT COUNT(*) FROM {table}")
             stats[key] = cur.fetchone()[0] or 0
         except Exception:
-            try: cur.connection.rollback()
-            except Exception: pass
+            rollback_quietly(cur)
             stats[key] = 0
     return stats
 
@@ -117,83 +124,157 @@ def classify_word(word):
     if w in COLOR_WORDS: return "color"
     if w in STYLE_WORDS: return "style"
     if w in ITEM_WORDS: return "item"
+    if w in EMOTE_KEYWORDS_HINT: return "emote"
     if w.isdigit(): return "number"
     return "unknown"
 
 
+# ============================================================
+# SMART OPPORTUNITY ANALYSIS — multi-word fallback + single-word extraction
+# ============================================================
 def analyze_opportunity(cur, kw):
+    """Smart analysis:
+       1. Try exact phrase
+       2. If < 15 matches and multi-word, try each word individually
+       3. Extract keywords from suggestions + bigrams + single words
+    """
+    kw_words = [w for w in kw.lower().split() if len(w) >= 2]
     pattern = word_boundary_pattern(kw)
-    cur.execute("""
-        SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
-               favorite_count, price, creator_name
-        FROM items
-        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
-          AND favorite_count > 0
-        LIMIT 2000
-    """, (pattern, pattern))
-    all_items = cur.fetchall()
+
+    # ---- STEP 1: Try exact phrase ----
+    all_items = []
+    try:
+        cur.execute("""
+            SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                   favorite_count, price, creator_name
+            FROM items
+            WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+              AND favorite_count > 0
+            LIMIT 2000
+        """, (pattern, pattern))
+        all_items = cur.fetchall()
+    except Exception as e:
+        print(f"Exact phrase query failed: {e}", flush=True)
+        rollback_quietly(cur)
+        all_items = []
+
+    # ---- STEP 2: Multi-word fallback — combine individual word matches ----
+    used_fallback = False
+    if len(all_items) < 15 and len(kw_words) > 1:
+        combined = {}
+        for w in kw_words:
+            try:
+                p = word_boundary_pattern(w)
+                cur.execute("""
+                    SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                           favorite_count, price, creator_name
+                    FROM items
+                    WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                      AND favorite_count > 0
+                    LIMIT 2000
+                """, (p, p))
+                for row in cur.fetchall():
+                    combined[row[0]] = row
+            except Exception as e:
+                print(f"Word '{w}' query failed: {e}", flush=True)
+                rollback_quietly(cur)
+        if combined and len(combined) > len(all_items):
+            all_items = list(combined.values())
+            used_fallback = True
+
     if not all_items:
         return None
 
-    cur.execute("""
-        SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
-    """, (f"%{kw}%", f"%{kw}%"))
-    candidates = [r[0] for r in cur.fetchall()]
-
+    # ---- STEP 3: Get search suggestions ----
     suggs = []
-    for s in candidates:
-        s = s.strip().lower()
-        if not s or len(s) < 3 or len(s) > 40: continue
-        if s in STOP_WORDS: continue
-        if any(junk in s for junk in ["twee", "emoji", "emoticon"]): continue
-        if matches_seed(s, kw): suggs.append(s)
-    suggs = list(set(suggs))[:60]
+    try:
+        cur.execute("""
+            SELECT DISTINCT suggestion FROM search_suggestions 
+            WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
+        """, (f"%{kw}%", f"%{kw}%"))
+        candidates = [r[0] for r in cur.fetchall()]
+        for s in candidates:
+            s = s.strip().lower()
+            if not s or len(s) < 3 or len(s) > 40: continue
+            if s in STOP_WORDS: continue
+            if any(junk in s for junk in ["twee", "emoji", "emoticon"]): continue
+            suggs.append(s)
+        suggs = list(set(suggs))[:60]
+    except Exception as e:
+        print(f"Suggestions query failed: {e}", flush=True)
+        rollback_quietly(cur)
 
+    # ---- STEP 4: Build keyword stats from multiple sources ----
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
+
+    # Source A: Suggestions matched against titles
     for _, name, desc, favs, price, creator in all_items:
         for s in suggs:
             if matches_seed(name, s):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
+    # Source B: Bigrams from titles
     for _, name, _, favs, _, _ in all_items:
-        words = name.split()
-        for i in range(len(words) - 1):
-            bigram = f"{words[i]} {words[i+1]}"
-            if kw in bigram and 3 < len(bigram) < 40:
-                if matches_seed(bigram, kw):
-                    stats[bigram]["favs"] += favs or 0
-                    stats[bigram]["count"] += 1
+        name_words = name.split()
+        for i in range(len(name_words) - 1):
+            bigram = f"{name_words[i]} {name_words[i+1]}"
+            if 3 < len(bigram) < 40:
+                stats[bigram]["favs"] += favs or 0
+                stats[bigram]["count"] += 1
 
-    # RELAXED: allow min_occurrence 1 for small niches
-    min_occurrence = 2 if len(all_items) >= 20 else 1
+    # Source C: Single words from titles (NEW)
+    seed_set = set(kw_words)
+    single_word_counter = Counter()
+    single_word_favs = defaultdict(int)
+    for _, name, _, favs, _, _ in all_items:
+        for w in set(extract_words(name)):
+            if w in seed_set:
+                continue
+            single_word_counter[w] += 1
+            single_word_favs[w] += favs or 0
+
+    # Merge single words into stats (bigrams take precedence)
+    for w, count in single_word_counter.items():
+        if w in stats:
+            continue
+        stats[w]["favs"] = single_word_favs[w]
+        stats[w]["count"] = count
+
+    # ---- STEP 5: Rank keywords ----
+    # For multi-word fallback: relax threshold
+    min_occur = 1 if used_fallback and len(all_items) < 30 else 2
     top_keywords = []
     for s, data in stats.items():
-        if data["count"] < min_occurrence: continue
+        if data["count"] < min_occur: continue
         af = data["favs"] / data["count"]
         top_keywords.append((s, af, data["count"], af / math.log1p(data["count"])))
     top_keywords.sort(key=lambda x: x[3], reverse=True)
+    top_keywords = top_keywords[:50]
 
+    # ---- STEP 6: Adjacent keywords ----
     adjacent_counter = Counter()
     for _, name, desc, favs, _, _ in all_items:
         for w in set(extract_words(name)):
-            if w != kw and not matches_seed(w, kw):
+            if w not in seed_set and not matches_seed(w, kw):
                 adjacent_counter[w] += 1
-    adjacent = [w for w, c in adjacent_counter.most_common(50) if c >= 3]
+    adjacent = [w for w, c in adjacent_counter.most_common(60) if c >= 3]
 
+    # ---- STEP 7: Description keywords ----
     desc_counter = Counter()
     for _, _, desc, _, _, _ in all_items:
         desc_counter.update(extract_words(desc))
-    desc_only = [w for w, c in desc_counter.most_common(50)
-                 if w != kw and w not in adjacent and c >= 2]
+    desc_only = [w for w, c in desc_counter.most_common(60)
+                 if w not in seed_set and w not in adjacent and c >= 2]
 
+    # ---- STEP 8: Prices ----
     prices = [p for _, _, _, _, p, _ in all_items if p and MIN_PRICE <= p <= MAX_PRICE]
     median_price = sorted(prices)[len(prices) // 2] if prices else 0
     top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:30]
     top_prices = [p for _, _, _, _, p, _ in top_items if p and MIN_PRICE <= p <= MAX_PRICE]
     best_price = sorted(top_prices)[len(top_prices) // 2] if top_prices else median_price
 
+    # ---- STEP 9: Creator stats ----
     creators = [c for _, _, _, _, _, c in all_items if c]
     unique_creators = len(set(creators))
     top_creator_counts = Counter(creators).most_common(1)
@@ -205,6 +286,7 @@ def analyze_opportunity(cur, kw):
     elif total_competitors < 500: saturation = "🟠 High — competitive"
     else: saturation = "🔴 Saturated — hard to rank"
 
+    # ---- STEP 10: Style patterns ----
     style_words = ["gothic","cute","emo","y2k","pastel","kawaii","grunge","cyber","coquette","anime","dark","light","fluffy","cyberpunk","retro","vintage","aesthetic","preppy","streetwear","cottagecore","fairycore","academia"]
     style_counts = Counter()
     for _, name, desc, _, _, _ in all_items:
@@ -223,6 +305,7 @@ def analyze_opportunity(cur, kw):
         "top_creator_share": round(top_creator_share, 1),
         "saturation": saturation, "top_styles": top_styles,
         "study_items": study_items,
+        "used_fallback": used_fallback,
     }
 
 
@@ -467,7 +550,11 @@ def _find_alternatives(cur, modifier, item_type, limit=6):
     alternatives = []
     for w, c in counter.most_common(30):
         if w == modifier.lower() or c < 2: continue
-        stats = _analyze_word(cur, w)
+        try:
+            stats = _analyze_word(cur, w)
+        except Exception:
+            rollback_quietly(cur)
+            continue
         if stats["avg_favs"] > 1000:
             alternatives.append({"word": w, "count": c, "avg_favs": stats["avg_favs"]})
         if len(alternatives) >= limit: break
@@ -676,8 +763,9 @@ def _assess_risk(word_stats, combo_stats, data, trend_data):
         risks.append(("🟠", f"Creator dominance ({data['top_creator_share']}%)", "Study their design"))
     if data and data["median_price"] > 0 and data["best_price"] > data["median_price"] * 2:
         risks.append(("🟡", "Price sensitivity", "Price below median"))
+    # ALWAYS ensure at least one
     if not risks:
-        risks.append(("🟢", "No major risks", "Solid opportunity"))
+        risks.append(("🟢", "No major risks detected", "Solid opportunity — execute cleanly"))
     return risks
 
 
@@ -785,9 +873,6 @@ def build_full_report(session, verdict, roi, risks, pricing, portfolio, design, 
     return "\n".join(lines)
 
 
-# ============================================================
-# BUTTON NAV
-# ============================================================
 class GuideNav(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=600)
@@ -843,7 +928,7 @@ async def ask_nav(ctx, prompt, timeout=600):
 
 
 # ============================================================
-# GUIDE
+# GUIDE — isolated queries so one failure doesn't kill the guide
 # ============================================================
 @bot.command(name="guide")
 async def guide(ctx, *, idea: str = None):
@@ -889,7 +974,7 @@ async def guide(ctx, *, idea: str = None):
             description=(f"{greeting}{db_status}\n"
                          "**4 sections** — buttons control the pace.\n\n"
                          "**What's your UGC idea?**\n"
-                         "*Examples: `y2k cyber visor` · `transparent beanie`*"),
+                         "*Examples: `korean dance` · `y2k cyber visor` · `transparent beanie`*"),
             color=0x00aaff), "Intake")
         try:
             msg = await bot.wait_for("message", check=check, timeout=600)
@@ -910,7 +995,8 @@ async def guide(ctx, *, idea: str = None):
 
     # ---- SECTION 1 ----
     classifications = [classify_word(w) for w in words]
-    icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢", "number": "🔢", "unknown": "❔"}
+    icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢",
+             "emote": "💃", "number": "🔢", "unknown": "❔"}
     understanding = "\n".join(f"{icons[c]} `{w}` — **{c}**" for w, c in zip(words, classifications))
 
     await safe_send(ctx, discord.Embed(
@@ -930,86 +1016,197 @@ async def guide(ctx, *, idea: str = None):
     total_items = 0
     total_described = 0
 
+    conn = None; cur = None
     try:
         conn = get_db(); cur = conn.cursor()
-        word_stats = [_analyze_word(cur, w) for w in words]
-        combo_stats = _analyze_combo(cur, words) if len(words) >= 2 else None
-        opportunity_data = analyze_opportunity(cur, words[-1])
-        adjacent = _get_adjacent_for(cur, words[-1], limit=25)
 
-        try: await progress.edit(content="🔄 Loading rivals + trends...")
+        # --- Each query isolated ---
+        try:
+            word_stats = [_analyze_word(cur, w) for w in words]
+        except Exception as e:
+            print(f"Word stats failed: {e}", flush=True)
+            rollback_quietly(cur)
+
+        try:
+            combo_stats = _analyze_combo(cur, words) if len(words) >= 2 else None
+        except Exception as e:
+            print(f"Combo stats failed: {e}", flush=True)
+            rollback_quietly(cur)
+            combo_stats = None
+
+        # Analyse LAST word — but with smart fallback
+        try:
+            await progress.edit(content="🔄 Analyzing keywords (with multi-word fallback)...")
         except Exception: pass
-        rivals = _analyze_rivals(cur, words[-1], top_n=3)
-        trend_data = _get_trend_signal(cur, words[-1]) or {}
-        timing = get_timing_intelligence(cur, words[-1])
-        launch_window = get_launch_window(cur, words[-1])
-        graph = get_niche_graph(cur, words[-1], top_per_level=12)
-        dominance = get_creator_dominance(cur, words[-1])
+        try:
+            opportunity_data = analyze_opportunity(cur, words[-1] if len(words) == 1 else idea_clean)
+            # If empty and multi-word, try last word only
+            if (not opportunity_data or not opportunity_data.get("top_keywords")) and len(words) > 1:
+                opportunity_data = analyze_opportunity(cur, words[-1])
+        except Exception as e:
+            print(f"Opportunity failed: {e}", flush=True)
+            rollback_quietly(cur)
+            opportunity_data = None
 
-        try: await progress.edit(content="🔄 Loading descriptions + gaps...")
+        try:
+            adjacent = _get_adjacent_for(cur, words[-1], limit=25)
+        except Exception as e:
+            print(f"Adjacent failed: {e}", flush=True)
+            rollback_quietly(cur)
+            adjacent = []
+
+        try:
+            await progress.edit(content="🔄 Loading rivals + trends...")
+        except Exception: pass
+
+        try:
+            rivals = _analyze_rivals(cur, words[-1], top_n=3)
+        except Exception as e:
+            print(f"Rivals failed: {e}", flush=True)
+            rollback_quietly(cur)
+            rivals = []
+
+        try:
+            trend_data = _get_trend_signal(cur, words[-1]) or {}
+        except Exception as e:
+            print(f"Trend failed: {e}", flush=True)
+            rollback_quietly(cur)
+            trend_data = {}
+
+        try:
+            timing = get_timing_intelligence(cur, words[-1])
+        except Exception as e:
+            print(f"Timing failed: {e}", flush=True)
+            rollback_quietly(cur)
+            timing = None
+
+        try:
+            launch_window = get_launch_window(cur, words[-1])
+        except Exception as e:
+            print(f"Launch window failed: {e}", flush=True)
+            rollback_quietly(cur)
+            launch_window = "N/A"
+
+        try:
+            graph = get_niche_graph(cur, words[-1], top_per_level=12)
+        except Exception as e:
+            print(f"Graph failed: {e}", flush=True)
+            rollback_quietly(cur)
+            graph = {"level_1": [], "level_2": {}}
+
+        try:
+            dominance = get_creator_dominance(cur, words[-1])
+        except Exception as e:
+            print(f"Dominance failed: {e}", flush=True)
+            rollback_quietly(cur)
+            dominance = []
+
+        # Descriptions + Gaps
+        try:
+            await progress.edit(content="🔄 Loading descriptions + gaps...")
         except Exception: pass
         pattern = word_boundary_pattern(words[-1])
 
-        # DB-wide description count for diagnostic
         try:
             cur.execute("SELECT COUNT(*) FROM items WHERE description IS NOT NULL AND description != ''")
             total_described = cur.fetchone()[0] or 0
             cur.execute("SELECT COUNT(*) FROM items")
             total_items = cur.fetchone()[0] or 0
-        except Exception:
-            try: cur.connection.rollback()
-            except Exception: pass
+        except Exception as e:
+            print(f"Desc diag failed: {e}", flush=True)
+            rollback_quietly(cur)
 
-        cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
-                       WHERE name ~* %s AND description IS NOT NULL AND description != ''
-                       AND favorite_count > 0 LIMIT 1000""", (pattern,))
-        desc_rows = cur.fetchall()
-        if desc_rows:
-            dc = Counter(); df = defaultdict(int)
-            for name, desc, favs in desc_rows:
-                for w in set(extract_words(desc)):
-                    dc[w] += 1; df[w] += favs or 0
-            for w, count in dc.most_common(50):
-                if count < 2: continue
-                af = df[w] / count
-                desc_keywords.append((w, af, count, af / math.log1p(count)))
+        try:
+            cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
+                           WHERE name ~* %s AND description IS NOT NULL AND description != ''
+                           AND favorite_count > 0 LIMIT 1000""", (pattern,))
+            desc_rows = cur.fetchall()
+            if desc_rows:
+                dc = Counter(); df = defaultdict(int)
+                for name, desc, favs in desc_rows:
+                    for w in set(extract_words(desc)):
+                        dc[w] += 1; df[w] += favs or 0
+                for w, count in dc.most_common(50):
+                    if count < 2: continue
+                    af = df[w] / count
+                    desc_keywords.append((w, af, count, af / math.log1p(count)))
+        except Exception as e:
+            print(f"Desc keywords failed: {e}", flush=True)
+            rollback_quietly(cur)
 
-        cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
-                       WHERE (name ~* %s OR COALESCE(description, '') ~* %s) 
-                       AND favorite_count > 50 LIMIT 1000""", (pattern, pattern))
-        gap_rows = cur.fetchall()
-        if gap_rows:
-            gs = defaultdict(lambda: {"favs": 0, "count": 0})
-            for name, desc, favs in gap_rows:
-                for w in set(extract_words(f"{name} {desc}")):
-                    if w == words[-1]: continue
-                    gs[w]["favs"] += (favs or 0); gs[w]["count"] += 1
-            for w, s in gs.items():
-                if s["count"] < 2 or s["count"] > 20: continue
-                af = s["favs"] / s["count"]
-                if af < 500: continue
-                gap_keywords.append((w, af, s["count"]))
-            gap_keywords.sort(key=lambda x: x[1], reverse=True)
-            gap_keywords = gap_keywords[:25]
+        try:
+            cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
+                           WHERE (name ~* %s OR COALESCE(description, '') ~* %s) 
+                           AND favorite_count > 50 LIMIT 1000""", (pattern, pattern))
+            gap_rows = cur.fetchall()
+            if gap_rows:
+                gs = defaultdict(lambda: {"favs": 0, "count": 0})
+                for name, desc, favs in gap_rows:
+                    for w in set(extract_words(f"{name} {desc}")):
+                        if w == words[-1]: continue
+                        gs[w]["favs"] += (favs or 0); gs[w]["count"] += 1
+                for w, s in gs.items():
+                    if s["count"] < 2 or s["count"] > 20: continue
+                    af = s["favs"] / s["count"]
+                    if af < 500: continue
+                    gap_keywords.append((w, af, s["count"]))
+                gap_keywords.sort(key=lambda x: x[1], reverse=True)
+                gap_keywords = gap_keywords[:25]
+        except Exception as e:
+            print(f"Gaps failed: {e}", flush=True)
+            rollback_quietly(cur)
 
-        if len(words) >= 2 and word_stats and word_stats[0]["count"] < 100:
-            alternatives = _find_alternatives(cur, words[0], words[-1], limit=8)
+        try:
+            if len(words) >= 2 and word_stats and word_stats[0]["count"] < 100:
+                alternatives = _find_alternatives(cur, words[0], words[-1], limit=8)
+        except Exception as e:
+            print(f"Alternatives failed: {e}", flush=True)
+            rollback_quietly(cur)
 
-        portfolio = _generate_portfolio(cur, idea_clean, alternatives, adjacent, opportunity_data)
-        risks = _assess_risk(word_stats, combo_stats, opportunity_data, trend_data)
-        pricing = _optimize_price(opportunity_data, combo_stats, word_stats)
-        roi = _compute_roi(opportunity_data, combo_stats, word_stats)
-        ab_titles = generate_ab_titles(idea_clean, words, combo_stats, alternatives, adjacent, opportunity_data)
-        design = _make_design_brief(idea_clean, word_stats, adjacent, opportunity_data)
+        try:
+            portfolio = _generate_portfolio(cur, idea_clean, alternatives, adjacent, opportunity_data)
+        except Exception as e:
+            print(f"Portfolio failed: {e}", flush=True)
+
+        try:
+            risks = _assess_risk(word_stats, combo_stats, opportunity_data, trend_data)
+        except Exception as e:
+            print(f"Risks failed: {e}", flush=True)
+            risks = [("🟢", "Analysis unavailable", "Solid opportunity — proceed")]
+
+        try:
+            pricing = _optimize_price(opportunity_data, combo_stats, word_stats)
+        except Exception as e:
+            print(f"Pricing failed: {e}", flush=True)
+
+        try:
+            roi = _compute_roi(opportunity_data, combo_stats, word_stats)
+        except Exception as e:
+            print(f"ROI failed: {e}", flush=True)
+
+        try:
+            ab_titles = generate_ab_titles(idea_clean, words, combo_stats, alternatives, adjacent, opportunity_data)
+        except Exception as e:
+            print(f"A/B titles failed: {e}", flush=True)
+
+        try:
+            design = _make_design_brief(idea_clean, word_stats, adjacent, opportunity_data)
+        except Exception as e:
+            print(f"Design failed: {e}", flush=True)
 
         try:
             increment_consultations(cur, discord_id)
             conn.commit()
         except Exception: pass
-        cur.close(); conn.close()
+
     except Exception as e:
-        print(f"Scan error: {e}", flush=True)
-        try: cur.close(); conn.close()
+        print(f"Outer scan error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        try: cur.close()
+        except Exception: pass
+        try: conn.close()
         except Exception: pass
 
     try: await progress.delete()
@@ -1050,14 +1247,17 @@ async def guide(ctx, *, idea: str = None):
 
     # ---- SECTION 2 ----
     if not goto_strategy:
-        # TOP KEYWORDS
-        if opportunity_data and opportunity_data["top_keywords"]:
+        # Top keywords
+        if opportunity_data and opportunity_data.get("top_keywords"):
             kw_all = opportunity_data["top_keywords"][:15]
+            fallback_note = ""
+            if opportunity_data.get("used_fallback"):
+                fallback_note = " *(multi-word fallback — searched each word separately)*"
             for page_start in range(0, len(kw_all), 8):
                 chunk = kw_all[page_start:page_start + 8]
                 kw_embed = discord.Embed(
                     title=f"🎯 Section 2 — Top Keywords ({page_start+1}–{page_start+len(chunk)})",
-                    description=f"From {opportunity_data['total_matches']} items matching `{words[-1]}`.",
+                    description=f"From **{opportunity_data['total_matches']}** items.{fallback_note}",
                     color=0x00ff88)
                 for i, (w, af, c, sc) in enumerate(chunk, page_start + 1):
                     kw_embed.add_field(name=f"{i}. {w}",
@@ -1066,15 +1266,15 @@ async def guide(ctx, *, idea: str = None):
                 await safe_send(ctx, kw_embed, "Kw")
                 await asyncio.sleep(0.5)
         else:
-            await safe_send(ctx, content="🎯 Section 2 — No top keywords found for this niche.", label="Kw-Empty")
+            await safe_send(ctx, content="🎯 Section 2 — No top keywords found.", label="Kw-Empty")
 
-        # ADJACENT
+        # Adjacent
         if adjacent:
             for page_start in range(0, len(adjacent), 30):
                 chunk = adjacent[page_start:page_start + 30]
                 adj_embed = discord.Embed(
                     title=f"🔗 Section 2 — Adjacent Keywords ({page_start+1}–{page_start+len(chunk)})",
-                    description=f"Words that appear alongside `{words[-1]}`.",
+                    description=f"Words that appear alongside your idea.",
                     color=0x66ccff)
                 half = (len(chunk) + 1) // 2
                 left = " · ".join(f"`{w}`" for w in chunk[:half])
@@ -1084,7 +1284,7 @@ async def guide(ctx, *, idea: str = None):
                 await safe_send(ctx, adj_embed, "Adj")
                 await asyncio.sleep(0.5)
 
-        # DESCRIPTION KEYWORDS
+        # Description keywords
         if desc_keywords:
             for page_start in range(0, min(len(desc_keywords), 20), 8):
                 chunk = desc_keywords[page_start:page_start + 8]
@@ -1099,23 +1299,21 @@ async def guide(ctx, *, idea: str = None):
                 await safe_send(ctx, desc_embed, "Desc")
                 await asyncio.sleep(0.5)
         else:
-            # Diagnostic
             if total_items > 0:
                 diag_msg = (
-                    f"**No descriptions found for `{words[-1]}` items.**\n\n"
+                    f"**No descriptions found for this niche.**\n\n"
                     f"📊 Database-wide: **{total_described:,}** of **{total_items:,}** items have descriptions "
                     f"({(total_described/total_items*100):.1f}%).\n\n"
                     f"Items in this niche likely don't have descriptions on Roblox yet. "
-                    f"Run the **enricher** workflow more times to grow the dataset."
+                    f"Run the **enricher** workflow more times."
                 )
             else:
                 diag_msg = "**No descriptions found.** Run the enricher to populate item descriptions."
             await safe_send(ctx, discord.Embed(
                 title="📝 Section 2 — Hidden Description Keywords",
-                description=diag_msg,
-                color=0xaa66ff), "Desc-Empty")
+                description=diag_msg, color=0xaa66ff), "Desc-Empty")
 
-        # GAPS
+        # Gaps
         if gap_keywords:
             for page_start in range(0, len(gap_keywords), 8):
                 chunk = gap_keywords[page_start:page_start + 8]
@@ -1192,9 +1390,8 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("🔄 Loading final section...")
         await asyncio.sleep(0.3)
 
-    # ---- SECTION 4 — 3 COMBINED EMBEDS (rate-limit safe) ----
+    # ---- SECTION 4 — 3 combined embeds ----
     try:
-        # === EMBED 1: Alternatives + Graph + ROI + Pricing ===
         combo = discord.Embed(
             title="💰 Section 4 — ROI, Pricing & Alternatives",
             color=0x00ff88
@@ -1230,7 +1427,6 @@ async def guide(ctx, *, idea: str = None):
         await safe_send(ctx, combo, "S4-1")
         await asyncio.sleep(1)
 
-        # === EMBED 2: Portfolio + Design + A/B ===
         design_embed = discord.Embed(
             title="✏️ Section 4 — Design Package",
             color=0x9966ff
@@ -1261,7 +1457,6 @@ async def guide(ctx, *, idea: str = None):
         await safe_send(ctx, design_embed, "S4-2")
         await asyncio.sleep(1)
 
-        # === EMBED 3: Timing + Strategy + Checklist ===
         final_embed = discord.Embed(
             title="🎯 Final Strategy & Launch Plan",
             color=0x00ffcc
@@ -1303,7 +1498,6 @@ async def guide(ctx, *, idea: str = None):
         except Exception:
             pass
 
-    # ---- FINAL: watchlist + export ----
     await ctx.send(
         f"🎉 **Done!** Guide complete for `{idea_clean}`.\n\n"
         f"👁️ Add `{words[-1]}` to **watchlist**? — reply `yes`\n"
@@ -1415,19 +1609,16 @@ async def dbtest(ctx):
                 count = cur.fetchone()[0]
                 lines.append(f"✅ `{table}` — **{count:,}** rows")
             except Exception:
-                try: cur.connection.rollback()
-                except Exception: pass
+                rollback_quietly(cur)
                 lines.append(f"❌ `{table}` — missing")
-        # Descriptions check
         try:
             cur.execute("SELECT COUNT(*) FROM items WHERE description IS NOT NULL AND description != ''")
             with_desc = cur.fetchone()[0] or 0
             cur.execute("SELECT COUNT(*) FROM items")
             total = cur.fetchone()[0] or 0
-            lines.append(f"\n📝 Descriptions: **{with_desc:,}** of **{total:,}** items ({(with_desc/total*100) if total else 0:.1f}%)")
+            lines.append(f"\n📝 Descriptions: **{with_desc:,}** of **{total:,}** items")
         except Exception:
-            try: cur.connection.rollback()
-            except Exception: pass
+            rollback_quietly(cur)
         cur.close(); conn.close()
         embed = discord.Embed(title="🔬 Database Diagnostic",
                               description="\n".join(lines), color=0x00ff88)
