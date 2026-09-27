@@ -16,6 +16,9 @@ BATCH_SIZE = 500
 WORKERS = 3
 ITEM_DELAY = 0.3
 
+# Set REFRESH_MODE=true via env var to re-enrich top items (builds velocity history)
+REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
+
 COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
 if not COOKIE:
     raise ValueError("ROBLOSECURITY_COOKIE environment variable not set!")
@@ -34,18 +37,22 @@ session.cookies[".ROBLOSECURITY"] = COOKIE
 session.headers.update(HEADERS)
 
 
+def log(msg):
+    print(msg, flush=True)
+
+
 def get_csrf_token():
     """Fetch CSRF token (needed for direct Roblox fallback)."""
-    print("🔐 Fetching X-CSRF-Token...", flush=True)
+    log("🔐 Fetching X-CSRF-Token...")
     try:
         resp = session.post(AUTH_URL, timeout=10)
         token = resp.headers.get("X-CSRF-Token")
         if token:
             session.headers["X-CSRF-Token"] = token
-            print(f"✅ Got CSRF token: {token[:8]}...", flush=True)
+            log(f"✅ Got CSRF token: {token[:8]}...")
             return True
     except Exception as e:
-        print(f"⚠️ CSRF error (OK for RoProxy): {e}", flush=True)
+        log(f"⚠️ CSRF error (OK for RoProxy): {e}")
     return False
 
 
@@ -79,20 +86,32 @@ def enrich_items():
     # Try to get CSRF (only needed if RoProxy fails)
     get_csrf_token()
 
-    cur.execute("""
-        SELECT id FROM discovered_items 
-        WHERE id NOT IN (SELECT id FROM items) 
-        LIMIT %s
-    """, (BATCH_SIZE,))
+    # ---- PICK ITEMS TO ENRICH ----
+    if REFRESH_EXISTING:
+        log("🔄 REFRESH MODE: re-enriching top items by favourite count")
+        cur.execute("""
+            SELECT id FROM items
+            WHERE favorite_count > 0
+            ORDER BY favorite_count DESC
+            LIMIT %s
+        """, (BATCH_SIZE,))
+    else:
+        log("🆕 NORMAL MODE: enriching new items only")
+        cur.execute("""
+            SELECT id FROM discovered_items 
+            WHERE id NOT IN (SELECT id FROM items) 
+            LIMIT %s
+        """, (BATCH_SIZE,))
+
     ids = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()
 
     if not ids:
-        print("✅ Nothing to enrich.", flush=True)
+        log("✅ Nothing to enrich.")
         return
 
-    print(f"🔧 Enriching {len(ids)} items with {WORKERS} workers (RoProxy)...", flush=True)
+    log(f"🔧 Enriching {len(ids)} items with {WORKERS} workers (RoProxy)...")
     start = time.time()
 
     results = []
@@ -110,9 +129,9 @@ def enrich_items():
                 failed += 1
 
             if i <= 10 or i % 10 == 0:
-                print(f"  {i}/{len(ids)} — success: {len(results)}, failed: {failed}", flush=True)
+                log(f"  {i}/{len(ids)} — success: {len(results)}, failed: {failed}")
 
-    print(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s", flush=True)
+    log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
 
     # ---- DB WRITE ----
     conn = get_db_connection()
@@ -143,6 +162,7 @@ def enrich_items():
                     fetched_at = CURRENT_TIMESTAMP
             """, (item_id, name, favs, price, sales, desc, creator, asset_type))
 
+            # Always insert a new history snapshot (this is what enables velocity tracking)
             cur.execute("""
                 INSERT INTO item_history (item_id, favorite_count, total_sales, price)
                 VALUES (%s, %s, %s, %s)
@@ -150,12 +170,12 @@ def enrich_items():
 
             enriched += 1
         except Exception as e:
-            print(f"  DB error {item_id}: {e}", flush=True)
+            log(f"  DB error {item_id}: {e}")
 
     conn.commit()
     cur.close()
     conn.close()
-    print(f"✅ Enriched {enriched} items in {time.time()-start:.1f}s total.", flush=True)
+    log(f"✅ Enriched {enriched} items in {time.time()-start:.1f}s total.")
 
 
 if __name__ == "__main__":
