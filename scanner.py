@@ -11,17 +11,21 @@ def log(msg):
     print(msg, flush=True)
 
 
-CATALOG_API = "https://catalog.roblox.com/v1/search/items"
+# RoProxy — relays Roblox API calls from residential IPs so keyword search works
+CATALOG_APIS = [
+    "https://catalog.roproxy.com/v1/search/items",
+    "https://catalog.roblox.com/v1/search/items",
+]
+
 CATEGORIES = [11, 3, 4, 12]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
 WORKERS = 3
 DELAY = 0.2
 MAX_PAGES_PER_QUERY = 10
-HTTP_TIMEOUT = 8
+HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
-QUERY_TIMEOUT = 45
+QUERY_TIMEOUT = 60
 
-# CRITICAL: Roblox returns empty data without a browser User-Agent
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -75,8 +79,8 @@ def get_dynamic_keywords():
         return []
 
 
-def scan_query(params):
-    """Hardened: capped retries, no infinite loops, with browser headers."""
+def try_api(api_url, params):
+    """Try one API endpoint. Return (found_set, success_bool)."""
     found = set()
     cursor = ""
     pages = 0
@@ -87,21 +91,20 @@ def scan_query(params):
         p["cursor"] = cursor
         try:
             resp = requests.get(
-                CATALOG_API,
+                api_url,
                 params=p,
                 headers=HEADERS,
                 timeout=HTTP_TIMEOUT
             )
-
             if resp.status_code == 429:
                 retries_429 += 1
                 if retries_429 > MAX_429_RETRIES:
-                    return found
+                    return found, len(found) > 0
                 time.sleep(1)
                 continue
 
             if resp.status_code != 200:
-                return found
+                return found, len(found) > 0
 
             data = resp.json()
             for item in data.get("data", []):
@@ -109,42 +112,42 @@ def scan_query(params):
 
             cursor = data.get("nextPageCursor")
             if not cursor:
-                return found
+                return found, True
 
             pages += 1
         except Exception:
-            return found
+            return found, len(found) > 0
 
         time.sleep(DELAY)
 
-    return found
+    return found, True
+
+
+def scan_query(params):
+    """Try RoProxy first, fall back to direct Roblox."""
+    for api_url in CATALOG_APIS:
+        found, success = try_api(api_url, params)
+        if found:
+            return found
+    return set()
 
 
 def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
-    # Category-only queries (these work reliably)
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({"category": cat, "sortType": sort, "limit": 30})
 
-    # Keyword queries — NO category filter (this is the fix)
     all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
     for kw in all_keywords:
         for sort in [0, 2]:
             queries.append({"keyword": kw, "sortType": sort, "limit": 30})
 
-    # Price range queries (no category, works better)
     for min_p, max_p in PRICE_RANGES:
-        queries.append({
-            "minPrice": min_p,
-            "maxPrice": max_p,
-            "sortType": 2,
-            "limit": 30
-        })
+        queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
 
-    # Learned keywords
     for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
 
@@ -179,7 +182,7 @@ def run_scanner():
     log(f"✅ Scan collected {len(all_ids)} IDs in {time.time()-start:.1f}s")
 
     if not all_ids:
-        log("⚠️ No IDs collected — bailing without writing.")
+        log("⚠️ No IDs collected — bailing.")
         return
 
     log("💾 Writing to database...")
