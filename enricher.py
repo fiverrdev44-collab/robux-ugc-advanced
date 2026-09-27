@@ -1,52 +1,42 @@
 import os
 import requests
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection, setup_database
 
-ECONOMY_API = "https://economy.roblox.com/v2/assets/{}/details"
-CATALOG_API = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
-
-BATCH_SIZE = 500
-WORKERS = 10
-FORCE_REFRESH = False   # set True to re-enrich already-processed items
+CATALOG_DETAILS_API = "https://catalog.roblox.com/v1/catalog/items/details"
+BATCH_SIZE = 500        # items to process per run
+CHUNK_SIZE = 120        # Roblox API limit per POST request
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Content-Type": "application/json",
     "Accept": "application/json",
 }
 
 
-def fetch_detail(item_id):
-    """Fetch from BOTH endpoints and merge data."""
-    merged = {}
-
-    # Economy API — sales, price, description, creator
-    try:
-        resp = requests.get(ECONOMY_API.format(item_id), headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            merged.update(resp.json())
-    except Exception:
-        pass
-
-    # Catalog API — favourite count, purchase count, name
-    try:
-        resp = requests.get(CATALOG_API.format(item_id), headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            c = resp.json()
-            merged["FavoriteCount"] = c.get("favoriteCount", 0)
-            merged["PurchaseCount"] = c.get("purchaseCount", 0)
-            if not merged.get("Name"):
-                merged["Name"] = c.get("name", "")
-            if not merged.get("Description"):
-                merged["Description"] = c.get("description", "")
-    except Exception:
-        pass
-
-    if not merged.get("Name"):
-        return item_id, None
-    return item_id, merged
+def fetch_batch(item_ids):
+    """Fetch details for up to 120 items in ONE POST request."""
+    payload = {"items": [{"itemType": "Asset", "id": iid} for iid in item_ids]}
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                CATALOG_DETAILS_API,
+                json=payload,
+                headers=HEADERS,
+                timeout=15
+            )
+            if resp.status_code == 200:
+                return resp.json().get("data", [])
+            if resp.status_code == 429:
+                print(f"  Rate-limited, waiting 3s...")
+                time.sleep(3)
+                continue
+            print(f"  Batch HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"  Batch error: {e}")
+            time.sleep(1)
+    return []
 
 
 def enrich_items():
@@ -54,16 +44,12 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    if FORCE_REFRESH:
-        # Re-fetch everything — useful to fix data after bug fixes
-        cur.execute("SELECT id FROM discovered_items LIMIT %s", (BATCH_SIZE,))
-    else:
-        cur.execute("""
-            SELECT id FROM discovered_items 
-            WHERE id NOT IN (SELECT id FROM items) 
-            LIMIT %s
-        """, (BATCH_SIZE,))
-
+    # Get IDs that haven't been enriched yet
+    cur.execute("""
+        SELECT id FROM discovered_items 
+        WHERE id NOT IN (SELECT id FROM items) 
+        LIMIT %s
+    """, (BATCH_SIZE,))
     ids = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()
@@ -72,51 +58,52 @@ def enrich_items():
         print("✅ Nothing to enrich.")
         return
 
-    print(f"🔧 Enriching {len(ids)} items with {WORKERS} workers...")
+    print(f"🔧 Enriching {len(ids)} items in batches of {CHUNK_SIZE}...")
     start = time.time()
 
-    results = []
-    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        futures = {executor.submit(fetch_detail, iid): iid for iid in ids}
-        for i, future in enumerate(as_completed(futures), 1):
-            item_id, data = future.result()
-            if data:
-                results.append((item_id, data))
-            if i % 50 == 0:
-                print(f"  Fetched {i}/{len(ids)}...")
+    # ---- FETCH IN BATCHES ----
+    all_data = []
+    for i in range(0, len(ids), CHUNK_SIZE):
+        chunk = ids[i:i+CHUNK_SIZE]
+        batch = fetch_batch(chunk)
+        all_data.extend(batch)
+        print(f"  Chunk {i//CHUNK_SIZE + 1}: got {len(batch)}/{len(chunk)} items")
+        time.sleep(0.3)
 
-    print(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
+    print(f"✅ Downloaded {len(all_data)} items in {time.time()-start:.1f}s")
 
-    # ---- DB WRITE ----
+    # ---- WRITE TO DB ----
     conn = get_db_connection()
     cur = conn.cursor()
     enriched = 0
-    for item_id, d in results:
+    for d in all_data:
         try:
-            favs = d.get("FavoriteCount", 0) or 0
-            sales = d.get("Sales", 0) or d.get("PurchaseCount", 0) or 0
-            price = d.get("PriceInRobux", 0) or 0
+            item_id = d.get("id")
+            if not item_id:
+                continue
+
+            favs = d.get("favoriteCount", 0) or 0
+            sales = d.get("purchaseCount", 0) or 0
+            price = d.get("price", 0) or 0
+            creator = d.get("creatorName", "") or ""
+            name = d.get("name", "") or ""
+            desc = d.get("description", "") or ""
+            asset_type = d.get("assetType", 0) or 0
 
             cur.execute("""
                 INSERT INTO items (
                     id, name, favorite_count, price, total_sales,
-                    description, creator_name, asset_type_id,
-                    created_at, updated_at
+                    description, creator_name, asset_type_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     favorite_count = EXCLUDED.favorite_count,
                     total_sales = EXCLUDED.total_sales,
                     price = EXCLUDED.price,
                     description = EXCLUDED.description,
+                    name = EXCLUDED.name,
                     fetched_at = CURRENT_TIMESTAMP
-            """, (
-                item_id, d.get("Name"), favs, price, sales,
-                d.get("Description", ""),
-                d.get("Creator", {}).get("Name", ""),
-                d.get("AssetTypeId"),
-                d.get("Created"), d.get("Updated")
-            ))
+            """, (item_id, name, favs, price, sales, desc, creator, asset_type))
 
             cur.execute("""
                 INSERT INTO item_history (item_id, favorite_count, total_sales, price)
@@ -125,7 +112,7 @@ def enrich_items():
 
             enriched += 1
         except Exception as e:
-            print(f"DB error {item_id}: {e}")
+            print(f"  DB error {d.get('id')}: {e}")
 
     conn.commit()
     cur.close()
