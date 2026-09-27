@@ -69,17 +69,15 @@ def get_db_stats(cur):
             cur.execute(f"SELECT COUNT(*) FROM {table}")
             stats[key] = cur.fetchone()[0] or 0
         except Exception as e:
-            try:
-                cur.connection.rollback()
-            except Exception:
-                pass
+            try: cur.connection.rollback()
+            except Exception: pass
             print(f"⚠️ Stats error on {table}: {e}", flush=True)
             stats[key] = 0
     return stats
 
 
 async def safe_send(ctx, embed=None, content=None, label=""):
-    """Send message with retry + error handling so one stage can't kill the guide."""
+    """Send message with retry — one failing stage can't kill the guide."""
     for attempt in range(2):
         try:
             if embed is not None:
@@ -241,7 +239,6 @@ class MultiViewPaginator(discord.ui.View):
     def build_embed(self):
         d = self.data
         seed = d["seed"]
-
         if self.view_mode == "keywords":
             items = d["top_keywords"]
             max_page = max(0, (len(items) - 1) // self.per_page)
@@ -255,13 +252,11 @@ class MultiViewPaginator(discord.ui.View):
                 embed.add_field(name=f"{i}. {w}",
                                 value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                                 inline=False)
-            embed.set_footer(text=f"Page {self.page+1}/{max_page+1} • Switch tabs below")
-
+            embed.set_footer(text=f"Page {self.page+1}/{max_page+1}")
         elif self.view_mode == "adjacent":
             adjs = d["adjacent"]
             embed = discord.Embed(title=f"🔗 Adjacent Keywords for `{seed}`",
-                                  description="Words that appear alongside your seed.",
-                                  color=0x66ccff)
+                                  description="Words alongside your seed.", color=0x66ccff)
             if adjs:
                 half = (len(adjs) + 1) // 2
                 left = " · ".join(f"`{w}`" for w in adjs[:half])
@@ -270,12 +265,10 @@ class MultiViewPaginator(discord.ui.View):
                 if right: embed.add_field(name="\u200b", value=right, inline=True)
             else:
                 embed.add_field(name="No adjacent keywords", value="Try a broader seed.", inline=False)
-
         elif self.view_mode == "description":
             descs = d["description_keywords"]
             embed = discord.Embed(title=f"📝 Hidden Description Keywords for `{seed}`",
-                                  description="SEO words top sellers bury in descriptions.",
-                                  color=0xaa66ff)
+                                  description="SEO words buried in descriptions.", color=0xaa66ff)
             if descs:
                 half = (len(descs) + 1) // 2
                 left = " · ".join(f"`{w}`" for w in descs[:half])
@@ -284,7 +277,6 @@ class MultiViewPaginator(discord.ui.View):
                 if right: embed.add_field(name="\u200b", value=right, inline=True)
             else:
                 embed.add_field(name="No description keywords", value="Try a different seed.", inline=False)
-
         elif self.view_mode == "market":
             embed = discord.Embed(title=f"💰 Market Info for `{seed}`",
                                   description="Competitive intelligence.", color=0xffaa00)
@@ -321,7 +313,6 @@ class MultiViewPaginator(discord.ui.View):
         market_btn = discord.ui.Button(label="💰 Market",
                                        style=discord.ButtonStyle.success if self.view_mode == "market" else discord.ButtonStyle.secondary, row=1)
         market_btn.callback = self.set_market; self.add_item(market_btn)
-
         if self.view_mode == "keywords":
             total = len(d["top_keywords"])
             max_page = max(0, (total - 1) // self.per_page)
@@ -518,7 +509,7 @@ def build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, dat
         if data: lines.append(f"• Price between **{data['median_price']}–{data['best_price']} R$**")
     elif emoji == "🟡":
         lines = ["**TEST IT.** Moderate signal.", "• Add specific modifiers",
-                 "• Check alternatives tab", "• Study top 3 rivals"]
+                 "• Check alternatives", "• Study top 3 rivals"]
     elif emoji == "🟠":
         lines = ["**DIFFERENTIATE.** Crowded but winnable.", "• Add unique style combo",
                  "• Undercut by 15–20% OR go premium"]
@@ -632,7 +623,7 @@ def generate_ab_titles(idea, words, combo_stats, alternatives, adjacent, data):
     if adjacent and len(adjacent) >= 2:
         titles.append({"title": f"{words[0].capitalize()} {words[-1].capitalize()} – {adjacent[0].capitalize()} {adjacent[1].capitalize()}"[:80],
                        "strategy": "Long-tail SEO", "predicted": "🟢 High",
-                       "why": f"Targets 4 keywords"})
+                       "why": "Targets 4 keywords"})
     return titles
 
 
@@ -798,30 +789,66 @@ def build_full_report(session, verdict, roi, risks, pricing, portfolio, design, 
     return "\n".join(lines)
 
 
+# ============================================================
+# BUTTON NAVIGATION
+# ============================================================
+class GuideNav(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.choice = None
+
+    def _disable_all(self):
+        for c in self.children:
+            c.disabled = True
+
+    @discord.ui.button(label="▶ Continue", style=discord.ButtonStyle.success, row=0)
+    async def cont(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "continue"
+        self._disable_all()
+        try: await interaction.response.edit_message(view=self)
+        except Exception: pass
+        self.stop()
+
+    @discord.ui.button(label="⏭ Skip to Strategy", style=discord.ButtonStyle.secondary, row=0)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "skip"
+        self._disable_all()
+        try: await interaction.response.edit_message(view=self)
+        except Exception: pass
+        self.stop()
+
+    @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger, row=0)
+    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "stop"
+        self._disable_all()
+        try: await interaction.response.edit_message(view=self)
+        except Exception: pass
+        self.stop()
+
+
+async def ask_nav(ctx, prompt):
+    nav = GuideNav()
+    try:
+        await ctx.send(prompt, view=nav)
+    except Exception:
+        return None
+    await nav.wait()
+    return nav.choice
+
+
+# ============================================================
+# GUIDE — SECTIONED WITH BUTTON NAV
+# ============================================================
 @bot.command(name="guide")
 async def guide(ctx, *, idea: str = None):
+    """Sectioned guide with button navigation."""
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
-
-    async def ask_yes_no(question, timeout=600):
-        """Long timeout (10 min) so user can't get cut off."""
-        try:
-            await ctx.send(question)
-        except Exception:
-            return False
-        try:
-            msg = await bot.wait_for("message", check=check, timeout=timeout)
-            reply = msg.content.strip().lower()
-            if reply in ("yes", "y", "yeah", "yep", "ok", "sure", "go", "yup"): return True
-            if reply in ("cancel", "exit", "stop"): return None
-            return False
-        except asyncio.TimeoutError:
-            return False
 
     discord_id = ctx.author.id
     username = str(ctx.author)
 
-    # ---- Load profile + stats (with fallback) ----
+    # ---- Profile + Stats ----
     try:
         conn = get_db(); cur = conn.cursor()
         profile = get_or_create_profile(cur, discord_id, username)
@@ -830,7 +857,7 @@ async def guide(ctx, *, idea: str = None):
         conn.commit()
         cur.close(); conn.close()
     except Exception as e:
-        print(f"Guide setup error: {e}", flush=True)
+        print(f"Setup error: {e}", flush=True)
         profile = {"total_consultations": 0, "first_seen": None}
         past = []
         stats = {"discovered": 0, "analyzed": 0, "snapshots": 0,
@@ -838,12 +865,7 @@ async def guide(ctx, *, idea: str = None):
 
     greeting = ""
     if profile["total_consultations"] > 0:
-        greeting = f"👋 **Welcome back, {ctx.author.display_name}.** This is consultation **#{profile['total_consultations'] + 1}**.\n\n"
-        if past:
-            greeting += "**Recent:**\n"
-            for seed, label, emoji, _ in past[:3]:
-                greeting += f"• {emoji} `{seed}` — {label}\n"
-            greeting += "\n"
+        greeting = f"👋 Welcome back, **{ctx.author.display_name}**. Consultation **#{profile['total_consultations'] + 1}**.\n\n"
 
     db_status = (
         f"```\n"
@@ -853,21 +875,19 @@ async def guide(ctx, *, idea: str = None):
         f"│ 📊 History Snapshots{stats['snapshots']:>10,} │\n"
         f"│ 💬 Search Suggestions{stats['suggestions']:>9,} │\n"
         f"│ 🧠 Learned Keywords {stats['learned']:>10,} │\n"
-        f"│ 📖 Past Consults    {stats['consultations']:>10,} │\n"
         f"└──────────────────────────────┘\n"
         f"```"
     )
 
     if not idea:
         await safe_send(ctx, discord.Embed(
-            title="🧠 Elite UGC Consultation Engine",
-            description=(f"{greeting}"
-                         f"{db_status}\n"
-                         "━━━━━━━━━━━━━━━━━━━━━\n"
-                         "**13-stage market consultation**\n\n"
+            title="🧠 Elite UGC Consultation",
+            description=(f"{greeting}{db_status}\n"
+                         "**5 sections** — you control the pace.\n"
+                         "*Keywords · Gaps · Diagnosis · Rivals · ROI · Pricing · Titles*\n\n"
                          "**What's your UGC idea?**\n"
                          "*Examples: `y2k cyber visor` · `transparent beanie`*"),
-            color=0x00aaff), "Init")
+            color=0x00aaff), "Intake")
         try:
             msg = await bot.wait_for("message", check=check, timeout=600)
             idea = msg.content.strip().lower()
@@ -886,28 +906,21 @@ async def guide(ctx, *, idea: str = None):
         return
 
     # ============================================================
-    # STAGE 1
+    # SECTION 1 — UNDERSTANDING + PULSE
     # ============================================================
     classifications = [classify_word(w) for w in words]
     icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢", "number": "🔢", "unknown": "❔"}
     understanding = "\n".join(f"{icons[c]} `{w}` — **{c}**" for w, c in zip(words, classifications))
 
     await safe_send(ctx, discord.Embed(
-        title=f"📖 Stage 1/13 — Understanding `{idea_clean}`",
-        description=(f"{db_status}\n"
-                     f"**Parsing {len(words)} components:**\n\n{understanding}\n\n"
-                     f"*Scanning {stats['analyzed']:,} items...*"),
-        color=0x00aaff), "Stage 1")
-    await asyncio.sleep(0.5)
+        title=f"📖 Section 1/5 — Understanding `{idea_clean}`",
+        description=(f"{db_status}\n**Parsing {len(words)} components:**\n\n"
+                     f"{understanding}\n\n*Scanning {stats['analyzed']:,} items...*"),
+        color=0x00aaff), "Section 1")
+    await asyncio.sleep(0.3)
 
-    # ============================================================
-    # STAGE 2 - DEEP SCAN
-    # ============================================================
-    try:
-        progress = await ctx.send("🔄 **[1/5] Analyzing individual words...**")
-    except Exception:
-        progress = None
-
+    # Heavy scan
+    progress = await ctx.send("🔄 Loading market data...")
     word_stats = []
     combo_stats = None
     opportunity_data = None
@@ -919,245 +932,304 @@ async def guide(ctx, *, idea: str = None):
     graph = {"level_1": [], "level_2": {}}
     dominance = []
     alternatives = []
-    matching = []
     portfolio = []
+    desc_keywords = []
+    gap_keywords = []
 
     try:
         conn = get_db(); cur = conn.cursor()
-
         word_stats = [_analyze_word(cur, w) for w in words]
-
-        if progress:
-            try: await progress.edit(content="🔄 **[2/5] Checking combos + opportunity...**")
-            except Exception: pass
         combo_stats = _analyze_combo(cur, words) if len(words) >= 2 else None
         opportunity_data = analyze_opportunity(cur, words[-1])
         adjacent = _get_adjacent_for(cur, words[-1], limit=15)
 
-        if progress:
-            try: await progress.edit(content="🔄 **[3/5] Loading rivals, trends, timing...**")
-            except Exception: pass
+        try: await progress.edit(content="🔄 Loading rivals + trends...")
+        except Exception: pass
         rivals = _analyze_rivals(cur, words[-1], top_n=3)
         trend_data = _get_trend_signal(cur, words[-1]) or {}
         timing = get_timing_intelligence(cur, words[-1])
         launch_window = get_launch_window(cur, words[-1])
-
-        if progress:
-            try: await progress.edit(content="🔄 **[4/5] Building keyword graph...**")
-            except Exception: pass
         graph = get_niche_graph(cur, words[-1], depth=1, top_per_level=8)
         dominance = get_creator_dominance(cur, words[-1])
 
-        if progress:
-            try: await progress.edit(content="🔄 **[5/5] Generating portfolio...**")
-            except Exception: pass
+        try: await progress.edit(content="🔄 Loading descriptions + gaps...")
+        except Exception: pass
+        pattern = word_boundary_pattern(words[-1])
+
+        cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
+                       WHERE name ~* %s AND description IS NOT NULL AND description != ''
+                       AND favorite_count > 0 LIMIT 1000""", (pattern,))
+        desc_rows = cur.fetchall()
+        if desc_rows:
+            dc = Counter(); df = defaultdict(int)
+            for name, desc, favs in desc_rows:
+                for w in set(extract_words(desc)):
+                    dc[w] += 1; df[w] += favs or 0
+            for w, count in dc.most_common(30):
+                if count < 2: continue
+                af = df[w] / count
+                desc_keywords.append((w, af, count, af / math.log1p(count)))
+
+        cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
+                       WHERE (name ~* %s OR COALESCE(description, '') ~* %s) 
+                       AND favorite_count > 50 LIMIT 1000""", (pattern, pattern))
+        gap_rows = cur.fetchall()
+        if gap_rows:
+            gs = defaultdict(lambda: {"favs": 0, "count": 0})
+            for name, desc, favs in gap_rows:
+                for w in set(extract_words(f"{name} {desc}")):
+                    if w == words[-1]: continue
+                    gs[w]["favs"] += (favs or 0); gs[w]["count"] += 1
+            for w, s in gs.items():
+                if s["count"] < 2 or s["count"] > 20: continue
+                af = s["favs"] / s["count"]
+                if af < 500: continue
+                gap_keywords.append((w, af, s["count"]))
+            gap_keywords.sort(key=lambda x: x[1], reverse=True)
+            gap_keywords = gap_keywords[:20]
+
         if len(words) >= 2 and word_stats and word_stats[0]["count"] < 100:
             alternatives = _find_alternatives(cur, words[0], words[-1], limit=6)
 
-        matching = find_matching_items(cur, words, limit=5)
         portfolio = _generate_portfolio(cur, idea_clean, alternatives, adjacent, opportunity_data)
 
         try:
             increment_consultations(cur, discord_id)
             conn.commit()
-        except Exception:
-            pass
+        except Exception: pass
         cur.close(); conn.close()
     except Exception as e:
         print(f"Scan error: {e}", flush=True)
-        try:
-            cur.close(); conn.close()
-        except Exception:
-            pass
-
-    if progress:
-        try: await progress.delete()
+        try: cur.close(); conn.close()
         except Exception: pass
 
+    try: await progress.delete()
+    except Exception: pass
     await asyncio.sleep(0.3)
 
-    # ============================================================
-    # STAGE 2 - MARKET PULSE
-    # ============================================================
-    pulse = discord.Embed(title="📊 Stage 2/13 — Market Pulse",
+    # Pulse
+    pulse = discord.Embed(title="📊 Section 1 — Market Pulse",
                           description="Real data per word:", color=0x66ccff)
-    if word_stats:
-        for i, w in enumerate(word_stats, 1):
-            if w["count"] == 0: status = "❌ Not in DB"
-            elif w["count"] < 10: status = f"🟡 Rare ({w['count']})"
-            elif w["count"] < 100: status = f"🟢 Niche ({w['count']})"
-            elif w["count"] < 500: status = f"🟠 Popular ({w['count']})"
-            else: status = f"🔴 Saturated ({w['count']})"
-            pulse.add_field(name=f"{i}. `{w['word']}` — {status}",
-                            value=f"Avg Favs: **{w['avg_favs']:,.0f}** · Avg Price: **{w['avg_price']:,.0f} R$**",
-                            inline=False)
-    else:
-        pulse.add_field(name="No data", value="No matching items in database.")
-
+    for i, w in enumerate(word_stats, 1):
+        if w["count"] == 0: status = "❌ Not in DB"
+        elif w["count"] < 10: status = f"🟡 Rare ({w['count']})"
+        elif w["count"] < 100: status = f"🟢 Niche ({w['count']})"
+        elif w["count"] < 500: status = f"🟠 Popular ({w['count']})"
+        else: status = f"🔴 Saturated ({w['count']})"
+        pulse.add_field(name=f"{i}. `{w['word']}` — {status}",
+                        value=f"Avg Favs: **{w['avg_favs']:,.0f}** · Avg Price: **{w['avg_price']:,.0f} R$**",
+                        inline=False)
     if trend_data and trend_data.get("avg_growth") is not None:
         g = trend_data["avg_growth"]
         arrow = "📈" if g > 50 else "📉" if g < -50 else "➡️"
-        pulse.add_field(name=f"{arrow} Trend Signal",
-                        value=f"**{g:+,.0f}** favs/snapshot across {trend_data.get('tracked', 0)} items",
+        pulse.add_field(name=f"{arrow} Trend",
+                        value=f"**{g:+,.0f}** favs/snapshot ({trend_data.get('tracked', 0)} tracked)",
                         inline=False)
+    await safe_send(ctx, pulse, "Pulse")
 
-    await safe_send(ctx, pulse, "Stage 2")
-    await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 3 - DIAGNOSIS
-    # ============================================================
-    verdict = smart_verdict(word_stats, combo_stats)
-    emoji, label, explanation = verdict
-    color_map = {"🔥": 0xff2266, "🟢": 0x00ff88, "🟡": 0xffaa00, "🟠": 0xff6600, "🔴": 0xff2222}
-
-    diag = discord.Embed(title=f"{emoji} Stage 3/13 — Diagnosis: {label}",
-                         description=f"━━━━━━━━━━━━━━━━━━━━━\n\n{explanation}",
-                         color=color_map.get(emoji, 0x00aaff))
-    if combo_stats and combo_stats["count"] > 0:
-        diag.add_field(name="🎯 Combo Match",
-                       value=f"**{combo_stats['count']}** items combine these words\n"
-                             f"Avg Fav: **{combo_stats['avg_favs']:,.0f}** · Avg Price: **{combo_stats['avg_price']:,.0f} R$**",
-                       inline=False)
-    await safe_send(ctx, diag, "Stage 3")
-    await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 4 - RISKS
-    # ============================================================
-    risks = _assess_risk(word_stats, combo_stats, opportunity_data, trend_data)
-    risk_embed = discord.Embed(title="⚠️ Stage 4/13 — Risk Assessment",
-                               description=f"**{len(risks)} risk{'s' if len(risks) > 1 else ''}** identified:",
-                               color=0xff8800)
-    for icon, risk, mit in risks:
-        risk_embed.add_field(name=f"{icon} {risk}", value=f"→ *{mit}*", inline=False)
-    await safe_send(ctx, risk_embed, "Stage 4")
-    await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 5 - RIVALS
-    # ============================================================
-    if rivals:
-        rival_embed = discord.Embed(title="🥊 Stage 5/13 — Rival Analysis",
-                                    description="**Study these** before you build:", color=0xff3388)
-        for iid, name, favs, price, creator in rivals:
-            creator_str = f"by {creator}" if creator else "unknown"
-            rival_embed.add_field(name=f"`{iid}` — {name[:55]}",
-                                  value=f"**{favs:,}** favs · **{price} R$** · {creator_str}", inline=False)
-        await safe_send(ctx, rival_embed, "Stage 5")
-    else:
-        await safe_send(ctx, content="🥊 Stage 5/13 — No rivals found (niche is empty or too new).", label="Stage 5")
-    await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 6 - DOMINANCE
-    # ============================================================
-    if dominance and len(dominance) > 1:
-        dom_embed = discord.Embed(title="👑 Stage 6/13 — Creator Dominance",
-                                  description="Who owns this niche?", color=0xffcc00)
-        for creator, cnt, total_favs in dominance[:5]:
-            dom_embed.add_field(name=creator,
-                                value=f"**{cnt}** items · **{total_favs:,}** total favs", inline=True)
-        if dominance[0][2] > sum(d[2] for d in dominance[1:]) * 2:
-            dom_embed.set_footer(text="⚠️ One creator dominates.")
-        await safe_send(ctx, dom_embed, "Stage 6")
-        await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 7 - ALTERNATIVES
-    # ============================================================
-    if alternatives:
-        alt_embed = discord.Embed(title="🎨 Stage 7/13 — Proven Alternatives",
-                                  description=f"Words that work with `{words[-1]}`:", color=0xaa66ff)
-        alt_lines = "\n".join(f"• `{a['word']}` — **{a['count']}** items, avg **{a['avg_favs']:,.0f}** favs"
-                              for a in alternatives[:5])
-        alt_embed.add_field(name="\u200b", value=alt_lines, inline=False)
-        await safe_send(ctx, alt_embed, "Stage 7")
-        await asyncio.sleep(0.3)
-
-    # ============================================================
-    # STAGE 8 - KEYWORD GRAPH
-    # ============================================================
-    if graph.get("level_1"):
-        graph_embed = discord.Embed(title="🕸️ Stage 8/13 — Niche Keyword Graph",
-                                    description=f"Keyword map for `{words[-1]}`:", color=0x44ddff)
-        graph_embed.add_field(name="🔗 Level 1 — Direct",
-                              value=" · ".join(f"`{w}`" for w in graph["level_1"][:10]), inline=False)
-        await safe_send(ctx, graph_embed, "Stage 8")
-        await asyncio.sleep(0.3)
-
-    # ============================================================
-    # ASK 1
-    # ============================================================
-    cont = await ask_yes_no("📊 **Continue to ROI, pricing, portfolio & launch plan?**\n"
-                            "Reply `yes` · `skip` for strategy only · `cancel`.")
-    if cont is None:
-        await ctx.send("❌ Cancelled.")
+    # NAV 1
+    choice = await ask_nav(ctx, "**Section 1 done.** See keyword intelligence (keywords + adjacent + descriptions + gaps)?")
+    goto_strategy = False
+    if choice in (None, "stop"):
+        await ctx.send("⏹ Guide ended. Run `!guide` anytime.")
         return
+    if choice == "skip":
+        goto_strategy = True
 
-    roi = None; pricing = None; ab_titles = []
-    design = _make_design_brief(idea_clean, word_stats, adjacent, opportunity_data)
+    # ============================================================
+    # SECTION 2 — KEYWORDS + ADJACENT + DESC + GAPS
+    # ============================================================
+    if not goto_strategy:
+        if opportunity_data and opportunity_data["top_keywords"]:
+            kw_data = opportunity_data["top_keywords"][:10]
+            kw_embed = discord.Embed(
+                title=f"🎯 Section 2 — Top Keywords",
+                description=f"Top **{len(kw_data)}** from {opportunity_data['total_matches']} items.",
+                color=0x00ff88)
+            for i, (w, af, c, sc) in enumerate(kw_data, 1):
+                kw_embed.add_field(name=f"{i}. {w}",
+                                   value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+                                   inline=False)
+            await safe_send(ctx, kw_embed, "Kw")
+            await asyncio.sleep(0.3)
 
-    if cont:
-        # STAGE 9 - ROI
+        if adjacent:
+            adj_embed = discord.Embed(title="🔗 Section 2 — Adjacent Keywords",
+                                      description=f"Words alongside `{words[-1]}`.", color=0x66ccff)
+            half = (len(adjacent) + 1) // 2
+            left = " · ".join(f"`{w}`" for w in adjacent[:half])
+            right = " · ".join(f"`{w}`" for w in adjacent[half:])
+            if left: adj_embed.add_field(name="\u200b", value=left, inline=True)
+            if right: adj_embed.add_field(name="\u200b", value=right, inline=True)
+            await safe_send(ctx, adj_embed, "Adj")
+            await asyncio.sleep(0.3)
+
+        if desc_keywords:
+            desc_embed = discord.Embed(title="📝 Section 2 — Hidden Description Keywords",
+                                       description="SEO words buried in descriptions.", color=0xaa66ff)
+            for i, (w, af, c, sc) in enumerate(desc_keywords[:10], 1):
+                desc_embed.add_field(name=f"{i}. {w}",
+                                     value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Used in **{c}** descs",
+                                     inline=False)
+            await safe_send(ctx, desc_embed, "Desc")
+            await asyncio.sleep(0.3)
+
+        if gap_keywords:
+            gap_embed = discord.Embed(title="🕳️ Section 2 — Market Gaps",
+                                      description="High demand + low competition:", color=0x00ffcc)
+            for i, (w, af, c) in enumerate(gap_keywords[:10], 1):
+                gap_embed.add_field(name=f"{i}. {w}",
+                                    value=f"AvgFav: **{af:,.0f}** | Used by **{c}** items — untapped!",
+                                    inline=False)
+            await safe_send(ctx, gap_embed, "Gaps")
+            await asyncio.sleep(0.3)
+
+        # NAV 2
+        choice = await ask_nav(ctx, "**Section 2 done.** See diagnosis + risks + rivals + dominance?")
+        if choice in (None, "stop"):
+            await ctx.send("⏹ Guide ended.")
+            return
+        if choice == "skip":
+            goto_strategy = True
+
+    # ============================================================
+    # SECTION 3 — DIAGNOSIS + RISKS + RIVALS + DOMINANCE
+    # ============================================================
+    if not goto_strategy:
+        verdict = smart_verdict(word_stats, combo_stats)
+        emoji, label, explanation = verdict
+        color_map = {"🔥": 0xff2266, "🟢": 0x00ff88, "🟡": 0xffaa00, "🟠": 0xff6600, "🔴": 0xff2222}
+
+        diag = discord.Embed(title=f"{emoji} Section 3 — Diagnosis: {label}",
+                             description=f"━━━━━━━━━━━━━━━━━━━━━\n\n{explanation}",
+                             color=color_map.get(emoji, 0x00aaff))
+        if combo_stats and combo_stats["count"] > 0:
+            diag.add_field(name="🎯 Combo Match",
+                           value=f"**{combo_stats['count']}** items\nAvg Fav: **{combo_stats['avg_favs']:,.0f}** · Price: **{combo_stats['avg_price']:,.0f} R$**",
+                           inline=False)
+        await safe_send(ctx, diag, "Diag")
+        await asyncio.sleep(0.3)
+
+        risks = _assess_risk(word_stats, combo_stats, opportunity_data, trend_data)
+        risk_embed = discord.Embed(title="⚠️ Section 3 — Risks",
+                                   description=f"**{len(risks)}** identified:", color=0xff8800)
+        for icon, risk, mit in risks:
+            risk_embed.add_field(name=f"{icon} {risk}", value=f"→ *{mit}*", inline=False)
+        await safe_send(ctx, risk_embed, "Risks")
+        await asyncio.sleep(0.3)
+
+        if rivals:
+            rival_embed = discord.Embed(title="🥊 Section 3 — Top Rivals",
+                                        description="Study these before you build:", color=0xff3388)
+            for iid, name, favs, price, creator in rivals:
+                creator_str = f"by {creator}" if creator else "unknown"
+                rival_embed.add_field(name=f"`{iid}` — {name[:55]}",
+                                      value=f"**{favs:,}** favs · **{price} R$** · {creator_str}",
+                                      inline=False)
+            await safe_send(ctx, rival_embed, "Rivals")
+            await asyncio.sleep(0.3)
+
+        if dominance and len(dominance) > 1:
+            dom_embed = discord.Embed(title="👑 Section 3 — Creator Dominance",
+                                      description="Who owns this niche?", color=0xffcc00)
+            for creator, cnt, total_favs in dominance[:5]:
+                dom_embed.add_field(name=creator,
+                                    value=f"**{cnt}** items · **{total_favs:,}** favs", inline=True)
+            await safe_send(ctx, dom_embed, "Dom")
+            await asyncio.sleep(0.3)
+
+        # NAV 3
+        choice = await ask_nav(ctx, "**Section 3 done.** See ROI + pricing + alternatives + graph?")
+        if choice in (None, "stop"):
+            await ctx.send("⏹ Guide ended.")
+            return
+        if choice == "skip":
+            goto_strategy = True
+
+    # ============================================================
+    # SECTION 4 — ALTERNATIVES + GRAPH + ROI + PRICING
+    # ============================================================
+    if not goto_strategy:
+        if alternatives:
+            alt_embed = discord.Embed(title="🎨 Section 4 — Proven Alternatives",
+                                      description=f"Words that work with `{words[-1]}`:", color=0xaa66ff)
+            alt_lines = "\n".join(f"• `{a['word']}` — **{a['count']}** items, avg **{a['avg_favs']:,.0f}** favs"
+                                  for a in alternatives[:5])
+            alt_embed.add_field(name="\u200b", value=alt_lines, inline=False)
+            await safe_send(ctx, alt_embed, "Alt")
+            await asyncio.sleep(0.3)
+
+        if graph.get("level_1"):
+            graph_embed = discord.Embed(title="🕸️ Section 4 — Keyword Graph",
+                                        description=f"Related keywords for `{words[-1]}`:", color=0x44ddff)
+            graph_embed.add_field(name="🔗 Level 1",
+                                  value=" · ".join(f"`{w}`" for w in graph["level_1"][:12]), inline=False)
+            await safe_send(ctx, graph_embed, "Graph")
+            await asyncio.sleep(0.3)
+
         roi = _compute_roi(opportunity_data, combo_stats, word_stats)
         if roi:
-            roi_embed = discord.Embed(title="💰 Stage 9/13 — ROI Projection",
-                                      description=f"Expected performance for `{idea_clean}`:", color=0x00ff88)
+            roi_embed = discord.Embed(title="💰 Section 4 — ROI Projection",
+                                      description="Expected first-30-day performance:", color=0x00ff88)
             roi_embed.add_field(name="📈 Expected Favs", value=f"**~{roi['expected_favs']:,}**", inline=True)
             roi_embed.add_field(name="💸 Expected Sales", value=f"**~{roi['expected_sales']:,}**", inline=True)
             roi_embed.add_field(name="💎 Expected Revenue", value=f"**~{roi['expected_revenue']:,} R$**", inline=True)
             roi_embed.add_field(name="🎯 Confidence", value=roi["confidence"], inline=True)
             roi_embed.add_field(name="💵 Recommended Price", value=f"**{roi['best_price']} R$**", inline=True)
-            await safe_send(ctx, roi_embed, "Stage 9")
+            await safe_send(ctx, roi_embed, "ROI")
             await asyncio.sleep(0.3)
 
-        # STAGE 10 - PRICING
         pricing = _optimize_price(opportunity_data, combo_stats, word_stats)
         if pricing:
-            price_embed = discord.Embed(title="💵 Stage 10/13 — Pricing Strategy",
+            price_embed = discord.Embed(title="💵 Section 4 — Pricing Strategy",
                                         description="Three price points:", color=0x00ccff)
             for p in pricing:
                 price_embed.add_field(name=f"{p['name']} — **{p['price']} R$**",
                                       value=f"✅ *{p['pro']}*\n⚠️ *{p['con']}*", inline=False)
-            await safe_send(ctx, price_embed, "Stage 10")
+            await safe_send(ctx, price_embed, "Price")
             await asyncio.sleep(0.3)
 
-        # STAGE 11 - PORTFOLIO
-        if portfolio:
-            port_embed = discord.Embed(title="🎨 Stage 11/13 — Portfolio Blueprint",
-                                       description=f"Build **{len(portfolio)} related items**:", color=0xff66aa)
-            for i, item in enumerate(portfolio, 1):
-                port_embed.add_field(name=f"{i}. [{item['angle']}] `{item['idea']}`",
-                                     value=f"*{item['why']}*", inline=False)
-            port_embed.set_footer(text="Release 1/week for compounding growth")
-            await safe_send(ctx, port_embed, "Stage 11")
-            await asyncio.sleep(0.3)
+        # NAV 4
+        choice = await ask_nav(ctx, "**Section 4 done.** See final package (portfolio + design + titles + timing)?")
+        if choice in (None, "stop"):
+            await ctx.send("⏹ Guide ended.")
+            return
 
-        # STAGE 12 - DESIGN BRIEF
-        design_embed = discord.Embed(title="✏️ Stage 12/13 — Design Brief",
-                                     description=design, color=0x9966ff)
-        if adjacent:
-            design_embed.add_field(name="🔗 Keywords for title/description",
-                                   value=" · ".join(f"`{w}`" for w in adjacent[:10]), inline=False)
-        await safe_send(ctx, design_embed, "Stage 12")
+    # ============================================================
+    # SECTION 5 — PORTFOLIO + DESIGN + A/B + TIMING + FINAL
+    # ============================================================
+    verdict = smart_verdict(word_stats, combo_stats)
+
+    if portfolio:
+        port_embed = discord.Embed(title="🎨 Section 5 — Portfolio Blueprint",
+                                   description=f"Build **{len(portfolio)} related items**:", color=0xff66aa)
+        for i, item in enumerate(portfolio, 1):
+            port_embed.add_field(name=f"{i}. [{item['angle']}] `{item['idea']}`",
+                                 value=f"*{item['why']}*", inline=False)
+        port_embed.set_footer(text="Release 1/week for compounding growth")
+        await safe_send(ctx, port_embed, "Port")
         await asyncio.sleep(0.3)
 
-        # STAGE 13 - A/B TITLES
-        ab_titles = generate_ab_titles(idea_clean, words, combo_stats, alternatives, adjacent, opportunity_data)
-        if ab_titles:
-            ab_embed = discord.Embed(title="🅰️ Stage 13/13 — A/B Title Testing",
-                                     description="**3 title variants**:", color=0x00ffaa)
-            for i, t in enumerate(ab_titles, 1):
-                ab_embed.add_field(name=f"Variant {chr(64+i)} — {t['strategy']} [{t['predicted']}]",
-                                   value=f"```{t['title']}```\n{t['why']}", inline=False)
-            await safe_send(ctx, ab_embed, "Stage 13")
-            await asyncio.sleep(0.3)
+    design = _make_design_brief(idea_clean, word_stats, adjacent, opportunity_data)
+    design_embed = discord.Embed(title="✏️ Section 5 — Design Brief",
+                                 description=design, color=0x9966ff)
+    if adjacent:
+        design_embed.add_field(name="🔗 Keywords for title/description",
+                               value=" · ".join(f"`{w}`" for w in adjacent[:10]), inline=False)
+    await safe_send(ctx, design_embed, "Design")
+    await asyncio.sleep(0.3)
 
-    # ============================================================
-    # BONUS - TIMING
-    # ============================================================
-    timing_embed = discord.Embed(title="🕐 Bonus — Timing Intelligence",
+    ab_titles = generate_ab_titles(idea_clean, words, combo_stats, alternatives, adjacent, opportunity_data)
+    if ab_titles:
+        ab_embed = discord.Embed(title="🅰️ Section 5 — A/B Titles",
+                                 description="**3 title variants**:", color=0x00ffaa)
+        for i, t in enumerate(ab_titles, 1):
+            ab_embed.add_field(name=f"Variant {chr(64+i)} — {t['strategy']} [{t['predicted']}]",
+                               value=f"```{t['title']}```\n{t['why']}", inline=False)
+        await safe_send(ctx, ab_embed, "AB")
+        await asyncio.sleep(0.3)
+
+    timing_embed = discord.Embed(title="🕐 Section 5 — Timing",
                                  description="When to launch:", color=0xffaa00)
     if timing:
         timing_embed.add_field(name="📅 Best Day", value=f"**{timing['best_day']}**", inline=True)
@@ -1166,78 +1238,73 @@ async def guide(ctx, *, idea: str = None):
     await safe_send(ctx, timing_embed, "Timing")
     await asyncio.sleep(0.3)
 
-    # ============================================================
-    # FINAL STRATEGY
-    # ============================================================
     strategy = build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, opportunity_data)
     strategy_embed = discord.Embed(title="🎯 Final Strategy",
                                    description=f"━━━━━━━━━━━━━━━━━━━━━\n\n{strategy}", color=0x00ffcc)
-    strategy_embed.set_footer(text=f"Consultation for '{idea_clean}' · {datetime.utcnow().strftime('%Y-%m-%d')}")
-    await safe_send(ctx, strategy_embed, "Final Strategy")
+    strategy_embed.set_footer(text=f"'{idea_clean}' · {datetime.utcnow().strftime('%Y-%m-%d')}")
+    await safe_send(ctx, strategy_embed, "Final")
     await asyncio.sleep(0.3)
 
-    # ============================================================
-    # WATCHLIST
-    # ============================================================
-    watch = await ask_yes_no(f"👁️ **Add `{words[-1]}` to your watchlist?** (yes/no)")
-    if watch:
-        try:
-            conn = get_db(); cur = conn.cursor()
-            added = add_to_watchlist(cur, discord_id, words[-1], baseline_favs=0)
-            conn.commit(); cur.close(); conn.close()
-            await ctx.send(f"✅ `{words[-1]}` added to watchlist." if added else f"ℹ️ Already on your watchlist.")
-        except Exception as e:
-            await ctx.send(f"⚠️ Couldn't save: {e}")
-
-    # ============================================================
-    # EXPORT
-    # ============================================================
-    export = await ask_yes_no("📄 **Export full report as file?** (yes/no)")
-    if export:
-        session_data = type("Session", (), {
-            "seed": idea_clean, "words": words,
-            "word_stats": word_stats, "combo_stats": combo_stats,
-        })()
-        report = build_full_report(session_data, verdict, roi, risks, pricing,
-                                    portfolio, design, timing, launch_window,
-                                    ab_titles, graph, dominance)
-        try:
-            conn = get_db(); cur = conn.cursor()
-            save_consultation(cur, discord_id, idea_clean, verdict, report)
-            conn.commit(); cur.close(); conn.close()
-        except Exception:
-            pass
-        file = discord.File(io.BytesIO(report.encode("utf-8")),
-                            filename=f"ugc_report_{idea_clean.replace(' ', '_')}.txt")
-        try:
-            await ctx.send("📄 **Full report attached:**", file=file)
-        except Exception as e:
-            await ctx.send(f"⚠️ Couldn't attach: {e}")
-
-    # ============================================================
-    # CHECKLIST
-    # ============================================================
+    # Checklist
+    roi = _compute_roi(opportunity_data, combo_stats, word_stats)
     final_title = ab_titles[0]["title"] if ab_titles else " ".join(w.capitalize() for w in words)[:80]
     final_price = roi["best_price"] if roi else 100
 
     checklist = discord.Embed(title="✅ Launch Checklist",
                               description="Execute in order:", color=0x00ff88)
     checklist.add_field(name="Day 1 — Design",
-                        value="☐ Model in Roblox Studio\n☐ Reference top 3 rivals\n☐ Apply design brief keywords",
+                        value="☐ Model in Roblox Studio\n☐ Reference top rivals\n☐ Apply design keywords",
                         inline=False)
     checklist.add_field(name="Day 2 — Upload",
-                        value=f"☐ Title: **{final_title}**\n☐ Price: **{final_price} R$**\n"
-                              f"☐ Full SEO description\n☐ Eye-catching thumbnail", inline=False)
-    checklist.add_field(name="Day 3–7 — Monitor",
-                        value="☐ Check Creator Dashboard daily\n☐ Track favourites\n☐ Adjust price if needed",
+                        value=f"☐ Title: **{final_title}**\n☐ Price: **{final_price} R$**\n☐ Full SEO description",
                         inline=False)
-    checklist.add_field(name="Day 8–30 — Scale",
-                        value="☐ >500 favs: color variants\n☐ <50 favs: pivot\n☐ Start next portfolio item",
+    checklist.add_field(name="Day 3–7",
+                        value="☐ Check Creator Dashboard daily\n☐ Track favourites",
                         inline=False)
     await safe_send(ctx, checklist, "Checklist")
 
-    await ctx.send(f"🎉 **Consultation complete for `{idea_clean}`.**\n\n"
-                   f"**Commands:** `!watchlist` · `!history` · `!guide` for new ideas")
+    # Final: watchlist + export
+    await ctx.send(
+        f"🎉 **Done!** Section complete for `{idea_clean}`.\n\n"
+        f"👁️ Add `{words[-1]}` to **watchlist**? — reply `yes`\n"
+        f"📄 Export **full report** as file? — reply `export`\n"
+        f"⏹ End here? — reply `no`"
+    )
+
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=300)
+        reply = msg.content.strip().lower()
+
+        if reply in ("yes", "y", "yup", "yeah", "ok", "sure"):
+            try:
+                conn = get_db(); cur = conn.cursor()
+                added = add_to_watchlist(cur, discord_id, words[-1], baseline_favs=0)
+                conn.commit(); cur.close(); conn.close()
+                await ctx.send(f"✅ `{words[-1]}` added to watchlist." if added else f"ℹ️ Already on watchlist.")
+            except Exception as e:
+                await ctx.send(f"⚠️ Watchlist error: {e}")
+
+        if reply == "export" or reply.startswith("export"):
+            session_data = type("Session", (), {
+                "seed": idea_clean, "words": words,
+                "word_stats": word_stats, "combo_stats": combo_stats,
+            })()
+            report = build_full_report(session_data, verdict, roi, risks, pricing,
+                                        portfolio, design, timing, launch_window,
+                                        ab_titles, graph, dominance)
+            try:
+                conn = get_db(); cur = conn.cursor()
+                save_consultation(cur, discord_id, idea_clean, verdict, report)
+                conn.commit(); cur.close(); conn.close()
+            except Exception: pass
+            file = discord.File(io.BytesIO(report.encode("utf-8")),
+                                filename=f"ugc_report_{idea_clean.replace(' ', '_')}.txt")
+            try:
+                await ctx.send("📄 **Report attached:**", file=file)
+            except Exception as e:
+                await ctx.send(f"⚠️ Attach failed: {e}")
+    except asyncio.TimeoutError:
+        pass
 
 
 @bot.command(name="watchlist")
