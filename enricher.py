@@ -2,28 +2,51 @@ import os
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
-DETAILS_API = "https://economy.roblox.com/v2/assets/{}/details"
+ECONOMY_API = "https://economy.roblox.com/v2/assets/{}/details"
+CATALOG_API = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
+
 BATCH_SIZE = 500
-WORKERS = 10   # parallel requests — safe for Roblox
+WORKERS = 10
+FORCE_REFRESH = False   # set True to re-enrich already-processed items
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
 
 def fetch_detail(item_id):
-    """Fetch one item's details. Retries on rate-limit."""
-    for attempt in range(3):
-        try:
-            resp = requests.get(DETAILS_API.format(item_id), timeout=10)
-            if resp.status_code == 200:
-                return item_id, resp.json()
-            if resp.status_code == 429:
-                time.sleep(1.5)
-                continue
-            return item_id, None
-        except Exception:
-            time.sleep(0.5)
-    return item_id, None
+    """Fetch from BOTH endpoints and merge data."""
+    merged = {}
+
+    # Economy API — sales, price, description, creator
+    try:
+        resp = requests.get(ECONOMY_API.format(item_id), headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            merged.update(resp.json())
+    except Exception:
+        pass
+
+    # Catalog API — favourite count, purchase count, name
+    try:
+        resp = requests.get(CATALOG_API.format(item_id), headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            c = resp.json()
+            merged["FavoriteCount"] = c.get("favoriteCount", 0)
+            merged["PurchaseCount"] = c.get("purchaseCount", 0)
+            if not merged.get("Name"):
+                merged["Name"] = c.get("name", "")
+            if not merged.get("Description"):
+                merged["Description"] = c.get("description", "")
+    except Exception:
+        pass
+
+    if not merged.get("Name"):
+        return item_id, None
+    return item_id, merged
 
 
 def enrich_items():
@@ -31,11 +54,16 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id FROM discovered_items 
-        WHERE id NOT IN (SELECT id FROM items) 
-        LIMIT %s
-    """, (BATCH_SIZE,))
+    if FORCE_REFRESH:
+        # Re-fetch everything — useful to fix data after bug fixes
+        cur.execute("SELECT id FROM discovered_items LIMIT %s", (BATCH_SIZE,))
+    else:
+        cur.execute("""
+            SELECT id FROM discovered_items 
+            WHERE id NOT IN (SELECT id FROM items) 
+            LIMIT %s
+        """, (BATCH_SIZE,))
+
     ids = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()
@@ -47,7 +75,6 @@ def enrich_items():
     print(f"🔧 Enriching {len(ids)} items with {WORKERS} workers...")
     start = time.time()
 
-    # ---- PARALLEL FETCH ----
     results = []
     with ThreadPoolExecutor(max_workers=WORKERS) as executor:
         futures = {executor.submit(fetch_detail, iid): iid for iid in ids}
@@ -60,14 +87,14 @@ def enrich_items():
 
     print(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
 
-    # ---- SEQUENTIAL DB WRITE (single connection, safe) ----
+    # ---- DB WRITE ----
     conn = get_db_connection()
     cur = conn.cursor()
     enriched = 0
     for item_id, d in results:
         try:
-            favs = d.get("FavoriteCount", 0)
-            sales = d.get("Sales", 0)
+            favs = d.get("FavoriteCount", 0) or 0
+            sales = d.get("Sales", 0) or d.get("PurchaseCount", 0) or 0
             price = d.get("PriceInRobux", 0) or 0
 
             cur.execute("""
