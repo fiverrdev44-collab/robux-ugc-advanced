@@ -4,7 +4,7 @@ import time
 from database import get_db_connection, setup_database
 
 DETAILS_API = "https://economy.roblox.com/v2/assets/{}/details"
-DELAY = 0.5
+DELAY = 0.3
 BATCH_SIZE = 500
 
 def enrich_items():
@@ -17,21 +17,24 @@ def enrich_items():
         WHERE id NOT IN (SELECT id FROM items) 
         LIMIT %s
     """, (BATCH_SIZE,))
-    ids_to_enrich = [row[0] for row in cur.fetchall()]
+    ids = [row[0] for row in cur.fetchall()]
 
-    if not ids_to_enrich:
-        print("✅ No new items to enrich.")
+    if not ids:
+        print("✅ Nothing to enrich.")
         cur.close(); conn.close()
         return
 
-    print(f"🔧 Enriching {len(ids_to_enrich)} items...")
+    print(f"🔧 Enriching {len(ids)} items...")
     enriched = 0
-
-    for item_id in ids_to_enrich:
+    for item_id in ids:
         try:
             resp = requests.get(DETAILS_API.format(item_id), timeout=10)
             if resp.status_code == 200:
                 d = resp.json()
+                favs = d.get("FavoriteCount", 0)
+                sales = d.get("Sales", 0)
+                price = d.get("PriceInRobux", 0) or 0
+
                 cur.execute("""
                     INSERT INTO items (
                         id, name, favorite_count, price, total_sales,
@@ -46,25 +49,26 @@ def enrich_items():
                         description = EXCLUDED.description,
                         fetched_at = CURRENT_TIMESTAMP
                 """, (
-                    item_id,
-                    d.get("Name"),
-                    d.get("FavoriteCount", 0),
-                    d.get("PriceInRobux", 0),
-                    d.get("Sales", 0),
+                    item_id, d.get("Name"), favs, price, sales,
                     d.get("Description", ""),
                     d.get("Creator", {}).get("Name", ""),
                     d.get("AssetTypeId"),
-                    d.get("Created"),
-                    d.get("Updated")
+                    d.get("Created"), d.get("Updated")
                 ))
+
+                cur.execute("""
+                    INSERT INTO item_history (item_id, favorite_count, total_sales, price)
+                    VALUES (%s, %s, %s, %s)
+                """, (item_id, favs, sales, price))
+
                 conn.commit()
                 enriched += 1
             time.sleep(DELAY)
         except Exception as e:
-            print(f"Failed to enrich {item_id}: {e}")
+            print(f"Failed {item_id}: {e}")
 
     cur.close(); conn.close()
-    print(f"✅ Enriched {enriched} items this run.")
+    print(f"✅ Enriched {enriched} items.")
 
 if __name__ == "__main__":
     enrich_items()
