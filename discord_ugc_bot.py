@@ -54,30 +54,29 @@ def get_db():
 
 
 def get_db_stats(cur):
-    """Fast single-query snapshot of DB stats."""
-    try:
-        cur.execute("""
-            SELECT 
-                (SELECT COUNT(*) FROM discovered_items),
-                (SELECT COUNT(*) FROM items),
-                (SELECT COUNT(*) FROM item_history),
-                (SELECT COUNT(*) FROM search_suggestions),
-                (SELECT COUNT(*) FROM learned_keywords),
-                (SELECT COUNT(*) FROM saved_consultations)
-        """)
-        row = cur.fetchone()
-        return {
-            "discovered": row[0] or 0,
-            "analyzed": row[1] or 0,
-            "snapshots": row[2] or 0,
-            "suggestions": row[3] or 0,
-            "learned": row[4] or 0,
-            "consultations": row[5] or 0,
-        }
-    except Exception as e:
-        print(f"Stats error: {e}")
-        return {"discovered": 0, "analyzed": 0, "snapshots": 0,
-                "suggestions": 0, "learned": 0, "consultations": 0}
+    """Fault-tolerant: queries each table SEPARATELY so one missing table doesn't kill all stats."""
+    table_map = {
+        "discovered": "discovered_items",
+        "analyzed": "items",
+        "snapshots": "item_history",
+        "suggestions": "search_suggestions",
+        "learned": "learned_keywords",
+        "consultations": "saved_consultations",
+    }
+    stats = {}
+    for key, table in table_map.items():
+        try:
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            stats[key] = cur.fetchone()[0] or 0
+        except Exception as e:
+            # Roll back the failed transaction so next query works
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+            print(f"⚠️ Stats error on {table}: {e}", flush=True)
+            stats[key] = 0
+    return stats
 
 
 def extract_words(text):
@@ -805,14 +804,14 @@ async def guide(ctx, *, idea: str = None):
     discord_id = ctx.author.id
     username = str(ctx.author)
 
-    # ---- Load profile + DB stats ----
     try:
         conn = get_db(); cur = conn.cursor()
         profile = get_or_create_profile(cur, discord_id, username)
         past = get_past_consultations(cur, discord_id, limit=3)
         stats = get_db_stats(cur)
         cur.close(); conn.close()
-    except Exception:
+    except Exception as e:
+        print(f"Guide setup error: {e}", flush=True)
         profile = {"total_consultations": 0, "first_seen": None}
         past = []
         stats = {"discovered": 0, "analyzed": 0, "snapshots": 0,
@@ -827,7 +826,6 @@ async def guide(ctx, *, idea: str = None):
                 greeting += f"• {emoji} `{seed}` — {label}\n"
             greeting += "\n"
 
-    # ---- LIVE DATABASE STATUS ----
     db_status = (
         f"```\n"
         f"┌─ LIVE DATABASE ──────────────┐\n"
@@ -868,7 +866,6 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("❌ Need at least one real word.")
         return
 
-    # ---- Stage 1 ----
     classifications = [classify_word(w) for w in words]
     icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢", "number": "🔢", "unknown": "❔"}
     understanding = "\n".join(f"{icons[c]} `{w}` — **{c}**" for w, c in zip(words, classifications))
@@ -880,7 +877,6 @@ async def guide(ctx, *, idea: str = None):
                      f"*Scanning {stats['analyzed']:,} items...*"),
         color=0x00aaff))
 
-    # ---- Stage 2: Deep scan with progress ----
     progress = await ctx.send("🔄 **[1/5] Analyzing individual words...**")
 
     conn = get_db(); cur = conn.cursor()
@@ -917,7 +913,6 @@ async def guide(ctx, *, idea: str = None):
     cur.close(); conn.close()
     await progress.delete()
 
-    # ---- Market pulse ----
     pulse = discord.Embed(title="📊 Stage 2/13 — Market Pulse",
                           description="Real data per word:", color=0x66ccff)
     for i, w in enumerate(word_stats, 1):
@@ -937,7 +932,6 @@ async def guide(ctx, *, idea: str = None):
     await ctx.send(embed=pulse)
     await asyncio.sleep(1)
 
-    # ---- Stage 3: Diagnosis ----
     verdict = smart_verdict(word_stats, combo_stats)
     emoji, label, explanation = verdict
     color_map = {"🔥": 0xff2266, "🟢": 0x00ff88, "🟡": 0xffaa00, "🟠": 0xff6600, "🔴": 0xff2222}
@@ -952,7 +946,6 @@ async def guide(ctx, *, idea: str = None):
                        inline=False)
     await ctx.send(embed=diag)
 
-    # ---- Stage 4: Risks ----
     risks = _assess_risk(word_stats, combo_stats, opportunity_data, trend_data)
     risk_embed = discord.Embed(title="⚠️ Stage 4/13 — Risk Assessment",
                                description=f"**{len(risks)} risk{'s' if len(risks) > 1 else ''}** identified:",
@@ -961,7 +954,6 @@ async def guide(ctx, *, idea: str = None):
         risk_embed.add_field(name=f"{icon} {risk}", value=f"→ *{mit}*", inline=False)
     await ctx.send(embed=risk_embed)
 
-    # ---- Stage 5: Rivals ----
     if rivals:
         rival_embed = discord.Embed(title="🥊 Stage 5/13 — Rival Analysis",
                                     description="**Study these** before you build:", color=0xff3388)
@@ -971,7 +963,6 @@ async def guide(ctx, *, idea: str = None):
                                   value=f"**{favs:,}** favs · **{price} R$** · {creator_str}", inline=False)
         await ctx.send(embed=rival_embed)
 
-    # ---- Stage 6: Dominance ----
     if dominance and len(dominance) > 1:
         dom_embed = discord.Embed(title="👑 Stage 6/13 — Creator Dominance",
                                   description="Who owns this niche?", color=0xffcc00)
@@ -982,7 +973,6 @@ async def guide(ctx, *, idea: str = None):
             dom_embed.set_footer(text="⚠️ One creator dominates.")
         await ctx.send(embed=dom_embed)
 
-    # ---- Stage 7: Alternatives ----
     if alternatives:
         alt_embed = discord.Embed(title="🎨 Stage 7/13 — Proven Alternatives",
                                   description=f"Words that work with `{words[-1]}`:", color=0xaa66ff)
@@ -991,7 +981,6 @@ async def guide(ctx, *, idea: str = None):
         alt_embed.add_field(name="\u200b", value=alt_lines, inline=False)
         await ctx.send(embed=alt_embed)
 
-    # ---- Stage 8: Keyword graph ----
     if graph["level_1"]:
         graph_embed = discord.Embed(title="🕸️ Stage 8/13 — Niche Keyword Graph",
                                     description=f"Keyword map for `{words[-1]}`:", color=0x44ddff)
@@ -999,7 +988,6 @@ async def guide(ctx, *, idea: str = None):
                               value=" · ".join(f"`{w}`" for w in graph["level_1"][:10]), inline=False)
         await ctx.send(embed=graph_embed)
 
-    # ---- Ask 1 ----
     cont = await ask_yes_no("📊 **Continue to ROI, pricing, portfolio & launch plan?**\n"
                             "Reply `yes` · `skip` for strategy only · `cancel`.")
     if cont is None:
@@ -1055,7 +1043,6 @@ async def guide(ctx, *, idea: str = None):
                                    value=f"```{t['title']}```\n{t['why']}", inline=False)
             await ctx.send(embed=ab_embed)
 
-    # ---- Timing ----
     timing_embed = discord.Embed(title="🕐 Bonus — Timing Intelligence",
                                  description="When to launch:", color=0xffaa00)
     if timing:
@@ -1064,14 +1051,12 @@ async def guide(ctx, *, idea: str = None):
     timing_embed.add_field(name="🚀 Launch Window", value=launch_window, inline=False)
     await ctx.send(embed=timing_embed)
 
-    # ---- Final strategy ----
     strategy = build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, opportunity_data)
     strategy_embed = discord.Embed(title="🎯 Final Strategy",
                                    description=f"━━━━━━━━━━━━━━━━━━━━━\n\n{strategy}", color=0x00ffcc)
     strategy_embed.set_footer(text=f"Consultation for '{idea_clean}' · {datetime.utcnow().strftime('%Y-%m-%d')}")
     await ctx.send(embed=strategy_embed)
 
-    # ---- Watchlist ----
     watch = await ask_yes_no(f"👁️ **Add `{words[-1]}` to your watchlist?** (yes/no)")
     if watch:
         try:
@@ -1082,7 +1067,6 @@ async def guide(ctx, *, idea: str = None):
         except Exception as e:
             await ctx.send(f"⚠️ Couldn't save: {e}")
 
-    # ---- Export ----
     export = await ask_yes_no("📄 **Export full report as file?** (yes/no)")
     if export:
         session_data = type("Session", (), {
@@ -1102,7 +1086,6 @@ async def guide(ctx, *, idea: str = None):
                             filename=f"ugc_report_{idea_clean.replace(' ', '_')}.txt")
         await ctx.send("📄 **Full report attached:**", file=file)
 
-    # ---- Checklist ----
     final_title = ab_titles[0]["title"] if ab_titles else " ".join(w.capitalize() for w in words)[:80]
     final_price = roi["best_price"] if roi else 100
 
@@ -1171,7 +1154,39 @@ async def history_cmd(ctx):
 
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} is online (Elite Market Intelligence Engine)")
+    print(f"✅ {bot.user} is online (Elite Market Intelligence Engine)", flush=True)
+    # AUTO-CREATE missing tables on every startup
+    try:
+        from database import setup_database
+        setup_database()
+        print("✅ Database tables verified/created.", flush=True)
+    except Exception as e:
+        print(f"⚠️ Table setup failed: {e}", flush=True)
+
+
+@bot.command(name="dbtest")
+async def dbtest(ctx):
+    """Diagnostic — shows exact row counts per table."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        lines = []
+        for table in ["discovered_items", "items", "item_history",
+                      "search_suggestions", "learned_keywords",
+                      "user_profiles", "saved_consultations", "watchlist"]:
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cur.fetchone()[0]
+                lines.append(f"✅ `{table}` — **{count:,}** rows")
+            except Exception as e:
+                try: cur.connection.rollback()
+                except Exception: pass
+                lines.append(f"❌ `{table}` — missing or error")
+        cur.close(); conn.close()
+        embed = discord.Embed(title="🔬 Database Diagnostic",
+                              description="\n".join(lines), color=0x00ff88)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Connection failed: {e}")
 
 
 @bot.command(name="scan_status")
