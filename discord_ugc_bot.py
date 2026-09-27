@@ -48,7 +48,6 @@ COLOR_WORDS = {"black","white","pink","blue","red","green","purple","yellow","or
 STYLE_WORDS = {"emo","goth","y2k","pastel","kawaii","grunge","cyber","coquette","anime","dark","fluffy","preppy","streetwear","academia","vkei","harajuku","cottagecore","fairycore","vintage","retro","gothic","aesthetic","cottage","boho","hipster","punk","scene","soft"}
 ITEM_WORDS = {"hat","beanie","crown","cap","hoodie","shirt","shoes","wing","wings","tail","ears","horn","horns","glasses","mask","necklace","chain","backpack","headphones","emote","dance","hair","face","pants","jacket","sword","pet","bag","purse","scarf","bandana","beret","visor","lens","ear","head","snapback","bonnet","balaclava"}
 
-# Price sanity caps — ignore limiteds/expensive outliers
 MIN_PRICE = 5
 MAX_PRICE = 10000
 
@@ -187,7 +186,6 @@ def analyze_opportunity(cur, kw):
     desc_only = [w for w, c in desc_counter.most_common(50)
                  if w != kw and w not in adjacent and c >= 2]
 
-    # ---- FIXED: only sane prices for stats ----
     prices = [p for _, _, _, _, p, _ in all_items if p and MIN_PRICE <= p <= MAX_PRICE]
     median_price = sorted(prices)[len(prices) // 2] if prices else 0
     top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:30]
@@ -409,7 +407,6 @@ class SimplePaginator(discord.ui.View):
 
 
 def _analyze_word(cur, word):
-    """FIXED: only uses sane prices."""
     pattern = word_boundary_pattern(word)
     cur.execute(f"""
         SELECT 
@@ -788,7 +785,7 @@ def build_full_report(session, verdict, roi, risks, pricing, portfolio, design, 
 
 
 # ============================================================
-# BUTTON NAV — FIXED
+# BUTTON NAV — BULLETPROOF (responds under 3 sec)
 # ============================================================
 class GuideNav(discord.ui.View):
     def __init__(self):
@@ -797,20 +794,29 @@ class GuideNav(discord.ui.View):
 
     def _disable_all(self):
         for c in self.children:
-            c.disabled = True
-
-    async def _handle(self, interaction, choice):
-        self.choice = choice
-        self._disable_all()
-        try:
-            await interaction.response.edit_message(view=self)
-        except Exception:
             try:
-                await interaction.followup.send(f"✅ Chose: {choice}", ephemeral=True)
+                c.disabled = True
             except Exception:
                 pass
-        # Small delay before stopping so interaction completes cleanly
-        await asyncio.sleep(0.1)
+
+    async def _handle(self, interaction: discord.Interaction, choice: str):
+        # 1. Set state FIRST (fast)
+        self.choice = choice
+        self._disable_all()
+
+        # 2. Immediately respond to Discord (must be < 3 sec)
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.errors.InteractionResponded:
+            pass
+        except Exception as e:
+            print(f"⚠️ Interaction edit failed: {e}", flush=True)
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
+
+        # 3. Stop the view so wait() returns immediately
         self.stop()
 
     @discord.ui.button(label="▶ Continue", style=discord.ButtonStyle.success, row=0)
@@ -827,15 +833,12 @@ class GuideNav(discord.ui.View):
 
 
 async def ask_nav(ctx, prompt, timeout=600):
-    """Send nav buttons. Return 'continue' | 'skip' | 'stop' | None."""
     nav = GuideNav()
-    msg = None
     try:
         msg = await ctx.send(prompt, view=nav)
     except Exception as e:
         print(f"⚠️ Nav send failed: {e}", flush=True)
-        return "continue"  # default to continuing if we can't show buttons
-    # Wait for click OR timeout
+        return "continue"
     try:
         await asyncio.wait_for(nav.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -845,7 +848,7 @@ async def ask_nav(ctx, prompt, timeout=600):
             await msg.edit(view=nav)
         except Exception:
             pass
-        return "continue"  # auto-continue on timeout
+        return "continue"
     return nav.choice or "continue"
 
 
@@ -1027,7 +1030,6 @@ async def guide(ctx, *, idea: str = None):
                         inline=False)
     await safe_send(ctx, pulse, "Pulse")
 
-    # NAV 1
     choice = await ask_nav(ctx, "**Section 1 done.** See keywords + adjacent + description + gaps?")
     goto_strategy = False
     if choice == "stop":
@@ -1036,15 +1038,13 @@ async def guide(ctx, *, idea: str = None):
     if choice == "skip":
         goto_strategy = True
     else:
-        # Send a loading message so user knows something is happening
         await ctx.send("🔄 Loading Section 2...")
         await asyncio.sleep(0.3)
 
     # ====================================================
-    # SECTION 2 — KEYWORDS + ADJACENT + DESC + GAPS
+    # SECTION 2
     # ====================================================
     if not goto_strategy:
-        # Top keywords
         if opportunity_data and opportunity_data["top_keywords"]:
             kw_data = opportunity_data["top_keywords"][:10]
             kw_embed = discord.Embed(
@@ -1060,7 +1060,6 @@ async def guide(ctx, *, idea: str = None):
         else:
             await safe_send(ctx, content="🎯 Section 2 — No top keywords found for this niche.", label="Kw-Empty")
 
-        # Adjacent
         if adjacent:
             adj_embed = discord.Embed(title="🔗 Section 2 — Adjacent Keywords",
                                       description=f"Words alongside `{words[-1]}`.", color=0x66ccff)
@@ -1072,7 +1071,6 @@ async def guide(ctx, *, idea: str = None):
             await safe_send(ctx, adj_embed, "Adj")
             await asyncio.sleep(0.3)
 
-        # Description keywords (always show, even if empty)
         desc_embed = discord.Embed(title="📝 Section 2 — Hidden Description Keywords",
                                    description="SEO words top sellers bury in descriptions.",
                                    color=0xaa66ff)
@@ -1088,7 +1086,6 @@ async def guide(ctx, *, idea: str = None):
         await safe_send(ctx, desc_embed, "Desc")
         await asyncio.sleep(0.3)
 
-        # Gaps
         if gap_keywords:
             gap_embed = discord.Embed(title="🕳️ Section 2 — Market Gaps",
                                       description="High demand + low competition:", color=0x00ffcc)
@@ -1099,7 +1096,6 @@ async def guide(ctx, *, idea: str = None):
             await safe_send(ctx, gap_embed, "Gaps")
             await asyncio.sleep(0.3)
 
-        # NAV 2
         choice = await ask_nav(ctx, "**Section 2 done.** See diagnosis + risks + rivals + dominance?")
         if choice == "stop":
             await ctx.send("⏹ Guide ended.")
@@ -1111,7 +1107,7 @@ async def guide(ctx, *, idea: str = None):
             await asyncio.sleep(0.3)
 
     # ====================================================
-    # SECTION 3 — DIAGNOSIS + RISKS + RIVALS + DOMINANCE
+    # SECTION 3
     # ====================================================
     verdict = smart_verdict(word_stats, combo_stats)
 
@@ -1158,17 +1154,15 @@ async def guide(ctx, *, idea: str = None):
             await safe_send(ctx, dom_embed, "Dom")
             await asyncio.sleep(0.3)
 
-        # NAV 3
-        choice = await ask_nav(ctx, "**Section 3 done.** See ROI + pricing + alternatives + final package?")
+        choice = await ask_nav(ctx, "**Section 3 done.** See ROI + pricing + final package?")
         if choice == "stop":
             await ctx.send("⏹ Guide ended.")
             return
-        # continue or skip — both go to final section
         await ctx.send("🔄 Loading final section...")
         await asyncio.sleep(0.3)
 
     # ====================================================
-    # SECTION 4 — ALTERNATIVES + ROI + PRICING + PORTFOLIO + DESIGN + TITLES + TIMING
+    # SECTION 4 — FINAL
     # ====================================================
     if alternatives:
         alt_embed = discord.Embed(title="🎨 Section 4 — Proven Alternatives",
@@ -1268,7 +1262,6 @@ async def guide(ctx, *, idea: str = None):
                         inline=False)
     await safe_send(ctx, checklist, "Checklist")
 
-    # Final: watchlist + export
     await ctx.send(
         f"🎉 **Done!** Guide complete for `{idea_clean}`.\n\n"
         f"👁️ Add `{words[-1]}` to **watchlist**? — reply `yes`\n"
