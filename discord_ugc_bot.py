@@ -36,7 +36,7 @@ STOP_WORDS = {
     "credits","inspired","based","similar","style","styles","design","designed",
     "really","actually","literally","basically","super","still","even",
     "ever","never","always","sometimes","maybe",
-    # Emoji-related junk words that appear in scraped titles
+    # Emoji-related junk
     "emoji","emojis","emoticon","emoticons","twemoji","twemojis"
 }
 
@@ -55,52 +55,55 @@ def extract_words(text):
 
 
 def word_boundary_pattern(word):
-    """Return a Postgres-compatible regex pattern for whole-word matching."""
-    # \m = start of word, \M = end of word
+    """Postgres whole-word match pattern."""
     return r'\m' + re.escape(word) + r'\M'
 
 
+def matches_seed(suggestion, seed):
+    """Python whole-word match for a suggestion."""
+    return re.search(r'\b' + re.escape(seed) + r'\b', suggestion) is not None
+
+
 def fast_opportunity(cur, kw):
-    """Fast whole-word matching opportunity analysis."""
-    # Get suggestions containing the keyword
+    """Fast whole-word opportunity analysis."""
+    # 1. Get candidates via broad LIKE
     cur.execute("""
         SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 50
+        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 200
     """, (f"%{kw}%", f"%{kw}%"))
-    suggs = [r[0] for r in cur.fetchall()] or [kw]
+    candidates = [r[0] for r in cur.fetchall()]
 
-    # Filter out junk suggestions (length, word count)
-    clean_suggs = []
-    for s in suggs:
+    # 2. STRICT FILTER: whole-word match + junk filter
+    suggs = []
+    for s in candidates:
         s = s.strip().lower()
         if not s or len(s) < 3 or len(s) > 40:
             continue
         if s in STOP_WORDS:
             continue
-        clean_suggs.append(s)
+        if any(junk in s for junk in ["twee", "emoji", "emoticon"]):
+            continue
+        if matches_seed(s, kw):
+            suggs.append(s)
 
-    if not clean_suggs:
-        clean_suggs = [kw]
+    suggs = list(set(suggs))[:30]
+    if not suggs:
+        suggs = [kw]
 
-    # Bulk query with word-boundary regex for each suggestion
-    # Build OR pattern: name ~* '\memo\M' OR name ~* '\memo ring\M' OR ...
-    patterns = [word_boundary_pattern(s) for s in clean_suggs]
+    # 3. Query items containing any suggestion
     cur.execute("""
         SELECT LOWER(name), favorite_count FROM items
-        WHERE favorite_count > 0
-          AND (name ~* %s OR name ~* %s OR name ~* %s OR name ~* %s OR name ~* %s)
-    """, tuple(patterns[:5]))  # limit to 5 patterns for speed
-
+        WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
+    """, ([f"%{s}%" for s in suggs],))
     rows = cur.fetchall()
 
     if not rows:
         return []
 
-    # Aggregate stats per suggestion using whole-word matching in Python
+    # 4. Aggregate with strict whole-word matching
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, favs in rows:
-        for s in clean_suggs:
-            # Whole-word regex match
+        for s in suggs:
             if re.search(r'\b' + re.escape(s) + r'\b', name):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
@@ -169,8 +172,6 @@ async def analyze(ctx, *, keyword: str):
         await ctx.send("❌ Provide a keyword like `!analyze bear`")
         return
     conn = get_db(); cur = conn.cursor()
-
-    # Whole-word match for the seed keyword
     pattern = word_boundary_pattern(kw)
     cur.execute("""
         SELECT name, description, favorite_count FROM items 
@@ -178,30 +179,24 @@ async def analyze(ctx, *, keyword: str):
           AND favorite_count > 0 LIMIT 2000
     """, (pattern, pattern))
     rows = cur.fetchall()
-
     if not rows:
         await ctx.send(f"⚠️ No data for `{kw}`. Try a more common word.")
         cur.close(); conn.close(); return
-
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
         for w in set(extract_words(f"{name} {desc}")):
             if w == kw: continue
             stats[w]["favs"] += (favs or 0)
             stats[w]["count"] += 1
-
     results = []
     for w, s in stats.items():
         if s["count"] < 3: continue
         af = s["favs"] / s["count"]
-        # Competition = items with w as whole word
         cur.execute("SELECT COUNT(*) FROM items WHERE name ~* %s", (word_boundary_pattern(w),))
         c = cur.fetchone()[0] or 1
         results.append((w, af, c, af / math.log1p(c)))
-
     cur.close(); conn.close()
     results.sort(key=lambda x: x[3], reverse=True)
-
     embed = discord.Embed(title=f"🧠 Deep Analysis for `{kw}`",
                           description=f"Analyzed **{len(rows)}** items.",
                           color=0x00ff88)
@@ -245,11 +240,9 @@ async def opportunity(ctx, *, keyword: str):
     conn = get_db(); cur = conn.cursor()
     results = fast_opportunity(cur, kw)
     cur.close(); conn.close()
-
     if not results:
         await ctx.send(f"⚠️ No data for `{kw}`. Try a more common word.")
         return
-
     embed = discord.Embed(
         title=f"💎 Opportunity Finder: `{kw}`",
         description="Whole-word matching. Higher score = better opportunity.",
@@ -273,11 +266,9 @@ async def emote(ctx, *, keyword: str):
     conn = get_db(); cur = conn.cursor()
     results = fast_opportunity(cur, kw)
     cur.close(); conn.close()
-
     if not results:
         await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
         return
-
     embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`", color=0xff66aa)
     for i, (p, af, c, sc) in enumerate(results[:10], 1):
         embed.add_field(name=f"{i}. {p}",
@@ -295,11 +286,9 @@ async def classic(ctx, *, keyword: str):
     conn = get_db(); cur = conn.cursor()
     results = fast_opportunity(cur, kw)
     cur.close(); conn.close()
-
     if not results:
         await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
         return
-
     embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`", color=0x66ccff)
     for i, (p, af, c, sc) in enumerate(results[:10], 1):
         embed.add_field(name=f"{i}. {p}",
@@ -322,14 +311,12 @@ async def gap(ctx, *, keyword: str):
     if not rows:
         await ctx.send(f"⚠️ No data for `{kw}`.")
         cur.close(); conn.close(); return
-
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
         for w in set(extract_words(f"{name} {desc}")):
             if w == kw: continue
             stats[w]["favs"] += (favs or 0)
             stats[w]["count"] += 1
-
     gaps = []
     for w, s in stats.items():
         if s["count"] < 2 or s["count"] > 20: continue
@@ -339,10 +326,8 @@ async def gap(ctx, *, keyword: str):
         c = cur.fetchone()[0] or 1
         if c < 50:
             gaps.append((w, af, c))
-
     cur.close(); conn.close()
     gaps.sort(key=lambda x: x[1], reverse=True)
-
     embed = discord.Embed(title=f"🕳️ Market Gaps for `{kw}`",
                           description="High demand + low competition.",
                           color=0x00ffcc)
