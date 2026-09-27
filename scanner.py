@@ -6,20 +6,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
+
 def log(msg):
     print(msg, flush=True)
+
 
 CATALOG_API = "https://catalog.roblox.com/v1/search/items"
 CATEGORIES = [11, 3, 4, 12]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
-WORKERS = 3              # lowered from 6 to avoid rate limits
-DELAY = 0.2              # slightly slower between pages
+WORKERS = 3
+DELAY = 0.2
 MAX_PAGES_PER_QUERY = 10
 HTTP_TIMEOUT = 8
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 45
 
-# ⚠️ CRITICAL: Roblox silently returns EMPTY results without a browser User-Agent
+# CRITICAL: Roblox returns empty data without a browser User-Agent
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -62,7 +64,8 @@ def get_dynamic_keywords():
         cur = conn.cursor()
         cur.execute("SELECT keyword FROM learned_keywords ORDER BY score DESC LIMIT 100")
         rows = cur.fetchall()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         existing = set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS)
         dynamic = [row[0] for row in rows if row[0] and row[0] not in existing][:80]
         log(f"🧠 Loaded {len(dynamic)} learned keywords.")
@@ -73,7 +76,7 @@ def get_dynamic_keywords():
 
 
 def scan_query(params):
-    """Hardened: capped retries, no infinite loops, WITH headers."""
+    """Hardened: capped retries, no infinite loops, with browser headers."""
     found = set()
     cursor = ""
     pages = 0
@@ -86,7 +89,7 @@ def scan_query(params):
             resp = requests.get(
                 CATALOG_API,
                 params=p,
-                headers=HEADERS,          # ← THE FIX
+                headers=HEADERS,
                 timeout=HTTP_TIMEOUT
             )
 
@@ -120,24 +123,31 @@ def scan_query(params):
 def build_all_queries():
     log("🔨 Building query list...")
     queries = []
+
+    # Category-only queries (these work reliably)
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({"category": cat, "sortType": sort, "limit": 30})
-    for kw in UGC_KEYWORDS:
+
+    # Keyword queries — NO category filter (this is the fix)
+    all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
+    for kw in all_keywords:
         for sort in [0, 2]:
-            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 11})
-    for kw in CLASSIC_KEYWORDS:
-        for sort in [0, 2]:
-            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 3})
-    for kw in EMOTE_KEYWORDS:
-        for sort in [0, 2]:
-            queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 12})
+            queries.append({"keyword": kw, "sortType": sort, "limit": 30})
+
+    # Price range queries (no category, works better)
     for min_p, max_p in PRICE_RANGES:
-        for cat in [11, 3, 12]:
-            queries.append({"minPrice": min_p, "maxPrice": max_p,
-                            "category": cat, "sortType": 2, "limit": 30})
+        queries.append({
+            "minPrice": min_p,
+            "maxPrice": max_p,
+            "sortType": 2,
+            "limit": 30
+        })
+
+    # Learned keywords
     for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
+
     log(f"🔨 Built {len(queries)} queries.")
     return queries
 
@@ -186,7 +196,8 @@ def run_scanner():
         )
         new_count += cur.rowcount
         conn.commit()
-    cur.close(); conn.close()
+    cur.close()
+    conn.close()
     log(f"✅ Inserted {new_count} NEW item IDs.")
 
 
