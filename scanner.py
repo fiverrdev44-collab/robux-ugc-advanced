@@ -2,14 +2,11 @@ import os
 import sys
 import requests
 import time
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
 def log(msg):
-    """Print with immediate flush for GitHub Actions."""
     print(msg, flush=True)
 
 CATALOG_API = "https://catalog.roblox.com/v1/search/items"
@@ -17,8 +14,10 @@ CATEGORIES = [11, 3, 4, 12]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
 WORKERS = 6
 DELAY = 0.1
-MAX_PAGES_PER_QUERY = 20
-HTTP_TIMEOUT = 8
+MAX_PAGES_PER_QUERY = 10
+HTTP_TIMEOUT = 6
+MAX_429_RETRIES = 3
+QUERY_TIMEOUT = 45          # hard cap per future (seconds)
 
 UGC_KEYWORDS = [
     "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
@@ -43,53 +42,64 @@ EMOTE_KEYWORDS = [
     "salute", "pose", "walk", "swim", "fly", "float", "anime", "aura"
 ]
 
-PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100), (101, 500)]
-
-STOP_WORDS = {"the","a","an","and","of","in","to","for","is","on","that","by","with"}
+PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100)]
 
 
 def get_dynamic_keywords():
-    log("🧠 Loading learned keywords from DB...")
+    log("🧠 Loading learned keywords...")
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT keyword FROM learned_keywords ORDER BY score DESC LIMIT 200")
+        cur.execute("SELECT keyword FROM learned_keywords ORDER BY score DESC LIMIT 100")
         rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         existing = set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS)
-        dynamic = [row[0] for row in rows if row[0] and row[0] not in existing][:150]
+        dynamic = [row[0] for row in rows if row[0] and row[0] not in existing][:80]
         log(f"🧠 Loaded {len(dynamic)} learned keywords.")
         return dynamic
     except Exception as e:
-        log(f"⚠️ Could not load learned keywords: {e}")
+        log(f"⚠️ Learned keywords error: {e}")
         return []
 
 
 def scan_query(params):
+    """Hardened: capped retries, no infinite loops."""
     found = set()
     cursor = ""
     pages = 0
+    retries_429 = 0
+
     while pages < MAX_PAGES_PER_QUERY:
         p = params.copy()
         p["cursor"] = cursor
         try:
             resp = requests.get(CATALOG_API, params=p, timeout=HTTP_TIMEOUT)
+
+            # ---- RATE LIMIT: hard cap ----
             if resp.status_code == 429:
-                time.sleep(2)
+                retries_429 += 1
+                if retries_429 > MAX_429_RETRIES:
+                    return found  # give up on this query, keep what we have
+                time.sleep(1)
                 continue
+
             if resp.status_code != 200:
-                break
+                return found  # any other error = bail
+
             data = resp.json()
             for item in data.get("data", []):
                 found.add(item["id"])
+
             cursor = data.get("nextPageCursor")
             if not cursor:
-                break
+                return found  # no more pages
+
             pages += 1
         except Exception:
-            break
+            return found  # timeout/network error = bail
+
         time.sleep(DELAY)
+
     return found
 
 
@@ -110,9 +120,9 @@ def build_all_queries():
             queries.append({"keyword": kw, "sortType": sort, "limit": 30, "category": 12})
     for min_p, max_p in PRICE_RANGES:
         for cat in [11, 3, 12]:
-            queries.append({"minPrice": min_p, "maxPrice": max_p, "category": cat, "sortType": 2, "limit": 30})
-    dynamic = get_dynamic_keywords()
-    for kw in dynamic:
+            queries.append({"minPrice": min_p, "maxPrice": max_p,
+                            "category": cat, "sortType": 2, "limit": 30})
+    for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
     log(f"🔨 Built {len(queries)} queries.")
     return queries
@@ -124,7 +134,7 @@ def run_scanner():
     log("📦 DB setup done.")
 
     queries = build_all_queries()
-    log(f"🚀 Running {len(queries)} queries with {WORKERS} parallel workers...")
+    log(f"🚀 Running {len(queries)} queries with {WORKERS} workers...")
     start = time.time()
 
     all_ids = set()
@@ -134,23 +144,28 @@ def run_scanner():
         for future in as_completed(futures):
             done += 1
             try:
-                found = future.result(timeout=30)
+                found = future.result(timeout=QUERY_TIMEOUT)
                 all_ids.update(found)
             except Exception as e:
-                log(f"  Query failed: {e}")
-            if done % 20 == 0:
-                log(f"  {done}/{len(queries)} queries done — {len(all_ids)} unique IDs so far")
+                log(f"  Query #{done} failed: {e}")
 
-    log(f"✅ Scan collected {len(all_ids)} unique IDs in {time.time()-start:.1f}s")
+            # Log every query so we always see progress
+            if done <= 10 or done % 10 == 0:
+                log(f"  {done}/{len(queries)} — {len(all_ids)} IDs")
+
+    log(f"✅ Scan collected {len(all_ids)} IDs in {time.time()-start:.1f}s")
+
+    if not all_ids:
+        log("⚠️ No IDs collected — bailing without writing.")
+        return
 
     log("💾 Writing to database...")
     conn = get_db_connection()
     cur = conn.cursor()
     ids_list = [(iid,) for iid in all_ids]
     new_count = 0
-    chunk_size = 1000
-    for i in range(0, len(ids_list), chunk_size):
-        chunk = ids_list[i:i+chunk_size]
+    for i in range(0, len(ids_list), 1000):
+        chunk = ids_list[i:i+1000]
         execute_values(
             cur,
             "INSERT INTO discovered_items (id) VALUES %s ON CONFLICT (id) DO NOTHING",
@@ -158,16 +173,15 @@ def run_scanner():
         )
         new_count += cur.rowcount
         conn.commit()
-    cur.close()
-    conn.close()
-    log(f"✅ Inserted {new_count} NEW item IDs into the database.")
+    cur.close(); conn.close()
+    log(f"✅ Inserted {new_count} NEW item IDs.")
 
 
 if __name__ == "__main__":
     try:
         run_scanner()
     except Exception as e:
-        log(f"❌ FATAL ERROR: {e}")
+        log(f"❌ FATAL: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
