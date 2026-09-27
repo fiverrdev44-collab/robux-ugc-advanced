@@ -53,33 +53,28 @@ STOP_WORDS = {
 
 
 def get_dynamic_keywords():
-    """Pull top words from items we already have. Self-expanding keyword pool."""
+    """
+    Pull top learned keywords from the `learned_keywords` table (populated by
+    discover_keywords.py). This is the self-learning loop.
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT name FROM items 
-            WHERE favorite_count > 100 
-            ORDER BY favorite_count DESC LIMIT 5000
+            SELECT keyword FROM learned_keywords 
+            ORDER BY score DESC 
+            LIMIT 300
         """)
         rows = cur.fetchall()
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
-        counter = Counter()
-        for (name,) in rows:
-            if not name:
-                continue
-            words = [w.lower() for w in re.findall(r"[a-zA-Z]+", name)
-                     if len(w) > 3 and w.lower() not in STOP_WORDS]
-            counter.update(words)
-
-        # Top 100 new words we haven't already hardcoded
         existing = set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS)
-        dynamic = [w for w, _ in counter.most_common(300) if w not in existing][:100]
-        print(f"🧠 Learned {len(dynamic)} new dynamic keywords from database.")
+        dynamic = [row[0] for row in rows if row[0] and row[0] not in existing][:200]
+        print(f"🧠 Loaded {len(dynamic)} learned keywords from database.")
         return dynamic
     except Exception as e:
-        print(f"⚠️ Could not load dynamic keywords: {e}")
+        print(f"⚠️ Could not load learned keywords (table may be empty): {e}")
         return []
 
 
@@ -113,6 +108,7 @@ def scan_query(params):
 
 def build_all_queries():
     queries = []
+
     # Categories × sort types
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
@@ -136,12 +132,17 @@ def build_all_queries():
     # Price ranges
     for min_p, max_p in PRICE_RANGES:
         for cat in [11, 3, 12]:
-            queries.append({"minPrice": min_p, "maxPrice": max_p, "category": cat, "sortType": 2, "limit": 30})
+            queries.append({
+                "minPrice": min_p, "maxPrice": max_p,
+                "category": cat, "sortType": 2, "limit": 30
+            })
 
-    # NEW: dynamic learned keywords (from DB history)
+    # NEW: learned keywords from discover_keywords.py
     dynamic = get_dynamic_keywords()
     for kw in dynamic:
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
+        # Also scan without category restriction for broader reach
+        queries.append({"keyword": kw, "sortType": 0, "limit": 30})
 
     return queries
 
