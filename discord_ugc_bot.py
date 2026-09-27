@@ -31,7 +31,7 @@ STOP_WORDS = {
     "assetid","assettype","itemtype","item","id","href","link","url",
     "library","bundles","bundle","store","shop","search","results","page",
     # Roblox-specific junk
-    "assets","asset","limited","unique","ugc","robux","rp","free",
+    "assets","asset","limited","unique","ugc","robux","free",
     "sale","sell","selling","buy","purchase","check",
     "community","join","follow","discord","twitter","instagram",
     "youtube","tiktok","social","socials","click","below","above",
@@ -49,15 +49,48 @@ def get_db():
 
 
 def extract_words(text):
-    """Extract clean words from text — removes URLs and junk."""
+    """Extract clean words — strips URLs, filters stop words."""
     if not text:
         return []
-    # Remove URLs first
     text = re.sub(r'http\S+|www\.\S+', ' ', text)
-    # Remove special characters that break words
     text = re.sub(r'[^\w\s]', ' ', text)
     words = re.findall(r"[a-zA-Z]+", text.lower())
     return [w for w in words if len(w) > 3 and w not in STOP_WORDS]
+
+
+def fast_opportunity(cur, kw):
+    """Shared fast logic for !opportunity, !emote, !classic."""
+    cur.execute("""
+        SELECT DISTINCT suggestion FROM search_suggestions 
+        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 50
+    """, (f"%{kw}%", f"%{kw}%"))
+    suggs = [r[0] for r in cur.fetchall()] or [kw]
+
+    cur.execute("""
+        SELECT LOWER(name), favorite_count FROM items
+        WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
+    """, ([f"%{s}%" for s in suggs],))
+    rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    stats = defaultdict(lambda: {"favs": 0, "count": 0})
+    for name, favs in rows:
+        for s in suggs:
+            if s in name:
+                stats[s]["favs"] += favs or 0
+                stats[s]["count"] += 1
+
+    results = []
+    for s, data in stats.items():
+        if data["count"] == 0:
+            continue
+        avg_f = data["favs"] / data["count"]
+        results.append((s, avg_f, data["count"], avg_f / math.log1p(data["count"])))
+
+    results.sort(key=lambda x: x[3], reverse=True)
+    return results
 
 
 @bot.event
@@ -83,7 +116,6 @@ async def scan_status(ctx):
 
 @bot.command(name="trends")
 async def trends(ctx):
-    """Top words in most-favourited items."""
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         SELECT name, description FROM items 
@@ -118,7 +150,7 @@ async def analyze(ctx, *, keyword: str):
     """, (f"%{kw}%", f"%{kw}%"))
     rows = cur.fetchall()
     if not rows:
-        await ctx.send(f"⚠️ No data for `{kw}` yet.")
+        await ctx.send(f"⚠️ No data for `{kw}` yet. Try a more common word.")
         cur.close(); conn.close(); return
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
@@ -172,34 +204,84 @@ async def desc_analyze(ctx, *, keyword: str):
 @bot.command(name="opportunity")
 async def opportunity(ctx, *, keyword: str):
     kw = keyword.strip().lower()
+    if not kw:
+        await ctx.send("❌ Provide a keyword like `!opportunity bear`")
+        return
     conn = get_db(); cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 100
-    """, (f"%{kw}%", f"%{kw}%"))
-    suggs = [r[0] for r in cur.fetchall()] or [kw]
-    results = []
-    for phrase in suggs:
-        cur.execute("SELECT COUNT(*) FROM items WHERE LOWER(name) LIKE %s", (f"%{phrase}%",))
-        c = cur.fetchone()[0] or 1
-        cur.execute("""
-            SELECT AVG(favorite_count), COUNT(*) FROM items 
-            WHERE LOWER(name) LIKE %s AND favorite_count > 0
-        """, (f"%{phrase}%",))
-        af, cnt = cur.fetchone()
-        if not cnt: continue
-        af = af or 0
-        score = af / math.log1p(c)
-        results.append((phrase, af, c, score))
+    results = fast_opportunity(cur, kw)
     cur.close(); conn.close()
-    results.sort(key=lambda x: x[3], reverse=True)
-    embed = discord.Embed(title=f"💎 Opportunity Finder: `{kw}`",
-                          description="Higher score = better opportunity.",
-                          color=0xff00cc)
+
+    if not results:
+        await ctx.send(f"⚠️ No data for `{kw}`. Try a more common word or run the enricher more.")
+        return
+
+    embed = discord.Embed(
+        title=f"💎 Opportunity Finder: `{kw}`",
+        description="Higher score = better opportunity.",
+        color=0xff00cc
+    )
     for i, (p, af, c, sc) in enumerate(results[:10], 1):
-        embed.add_field(name=f"{i}. {p}",
-                        value=f"Opportunity: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-                        inline=False)
+        embed.add_field(
+            name=f"{i}. {p}",
+            value=f"Opportunity: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="emote")
+async def emote(ctx, *, keyword: str):
+    kw = keyword.strip().lower()
+    if not kw:
+        await ctx.send("❌ Provide a keyword like `!emote dance`")
+        return
+    conn = get_db(); cur = conn.cursor()
+    results = fast_opportunity(cur, kw)
+    cur.close(); conn.close()
+
+    if not results:
+        await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
+        return
+
+    embed = discord.Embed(
+        title=f"💃 Emote Opportunity: `{kw}`",
+        description="Emote-focused analysis.",
+        color=0xff66aa
+    )
+    for i, (p, af, c, sc) in enumerate(results[:10], 1):
+        embed.add_field(
+            name=f"{i}. {p}",
+            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="classic")
+async def classic(ctx, *, keyword: str):
+    kw = keyword.strip().lower()
+    if not kw:
+        await ctx.send("❌ Provide a keyword like `!classic flannel`")
+        return
+    conn = get_db(); cur = conn.cursor()
+    results = fast_opportunity(cur, kw)
+    cur.close(); conn.close()
+
+    if not results:
+        await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
+        return
+
+    embed = discord.Embed(
+        title=f"👕 Classic Clothing: `{kw}`",
+        description="Classic clothing analysis.",
+        color=0x66ccff
+    )
+    for i, (p, af, c, sc) in enumerate(results[:10], 1):
+        embed.add_field(
+            name=f"{i}. {p}",
+            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+            inline=False
+        )
     await ctx.send(embed=embed)
 
 
@@ -290,68 +372,6 @@ async def track(ctx, item_id: int):
     for favs, price, when in rows:
         embed.add_field(name=f"🕐 {when.strftime('%m/%d %H:%M')}",
                         value=f"Favs: **{favs:,}** | Price: **{price} R$**",
-                        inline=False)
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="emote")
-async def emote(ctx, *, keyword: str):
-    kw = keyword.strip().lower()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 100
-    """, (f"%{kw}%", f"%{kw}%"))
-    suggs = [r[0] for r in cur.fetchall()] or [kw]
-    results = []
-    for phrase in suggs:
-        cur.execute("SELECT COUNT(*) FROM items WHERE LOWER(name) LIKE %s", (f"%{phrase}%",))
-        c = cur.fetchone()[0] or 1
-        cur.execute("""
-            SELECT AVG(favorite_count), COUNT(*) FROM items 
-            WHERE LOWER(name) LIKE %s AND favorite_count > 0
-        """, (f"%{phrase}%",))
-        af, cnt = cur.fetchone()
-        if not cnt: continue
-        af = af or 0
-        results.append((phrase, af, c, af / math.log1p(c)))
-    cur.close(); conn.close()
-    results.sort(key=lambda x: x[3], reverse=True)
-    embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`", color=0xff66aa)
-    for i, (p, af, c, sc) in enumerate(results[:10], 1):
-        embed.add_field(name=f"{i}. {p}",
-                        value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-                        inline=False)
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="classic")
-async def classic(ctx, *, keyword: str):
-    kw = keyword.strip().lower()
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""
-        SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 100
-    """, (f"%{kw}%", f"%{kw}%"))
-    suggs = [r[0] for r in cur.fetchall()] or [kw]
-    results = []
-    for phrase in suggs:
-        cur.execute("SELECT COUNT(*) FROM items WHERE LOWER(name) LIKE %s", (f"%{phrase}%",))
-        c = cur.fetchone()[0] or 1
-        cur.execute("""
-            SELECT AVG(favorite_count), COUNT(*) FROM items 
-            WHERE LOWER(name) LIKE %s AND favorite_count > 0
-        """, (f"%{phrase}%",))
-        af, cnt = cur.fetchone()
-        if not cnt: continue
-        af = af or 0
-        results.append((phrase, af, c, af / math.log1p(c)))
-    cur.close(); conn.close()
-    results.sort(key=lambda x: x[3], reverse=True)
-    embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`", color=0x66ccff)
-    for i, (p, af, c, sc) in enumerate(results[:10], 1):
-        embed.add_field(name=f"{i}. {p}",
-                        value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                         inline=False)
     await ctx.send(embed=embed)
 
