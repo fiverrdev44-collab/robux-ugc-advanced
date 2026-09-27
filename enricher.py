@@ -9,7 +9,7 @@ CATALOG_API = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=A
 
 BATCH_SIZE = 500
 WORKERS = 10
-FORCE_REFRESH = True   # set True to re-enrich already-processed items
+FORCE_REFRESH = False   # set True to re-enrich already-processed items
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
