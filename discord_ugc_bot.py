@@ -62,7 +62,7 @@ def matches_seed(text, seed):
 
 
 def analyze_opportunity(cur, kw):
-    """Rich, multi-source opportunity analysis — returns LOTS of results."""
+    """Rich multi-source opportunity analysis."""
     pattern = word_boundary_pattern(kw)
 
     cur.execute("""
@@ -98,7 +98,7 @@ def analyze_opportunity(cur, kw):
             suggs.append(s)
     suggs = list(set(suggs))[:80]
 
-    # Score seed-matching keywords
+    # Score keywords containing seed
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for _, name, desc, favs, price, creator in all_items:
         for s in suggs:
@@ -106,7 +106,7 @@ def analyze_opportunity(cur, kw):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
-    # Bigrams
+    # Bigrams from titles
     for _, name, _, favs, _, _ in all_items:
         words = name.split()
         for i in range(len(words) - 1):
@@ -136,7 +136,7 @@ def analyze_opportunity(cur, kw):
     desc_counter = Counter()
     for _, _, desc, _, _, _ in all_items:
         desc_counter.update(extract_words(desc))
-    desc_only = [w for w, c in desc_counter.most_common(60) 
+    desc_only = [w for w, c in desc_counter.most_common(60)
                  if w != kw and w not in adjacent and c >= 2]
 
     # Prices
@@ -196,10 +196,231 @@ def analyze_opportunity(cur, kw):
 
 
 # ============================================================
-# PAGINATION VIEW with Arrow Buttons
+# MULTI-VIEW PAGINATOR (Tabs + Pagination)
 # ============================================================
-class PaginatedView(discord.ui.View):
-    """Buttons for navigating multiple pages of keywords."""
+class MultiViewPaginator(discord.ui.View):
+    """Pagination with category tabs: Keywords / Adjacent / Description / Market."""
+    def __init__(self, data):
+        super().__init__(timeout=300)
+        self.data = data
+        self.view_mode = "keywords"
+        self.page = 0
+        self.per_page = 8
+        self.rebuild_buttons()
+
+    def build_embed(self):
+        d = self.data
+        seed = d["seed"]
+
+        if self.view_mode == "keywords":
+            items = d["top_keywords"]
+            max_page = max(0, (len(items) - 1) // self.per_page)
+            self.page = min(self.page, max_page)
+            start = self.page * self.per_page
+            chunk = items[start:start + self.per_page]
+
+            embed = discord.Embed(
+                title=f"🎯 Keywords for `{seed}`",
+                description=f"Showing **{start+1}–{min(start+self.per_page, len(items))}** of **{len(items)}** keywords.",
+                color=0x00ff88
+            )
+            for i, (w, af, c, sc) in enumerate(chunk, start + 1):
+                embed.add_field(
+                    name=f"{i}. {w}",
+                    value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+                    inline=False
+                )
+            embed.set_footer(text=f"Page {self.page+1}/{max_page+1} • Switch tabs below")
+
+        elif self.view_mode == "adjacent":
+            adjs = d["adjacent"]
+            embed = discord.Embed(
+                title=f"🔗 Adjacent Keywords for `{seed}`",
+                description=f"Words that appear alongside `{seed}` — new angles to expand your niche.",
+                color=0x66ccff
+            )
+            if adjs:
+                half = (len(adjs) + 1) // 2
+                left = " · ".join(f"`{w}`" for w in adjs[:half])
+                right = " · ".join(f"`{w}`" for w in adjs[half:])
+                if left:
+                    embed.add_field(name="\u200b", value=left, inline=True)
+                if right:
+                    embed.add_field(name="\u200b", value=right, inline=True)
+            else:
+                embed.add_field(name="No adjacent keywords", value="Try a broader seed.", inline=False)
+
+        elif self.view_mode == "description":
+            descs = d["description_keywords"]
+            embed = discord.Embed(
+                title=f"📝 Hidden Description Keywords for `{seed}`",
+                description="SEO words top sellers bury in descriptions. Copy into YOUR descriptions.",
+                color=0xaa66ff
+            )
+            if descs:
+                half = (len(descs) + 1) // 2
+                left = " · ".join(f"`{w}`" for w in descs[:half])
+                right = " · ".join(f"`{w}`" for w in descs[half:])
+                if left:
+                    embed.add_field(name="\u200b", value=left, inline=True)
+                if right:
+                    embed.add_field(name="\u200b", value=right, inline=True)
+            else:
+                embed.add_field(name="No description keywords", value="Try a different seed.", inline=False)
+
+        elif self.view_mode == "market":
+            embed = discord.Embed(
+                title=f"💰 Market Info for `{seed}`",
+                description="Competitive intelligence for this niche.",
+                color=0xffaa00
+            )
+            embed.add_field(
+                name="💰 Price Insight",
+                value=f"Median: **{d['median_price']} R$**\nBest-seller: **{d['best_price']} R$**",
+                inline=True
+            )
+            embed.add_field(
+                name="📊 Market Health",
+                value=f"Competitors: **{d['total_matches']}**\nSaturation: **{d['saturation']}**",
+                inline=True
+            )
+            embed.add_field(
+                name="👥 Creators",
+                value=f"Unique: **{d['unique_creators']}**\nTop share: **{d['top_creator_share']}%**",
+                inline=True
+            )
+            if d["top_styles"]:
+                styles_str = "\n".join(f"`{s}` — {c} items" for s, c in d["top_styles"])
+                embed.add_field(name="🎨 Style Patterns", value=styles_str, inline=False)
+            if d["study_items"]:
+                study_str = "\n".join(
+                    f"`{iid}` — {name[:45]} ({favs:,} favs)"
+                    for iid, name, _, favs, _, _ in d["study_items"]
+                )
+                embed.add_field(name="👀 Study These Top Items", value=study_str, inline=False)
+
+        return embed
+
+    def rebuild_buttons(self):
+        self.clear_items()
+        d = self.data
+
+        # ---- TAB BUTTONS (row 1) ----
+        kw_btn = discord.ui.Button(
+            label=f"🎯 Keywords ({len(d['top_keywords'])})",
+            style=discord.ButtonStyle.success if self.view_mode == "keywords" else discord.ButtonStyle.secondary,
+            row=1
+        )
+        kw_btn.callback = self.set_keywords
+        self.add_item(kw_btn)
+
+        adj_btn = discord.ui.Button(
+            label=f"🔗 Adjacent ({len(d['adjacent'])})",
+            style=discord.ButtonStyle.success if self.view_mode == "adjacent" else discord.ButtonStyle.secondary,
+            row=1
+        )
+        adj_btn.callback = self.set_adjacent
+        self.add_item(adj_btn)
+
+        desc_btn = discord.ui.Button(
+            label=f"📝 Description ({len(d['description_keywords'])})",
+            style=discord.ButtonStyle.success if self.view_mode == "description" else discord.ButtonStyle.secondary,
+            row=1
+        )
+        desc_btn.callback = self.set_description
+        self.add_item(desc_btn)
+
+        market_btn = discord.ui.Button(
+            label="💰 Market",
+            style=discord.ButtonStyle.success if self.view_mode == "market" else discord.ButtonStyle.secondary,
+            row=1
+        )
+        market_btn.callback = self.set_market
+        self.add_item(market_btn)
+
+        # ---- PAGINATION (row 0, only for keywords view) ----
+        if self.view_mode == "keywords":
+            total = len(d["top_keywords"])
+            max_page = max(0, (total - 1) // self.per_page)
+
+            first = discord.ui.Button(label="⏮️", style=discord.ButtonStyle.secondary,
+                                      row=0, disabled=(self.page == 0))
+            first.callback = self.first_page
+            self.add_item(first)
+
+            prev = discord.ui.Button(label="◀️", style=discord.ButtonStyle.primary,
+                                     row=0, disabled=(self.page == 0))
+            prev.callback = self.prev_page
+            self.add_item(prev)
+
+            indicator = discord.ui.Button(
+                label=f"Page {self.page+1}/{max_page+1}",
+                style=discord.ButtonStyle.secondary, row=0, disabled=True
+            )
+            self.add_item(indicator)
+
+            nxt = discord.ui.Button(label="▶️", style=discord.ButtonStyle.primary,
+                                    row=0, disabled=(self.page >= max_page))
+            nxt.callback = self.next_page
+            self.add_item(nxt)
+
+            last = discord.ui.Button(label="⏭️", style=discord.ButtonStyle.secondary,
+                                     row=0, disabled=(self.page >= max_page))
+            last.callback = self.last_page
+            self.add_item(last)
+
+    # ---- TAB CALLBACKS ----
+    async def set_keywords(self, interaction):
+        self.view_mode = "keywords"
+        self.page = 0
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def set_adjacent(self, interaction):
+        self.view_mode = "adjacent"
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def set_description(self, interaction):
+        self.view_mode = "description"
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def set_market(self, interaction):
+        self.view_mode = "market"
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    # ---- PAGINATION CALLBACKS ----
+    async def first_page(self, interaction):
+        self.page = 0
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def prev_page(self, interaction):
+        self.page = max(0, self.page - 1)
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def next_page(self, interaction):
+        total = len(self.data["top_keywords"])
+        max_page = max(0, (total - 1) // self.per_page)
+        self.page = min(max_page, self.page + 1)
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def last_page(self, interaction):
+        total = len(self.data["top_keywords"])
+        max_page = max(0, (total - 1) // self.per_page)
+        self.page = max_page
+        self.rebuild_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
+# ============================================================
+# SIMPLE PAGINATOR (for analyze, desc_analyze, gap)
+# ============================================================
+class SimplePaginator(discord.ui.View):
     def __init__(self, keyword, items, title_prefix, color, per_page=10):
         super().__init__(timeout=180)
         self.keyword = keyword
@@ -209,15 +430,36 @@ class PaginatedView(discord.ui.View):
         self.per_page = per_page
         self.page = 0
         self.max_page = max(0, (len(items) - 1) // per_page)
-        self.update_buttons()
+        self.rebuild()
 
-    def update_buttons(self):
-        # Disable buttons if at edges
-        self.prev_btn.disabled = (self.page == 0)
-        self.next_btn.disabled = (self.page >= self.max_page)
-        self.first_btn.disabled = (self.page == 0)
-        self.last_btn.disabled = (self.page >= self.max_page)
-        self.page_indicator.label = f"Page {self.page + 1}/{self.max_page + 1}"
+    def rebuild(self):
+        self.clear_items()
+
+        first = discord.ui.Button(label="⏮️", style=discord.ButtonStyle.secondary,
+                                  disabled=(self.page == 0))
+        first.callback = self.first_page
+        self.add_item(first)
+
+        prev = discord.ui.Button(label="◀️", style=discord.ButtonStyle.primary,
+                                 disabled=(self.page == 0))
+        prev.callback = self.prev_page
+        self.add_item(prev)
+
+        indicator = discord.ui.Button(
+            label=f"Page {self.page+1}/{self.max_page+1}",
+            style=discord.ButtonStyle.secondary, disabled=True
+        )
+        self.add_item(indicator)
+
+        nxt = discord.ui.Button(label="▶️", style=discord.ButtonStyle.primary,
+                                disabled=(self.page >= self.max_page))
+        nxt.callback = self.next_page
+        self.add_item(nxt)
+
+        last = discord.ui.Button(label="⏭️", style=discord.ButtonStyle.secondary,
+                                 disabled=(self.page >= self.max_page))
+        last.callback = self.last_page
+        self.add_item(last)
 
     def build_embed(self):
         start = self.page * self.per_page
@@ -226,7 +468,7 @@ class PaginatedView(discord.ui.View):
 
         embed = discord.Embed(
             title=f"{self.title_prefix}: `{self.keyword}`",
-            description=f"Showing **{start + 1}–{min(end, len(self.items))}** of **{len(self.items)}** results. Use buttons to navigate.",
+            description=f"Showing **{start+1}–{min(end, len(self.items))}** of **{len(self.items)}** results.",
             color=self.color
         )
         for i, (w, af, c, sc) in enumerate(chunk, start + 1):
@@ -235,38 +477,33 @@ class PaginatedView(discord.ui.View):
                 value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
                 inline=False
             )
-        embed.set_footer(text=f"Page {self.page + 1} of {self.max_page + 1}")
+        embed.set_footer(text=f"Page {self.page+1} of {self.max_page+1}")
         return embed
 
-    @discord.ui.button(label="⏮️", style=discord.ButtonStyle.secondary, row=0)
-    async def first_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def first_page(self, interaction):
         self.page = 0
-        self.update_buttons()
+        self.rebuild()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="◀️", style=discord.ButtonStyle.primary, row=0)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def prev_page(self, interaction):
         self.page = max(0, self.page - 1)
-        self.update_buttons()
+        self.rebuild()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="Page 1/1", style=discord.ButtonStyle.secondary, row=0, disabled=True)
-    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
-        pass
-
-    @discord.ui.button(label="▶️", style=discord.ButtonStyle.primary, row=0)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_page(self, interaction):
         self.page = min(self.max_page, self.page + 1)
-        self.update_buttons()
+        self.rebuild()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.secondary, row=0)
-    async def last_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def last_page(self, interaction):
         self.page = self.max_page
-        self.update_buttons()
+        self.rebuild()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
 
+# ============================================================
+# BOT EVENTS + COMMANDS
+# ============================================================
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} is online (Market Intelligence Engine)")
@@ -279,12 +516,14 @@ async def scan_status(ctx):
     cur.execute("SELECT COUNT(*) FROM items"); e = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM item_history"); h = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM search_suggestions"); s = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM learned_keywords"); l = cur.fetchone()[0]
     cur.close(); conn.close()
     embed = discord.Embed(title="📡 Market Intelligence Status", color=0x00aaff)
     embed.add_field(name="🔍 IDs Discovered", value=f"**{d:,}**", inline=True)
     embed.add_field(name="📦 Items Analyzed", value=f"**{e:,}**", inline=True)
     embed.add_field(name="📊 History Snapshots", value=f"**{h:,}**", inline=True)
     embed.add_field(name="💬 Search Suggestions", value=f"**{s:,}**", inline=True)
+    embed.add_field(name="🧠 Learned Keywords", value=f"**{l:,}**", inline=True)
     await ctx.send(embed=embed)
 
 
@@ -357,9 +596,9 @@ async def analyze(ctx, *, keyword: str):
         await ctx.send(f"⚠️ Not enough data for `{kw}`.")
         return
 
-    view = PaginatedView(kw, results, "🧠 Deep Analysis", 0x00ff88, per_page=10)
+    view = SimplePaginator(kw, results, "🧠 Deep Analysis", 0x00ff88, per_page=10)
     embed = view.build_embed()
-    embed.description = f"Analyzed **{len(rows)}** items. Use buttons below to navigate."
+    embed.description = f"Analyzed **{len(rows)}** items. Use buttons below."
     await ctx.send(embed=embed, view=view)
 
 
@@ -381,7 +620,7 @@ async def desc_analyze(ctx, *, keyword: str):
     for (d,) in rows:
         counter.update(extract_words(d))
     items = [(w, c, 0, c) for w, c in counter.most_common(100)]
-    view = PaginatedView(kw, items, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
+    view = SimplePaginator(kw, items, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
     await ctx.send(embed=view.build_embed(), view=view)
 
 
@@ -400,66 +639,8 @@ async def opportunity(ctx, *, keyword: str):
         await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `bear`.")
         return
 
-    # ---- SUMMARY EMBED ----
-    summary = discord.Embed(
-        title=f"💎 Full Opportunity Analysis: `{kw}`",
-        description=f"Analyzed **{data['total_matches']}** matching items.",
-        color=0xff00cc
-    )
-
-    # Top 5 keywords preview
-    if data["top_keywords"]:
-        lines = []
-        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:5], 1):
-            lines.append(f"**{i}. {p}** — Score: `{sc:,.0f}` | AvgFav: `{af:,.0f}` | Comp: `{c}`")
-        summary.add_field(name="🎯 Top 5 Keywords (see full list with buttons ⬇️)",
-                          value="\n".join(lines), inline=False)
-
-    if data["adjacent"]:
-        adj_str = " · ".join(f"`{w}`" for w in data["adjacent"][:15])
-        summary.add_field(name="🔗 Adjacent Keywords", value=adj_str, inline=False)
-
-    if data["description_keywords"]:
-        desc_str = " · ".join(f"`{w}`" for w in data["description_keywords"][:12])
-        summary.add_field(name="📝 Hidden Description Keywords", value=desc_str, inline=False)
-
-    summary.add_field(
-        name="💰 Price Insight",
-        value=f"Median: **{data['median_price']} R$** | Best-seller price: **{data['best_price']} R$**",
-        inline=False
-    )
-
-    summary.add_field(
-        name="📊 Market Health",
-        value=f"Competitors: **{data['total_matches']}** | Saturation: **{data['saturation']}**\n"
-              f"Unique creators: **{data['unique_creators']}** | Top creator owns **{data['top_creator_share']}%**",
-        inline=False
-    )
-
-    if data["top_styles"]:
-        styles_str = " · ".join(f"`{s}` ({c})" for s, c in data["top_styles"])
-        summary.add_field(name="🎨 Style Patterns", value=styles_str, inline=False)
-
-    if data["study_items"]:
-        study_str = "\n".join(
-            f"`{iid}` — {name[:40]} ({favs:,} favs)"
-            for iid, name, _, favs, _, _ in data["study_items"]
-        )
-        summary.add_field(name="👀 Study These Top Items", value=study_str, inline=False)
-
-    summary.set_footer(text="📄 Full keyword list sent as separate paginated message below...")
-    await ctx.send(embed=summary)
-
-    # ---- PAGINATED KEYWORD LIST ----
-    if data["top_keywords"]:
-        view = PaginatedView(
-            kw,
-            data["top_keywords"],
-            "🎯 Full Keyword List",
-            0x00ff88,
-            per_page=10
-        )
-        await ctx.send(embed=view.build_embed(), view=view)
+    view = MultiViewPaginator(data)
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="emote")
@@ -474,11 +655,8 @@ async def emote(ctx, *, keyword: str):
     if not data:
         await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
         return
-    if data["top_keywords"]:
-        view = PaginatedView(kw, data["top_keywords"], "💃 Emote Opportunity", 0xff66aa, per_page=10)
-        await ctx.send(embed=view.build_embed(), view=view)
-    else:
-        await ctx.send(f"⚠️ No results for `{kw}`.")
+    view = MultiViewPaginator(data)
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="classic")
@@ -493,11 +671,8 @@ async def classic(ctx, *, keyword: str):
     if not data:
         await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
         return
-    if data["top_keywords"]:
-        view = PaginatedView(kw, data["top_keywords"], "👕 Classic Clothing", 0x66ccff, per_page=10)
-        await ctx.send(embed=view.build_embed(), view=view)
-    else:
-        await ctx.send(f"⚠️ No results for `{kw}`.")
+    view = MultiViewPaginator(data)
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="gap")
@@ -552,7 +727,7 @@ async def gap(ctx, *, keyword: str):
         await ctx.send(f"⚠️ No gaps found for `{kw}`.")
         return
 
-    view = PaginatedView(kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
+    view = SimplePaginator(kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
     await ctx.send(embed=view.build_embed(), view=view)
 
 
