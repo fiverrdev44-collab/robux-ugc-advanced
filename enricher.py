@@ -4,8 +4,14 @@ import time
 from database import get_db_connection, setup_database
 
 CATALOG_DETAILS_API = "https://catalog.roblox.com/v1/catalog/items/details"
-BATCH_SIZE = 500        # items to process per run
-CHUNK_SIZE = 120        # Roblox API limit per POST request
+AUTH_URL = "https://auth.roblox.com/v2/logout"
+
+BATCH_SIZE = 500
+CHUNK_SIZE = 120
+
+COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
+if not COOKIE:
+    raise ValueError("ROBLOSECURITY_COOKIE environment variable not set!")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -14,22 +20,44 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+# Create a global session that holds our auth
+session = requests.Session()
+session.cookies[".ROBLOSECURITY"] = COOKIE
+session.headers.update(HEADERS)
+
+
+def get_csrf_token():
+    """Fetches a fresh X-CSRF-Token using the session's cookie."""
+    print("🔐 Fetching X-CSRF-Token...")
+    try:
+        resp = session.post(AUTH_URL, timeout=10)
+        token = resp.headers.get("X-CSRF-Token")
+        if token:
+            session.headers["X-CSRF-Token"] = token
+            print(f"✅ Got CSRF token: {token[:8]}...")
+            return True
+        print(f"❌ Failed to get CSRF token. Status: {resp.status_code}")
+        return False
+    except Exception as e:
+        print(f"❌ CSRF request error: {e}")
+        return False
+
 
 def fetch_batch(item_ids):
     """Fetch details for up to 120 items in ONE POST request."""
     payload = {"items": [{"itemType": "Asset", "id": iid} for iid in item_ids]}
     for attempt in range(3):
         try:
-            resp = requests.post(
-                CATALOG_DETAILS_API,
-                json=payload,
-                headers=HEADERS,
-                timeout=15
-            )
+            resp = session.post(CATALOG_DETAILS_API, json=payload, timeout=15)
             if resp.status_code == 200:
                 return resp.json().get("data", [])
+            if resp.status_code == 403:
+                # Token expired — refresh and retry
+                print("  CSRF token expired, refreshing...")
+                if get_csrf_token():
+                    continue
             if resp.status_code == 429:
-                print(f"  Rate-limited, waiting 3s...")
+                print("  Rate-limited, waiting 3s...")
                 time.sleep(3)
                 continue
             print(f"  Batch HTTP {resp.status_code}")
@@ -44,7 +72,13 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Get IDs that haven't been enriched yet
+    # Refresh CSRF token at the start of every run
+    if not get_csrf_token():
+        print("❌ Cannot proceed without CSRF token.")
+        cur.close()
+        conn.close()
+        return
+
     cur.execute("""
         SELECT id FROM discovered_items 
         WHERE id NOT IN (SELECT id FROM items) 
@@ -61,7 +95,6 @@ def enrich_items():
     print(f"🔧 Enriching {len(ids)} items in batches of {CHUNK_SIZE}...")
     start = time.time()
 
-    # ---- FETCH IN BATCHES ----
     all_data = []
     for i in range(0, len(ids), CHUNK_SIZE):
         chunk = ids[i:i+CHUNK_SIZE]
@@ -72,7 +105,7 @@ def enrich_items():
 
     print(f"✅ Downloaded {len(all_data)} items in {time.time()-start:.1f}s")
 
-    # ---- WRITE TO DB ----
+    # ---- DB WRITE ----
     conn = get_db_connection()
     cur = conn.cursor()
     enriched = 0
