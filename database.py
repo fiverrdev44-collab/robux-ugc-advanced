@@ -3,8 +3,19 @@ import psycopg2
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    """Get a DB connection with a hard 10-second timeout."""
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode='require',
+        connect_timeout=10,           # give up after 10s if Supabase is unreachable
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+
 
 def setup_database():
     conn = get_db_connection()
@@ -60,7 +71,6 @@ def setup_database():
         ON search_suggestions (suggestion);
     ''')
 
-    # NEW: Self-learned keywords table
     cur.execute('''
         CREATE TABLE IF NOT EXISTS learned_keywords (
             id SERIAL PRIMARY KEY,
@@ -80,4 +90,4 @@ def setup_database():
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ Database tables ready.")
+    print("✅ Database tables ready.", flush=True)
