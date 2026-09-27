@@ -27,4 +27,5 @@ jobs:
       - name: Run scanner
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ROBLOSECURITY_COOKIE: ${{ secrets.ROBLOSECURITY_COOKIE }}
         run: python scanner.py
