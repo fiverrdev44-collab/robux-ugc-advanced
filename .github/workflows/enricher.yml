@@ -27,4 +27,5 @@ jobs:
       - name: Run enricher
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ROBLOSECURITY_COOKIE: ${{ secrets.ROBLOSECURITY_COOKIE }}
         run: python enricher.py
