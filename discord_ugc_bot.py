@@ -48,8 +48,20 @@ COLOR_WORDS = {"black","white","pink","blue","red","green","purple","yellow","or
 STYLE_WORDS = {"emo","goth","y2k","pastel","kawaii","grunge","cyber","coquette","anime","dark","fluffy","preppy","streetwear","academia","vkei","harajuku","cottagecore","fairycore","vintage","retro","gothic","aesthetic","cottage","boho","hipster","punk","scene","soft"}
 ITEM_WORDS = {"hat","beanie","crown","cap","hoodie","shirt","shoes","wing","wings","tail","ears","horn","horns","glasses","mask","necklace","chain","backpack","headphones","emote","dance","hair","face","pants","jacket","sword","pet","bag","purse","scarf","bandana","beret","visor","lens","ear","head","snapback","bonnet","balaclava"}
 
-EMOTE_KEYWORDS_HINT = {"dance", "emote", "floss", "griddy", "wave", "dab", "shuffle",
-                       "moonwalk", "spin", "flip", "kick", "pose", "salute", "clap"}
+EMOTE_KEYWORDS_HINT = {
+    "dance", "emote", "animation", "animate", "floss", "griddy", "wave", "dab",
+    "shuffle", "moonwalk", "spin", "flip", "kick", "pose", "salute", "clap",
+    "korean", "kpop", "k-pop", "gangnam", "russian", "renegade", "salsa",
+    "ballet", "hiphop", "hip-hop", "breakdance", "twirl", "cartwheel",
+    "greeting", "hello", "goodbye", "peace", "handshake", "hug",
+    "sing", "rap", "beatbox", "meme", "fortnite", "skibidi", "sigma",
+    "loop", "idle", "sit", "crouch", "sleep", "meditate",
+    "cry", "laugh", "smile", "silly", "rage", "cheer", "victory",
+    "run", "walk", "jump", "swim", "fly", "float", "levitate",
+    "cat", "dog", "bunny", "bear", "panda", "fox", "wolf", "dragon",
+    "krumping", "shmoney", "harlem", "dougie", "stanky", "leg", "whip",
+    "milky", "smooth", "spin", "kick", "bounce", "hype", "party"
+}
 
 MIN_PRICE = 5
 MAX_PRICE = 10000
@@ -102,8 +114,7 @@ async def safe_send(ctx, embed=None, content=None, label=""):
 
 
 def extract_words(text):
-    if not text:
-        return []
+    if not text: return []
     text = re.sub(r'http\S+|www\.\S+', ' ', text)
     text = re.sub(r'[^\w\s]', ' ', text)
     words = re.findall(r"[a-zA-Z]+", text.lower())
@@ -118,6 +129,23 @@ def matches_seed(text, seed):
     return re.search(r'\b' + re.escape(seed) + r'\b', text) is not None
 
 
+def is_emote_word(cur, word):
+    """Self-learning: check if word appears in real emote items in DB."""
+    if word in EMOTE_KEYWORDS_HINT:
+        return True
+    try:
+        pattern = word_boundary_pattern(word)
+        cur.execute("""
+            SELECT COUNT(*) FROM items
+            WHERE name ~* %s AND asset_type_id = 61 AND favorite_count > 0
+        """, (pattern,))
+        count = cur.fetchone()[0] or 0
+        return count >= 3
+    except Exception:
+        rollback_quietly(cur)
+        return False
+
+
 def classify_word(word):
     w = word.lower().strip()
     if w in SLANG_WORDS: return "slang"
@@ -129,54 +157,78 @@ def classify_word(word):
     return "unknown"
 
 
-# ============================================================
-# SMART OPPORTUNITY ANALYSIS — multi-word fallback + single-word extraction
-# ============================================================
 def analyze_opportunity(cur, kw):
-    """Smart analysis:
-       1. Try exact phrase
-       2. If < 15 matches and multi-word, try each word individually
-       3. Extract keywords from suggestions + bigrams + single words
-    """
     kw_words = [w for w in kw.lower().split() if len(w) >= 2]
     pattern = word_boundary_pattern(kw)
+
+    # Detect if emote seed (self-learning)
+    is_emote_seed = any(is_emote_word(cur, w) for w in kw_words)
 
     # ---- STEP 1: Try exact phrase ----
     all_items = []
     try:
-        cur.execute("""
-            SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
-                   favorite_count, price, creator_name
-            FROM items
-            WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
-              AND favorite_count > 0
-            LIMIT 2000
-        """, (pattern, pattern))
-        all_items = cur.fetchall()
+        if is_emote_seed:
+            cur.execute("""
+                SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                       favorite_count, price, creator_name
+                FROM items
+                WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                  AND favorite_count > 0
+                  AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+                LIMIT 2000
+            """, (pattern, pattern))
+            all_items = cur.fetchall()
+            if len(all_items) < 15:
+                cur.execute("""
+                    SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                           favorite_count, price, creator_name
+                    FROM items
+                    WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                      AND favorite_count > 0 LIMIT 2000
+                """, (pattern, pattern))
+                all_items = cur.fetchall()
+        else:
+            cur.execute("""
+                SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                       favorite_count, price, creator_name
+                FROM items
+                WHERE (name ~* %s OR COALESCE(LOWER(description), '') ~* %s)
+                  AND favorite_count > 0 LIMIT 2000
+            """, (pattern, pattern))
+            all_items = cur.fetchall()
     except Exception as e:
         print(f"Exact phrase query failed: {e}", flush=True)
         rollback_quietly(cur)
         all_items = []
 
-    # ---- STEP 2: Multi-word fallback — combine individual word matches ----
+    # ---- STEP 2: Multi-word fallback ----
     used_fallback = False
     if len(all_items) < 15 and len(kw_words) > 1:
         combined = {}
         for w in kw_words:
             try:
                 p = word_boundary_pattern(w)
-                cur.execute("""
-                    SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
-                           favorite_count, price, creator_name
-                    FROM items
-                    WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
-                      AND favorite_count > 0
-                    LIMIT 2000
-                """, (p, p))
+                if is_emote_seed:
+                    cur.execute("""
+                        SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                               favorite_count, price, creator_name
+                        FROM items
+                        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                          AND favorite_count > 0
+                          AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+                        LIMIT 2000
+                    """, (p, p))
+                else:
+                    cur.execute("""
+                        SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
+                               favorite_count, price, creator_name
+                        FROM items
+                        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                          AND favorite_count > 0 LIMIT 2000
+                    """, (p, p))
                 for row in cur.fetchall():
                     combined[row[0]] = row
-            except Exception as e:
-                print(f"Word '{w}' query failed: {e}", flush=True)
+            except Exception:
                 rollback_quietly(cur)
         if combined and len(combined) > len(all_items):
             all_items = list(combined.values())
@@ -185,36 +237,32 @@ def analyze_opportunity(cur, kw):
     if not all_items:
         return None
 
-    # ---- STEP 3: Get search suggestions ----
+    # ---- STEP 3: Search suggestions ----
     suggs = []
     try:
         cur.execute("""
             SELECT DISTINCT suggestion FROM search_suggestions 
             WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
         """, (f"%{kw}%", f"%{kw}%"))
-        candidates = [r[0] for r in cur.fetchall()]
-        for s in candidates:
+        for s in [r[0] for r in cur.fetchall()]:
             s = s.strip().lower()
             if not s or len(s) < 3 or len(s) > 40: continue
             if s in STOP_WORDS: continue
             if any(junk in s for junk in ["twee", "emoji", "emoticon"]): continue
             suggs.append(s)
         suggs = list(set(suggs))[:60]
-    except Exception as e:
-        print(f"Suggestions query failed: {e}", flush=True)
+    except Exception:
         rollback_quietly(cur)
 
-    # ---- STEP 4: Build keyword stats from multiple sources ----
+    # ---- STEP 4: Build keyword stats ----
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
 
-    # Source A: Suggestions matched against titles
     for _, name, desc, favs, price, creator in all_items:
         for s in suggs:
             if matches_seed(name, s):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
-    # Source B: Bigrams from titles
     for _, name, _, favs, _, _ in all_items:
         name_words = name.split()
         for i in range(len(name_words) - 1):
@@ -223,26 +271,19 @@ def analyze_opportunity(cur, kw):
                 stats[bigram]["favs"] += favs or 0
                 stats[bigram]["count"] += 1
 
-    # Source C: Single words from titles (NEW)
     seed_set = set(kw_words)
-    single_word_counter = Counter()
-    single_word_favs = defaultdict(int)
+    single_counter = Counter()
+    single_favs = defaultdict(int)
     for _, name, _, favs, _, _ in all_items:
         for w in set(extract_words(name)):
-            if w in seed_set:
-                continue
-            single_word_counter[w] += 1
-            single_word_favs[w] += favs or 0
-
-    # Merge single words into stats (bigrams take precedence)
-    for w, count in single_word_counter.items():
-        if w in stats:
-            continue
-        stats[w]["favs"] = single_word_favs[w]
+            if w in seed_set: continue
+            single_counter[w] += 1
+            single_favs[w] += favs or 0
+    for w, count in single_counter.items():
+        if w in stats: continue
+        stats[w]["favs"] = single_favs[w]
         stats[w]["count"] = count
 
-    # ---- STEP 5: Rank keywords ----
-    # For multi-word fallback: relax threshold
     min_occur = 1 if used_fallback and len(all_items) < 30 else 2
     top_keywords = []
     for s, data in stats.items():
@@ -252,7 +293,6 @@ def analyze_opportunity(cur, kw):
     top_keywords.sort(key=lambda x: x[3], reverse=True)
     top_keywords = top_keywords[:50]
 
-    # ---- STEP 6: Adjacent keywords ----
     adjacent_counter = Counter()
     for _, name, desc, favs, _, _ in all_items:
         for w in set(extract_words(name)):
@@ -260,21 +300,18 @@ def analyze_opportunity(cur, kw):
                 adjacent_counter[w] += 1
     adjacent = [w for w, c in adjacent_counter.most_common(60) if c >= 3]
 
-    # ---- STEP 7: Description keywords ----
     desc_counter = Counter()
     for _, _, desc, _, _, _ in all_items:
         desc_counter.update(extract_words(desc))
     desc_only = [w for w, c in desc_counter.most_common(60)
                  if w not in seed_set and w not in adjacent and c >= 2]
 
-    # ---- STEP 8: Prices ----
     prices = [p for _, _, _, _, p, _ in all_items if p and MIN_PRICE <= p <= MAX_PRICE]
     median_price = sorted(prices)[len(prices) // 2] if prices else 0
     top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:30]
     top_prices = [p for _, _, _, _, p, _ in top_items if p and MIN_PRICE <= p <= MAX_PRICE]
     best_price = sorted(top_prices)[len(top_prices) // 2] if top_prices else median_price
 
-    # ---- STEP 9: Creator stats ----
     creators = [c for _, _, _, _, _, c in all_items if c]
     unique_creators = len(set(creators))
     top_creator_counts = Counter(creators).most_common(1)
@@ -286,7 +323,6 @@ def analyze_opportunity(cur, kw):
     elif total_competitors < 500: saturation = "🟠 High — competitive"
     else: saturation = "🔴 Saturated — hard to rank"
 
-    # ---- STEP 10: Style patterns ----
     style_words = ["gothic","cute","emo","y2k","pastel","kawaii","grunge","cyber","coquette","anime","dark","light","fluffy","cyberpunk","retro","vintage","aesthetic","preppy","streetwear","cottagecore","fairycore","academia"]
     style_counts = Counter()
     for _, name, desc, _, _, _ in all_items:
@@ -306,6 +342,7 @@ def analyze_opportunity(cur, kw):
         "saturation": saturation, "top_styles": top_styles,
         "study_items": study_items,
         "used_fallback": used_fallback,
+        "is_emote_seed": is_emote_seed,
     }
 
 
@@ -494,24 +531,18 @@ class SimplePaginator(discord.ui.View):
 def _analyze_word(cur, word):
     pattern = word_boundary_pattern(word)
     cur.execute(f"""
-        SELECT 
-            COUNT(*), 
-            AVG(favorite_count),
-            AVG(CASE WHEN price BETWEEN {MIN_PRICE} AND {MAX_PRICE} THEN price END),
-            PERCENTILE_CONT(0.5) WITHIN GROUP (
-                ORDER BY CASE WHEN price BETWEEN {MIN_PRICE} AND {MAX_PRICE} THEN price END
-            )
+        SELECT COUNT(*), AVG(favorite_count),
+               AVG(CASE WHEN price BETWEEN {MIN_PRICE} AND {MAX_PRICE} THEN price END),
+               PERCENTILE_CONT(0.5) WITHIN GROUP (
+                   ORDER BY CASE WHEN price BETWEEN {MIN_PRICE} AND {MAX_PRICE} THEN price END)
         FROM items WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
           AND favorite_count > 0
     """, (pattern, pattern))
     row = cur.fetchone()
     avg_price = row[2] or 0
     median_price = row[3] or avg_price
-    return {
-        "word": word, "count": row[0] or 0,
-        "avg_favs": row[1] or 0,
-        "avg_price": median_price or avg_price or 0,
-    }
+    return {"word": word, "count": row[0] or 0, "avg_favs": row[1] or 0,
+            "avg_price": median_price or avg_price or 0}
 
 
 def _analyze_combo(cur, words):
@@ -584,14 +615,14 @@ def smart_verdict(word_stats, combo_stats):
             return ("🔥", "FIRST-MOVER GOLDMINE", f"No item combines these words — but individually they're proven winners (top word averages {top_avg:,.0f} favs).")
         elif top_avg > 10000:
             return ("🟢", "UNTAPPED COMBO", "No combo exists yet, but words have solid demand.")
-        return ("🟡", "UNTESTED", "No item combines these words. Could be sleeper hit OR dead demand.")
+        return ("🟡", "UNTESTED", "No item combines these words.")
     if combo_count < 10:
         if combo_stats["avg_favs"] > 10000:
-            return ("🔥", "JACKPOT", f"Only **{combo_count}** items — but they average **{combo_stats['avg_favs']:,.0f}** favs.")
+            return ("🔥", "JACKPOT", f"Only **{combo_count}** items — averaging **{combo_stats['avg_favs']:,.0f}** favs.")
         return ("🟢", "UNTAPPED NICHE", f"Only {combo_count} items exist.")
     if combo_count < 50: return ("🟡", "SWEET SPOT", f"{combo_count} items — proven demand.")
-    if combo_count < 200: return ("🟠", "COMPETITIVE", f"{combo_count} items. Need a clear edge.")
-    return ("🔴", "SATURATED", f"{combo_count} items. Too crowded.")
+    if combo_count < 200: return ("🟠", "COMPETITIVE", f"{combo_count} items.")
+    return ("🔴", "SATURATED", f"{combo_count} items.")
 
 
 def build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, data):
@@ -601,14 +632,13 @@ def build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, dat
         lines = ["**ATTACK NOW.** Rare opportunity.", "• Design an exceptional item",
                  "• Use the exact combo in title"]
         if data: lines.append(f"• Price around **{data['best_price']} R$**")
-        lines.append("• Upload ASAP — window won't last")
+        lines.append("• Upload ASAP")
     elif emoji == "🟢":
         lines = ["**GREEN LIGHT.** Solid opportunity.", "• Use top 2 keywords in title"]
         if alternatives: lines.append(f"• Add `{alternatives[0]['word']}` for reach")
         if data: lines.append(f"• Price between **{data['median_price']}–{data['best_price']} R$**")
     elif emoji == "🟡":
-        lines = ["**TEST IT.** Moderate signal.", "• Add specific modifiers",
-                 "• Study top 3 rivals"]
+        lines = ["**TEST IT.** Moderate signal.", "• Add modifiers", "• Study rivals"]
     elif emoji == "🟠":
         lines = ["**DIFFERENTIATE.** Crowded but winnable.", "• Add unique style combo"]
         if alternatives: lines.append(f"• Try `{alternatives[0]['word']}` instead")
@@ -708,7 +738,7 @@ def generate_ab_titles(idea, words, combo_stats, alternatives, adjacent, data):
     else:
         titles.append({"title": " ".join(w.capitalize() for w in words)[:80],
                        "strategy": "First-mover", "predicted": "🟡 Medium",
-                       "why": "No existing combo, but individual words have demand"})
+                       "why": "No existing combo"})
     if alternatives:
         alt = alternatives[0]["word"]
         rest = " ".join(w.capitalize() for w in words[1:]) if len(words) > 1 else ""
@@ -757,13 +787,12 @@ def _assess_risk(word_stats, combo_stats, data, trend_data):
             risks.append(("🔴", "Unproven demand", "Test with a cheaper variant first"))
     if trend_data and trend_data.get("avg_growth") is not None:
         g = trend_data["avg_growth"]
-        if g < -50: risks.append(("🔴", "Fading trend", "Pivot to a rising keyword"))
+        if g < -50: risks.append(("🔴", "Fading trend", "Pivot"))
         elif g < 0: risks.append(("🟡", "Slightly declining", "Move fast"))
     if data and data["top_creator_share"] > 25:
         risks.append(("🟠", f"Creator dominance ({data['top_creator_share']}%)", "Study their design"))
     if data and data["median_price"] > 0 and data["best_price"] > data["median_price"] * 2:
         risks.append(("🟡", "Price sensitivity", "Price below median"))
-    # ALWAYS ensure at least one
     if not risks:
         risks.append(("🟢", "No major risks detected", "Solid opportunity — execute cleanly"))
     return risks
@@ -927,9 +956,6 @@ async def ask_nav(ctx, prompt, timeout=600):
     return nav.choice or "continue"
 
 
-# ============================================================
-# GUIDE — isolated queries so one failure doesn't kill the guide
-# ============================================================
 @bot.command(name="guide")
 async def guide(ctx, *, idea: str = None):
     def check(m):
@@ -993,10 +1019,22 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("❌ Need at least one real word.")
         return
 
-    # ---- SECTION 1 ----
-    classifications = [classify_word(w) for w in words]
+    # Section 1 - understanding (uses DB check for emote detection)
+    classifications = []
     icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢",
              "emote": "💃", "number": "🔢", "unknown": "❔"}
+    # Do a quick DB connection for classification
+    try:
+        conn_c = get_db(); cur_c = conn_c.cursor()
+        for w in words:
+            c = classify_word(w)
+            if c == "unknown" and is_emote_word(cur_c, w):
+                c = "emote"
+            classifications.append(c)
+        cur_c.close(); conn_c.close()
+    except Exception:
+        classifications = [classify_word(w) for w in words]
+
     understanding = "\n".join(f"{icons[c]} `{w}` — **{c}**" for w, c in zip(words, classifications))
 
     await safe_send(ctx, discord.Embed(
@@ -1020,7 +1058,6 @@ async def guide(ctx, *, idea: str = None):
     try:
         conn = get_db(); cur = conn.cursor()
 
-        # --- Each query isolated ---
         try:
             word_stats = [_analyze_word(cur, w) for w in words]
         except Exception as e:
@@ -1034,13 +1071,12 @@ async def guide(ctx, *, idea: str = None):
             rollback_quietly(cur)
             combo_stats = None
 
-        # Analyse LAST word — but with smart fallback
         try:
-            await progress.edit(content="🔄 Analyzing keywords (with multi-word fallback)...")
+            await progress.edit(content="🔄 Analyzing keywords (emote-aware)...")
         except Exception: pass
+
         try:
-            opportunity_data = analyze_opportunity(cur, words[-1] if len(words) == 1 else idea_clean)
-            # If empty and multi-word, try last word only
+            opportunity_data = analyze_opportunity(cur, idea_clean)
             if (not opportunity_data or not opportunity_data.get("top_keywords")) and len(words) > 1:
                 opportunity_data = analyze_opportunity(cur, words[-1])
         except Exception as e:
@@ -1101,7 +1137,6 @@ async def guide(ctx, *, idea: str = None):
             rollback_quietly(cur)
             dominance = []
 
-        # Descriptions + Gaps
         try:
             await progress.edit(content="🔄 Loading descriptions + gaps...")
         except Exception: pass
@@ -1112,8 +1147,7 @@ async def guide(ctx, *, idea: str = None):
             total_described = cur.fetchone()[0] or 0
             cur.execute("SELECT COUNT(*) FROM items")
             total_items = cur.fetchone()[0] or 0
-        except Exception as e:
-            print(f"Desc diag failed: {e}", flush=True)
+        except Exception:
             rollback_quietly(cur)
 
         try:
@@ -1213,7 +1247,7 @@ async def guide(ctx, *, idea: str = None):
     except Exception: pass
     await asyncio.sleep(0.3)
 
-    # ---- PULSE ----
+    # Pulse
     pulse = discord.Embed(title="📊 Section 1 — Market Pulse",
                           description="Real data per word:", color=0x66ccff)
     for i, w in enumerate(word_stats, 1):
@@ -1245,14 +1279,15 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("🔄 Loading Section 2...")
         await asyncio.sleep(0.3)
 
-    # ---- SECTION 2 ----
+    # Section 2
     if not goto_strategy:
-        # Top keywords
         if opportunity_data and opportunity_data.get("top_keywords"):
             kw_all = opportunity_data["top_keywords"][:15]
             fallback_note = ""
             if opportunity_data.get("used_fallback"):
-                fallback_note = " *(multi-word fallback — searched each word separately)*"
+                fallback_note = " *(multi-word fallback)*"
+            if opportunity_data.get("is_emote_seed"):
+                fallback_note += " *(💃 emote-aware)*"
             for page_start in range(0, len(kw_all), 8):
                 chunk = kw_all[page_start:page_start + 8]
                 kw_embed = discord.Embed(
@@ -1268,13 +1303,12 @@ async def guide(ctx, *, idea: str = None):
         else:
             await safe_send(ctx, content="🎯 Section 2 — No top keywords found.", label="Kw-Empty")
 
-        # Adjacent
         if adjacent:
             for page_start in range(0, len(adjacent), 30):
                 chunk = adjacent[page_start:page_start + 30]
                 adj_embed = discord.Embed(
                     title=f"🔗 Section 2 — Adjacent Keywords ({page_start+1}–{page_start+len(chunk)})",
-                    description=f"Words that appear alongside your idea.",
+                    description="Words that appear alongside your idea.",
                     color=0x66ccff)
                 half = (len(chunk) + 1) // 2
                 left = " · ".join(f"`{w}`" for w in chunk[:half])
@@ -1284,7 +1318,6 @@ async def guide(ctx, *, idea: str = None):
                 await safe_send(ctx, adj_embed, "Adj")
                 await asyncio.sleep(0.5)
 
-        # Description keywords
         if desc_keywords:
             for page_start in range(0, min(len(desc_keywords), 20), 8):
                 chunk = desc_keywords[page_start:page_start + 8]
@@ -1304,16 +1337,14 @@ async def guide(ctx, *, idea: str = None):
                     f"**No descriptions found for this niche.**\n\n"
                     f"📊 Database-wide: **{total_described:,}** of **{total_items:,}** items have descriptions "
                     f"({(total_described/total_items*100):.1f}%).\n\n"
-                    f"Items in this niche likely don't have descriptions on Roblox yet. "
-                    f"Run the **enricher** workflow more times."
+                    f"Run the **enricher** workflow more times to fill them in."
                 )
             else:
-                diag_msg = "**No descriptions found.** Run the enricher to populate item descriptions."
+                diag_msg = "**No descriptions found.** Run the enricher."
             await safe_send(ctx, discord.Embed(
                 title="📝 Section 2 — Hidden Description Keywords",
                 description=diag_msg, color=0xaa66ff), "Desc-Empty")
 
-        # Gaps
         if gap_keywords:
             for page_start in range(0, len(gap_keywords), 8):
                 chunk = gap_keywords[page_start:page_start + 8]
@@ -1338,13 +1369,12 @@ async def guide(ctx, *, idea: str = None):
             await ctx.send("🔄 Loading Section 3...")
             await asyncio.sleep(0.3)
 
-    # ---- SECTION 3 ----
+    # Section 3
     verdict = smart_verdict(word_stats, combo_stats)
 
     if not goto_strategy:
         emoji, label, explanation = verdict
         color_map = {"🔥": 0xff2266, "🟢": 0x00ff88, "🟡": 0xffaa00, "🟠": 0xff6600, "🔴": 0xff2222}
-
         diag = discord.Embed(title=f"{emoji} Section 3 — Diagnosis: {label}",
                              description=f"━━━━━━━━━━━━━━━━━━━━━\n\n{explanation}",
                              color=color_map.get(emoji, 0x00aaff))
@@ -1390,113 +1420,69 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("🔄 Loading final section...")
         await asyncio.sleep(0.3)
 
-    # ---- SECTION 4 — 3 combined embeds ----
+    # Section 4 — 3 combined embeds
     try:
-        combo = discord.Embed(
-            title="💰 Section 4 — ROI, Pricing & Alternatives",
-            color=0x00ff88
-        )
+        combo = discord.Embed(title="💰 Section 4 — ROI, Pricing & Alternatives",
+                              color=0x00ff88)
         if alternatives:
-            alt_lines = "\n".join(
-                f"• `{a['word']}` — **{a['count']}** items, avg **{a['avg_favs']:,.0f}** favs"
-                for a in alternatives[:5]
-            )
             combo.add_field(name="🎨 Proven Alternatives",
-                            value=alt_lines, inline=False)
+                            value="\n".join(f"• `{a['word']}` — **{a['count']}** items, avg **{a['avg_favs']:,.0f}** favs"
+                                            for a in alternatives[:5]),
+                            inline=False)
         if graph.get("level_1"):
-            combo.add_field(
-                name="🕸️ Keyword Graph",
-                value=" · ".join(f"`{w}`" for w in graph["level_1"][:10]),
-                inline=False
-            )
+            combo.add_field(name="🕸️ Keyword Graph",
+                            value=" · ".join(f"`{w}`" for w in graph["level_1"][:10]),
+                            inline=False)
         if roi:
-            combo.add_field(name="📈 Expected Favs",
-                            value=f"**~{roi['expected_favs']:,}**", inline=True)
-            combo.add_field(name="💸 Expected Sales",
-                            value=f"**~{roi['expected_sales']:,}**", inline=True)
-            combo.add_field(name="💎 Expected Revenue",
-                            value=f"**~{roi['expected_revenue']:,} R$**\n({roi['confidence']})",
-                            inline=True)
+            combo.add_field(name="📈 Expected Favs", value=f"**~{roi['expected_favs']:,}**", inline=True)
+            combo.add_field(name="💸 Expected Sales", value=f"**~{roi['expected_sales']:,}**", inline=True)
+            combo.add_field(name="💎 Expected Revenue", value=f"**~{roi['expected_revenue']:,} R$**\n({roi['confidence']})", inline=True)
         if pricing:
-            price_lines = "\n".join(
-                f"{p['name']} — **{p['price']} R$** · *{p['pro']}*"
-                for p in pricing
-            )
             combo.add_field(name="💵 Pricing Options",
-                            value=price_lines, inline=False)
+                            value="\n".join(f"{p['name']} — **{p['price']} R$** · *{p['pro']}*" for p in pricing),
+                            inline=False)
         await safe_send(ctx, combo, "S4-1")
         await asyncio.sleep(1)
 
-        design_embed = discord.Embed(
-            title="✏️ Section 4 — Design Package",
-            color=0x9966ff
-        )
+        design_embed = discord.Embed(title="✏️ Section 4 — Design Package", color=0x9966ff)
         if portfolio:
-            port_lines = "\n".join(
-                f"**{i}. [{item['angle']}]** `{item['idea']}`\n    *{item['why']}*"
-                for i, item in enumerate(portfolio, 1)
-            )
             design_embed.add_field(name="🎨 Portfolio Blueprint",
-                                   value=port_lines, inline=False)
+                                   value="\n".join(f"**{i}. [{item['angle']}]** `{item['idea']}`\n    *{item['why']}*"
+                                                   for i, item in enumerate(portfolio, 1)),
+                                   inline=False)
         if design:
-            design_embed.add_field(name="📐 Design Brief",
-                                   value=design, inline=False)
+            design_embed.add_field(name="📐 Design Brief", value=design, inline=False)
         if adjacent:
-            design_embed.add_field(
-                name="🔗 Title/Description Keywords",
-                value=" · ".join(f"`{w}`" for w in adjacent[:10]),
-                inline=False
-            )
+            design_embed.add_field(name="🔗 Title/Description Keywords",
+                                   value=" · ".join(f"`{w}`" for w in adjacent[:10]), inline=False)
         if ab_titles:
-            ab_lines = "\n\n".join(
-                f"**{chr(64+i)}. {t['strategy']}** [{t['predicted']}]\n`{t['title']}`"
-                for i, t in enumerate(ab_titles, 1)
-            )
             design_embed.add_field(name="🅰️ Title Variants",
-                                   value=ab_lines, inline=False)
+                                   value="\n\n".join(f"**{chr(64+i)}. {t['strategy']}** [{t['predicted']}]\n`{t['title']}`"
+                                                     for i, t in enumerate(ab_titles, 1)),
+                                   inline=False)
         await safe_send(ctx, design_embed, "S4-2")
         await asyncio.sleep(1)
 
-        final_embed = discord.Embed(
-            title="🎯 Final Strategy & Launch Plan",
-            color=0x00ffcc
-        )
+        final_embed = discord.Embed(title="🎯 Final Strategy & Launch Plan", color=0x00ffcc)
         if timing:
-            final_embed.add_field(name="📅 Best Day",
-                                  value=f"**{timing['best_day']}**", inline=True)
-            final_embed.add_field(name="⏰ Best Hours",
-                                  value=", ".join(timing["best_hours"]), inline=True)
-        final_embed.add_field(name="🚀 Launch Window",
-                              value=launch_window, inline=False)
-        strategy = build_strategy(verdict, word_stats, combo_stats,
-                                   adjacent, alternatives, opportunity_data)
+            final_embed.add_field(name="📅 Best Day", value=f"**{timing['best_day']}**", inline=True)
+            final_embed.add_field(name="⏰ Best Hours", value=", ".join(timing["best_hours"]), inline=True)
+        final_embed.add_field(name="🚀 Launch Window", value=launch_window, inline=False)
         final_embed.add_field(name="🎯 Strategy",
-                              value=strategy, inline=False)
+                              value=build_strategy(verdict, word_stats, combo_stats, adjacent, alternatives, opportunity_data),
+                              inline=False)
         final_title = ab_titles[0]["title"] if ab_titles else " ".join(w.capitalize() for w in words)[:80]
         final_price = roi["best_price"] if roi else 100
-        checklist_txt = (
-            f"**Day 1 — Design**\n"
-            f"☐ Model in Roblox Studio\n"
-            f"☐ Reference top rivals\n"
-            f"☐ Apply design keywords\n\n"
-            f"**Day 2 — Upload**\n"
-            f"☐ Title: `{final_title}`\n"
-            f"☐ Price: **{final_price} R$**\n"
-            f"☐ Full SEO description\n\n"
-            f"**Day 3–7** — Track favourites daily\n"
-            f"**Day 8–30** — Scale or pivot"
-        )
         final_embed.add_field(name="✅ Launch Checklist",
-                              value=checklist_txt, inline=False)
+                              value=(f"**Day 1 — Design**\n☐ Model in Roblox Studio\n☐ Reference rivals\n\n"
+                                     f"**Day 2 — Upload**\n☐ Title: `{final_title}`\n☐ Price: **{final_price} R$**\n☐ Full SEO description\n\n"
+                                     f"**Day 3–7** — Track favourites daily\n**Day 8–30** — Scale or pivot"),
+                              inline=False)
         await safe_send(ctx, final_embed, "S4-3")
     except Exception as e:
         print(f"❌ Section 4 error: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        try:
-            await ctx.send(f"⚠️ **Section 4 error:** `{e}`")
-        except Exception:
-            pass
+        try: await ctx.send(f"⚠️ **Section 4 error:** `{e}`")
+        except Exception: pass
 
     await ctx.send(
         f"🎉 **Done!** Guide complete for `{idea_clean}`.\n\n"
@@ -1508,7 +1494,6 @@ async def guide(ctx, *, idea: str = None):
     try:
         msg = await bot.wait_for("message", check=check, timeout=300)
         reply = msg.content.strip().lower()
-
         if reply in ("yes", "y", "yup", "yeah", "ok", "sure"):
             try:
                 conn = get_db(); cur = conn.cursor()
@@ -1517,15 +1502,11 @@ async def guide(ctx, *, idea: str = None):
                 await ctx.send(f"✅ `{words[-1]}` added to watchlist." if added else f"ℹ️ Already on watchlist.")
             except Exception as e:
                 await ctx.send(f"⚠️ Watchlist error: {e}")
-
         if reply == "export" or reply.startswith("export"):
-            session_data = type("Session", (), {
-                "seed": idea_clean, "words": words,
-                "word_stats": word_stats, "combo_stats": combo_stats,
-            })()
-            report = build_full_report(session_data, verdict, roi, risks, pricing,
-                                        portfolio, design, timing, launch_window,
-                                        ab_titles, graph, dominance)
+            session_data = type("Session", (), {"seed": idea_clean, "words": words,
+                                                "word_stats": word_stats, "combo_stats": combo_stats})()
+            report = build_full_report(session_data, verdict, roi, risks, pricing, portfolio, design,
+                                        timing, launch_window, ab_titles, graph, dominance)
             try:
                 conn = get_db(); cur = conn.cursor()
                 save_consultation(cur, discord_id, idea_clean, verdict, report)
@@ -1533,12 +1514,50 @@ async def guide(ctx, *, idea: str = None):
             except Exception: pass
             file = discord.File(io.BytesIO(report.encode("utf-8")),
                                 filename=f"ugc_report_{idea_clean.replace(' ', '_')}.txt")
-            try:
-                await ctx.send("📄 **Report attached:**", file=file)
-            except Exception as e:
-                await ctx.send(f"⚠️ Attach failed: {e}")
+            try: await ctx.send("📄 **Report attached:**", file=file)
+            except Exception as e: await ctx.send(f"⚠️ Attach failed: {e}")
     except asyncio.TimeoutError:
         pass
+
+
+@bot.command(name="emote_status")
+async def emote_status(ctx):
+    """Diagnostic — shows how many emotes are in the DB."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) FROM items WHERE asset_type_id = 61")
+            emote_count = cur.fetchone()[0] or 0
+        except Exception:
+            rollback_quietly(cur); emote_count = 0
+        try:
+            cur.execute("SELECT COUNT(*) FROM items WHERE name ~* '\\mdance\\M|\\memote\\M|\\mfloss\\M|\\mgriddy\\M|\\mmoonwalk\\M'")
+            kw_emote = cur.fetchone()[0] or 0
+        except Exception:
+            rollback_quietly(cur); kw_emote = 0
+        try:
+            cur.execute("SELECT COUNT(*) FROM items")
+            total = cur.fetchone()[0] or 0
+        except Exception:
+            rollback_quietly(cur); total = 0
+        cur.close(); conn.close()
+
+        embed = discord.Embed(title="💃 Emote Coverage Diagnostic", color=0xff66aa)
+        embed.add_field(name="By AssetTypeId (61)", value=f"**{emote_count:,}** items", inline=True)
+        embed.add_field(name="By Title Keyword", value=f"**{kw_emote:,}** items", inline=True)
+        embed.add_field(name="Total in DB", value=f"**{total:,}** items", inline=True)
+        if emote_count == 0:
+            embed.add_field(name="⚠️ No emotes detected",
+                            value="Run the Daily Scanner workflow on GitHub. It may take a full scan to fetch emotes.",
+                            inline=False)
+        else:
+            embed.add_field(name="✅ Emotes Detected",
+                            value=f"You have **{emote_count:,}** emotes in the database. "
+                                  f"Run the enricher to fill details.",
+                            inline=False)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
 
 
 @bot.command(name="watchlist")
@@ -1550,11 +1569,9 @@ async def watchlist_cmd(ctx):
         rows = cur.fetchall()
         cur.close(); conn.close()
     except Exception as e:
-        await ctx.send(f"⚠️ DB error: {e}")
-        return
+        await ctx.send(f"⚠️ DB error: {e}"); return
     if not rows:
-        await ctx.send("👁️ Your watchlist is empty. Add keywords during `!guide`.")
-        return
+        await ctx.send("👁️ Your watchlist is empty."); return
     embed = discord.Embed(title=f"👁️ {ctx.author.display_name}'s Watchlist",
                           description=f"Tracking **{len(rows)}** keywords:", color=0x00aaff)
     for kw, baseline, added in rows:
@@ -1572,13 +1589,11 @@ async def history_cmd(ctx):
         rows = cur.fetchall()
         cur.close(); conn.close()
     except Exception as e:
-        await ctx.send(f"⚠️ DB error: {e}")
-        return
+        await ctx.send(f"⚠️ DB error: {e}"); return
     if not rows:
-        await ctx.send("📖 No consultation history yet. Run `!guide`.")
-        return
+        await ctx.send("📖 No consultation history yet. Run `!guide`."); return
     embed = discord.Embed(title=f"📖 {ctx.author.display_name}'s Consultation History",
-                          description=f"**{len(rows)}** saved consultations:", color=0xffaa00)
+                          description=f"**{len(rows)}** saved:", color=0xffaa00)
     for seed, label, emoji, when in rows:
         embed.add_field(name=f"{emoji} `{seed}` — {label}",
                         value=when.strftime("%Y-%m-%d %H:%M"), inline=False)
@@ -1606,8 +1621,7 @@ async def dbtest(ctx):
                       "user_profiles", "saved_consultations", "watchlist"]:
             try:
                 cur.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cur.fetchone()[0]
-                lines.append(f"✅ `{table}` — **{count:,}** rows")
+                lines.append(f"✅ `{table}` — **{cur.fetchone()[0]:,}** rows")
             except Exception:
                 rollback_quietly(cur)
                 lines.append(f"❌ `{table}` — missing")
@@ -1650,14 +1664,12 @@ async def trends(ctx):
     rows = cur.fetchall()
     cur.close(); conn.close()
     if not rows:
-        await ctx.send("⚠️ No data yet.")
-        return
+        await ctx.send("⚠️ No data yet."); return
     counter = Counter()
     for name, desc in rows:
         counter.update(extract_words(name))
         counter.update(extract_words(desc))
-    embed = discord.Embed(title="📈 Top Trend Words",
-                          description="Based on top 1,000 items.", color=0xffaa00)
+    embed = discord.Embed(title="📈 Top Trend Words", color=0xffaa00)
     for i, (w, c) in enumerate(counter.most_common(15), 1):
         embed.add_field(name=f"{i}. {w}", value=f"Appears **{c}** times", inline=False)
     await ctx.send(embed=embed)
@@ -1667,8 +1679,7 @@ async def trends(ctx):
 async def analyze(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     pattern = word_boundary_pattern(kw)
     cur.execute("""SELECT name, description, favorite_count FROM items 
@@ -1676,14 +1687,12 @@ async def analyze(ctx, *, keyword: str):
                    AND favorite_count > 0 LIMIT 2000""", (pattern, pattern))
     rows = cur.fetchall()
     if not rows:
-        await ctx.send(f"⚠️ No data for `{kw}`.")
-        cur.close(); conn.close(); return
+        await ctx.send(f"⚠️ No data for `{kw}`."); cur.close(); conn.close(); return
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
         for w in set(extract_words(f"{name} {desc}")):
             if w == kw: continue
-            stats[w]["favs"] += (favs or 0)
-            stats[w]["count"] += 1
+            stats[w]["favs"] += (favs or 0); stats[w]["count"] += 1
     cur.execute("SELECT LOWER(name) FROM items WHERE favorite_count > 0")
     all_names = [r[0] for r in cur.fetchall()]
     word_list = [w for w, s in stats.items() if s["count"] >= 3]
@@ -1700,8 +1709,7 @@ async def analyze(ctx, *, keyword: str):
     cur.close(); conn.close()
     results.sort(key=lambda x: x[3], reverse=True)
     if not results:
-        await ctx.send(f"⚠️ Not enough data for `{kw}`.")
-        return
+        await ctx.send(f"⚠️ Not enough data."); return
     view = SimplePaginator(kw, results, "🧠 Deep Analysis", 0x00ff88, per_page=10)
     embed = view.build_embed()
     embed.description = f"Analyzed **{len(rows)}** items."
@@ -1712,8 +1720,7 @@ async def analyze(ctx, *, keyword: str):
 async def desc_analyze(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     pattern = word_boundary_pattern(kw)
     cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
@@ -1721,13 +1728,11 @@ async def desc_analyze(ctx, *, keyword: str):
                    AND favorite_count > 0 LIMIT 1500""", (pattern,))
     rows = cur.fetchall()
     if not rows:
-        await ctx.send(f"⚠️ No descriptions for `{kw}`.")
-        cur.close(); conn.close(); return
+        await ctx.send(f"⚠️ No descriptions for `{kw}`."); cur.close(); conn.close(); return
     counter = Counter(); word_favs = defaultdict(int)
     for name, desc, favs in rows:
         for w in set(extract_words(desc)):
-            counter[w] += 1
-            word_favs[w] += favs or 0
+            counter[w] += 1; word_favs[w] += favs or 0
     cur.execute("SELECT LOWER(name), COALESCE(LOWER(description), '') FROM items WHERE favorite_count > 0")
     all_rows = cur.fetchall()
     cur.close(); conn.close()
@@ -1746,8 +1751,7 @@ async def desc_analyze(ctx, *, keyword: str):
         results.append((w, avg_favs, comp, avg_favs / math.log1p(comp)))
     results.sort(key=lambda x: x[3], reverse=True)
     if not results:
-        await ctx.send(f"⚠️ Not enough data.")
-        return
+        await ctx.send(f"⚠️ Not enough data."); return
     view = SimplePaginator(kw, results, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
     embed = view.build_embed()
     embed.description = f"Analyzed **{len(rows)}** descriptions."
@@ -1758,14 +1762,12 @@ async def desc_analyze(ctx, *, keyword: str):
 async def opportunity(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
     if not data:
-        await ctx.send(f"⚠️ No data for `{kw}`.")
-        return
+        await ctx.send(f"⚠️ No data for `{kw}`."); return
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -1774,14 +1776,12 @@ async def opportunity(ctx, *, keyword: str):
 async def emote(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
     if not data:
-        await ctx.send(f"⚠️ No emote data for `{kw}`.")
-        return
+        await ctx.send(f"⚠️ No emote data for `{kw}`."); return
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -1790,14 +1790,12 @@ async def emote(ctx, *, keyword: str):
 async def classic(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     data = analyze_opportunity(cur, kw)
     cur.close(); conn.close()
     if not data:
-        await ctx.send(f"⚠️ No classic data for `{kw}`.")
-        return
+        await ctx.send(f"⚠️ No classic data for `{kw}`."); return
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -1806,8 +1804,7 @@ async def classic(ctx, *, keyword: str):
 async def gap(ctx, *, keyword: str):
     kw = keyword.strip().lower()
     if not kw:
-        await ctx.send("❌ Provide a keyword.")
-        return
+        await ctx.send("❌ Provide a keyword."); return
     conn = get_db(); cur = conn.cursor()
     pattern = word_boundary_pattern(kw)
     cur.execute("""SELECT name, COALESCE(description, ''), favorite_count FROM items 
@@ -1815,14 +1812,12 @@ async def gap(ctx, *, keyword: str):
                    AND favorite_count > 50 LIMIT 2000""", (pattern, pattern))
     rows = cur.fetchall()
     if not rows:
-        await ctx.send(f"⚠️ No data for `{kw}`.")
-        cur.close(); conn.close(); return
+        await ctx.send(f"⚠️ No data for `{kw}`."); cur.close(); conn.close(); return
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
         for w in set(extract_words(f"{name} {desc}")):
             if w == kw: continue
-            stats[w]["favs"] += (favs or 0)
-            stats[w]["count"] += 1
+            stats[w]["favs"] += (favs or 0); stats[w]["count"] += 1
     candidates = []
     for w, s in stats.items():
         if s["count"] < 2 or s["count"] > 20: continue
@@ -1830,8 +1825,7 @@ async def gap(ctx, *, keyword: str):
         if af < 500: continue
         candidates.append((w, af))
     if not candidates:
-        await ctx.send(f"⚠️ No gaps for `{kw}`.")
-        cur.close(); conn.close(); return
+        await ctx.send(f"⚠️ No gaps for `{kw}`."); cur.close(); conn.close(); return
     cur.execute("SELECT LOWER(name) FROM items WHERE favorite_count > 0")
     all_names = [r[0] for r in cur.fetchall()]
     word_list = [c[0] for c in candidates]
@@ -1848,8 +1842,7 @@ async def gap(ctx, *, keyword: str):
     cur.close(); conn.close()
     gaps.sort(key=lambda x: x[1], reverse=True)
     if not gaps:
-        await ctx.send(f"⚠️ No gaps found.")
-        return
+        await ctx.send(f"⚠️ No gaps found."); return
     view = SimplePaginator(kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -1890,8 +1883,7 @@ async def track(ctx, item_id: int):
     rows = cur.fetchall()
     cur.close(); conn.close()
     if not rows:
-        await ctx.send(f"⚠️ No history for `{item_id}`.")
-        return
+        await ctx.send(f"⚠️ No history for `{item_id}`."); return
     title = m[0] if m else f"Item {item_id}"
     embed = discord.Embed(title=f"📊 Tracking: {title[:60]}", color=0x66ccff)
     for favs, price, when in rows:
