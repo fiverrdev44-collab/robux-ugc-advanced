@@ -60,6 +60,23 @@ def setup_database():
         ON search_suggestions (suggestion);
     ''')
 
+    # NEW: Self-learned keywords table
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS learned_keywords (
+            id SERIAL PRIMARY KEY,
+            keyword TEXT UNIQUE,
+            score DOUBLE PRECISION,
+            avg_favorites DOUBLE PRECISION,
+            avg_sales DOUBLE PRECISION,
+            item_count INTEGER,
+            learned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    cur.execute('''
+        CREATE INDEX IF NOT EXISTS idx_learned_keywords_score 
+        ON learned_keywords (score DESC);
+    ''')
+
     conn.commit()
     cur.close()
     conn.close()
