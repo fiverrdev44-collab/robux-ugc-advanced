@@ -62,27 +62,26 @@ def matches_seed(text, seed):
 
 
 def analyze_opportunity(cur, kw):
-    """Rich, multi-source opportunity analysis."""
+    """Rich, multi-source opportunity analysis — returns LOTS of results."""
     pattern = word_boundary_pattern(kw)
 
-    # ---- 1. Get all matching items (titles + descriptions) ----
     cur.execute("""
         SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
                favorite_count, price, creator_name
         FROM items
         WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
           AND favorite_count > 0
-        LIMIT 3000
+        LIMIT 5000
     """, (pattern, pattern))
     all_items = cur.fetchall()
 
     if not all_items:
         return None
 
-    # ---- 2. Get search suggestions for seed ----
+    # Seed-matching suggestions
     cur.execute("""
         SELECT DISTINCT suggestion FROM search_suggestions 
-        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 500
+        WHERE suggestion LIKE %s OR seed_keyword LIKE %s LIMIT 1000
     """, (f"%{kw}%", f"%{kw}%"))
     candidates = [r[0] for r in cur.fetchall()]
 
@@ -97,18 +96,17 @@ def analyze_opportunity(cur, kw):
             continue
         if matches_seed(s, kw):
             suggs.append(s)
-    suggs = list(set(suggs))[:50]
+    suggs = list(set(suggs))[:80]
 
-    # ---- 3. Score seed-containing keywords ----
+    # Score seed-matching keywords
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for _, name, desc, favs, price, creator in all_items:
-        # From suggestions - match against title
         for s in suggs:
             if matches_seed(name, s):
                 stats[s]["favs"] += favs or 0
                 stats[s]["count"] += 1
 
-    # Bigrams from titles
+    # Bigrams
     for _, name, _, favs, _, _ in all_items:
         words = name.split()
         for i in range(len(words) - 1):
@@ -125,43 +123,37 @@ def analyze_opportunity(cur, kw):
         af = data["favs"] / data["count"]
         top_keywords.append((s, af, data["count"], af / math.log1p(data["count"])))
     top_keywords.sort(key=lambda x: x[3], reverse=True)
-    top_keywords = top_keywords[:10]
 
-    # ---- 4. ADJACENT keywords (words that co-occur but don't contain seed) ----
+    # Adjacent keywords
     adjacent_counter = Counter()
     for _, name, desc, favs, _, _ in all_items:
-        # Count words from titles that appear alongside the seed
-        words = set(extract_words(name))
-        for w in words:
+        for w in set(extract_words(name)):
             if w != kw and not matches_seed(w, kw):
                 adjacent_counter[w] += 1
-    adjacent = [w for w, _ in adjacent_counter.most_common(50) if _ >= 3][:10]
+    adjacent = [w for w, c in adjacent_counter.most_common(60) if c >= 3]
 
-    # ---- 5. DESCRIPTION keywords (hidden SEO) ----
+    # Description keywords
     desc_counter = Counter()
     for _, _, desc, _, _, _ in all_items:
         desc_counter.update(extract_words(desc))
-    # Remove seed and adjacent dupes
-    desc_only = [w for w, _ in desc_counter.most_common(50) 
-                 if w != kw and w not in adjacent and _ >= 2][:8]
+    desc_only = [w for w, c in desc_counter.most_common(60) 
+                 if w != kw and w not in adjacent and c >= 2]
 
-    # ---- 6. PRICE analysis ----
+    # Prices
     prices = [p for _, _, _, _, p, _ in all_items if p and p > 0]
     median_price = sorted(prices)[len(prices) // 2] if prices else 0
-    # Find price of top-favourited items
-    top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:20]
+    top_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:30]
     top_prices = [p for _, _, _, _, p, _ in top_items if p and p > 0]
     best_price = sorted(top_prices)[len(top_prices) // 2] if top_prices else median_price
 
-    # ---- 7. CREATOR diversity ----
+    # Creators
     creators = [c for _, _, _, _, _, c in all_items if c]
     unique_creators = len(set(creators))
     top_creator_counts = Counter(creators).most_common(1)
     top_creator_share = (top_creator_counts[0][1] / len(all_items) * 100) if top_creator_counts else 0
 
-    # ---- 8. MARKET HEALTH ----
+    # Saturation
     total_competitors = len(all_items)
-    avg_favs = sum(f or 0 for _, _, _, f, _, _ in all_items) / len(all_items)
     if total_competitors < 20:
         saturation = "🟢 Low — untapped!"
     elif total_competitors < 100:
@@ -171,7 +163,7 @@ def analyze_opportunity(cur, kw):
     else:
         saturation = "🔴 Saturated — hard to rank"
 
-    # ---- 9. STYLE patterns ----
+    # Styles
     style_words = ["gothic", "cute", "emo", "y2k", "pastel", "kawaii", "grunge",
                    "cyber", "coquette", "anime", "dark", "light", "fluffy",
                    "cyberpunk", "retro", "vintage", "aesthetic", "preppy",
@@ -182,10 +174,10 @@ def analyze_opportunity(cur, kw):
         for style in style_words:
             if re.search(r'\b' + style + r'\b', text):
                 style_counts[style] += 1
-    top_styles = style_counts.most_common(5)
+    top_styles = style_counts.most_common(8)
 
-    # ---- 10. TOP ITEMS to study ----
-    study_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:3]
+    # Study items
+    study_items = sorted(all_items, key=lambda x: x[3] or 0, reverse=True)[:5]
 
     return {
         "seed": kw,
@@ -198,10 +190,81 @@ def analyze_opportunity(cur, kw):
         "unique_creators": unique_creators,
         "top_creator_share": round(top_creator_share, 1),
         "saturation": saturation,
-        "avg_favs": round(avg_favs, 0),
         "top_styles": top_styles,
         "study_items": study_items,
     }
+
+
+# ============================================================
+# PAGINATION VIEW with Arrow Buttons
+# ============================================================
+class PaginatedView(discord.ui.View):
+    """Buttons for navigating multiple pages of keywords."""
+    def __init__(self, keyword, items, title_prefix, color, per_page=10):
+        super().__init__(timeout=180)
+        self.keyword = keyword
+        self.items = items
+        self.title_prefix = title_prefix
+        self.color = color
+        self.per_page = per_page
+        self.page = 0
+        self.max_page = max(0, (len(items) - 1) // per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        # Disable buttons if at edges
+        self.prev_btn.disabled = (self.page == 0)
+        self.next_btn.disabled = (self.page >= self.max_page)
+        self.first_btn.disabled = (self.page == 0)
+        self.last_btn.disabled = (self.page >= self.max_page)
+        self.page_indicator.label = f"Page {self.page + 1}/{self.max_page + 1}"
+
+    def build_embed(self):
+        start = self.page * self.per_page
+        end = start + self.per_page
+        chunk = self.items[start:end]
+
+        embed = discord.Embed(
+            title=f"{self.title_prefix}: `{self.keyword}`",
+            description=f"Showing **{start + 1}–{min(end, len(self.items))}** of **{len(self.items)}** results. Use buttons to navigate.",
+            color=self.color
+        )
+        for i, (w, af, c, sc) in enumerate(chunk, start + 1):
+            embed.add_field(
+                name=f"{i}. {w}",
+                value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
+                inline=False
+            )
+        embed.set_footer(text=f"Page {self.page + 1} of {self.max_page + 1}")
+        return embed
+
+    @discord.ui.button(label="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def first_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 0
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="◀️", style=discord.ButtonStyle.primary, row=0)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Page 1/1", style=discord.ButtonStyle.secondary, row=0, disabled=True)
+    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pass
+
+    @discord.ui.button(label="▶️", style=discord.ButtonStyle.primary, row=0)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.max_page, self.page + 1)
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.secondary, row=0)
+    async def last_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = self.max_page
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
 
 @bot.event
@@ -261,7 +324,7 @@ async def analyze(ctx, *, keyword: str):
     cur.execute("""
         SELECT name, description, favorite_count FROM items 
         WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
-          AND favorite_count > 0 LIMIT 2000
+          AND favorite_count > 0 LIMIT 3000
     """, (pattern, pattern))
     rows = cur.fetchall()
     if not rows:
@@ -289,14 +352,15 @@ async def analyze(ctx, *, keyword: str):
         results.append((w, af, c, af / math.log1p(c)))
     cur.close(); conn.close()
     results.sort(key=lambda x: x[3], reverse=True)
-    embed = discord.Embed(title=f"🧠 Deep Analysis for `{kw}`",
-                          description=f"Analyzed **{len(rows)}** items.",
-                          color=0x00ff88)
-    for i, (w, af, c, sc) in enumerate(results[:15], 1):
-        embed.add_field(name=f"{i}. {w}",
-                        value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c:,}**",
-                        inline=False)
-    await ctx.send(embed=embed)
+
+    if not results:
+        await ctx.send(f"⚠️ Not enough data for `{kw}`.")
+        return
+
+    view = PaginatedView(kw, results, "🧠 Deep Analysis", 0x00ff88, per_page=10)
+    embed = view.build_embed()
+    embed.description = f"Analyzed **{len(rows)}** items. Use buttons below to navigate."
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.command(name="desc_analyze")
@@ -316,11 +380,9 @@ async def desc_analyze(ctx, *, keyword: str):
     counter = Counter()
     for (d,) in rows:
         counter.update(extract_words(d))
-    embed = discord.Embed(title=f"📝 Hidden Keywords in `{kw}` descriptions",
-                          color=0xaa66ff)
-    for i, (w, c) in enumerate(counter.most_common(15), 1):
-        embed.add_field(name=f"{i}. {w}", value=f"Used in **{c}** descriptions", inline=False)
-    await ctx.send(embed=embed)
+    items = [(w, c, 0, c) for w, c in counter.most_common(100)]
+    view = PaginatedView(kw, items, "📝 Hidden Description Keywords", 0xaa66ff, per_page=10)
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="opportunity")
@@ -338,65 +400,66 @@ async def opportunity(ctx, *, keyword: str):
         await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `bear`.")
         return
 
-    # ---- Build the rich embed ----
-    embed = discord.Embed(
+    # ---- SUMMARY EMBED ----
+    summary = discord.Embed(
         title=f"💎 Full Opportunity Analysis: `{kw}`",
-        description=f"Analyzed **{data['total_matches']}** matching items across titles + descriptions.",
+        description=f"Analyzed **{data['total_matches']}** matching items.",
         color=0xff00cc
     )
 
-    # 1. Top keywords
+    # Top 5 keywords preview
     if data["top_keywords"]:
         lines = []
-        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:7], 1):
-            lines.append(f"**{i}. {p}**\nOpp: `{sc:,.0f}` | AvgFav: `{af:,.0f}` | Comp: `{c}`")
-        embed.add_field(name="🎯 Top Keywords (contain your seed)",
-                        value="\n".join(lines), inline=False)
+        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:5], 1):
+            lines.append(f"**{i}. {p}** — Score: `{sc:,.0f}` | AvgFav: `{af:,.0f}` | Comp: `{c}`")
+        summary.add_field(name="🎯 Top 5 Keywords (see full list with buttons ⬇️)",
+                          value="\n".join(lines), inline=False)
 
-    # 2. Adjacent keywords
     if data["adjacent"]:
-        adj_str = " · ".join(f"`{w}`" for w in data["adjacent"])
-        embed.add_field(name="🔗 Adjacent Keywords (new angles)",
-                        value=adj_str, inline=False)
+        adj_str = " · ".join(f"`{w}`" for w in data["adjacent"][:15])
+        summary.add_field(name="🔗 Adjacent Keywords", value=adj_str, inline=False)
 
-    # 3. Description keywords
     if data["description_keywords"]:
-        desc_str = " · ".join(f"`{w}`" for w in data["description_keywords"])
-        embed.add_field(name="📝 Hidden Description Keywords",
-                        value=desc_str, inline=False)
+        desc_str = " · ".join(f"`{w}`" for w in data["description_keywords"][:12])
+        summary.add_field(name="📝 Hidden Description Keywords", value=desc_str, inline=False)
 
-    # 4. Price insight
-    embed.add_field(
+    summary.add_field(
         name="💰 Price Insight",
         value=f"Median: **{data['median_price']} R$** | Best-seller price: **{data['best_price']} R$**",
         inline=False
     )
 
-    # 5. Market health
-    embed.add_field(
+    summary.add_field(
         name="📊 Market Health",
         value=f"Competitors: **{data['total_matches']}** | Saturation: **{data['saturation']}**\n"
               f"Unique creators: **{data['unique_creators']}** | Top creator owns **{data['top_creator_share']}%**",
         inline=False
     )
 
-    # 6. Style patterns
     if data["top_styles"]:
         styles_str = " · ".join(f"`{s}` ({c})" for s, c in data["top_styles"])
-        embed.add_field(name="🎨 Style Patterns",
-                        value=styles_str, inline=False)
+        summary.add_field(name="🎨 Style Patterns", value=styles_str, inline=False)
 
-    # 7. Study items
     if data["study_items"]:
         study_str = "\n".join(
-            f"`{iid}` — {name[:35]}... ({favs:,} favs)"
+            f"`{iid}` — {name[:40]} ({favs:,} favs)"
             for iid, name, _, favs, _, _ in data["study_items"]
         )
-        embed.add_field(name="👀 Study These Top Items",
-                        value=study_str, inline=False)
+        summary.add_field(name="👀 Study These Top Items", value=study_str, inline=False)
 
-    embed.set_footer(text="Use the keywords + description words in your next item.")
-    await ctx.send(embed=embed)
+    summary.set_footer(text="📄 Full keyword list sent as separate paginated message below...")
+    await ctx.send(embed=summary)
+
+    # ---- PAGINATED KEYWORD LIST ----
+    if data["top_keywords"]:
+        view = PaginatedView(
+            kw,
+            data["top_keywords"],
+            "🎯 Full Keyword List",
+            0x00ff88,
+            per_page=10
+        )
+        await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="emote")
@@ -411,16 +474,11 @@ async def emote(ctx, *, keyword: str):
     if not data:
         await ctx.send(f"⚠️ No emote data for `{kw}`. Try `dance`, `wave`, `floss`.")
         return
-    embed = discord.Embed(title=f"💃 Emote Opportunity: `{kw}`",
-                          color=0xff66aa)
     if data["top_keywords"]:
-        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:10], 1):
-            embed.add_field(name=f"{i}. {p}",
-                            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c}**",
-                            inline=False)
-    if data["adjacent"]:
-        embed.add_field(name="🔗 Adjacent", value=" · ".join(f"`{w}`" for w in data["adjacent"]), inline=False)
-    await ctx.send(embed=embed)
+        view = PaginatedView(kw, data["top_keywords"], "💃 Emote Opportunity", 0xff66aa, per_page=10)
+        await ctx.send(embed=view.build_embed(), view=view)
+    else:
+        await ctx.send(f"⚠️ No results for `{kw}`.")
 
 
 @bot.command(name="classic")
@@ -435,16 +493,11 @@ async def classic(ctx, *, keyword: str):
     if not data:
         await ctx.send(f"⚠️ No classic clothing data for `{kw}`.")
         return
-    embed = discord.Embed(title=f"👕 Classic Clothing: `{kw}`",
-                          color=0x66ccff)
     if data["top_keywords"]:
-        for i, (p, af, c, sc) in enumerate(data["top_keywords"][:10], 1):
-            embed.add_field(name=f"{i}. {p}",
-                            value=f"Score: **{sc:,.0f}** | AvgFav: **{af:,.0f}** | Comp: **{c}**",
-                            inline=False)
-    if data["adjacent"]:
-        embed.add_field(name="🔗 Adjacent", value=" · ".join(f"`{w}`" for w in data["adjacent"]), inline=False)
-    await ctx.send(embed=embed)
+        view = PaginatedView(kw, data["top_keywords"], "👕 Classic Clothing", 0x66ccff, per_page=10)
+        await ctx.send(embed=view.build_embed(), view=view)
+    else:
+        await ctx.send(f"⚠️ No results for `{kw}`.")
 
 
 @bot.command(name="gap")
@@ -458,11 +511,11 @@ async def gap(ctx, *, keyword: str):
     cur.execute("""
         SELECT name, COALESCE(description, ''), favorite_count FROM items 
         WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
-          AND favorite_count > 50 LIMIT 2000
+          AND favorite_count > 50 LIMIT 3000
     """, (pattern, pattern))
     rows = cur.fetchall()
     if not rows:
-        await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`, `chains`.")
+        await ctx.send(f"⚠️ No data for `{kw}`. Try `emo`, `beanie`, `grunge`.")
         cur.close(); conn.close(); return
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
     for name, desc, favs in rows:
@@ -491,19 +544,16 @@ async def gap(ctx, *, keyword: str):
     for w, af in candidates:
         c = comp_map.get(w, 0)
         if c < 50:
-            gaps.append((w, af, c))
+            gaps.append((w, af, c, af / math.log1p(max(c, 1))))
     cur.close(); conn.close()
     gaps.sort(key=lambda x: x[1], reverse=True)
-    embed = discord.Embed(title=f"🕳️ Market Gaps for `{kw}`",
-                          description="High demand + low competition (<50 items).",
-                          color=0x00ffcc)
+
     if not gaps:
-        embed.add_field(name="No gaps found", value="Try `emo`, `beanie`, `grunge`.", inline=False)
-    for i, (w, af, c) in enumerate(gaps[:15], 1):
-        embed.add_field(name=f"{i}. {w}",
-                        value=f"AvgFav: **{af:,.0f}** | Comp: **{c}**",
-                        inline=False)
-    await ctx.send(embed=embed)
+        await ctx.send(f"⚠️ No gaps found for `{kw}`.")
+        return
+
+    view = PaginatedView(kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
+    await ctx.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="velocity")
@@ -512,22 +562,31 @@ async def velocity(ctx):
     cur.execute("""
         SELECT item_id, MAX(favorite_count) - MIN(favorite_count), COUNT(*) 
         FROM item_history GROUP BY item_id HAVING COUNT(*) >= 2 
-        ORDER BY 2 DESC LIMIT 10
+        ORDER BY 2 DESC LIMIT 50
     """)
     rows = cur.fetchall()
     if not rows:
         await ctx.send("⚠️ Not enough history yet. Run enricher 2+ times.")
         cur.close(); conn.close(); return
-    embed = discord.Embed(title="🚀 Fastest Rising Items", color=0xff5500)
-    for i, (iid, growth, snaps) in enumerate(rows, 1):
+    items = []
+    for iid, growth, snaps in rows:
         cur.execute("SELECT name, price FROM items WHERE id = %s", (iid,))
         r = cur.fetchone()
         name = r[0] if r else f"Item {iid}"
         price = r[1] if r else "?"
-        embed.add_field(name=f"{i}. {name[:50]}",
+        items.append((name[:50], growth, price, growth))
+    cur.close(); conn.close()
+
+    embed = discord.Embed(
+        title="🚀 Fastest Rising Items",
+        description=f"Top **{len(items)}** fastest-rising items since tracking began.",
+        color=0xff5500
+    )
+    for i, (name, growth, price, _) in enumerate(items[:10], 1):
+        embed.add_field(name=f"{i}. {name}",
                         value=f"📈 +**{growth:,}** favs | 💰 {price} R$",
                         inline=False)
-    cur.close(); conn.close()
+    embed.set_footer(text="Top 10 shown")
     await ctx.send(embed=embed)
 
 
