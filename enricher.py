@@ -5,7 +5,7 @@ from database import get_db_connection, setup_database
 
 DETAILS_API = "https://economy.roblox.com/v2/assets/{}/details"
 DELAY = 0.5
-BATCH_SIZE = 50
+BATCH_SIZE = 500
 
 def enrich_items():
     setup_database()
