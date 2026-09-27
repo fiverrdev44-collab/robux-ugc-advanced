@@ -16,11 +16,31 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 STOP_WORDS = {
+    # Common English stop words
     "the","a","an","and","of","in","to","for","is","on","that","by","with",
     "from","as","it","at","be","or","no","not","but","all","are","was","were",
     "they","them","his","her","my","your","its","i","you","he","she","we","me",
     "us","our","new","one","if","so","up","out","just","can","also","do","get",
-    "has","had","have","did","more","some","like","this","will","use","used"
+    "has","had","have","did","more","some","like","this","will","use","used",
+    "very","much","many","make","made","would","could","should","may","might",
+    "must","shall","than","then","there","here","when","where","why","how",
+    "what","who","which","am","been","being","having",
+    # URL fragments + Roblox metadata
+    "http","https","www","com","net","org","roblox","catalog","category",
+    "subcategory","creatorname","creator","keyword","keywords","group",
+    "assetid","assettype","itemtype","item","id","href","link","url",
+    "library","bundles","bundle","store","shop","search","results","page",
+    # Roblox-specific junk
+    "assets","asset","limited","unique","ugc","robux","rp","free",
+    "sale","sell","selling","buy","purchase","check",
+    "community","join","follow","discord","twitter","instagram",
+    "youtube","tiktok","social","socials","click","below","above",
+    # Meta
+    "version","update","updated","reupload","reuploaded","original","credit",
+    "credits","inspired","based","similar","style","styles","design","designed",
+    # Filler
+    "really","actually","literally","basically","super","still","even",
+    "ever","never","always","sometimes","maybe"
 }
 
 
@@ -29,10 +49,15 @@ def get_db():
 
 
 def extract_words(text):
+    """Extract clean words from text — removes URLs and junk."""
     if not text:
         return []
+    # Remove URLs first
+    text = re.sub(r'http\S+|www\.\S+', ' ', text)
+    # Remove special characters that break words
+    text = re.sub(r'[^\w\s]', ' ', text)
     words = re.findall(r"[a-zA-Z]+", text.lower())
-    return [w for w in words if len(w) > 2 and w not in STOP_WORDS]
+    return [w for w in words if len(w) > 3 and w not in STOP_WORDS]
 
 
 @bot.event
