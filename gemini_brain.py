@@ -1,9 +1,10 @@
 """
 gemini_brain.py — Elite 2-pass hybrid AI for Roblox UGC domination.
 
-Pass 1 (extract_keywords): casual description -> structured intent JSON.
-Pass 2 (synthesize_hybrid): intent + DB data + Gemini's culture brain -> strategy.
-verify_titles(): hard gate — every title word must exist in DB allow-list.
+Pass 1   (extract_keywords):     casual description -> structured intent JSON.
+Pass 1.5 (expand_search_terms):  bridge failed terms to real DB vocab via Gemini.
+Pass 2   (synthesize_hybrid):    intent + DB data + culture brain -> strategy.
+verify_titles():                 hard gate — every title word must exist in DB.
 
 Rule: Database = truth. Gemini = strategist. Never mix them.
 """
@@ -146,6 +147,80 @@ def all_terms(intent: dict) -> list:
 
 
 # =========================================================================
+# PASS 1.5 — BRIDGE: when user's words don't exist in DB
+# =========================================================================
+_EXPAND_PROMPT = """You are a Roblox UGC database search expert.
+
+The creator's original intent did not return enough results in our catalog.
+Your job: find ALTERNATIVE search terms that WILL match real Roblox items.
+
+ORIGINAL INTENT:
+{intent_json}
+
+WORDS THAT FAILED (few/no matches in DB):
+{failed_terms}
+
+REAL WORDS THAT EXIST IN OUR DB (sample of the most common {vocab_size} catalog terms):
+{db_vocab_sample}
+
+RULES:
+- Suggest 15-25 alternative search terms SEMANTICALLY SIMILAR to the failed terms,
+  but LIKELY TO EXIST in a Roblox UGC catalog.
+- Prefer words from the DB vocabulary sample whenever they fit the intent.
+- Include: synonyms, related aesthetics, style words, item types, vibe words.
+- Lowercase. Single words or short phrases. No punctuation.
+- DO NOT include the failed terms themselves.
+- Think: what would the items on Roblox ACTUALLY be called?
+
+Return ONLY valid JSON:
+{{"expanded_terms": ["...", "..."], "reasoning": "one-line explanation"}}
+
+OUTPUT ONLY THE JSON.
+"""
+
+
+def expand_search_terms(intent: dict, db_vocab_sample: list, failed_terms: list) -> dict:
+    """Pass 1.5. Bridge failed terms to real DB words via Gemini."""
+    if not failed_terms:
+        return {"expanded_terms": [], "reasoning": "no failed terms"}
+
+    intent_json = json.dumps({k: v for k, v in intent.items()
+                              if k not in ("search_terms",)}, indent=2)
+    vocab_str = ", ".join(db_vocab_sample[:400])
+
+    prompt = _EXPAND_PROMPT.format(
+        intent_json=intent_json,
+        failed_terms=", ".join(failed_terms),
+        vocab_size=len(db_vocab_sample),
+        db_vocab_sample=vocab_str,
+    )
+
+    raw = _generate(prompt, json_mode=True, temperature=0.6, max_tokens=1024)
+    if not raw:
+        return {"expanded_terms": [], "reasoning": "gemini returned nothing"}
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return {"expanded_terms": [], "reasoning": "parse failed"}
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return {"expanded_terms": [], "reasoning": "parse failed"}
+
+    terms = data.get("expanded_terms", [])
+    if isinstance(terms, str):
+        terms = [terms]
+    clean = [str(t).lower().strip() for t in terms if str(t).strip()]
+    return {
+        "expanded_terms": clean[:30],
+        "reasoning": str(data.get("reasoning", ""))[:200],
+    }
+
+
+# =========================================================================
 # PASS 2 — SYNTHESIS (the $20k strategist)
 # =========================================================================
 _SYNTH_PROMPT = """You are the world's #1 Roblox UGC strategist. Your launch reports are worth $20,000 because you combine two weapons:
@@ -153,7 +228,8 @@ _SYNTH_PROMPT = """You are the world's #1 Roblox UGC strategist. Your launch rep
 WEAPON 1 — HARD DATA (given below, this is the ONLY source of truth for names, prices, stats):
 - ALLOW-LIST of real keywords pulled from millions of live Roblox items
 - TOP COMPETING ITEMS with real favourite counts and prices
-- MARKET STATS (item count, price range, sales)
+- MARKET STATS (item count, price range, sales, competition density)
+- SEARCH DIAGNOSTICS (direct hits vs Gemini-bridged terms)
 
 WEAPON 2 — YOUR LETHAL CULTURE BRAIN (use this freely):
 - TikTok / YouTube / Instagram virality mechanics
@@ -168,14 +244,18 @@ RULES — CRITICAL:
 3. Only use numbers I give you. Never fabricate.
 4. Be OPINIONATED. Give specific recommendations, not "it depends".
 5. Write like a strategist briefing a paying client. Concrete, tactical, ruthless.
-6. No filler. No AI disclaimers. No hedging.
+6. If SEARCH DIAGNOSTICS show "expansion used", it means the user's literal words
+   don't exist in the catalog. EXPLAIN this in market_diagnosis and lean into
+   the bridged terms as the real opportunity. This is insight the user cannot get anywhere else.
+7. No filler. No AI disclaimers. No hedging.
 
 OUTPUT — return ONLY valid JSON with this EXACT schema:
 
 {{
   "titles": ["title 1", "title 2", "title 3"],
+  "search_diagnosis": "2-3 sentences: which of the user's words actually exist in the catalog vs which had to be bridged, and what that reveals",
   "positioning": "2-3 sentences: how to position against the competitors you can see",
-  "market_diagnosis": "3-4 sentences: honest read of market state, saturation, what's winning",
+  "market_diagnosis": "3-4 sentences: honest read of saturation, winners, losers, and CTR signals (avg favs per item)",
   "trend_intel": "2-3 sentences: is this trend rising/peaking/dying? Specific launch window",
   "price_strategy": "2-3 sentences: price recommendation with psychology (charm pricing, anchoring, etc.)",
   "seo_description": "2-3 sentence Roblox item description, keyword-rich, copy-paste ready",
@@ -205,11 +285,15 @@ TOP COMPETING ITEMS:
 
 MARKET STATS:
 {market_stats}
+
+SEARCH DIAGNOSTICS:
+{search_diagnostics}
 """
 
 
 def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
-                      item_type="unknown", trend_source="none"):
+                      item_type="unknown", trend_source="none",
+                      search_diagnostics=None):
     if not allow_list:
         return {}
 
@@ -227,7 +311,23 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         f"- price avg: R${market_stats.get('price_avg', 0)}",
         f"- price max: R${market_stats.get('price_max', 0)}",
         f"- total sales (matched): {market_stats.get('total_sales', 0):,}",
+        f"- avg favourites/item: {market_stats.get('avg_favs', 0):,}",
+        f"- median favourites: {market_stats.get('median_favs', 0):,}",
+        f"- winner threshold (top 10%): {market_stats.get('winner_favs', 0):,} favs",
+        f"- winners in set (>10k favs): {market_stats.get('winner_count', 0):,}",
     ]
+
+    diag = search_diagnostics or {}
+    diag_lines = [
+        f"- direct term matches: {diag.get('direct_matches', 0):,}",
+        f"- bridge/expansion used: {'YES' if diag.get('expansion_used') else 'no'}",
+    ]
+    if diag.get("expanded_terms"):
+        diag_lines.append(f"- bridged terms: {', '.join(diag['expanded_terms'][:15])}")
+    if diag.get("reasoning"):
+        diag_lines.append(f"- bridge reasoning: {diag['reasoning']}")
+    if diag.get("failed_terms"):
+        diag_lines.append(f"- failed user terms: {', '.join(diag['failed_terms'][:10])}")
 
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
@@ -237,6 +337,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         allow_list=", ".join(allow_list),
         top_items="\n".join(top_lines) or "(none)",
         market_stats="\n".join(stats_lines),
+        search_diagnostics="\n".join(diag_lines) or "(none)",
     )
 
     raw = _generate(prompt, json_mode=True, temperature=0.85, max_tokens=8192)
