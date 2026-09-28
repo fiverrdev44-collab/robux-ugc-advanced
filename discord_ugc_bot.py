@@ -2055,7 +2055,7 @@ def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown")
     if item_type and item_type != "unknown":
         lines.append(f"*Detected item type: **{item_type.upper()}***")
     if stats.get("expansion_used"):
-        lines.append("*Search tier: **Tier 2** (Gemini bridged missing terms)*")
+        lines.append("*Search tier: **Tier 2** (AI bridged missing terms)*")
     else:
         lines.append("*Search tier: **Tier 1** (direct DB hits)*")
     lines.append("")
@@ -2120,17 +2120,21 @@ def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown")
 @bot.command(name="ai_status")
 async def ai_status(ctx):
     if is_available():
-        await ctx.send(
-            "**🧠 Gemini AI: ONLINE**\n"
-            f"Model: `{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}`\n"
-            "Commands ready: `!brainstorm`, `!ask`\n"
-            "Search tiers: Tier 1 (direct) + Tier 2 (Gemini bridge)"
-        )
+        gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        omodel = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+        has_or = bool(os.getenv("OPENROUTER_API_KEY", "").strip())
+        lines = [
+            "**🧠 AI Status: ONLINE**",
+            f"• Primary: `Gemini` ({gmodel})",
+            f"• Fallback: {'`OpenRouter` (' + omodel + ')' if has_or else '❌ not configured'}",
+            "Commands: `!brainstorm`, `!ask`, `!ai_debug`",
+        ]
+        await ctx.send("\n".join(lines))
     else:
         await ctx.send(
-            "**🧠 Gemini AI: OFFLINE**\n"
-            "Check that `GEMINI_API_KEY` is set on Render and that "
-            "`google-generativeai` is in `requirements.txt`."
+            "**🧠 AI Status: OFFLINE**\n"
+            "No AI provider configured. Check `GEMINI_API_KEY` "
+            "and/or `OPENROUTER_API_KEY` on Render."
         )
 
 
@@ -2140,15 +2144,20 @@ async def brainstorm(ctx, *, description: str = ""):
         await ctx.send("Usage: `!brainstorm rasputin dance emote from youtube`")
         return
     if not is_available():
-        await ctx.send("Gemini is offline. Run `!ai_status`.")
+        await ctx.send("AI is offline. Run `!ai_status`.")
         return
 
     progress = await ctx.send("🧠 **Pass 1:** Extracting intent...")
 
     intent = extract_keywords(description)
     if not intent:
-        await progress.edit(content="❌ Pass 1 failed — Gemini returned nothing.")
-        return
+        await progress.edit(content="⚠️ Pass 1 failed — using keyword-only fallback...")
+        words_raw = re.findall(r"[a-z]{3,}", description.lower())
+        intent = {
+            "primary": words_raw, "synonyms": [], "style": [], "vibe": [],
+            "colors": [], "references": [], "search_terms": words_raw,
+            "item_type": "unknown", "trend_source": "none",
+        }
 
     item_type = intent.get("item_type", "unknown")
     trend_source = intent.get("trend_source", "none")
@@ -2172,7 +2181,7 @@ async def brainstorm(ctx, *, description: str = ""):
 
     if not allow_list:
         await progress.edit(
-            content=("❌ **Nothing matched — not even after Gemini bridge.**\n"
+            content=("❌ **Nothing matched — not even after AI bridge.**\n"
                      "Your DB is too small for this niche. Run the enricher 10+ "
                      "more times, then try again.")
         )
@@ -2180,7 +2189,7 @@ async def brainstorm(ctx, *, description: str = ""):
 
     if stats.get("expansion_used"):
         bridge_msg = (
-            f"🌉 **Tier 2: Gemini bridge engaged.**\n"
+            f"🌉 **Tier 2: AI bridge engaged.**\n"
             f"• Failed user terms: `{', '.join(stats.get('failed_terms', [])[:8])}`\n"
             f"• Bridge reasoning: *{stats.get('reasoning', '—')}*\n"
             f"• Bridged to: `{', '.join(stats.get('expanded_terms', [])[:12])}`\n\n"
@@ -2195,9 +2204,10 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"• Winner threshold: **{stats.get('winner_favs', 0):,}** favs\n"
                  f"• Winners (>10k): **{stats.get('winner_count', 0):,}**  "
                  f"• Strugglers (<1k): **{stats.get('loser_count', 0):,}**\n\n"
-                 f"🧠 **Pass 2:** Gemini strategist at work...")
+                 f"🧠 **Pass 2:** AI strategist at work...")
     )
 
+    synth = None
     try:
         synth = await asyncio.to_thread(
             synthesize_hybrid, description, allow_list, top_items, stats,
@@ -2209,11 +2219,48 @@ async def brainstorm(ctx, *, description: str = ""):
              "reasoning": stats.get("reasoning", "")}
         )
     except Exception as e:
-        await progress.edit(content=f"❌ Pass 2 failed: `{e}`")
-        return
+        print(f"[brainstorm] synth failed: {e}", flush=True)
+        synth = None
 
     if not synth:
-        await progress.edit(content="❌ Synthesis failed — Gemini returned nothing.")
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        fallback_lines = ["⚠️ **AI returned nothing — showing raw market data only.**\n"]
+        fallback_lines.append(
+            "*(Both Gemini and OpenRouter failed. Temporary capacity spike — "
+            "try again in 5–10 minutes for the full strategy report.)*\n"
+        )
+        fallback_lines.append(f"**🎯 Terms:** `{', '.join(terms[:15])}`")
+        fallback_lines.append(
+            f"**📊 Matched:** {stats['count']:,} real items · "
+            f"avg favs {stats.get('avg_favs', 0):,} · "
+            f"winner bar {stats.get('winner_favs', 0):,}"
+        )
+        fallback_lines.append(
+            f"**💰 Price:** avg **R${stats.get('price_avg', 0)}** · "
+            f"range R${stats.get('price_min', 0)}–{stats.get('price_max', 0)}"
+        )
+        if top_items:
+            fallback_lines.append("\n**🥊 Top competitors:**")
+            for it in top_items[:5]:
+                name = (it.get("name") or "")[:60]
+                favs = it.get("favourite_count") or 0
+                price = it.get("price") or 0
+                fallback_lines.append(f"• `{name}` — {favs:,} favs · R${price}")
+        if allow_list:
+            kw_str = ", ".join(f"`{k}`" for k in allow_list[:20])
+            fallback_lines.append(f"\n**🎯 Top real keywords:**\n{kw_str}")
+        fallback_lines.append(
+            "\n**📈 Try this instead:** use `!opportunity <keyword>` for a "
+            "deeper data-driven report without AI."
+        )
+
+        body = "\n".join(fallback_lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i + 1900])
         return
 
     verified, rejected = verify_titles(synth.get("titles") or [], allow_list)
@@ -2235,18 +2282,18 @@ async def ask_cmd(ctx, *, question: str = ""):
         await ctx.send("Usage: `!ask how does the Roblox UGC algo rank new items?`")
         return
     if not is_available():
-        await ctx.send("Gemini is offline. Run `!ai_status`.")
+        await ctx.send("AI is offline. Run `!ai_status`.")
         return
 
     progress = await ctx.send("🧠 Thinking...")
     try:
         answer = await asyncio.to_thread(ask_ai, question)
     except Exception as e:
-        await progress.edit(content=f"❌ Gemini failed: `{e}`")
+        await progress.edit(content=f"❌ AI failed: `{e}`")
         return
 
     if not answer:
-        await progress.edit(content="❌ Gemini returned nothing.")
+        await progress.edit(content="❌ AI returned nothing. Try again in a moment.")
         return
 
     try:
@@ -2264,90 +2311,69 @@ async def ask_cmd(ctx, *, question: str = ""):
 
 @bot.command(name="ai_debug")
 async def ai_debug(ctx):
-    """Diagnostic — shows exactly what's failing with Gemini."""
-    lines = ["**🔬 Gemini Debug Report**\n"]
+    """Diagnostic — shows status of every AI provider."""
+    lines = ["**🔬 AI Debug Report**\n"]
 
-    key = os.getenv("GEMINI_API_KEY", "")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    lines.append(f"**Env vars:**")
-    lines.append(f"• GEMINI_API_KEY: `{key[:8] if key else 'MISSING'}...` (len {len(key)})")
-    lines.append(f"• GEMINI_MODEL: `{model}`")
+    gkey = os.getenv("GEMINI_API_KEY", "")
+    gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    okey = os.getenv("OPENROUTER_API_KEY", "")
+    omodel = os.getenv("OPENROUTER_MODEL",
+                       "nvidia/nemotron-3-super-120b-a12b:free")
+
+    lines.append("**Env vars:**")
+    lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
+    lines.append(f"• GEMINI_MODEL: `{gmodel}`")
+    lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
+    lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
     lines.append("")
 
-    if not key:
-        lines.append("❌ GEMINI_API_KEY is empty. Add it on Render.")
-        await ctx.send("\n".join(lines))
-        return
-
-    lines.append("**Installed SDKs:**")
-    has_new = False
-    has_old = False
-    try:
-        import google.genai as new_genai
-        ver = getattr(new_genai, "__version__", "unknown")
-        lines.append(f"• `google-genai` (new): ✅ v{ver}")
-        has_new = True
-    except Exception as e:
-        lines.append(f"• `google-genai` (new): ❌ {e}")
-
-    try:
-        import google.generativeai as old_gen
-        ver = getattr(old_gen, "__version__", "unknown")
-        lines.append(f"• `google-generativeai` (old): ✅ v{ver}")
-        has_old = True
-    except Exception as e:
-        lines.append(f"• `google-generativeai` (old): ❌ {e}")
-    lines.append("")
-
-    lines.append("**Live API test** (`say hello`):")
-
-    if has_new:
+    # Gemini test
+    lines.append("**Gemini test** (`say hello`):")
+    if not gkey:
+        lines.append("• ❌ GEMINI_API_KEY not set")
+    else:
         try:
             from google import genai as g
-            client = g.Client(api_key=key)
+            client = g.Client(api_key=gkey)
             resp = client.models.generate_content(
-                model=model,
+                model=gmodel,
                 contents="Say only the word: hello",
             )
             text = (resp.text or "").strip()
-            lines.append(f"• NEW SDK response: `{repr(text)[:150]}`")
-            if not text:
-                lines.append("• ⚠️ Empty response — checking finish_reason...")
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
                 if getattr(resp, "candidates", None):
-                    c = resp.candidates[0]
-                    fr = getattr(c, "finish_reason", "?")
+                    fr = getattr(resp.candidates[0], "finish_reason", "?")
                     lines.append(f"• finish_reason: `{fr}`")
-                else:
-                    lines.append("• ❌ No candidates returned at all")
         except Exception as e:
-            lines.append(f"• ❌ NEW SDK error: `{type(e).__name__}: {str(e)[:250]}`")
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+    lines.append("")
 
-    if has_old and not has_new:
+    # OpenRouter test
+    lines.append("**OpenRouter test** (`say hello`):")
+    if not okey:
+        lines.append("• ❌ OPENROUTER_API_KEY not set")
+    else:
         try:
-            import google.generativeai as old_gen
-            old_gen.configure(api_key=key)
-            m = old_gen.GenerativeModel(model)
-            resp = m.generate_content("Say only the word: hello")
-            text = (resp.text or "").strip()
-            lines.append(f"• OLD SDK response: `{repr(text)[:150]}`")
+            from openai import OpenAI
+            or_client = OpenAI(
+                api_key=okey,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            resp = or_client.chat.completions.create(
+                model=omodel,
+                messages=[{"role": "user", "content": "Say only the word: hello"}],
+                max_tokens=20,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
         except Exception as e:
-            lines.append(f"• ❌ OLD SDK error: `{type(e).__name__}: {str(e)[:250]}`")
-
-    if has_new:
-        lines.append("")
-        lines.append("**Model name probe:**")
-        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"]:
-            try:
-                from google import genai as g
-                client = g.Client(api_key=key)
-                resp = client.models.generate_content(
-                    model=m_name,
-                    contents="hi",
-                )
-                t = (resp.text or "").strip()
-                lines.append(f"• `{m_name}` → ✅ `{t[:40]}`")
-            except Exception as e:
-                lines.append(f"• `{m_name}` → ❌ {str(e)[:80]}")
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
 
     body = "\n".join(lines)
     for i in range(0, len(body), 1900):
