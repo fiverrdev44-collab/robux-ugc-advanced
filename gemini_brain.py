@@ -15,7 +15,7 @@ MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv(
-    "OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+    "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
 _client = None
 _openrouter_client = None
@@ -33,7 +33,6 @@ def _ensure():
         return _client is not None or _openrouter_client is not None
     _configured = True
 
-    # ---- Gemini ----
     if GEMINI_API_KEY:
         try:
             _client = genai.Client(api_key=GEMINI_API_KEY)
@@ -44,7 +43,6 @@ def _ensure():
     else:
         print("[gemini] GEMINI_API_KEY not set")
 
-    # ---- OpenRouter ----
     if OPENROUTER_API_KEY:
         try:
             from openai import OpenAI
@@ -69,7 +67,6 @@ def is_available() -> bool:
 def _gemini_generate(prompt: str, json_mode: bool = False,
                      temperature: float = 0.7, max_tokens: int = 8192,
                      max_retries: int = 4):
-    """Gemini call with auto-retry on transient errors."""
     if not _client:
         return None
     for attempt in range(max_retries):
@@ -108,7 +105,6 @@ def _gemini_generate(prompt: str, json_mode: bool = False,
 def _openrouter_generate(prompt: str, json_mode: bool = False,
                          temperature: float = 0.7, max_tokens: int = 4096,
                          max_retries: int = 3):
-    """OpenRouter call with auto-retry on transient errors."""
     if not _openrouter_client:
         return None
     for attempt in range(max_retries):
@@ -145,20 +141,15 @@ def _openrouter_generate(prompt: str, json_mode: bool = False,
 def _generate(prompt: str, json_mode: bool = False,
               temperature: float = 0.7, max_tokens: int = 8192,
               prefer: str = "gemini"):
-    """
-    Try Gemini first (with retries). If all fail, fall back to OpenRouter.
-    """
     if not _ensure():
         return None
 
-    # ---- TIER 1: Gemini ----
     if _client is not None:
         out = _gemini_generate(prompt, json_mode, temperature, max_tokens)
         if out:
             return out
         print("[fallback] Gemini exhausted — switching to OpenRouter")
 
-    # ---- TIER 2: OpenRouter ----
     if _openrouter_client is not None:
         out = _openrouter_generate(prompt, json_mode, temperature,
                                     min(max_tokens, 4096))
@@ -351,11 +342,20 @@ RULES — CRITICAL:
    don't exist in the catalog. EXPLAIN this in market_diagnosis and lean into
    the bridged terms as the real opportunity.
 7. No filler. No AI disclaimers. No hedging.
+8. You return 10 titles TOTAL, grouped into 4 strategic buckets. Each title in a
+   group must feel DIFFERENT from the others — no repeating the same 3 words.
+   - SAFE = mirror what top competitors already do (highest chance of ranking)
+   - DIFFERENTIATED = same niche keywords but unique angle (beat the crowd)
+   - LONGTAIL = 4+ keywords packed into one title (rank for rare searches)
+   - VIRAL = meme/TikTok/Sound hook (highest CTR potential)
 
 OUTPUT — return ONLY valid JSON with this EXACT schema:
 
 {{
-  "titles": ["title 1", "title 2", "title 3"],
+  "titles_safe": ["title 1", "title 2", "title 3"],
+  "titles_differentiated": ["title 1", "title 2", "title 3"],
+  "titles_longtail": ["title 1", "title 2"],
+  "titles_viral": ["title 1", "title 2"],
   "search_diagnosis": "2-3 sentences: which of the user's words actually exist in the catalog vs which had to be bridged, and what that reveals",
   "positioning": "2-3 sentences: how to position against the competitors you can see",
   "market_diagnosis": "3-4 sentences: honest read of saturation, winners, losers, and CTR signals (avg favs per item)",
