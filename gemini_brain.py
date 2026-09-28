@@ -1,24 +1,19 @@
 """
 gemini_brain.py — Elite 2-pass hybrid AI for Roblox UGC domination.
-
-Pass 1   (extract_keywords):     casual description -> structured intent JSON.
-Pass 1.5 (expand_search_terms):  bridge failed terms to real DB vocab via Gemini.
-Pass 2   (synthesize_hybrid):    intent + DB data + culture brain -> strategy.
-verify_titles():                 hard gate — every title word must exist in DB.
-
-Rule: Database = truth. Gemini = strategist. Never mix them.
+Uses the NEW google-genai SDK (supports AQ.* format keys).
 """
 
 import os
 import re
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
+_client = None
 _configured = False
-_model = None
 
 STOPWORDS = {
     "a", "an", "the", "of", "and", "or", "for", "to", "in", "on", "with",
@@ -27,21 +22,20 @@ STOPWORDS = {
 
 
 def _ensure():
-    global _configured, _model
+    global _client, _configured
     if _configured:
-        return _model is not None
+        return _client is not None
     _configured = True
     if not GEMINI_API_KEY:
         print("[gemini] GEMINI_API_KEY not set")
         return False
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _model = genai.GenerativeModel(MODEL_NAME)
+        _client = genai.Client(api_key=GEMINI_API_KEY)
         print(f"[gemini] configured model={MODEL_NAME}")
         return True
     except Exception as e:
         print(f"[gemini] configure failed: {e}")
-        _model = None
+        _client = None
         return False
 
 
@@ -54,16 +48,24 @@ def _generate(prompt: str, json_mode: bool = False,
     if not _ensure():
         return None
     try:
-        cfg = {
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-        }
+        cfg = types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
         if json_mode:
-            cfg["response_mime_type"] = "application/json"
-        resp = _model.generate_content(prompt, generation_config=cfg)
-        return (resp.text or "").strip()
+            cfg.response_mime_type = "application/json"
+        resp = _client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config=cfg,
+        )
+        text = (resp.text or "").strip()
+        if not text:
+            print(f"[gemini] empty response. finish_reason="
+                  f"{getattr(resp.candidates[0], 'finish_reason', 'unknown') if resp.candidates else 'no candidates'}")
+        return text
     except Exception as e:
-        print(f"[gemini] generate failed: {e}")
+        print(f"[gemini] generate failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -147,7 +149,7 @@ def all_terms(intent: dict) -> list:
 
 
 # =========================================================================
-# PASS 1.5 — BRIDGE: when user's words don't exist in DB
+# PASS 1.5 — BRIDGE
 # =========================================================================
 _EXPAND_PROMPT = """You are a Roblox UGC database search expert.
 
@@ -180,7 +182,6 @@ OUTPUT ONLY THE JSON.
 
 
 def expand_search_terms(intent: dict, db_vocab_sample: list, failed_terms: list) -> dict:
-    """Pass 1.5. Bridge failed terms to real DB words via Gemini."""
     if not failed_terms:
         return {"expanded_terms": [], "reasoning": "no failed terms"}
 
@@ -221,7 +222,7 @@ def expand_search_terms(intent: dict, db_vocab_sample: list, failed_terms: list)
 
 
 # =========================================================================
-# PASS 2 — SYNTHESIS (the $20k strategist)
+# PASS 2 — SYNTHESIS
 # =========================================================================
 _SYNTH_PROMPT = """You are the world's #1 Roblox UGC strategist. Your launch reports are worth $20,000 because you combine two weapons:
 
@@ -246,7 +247,7 @@ RULES — CRITICAL:
 5. Write like a strategist briefing a paying client. Concrete, tactical, ruthless.
 6. If SEARCH DIAGNOSTICS show "expansion used", it means the user's literal words
    don't exist in the catalog. EXPLAIN this in market_diagnosis and lean into
-   the bridged terms as the real opportunity. This is insight the user cannot get anywhere else.
+   the bridged terms as the real opportunity.
 7. No filler. No AI disclaimers. No hedging.
 
 OUTPUT — return ONLY valid JSON with this EXACT schema:
@@ -257,14 +258,14 @@ OUTPUT — return ONLY valid JSON with this EXACT schema:
   "positioning": "2-3 sentences: how to position against the competitors you can see",
   "market_diagnosis": "3-4 sentences: honest read of saturation, winners, losers, and CTR signals (avg favs per item)",
   "trend_intel": "2-3 sentences: is this trend rising/peaking/dying? Specific launch window",
-  "price_strategy": "2-3 sentences: price recommendation with psychology (charm pricing, anchoring, etc.)",
+  "price_strategy": "2-3 sentences: price recommendation with psychology",
   "seo_description": "2-3 sentence Roblox item description, keyword-rich, copy-paste ready",
   "killer_keywords": ["10-15 highest-value keywords from allow-list"],
-  "algo_strategy": "3-4 sentences: specific Roblox algorithm tactics — search ranking + Discover",
-  "social_playbook": "3-4 sentences: TikTok / YouTube / IG promotion plan — what clips, when, hooks",
+  "algo_strategy": "3-4 sentences: specific Roblox algorithm tactics",
+  "social_playbook": "3-4 sentences: TikTok / YouTube / IG promotion plan",
   "risk_analysis": "2-3 sentences: what could kill this item and how to mitigate",
-  "expected_performance": "2-3 sentences: realistic forecast using the market stats + trend signal",
-  "cultural_ammo": "2-3 sentences: cultural context (meme cycle, anime arc, TikTok sound) to weaponize",
+  "expected_performance": "2-3 sentences: realistic forecast",
+  "cultural_ammo": "2-3 sentences: cultural context to weaponize",
   "verdict": "GO / CONDITIONAL GO / NO-GO — one-line reason",
   "bonus_plays": ["2-3 additional item ideas riding the same trend"]
 }}
@@ -356,7 +357,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
 
 # =========================================================================
-# VERIFICATION — hard gate
+# VERIFICATION
 # =========================================================================
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -400,9 +401,8 @@ Answer using your knowledge of:
 - Pricing psychology and upload timing
 - Aesthetic movements and trend cycles
 
-If asked about specific numbers or item names you weren't given, say so
-and suggest using the data commands. Be concrete, opinionated, tactical.
-No filler. No AI disclaimers. Under 1,800 characters unless depth is needed.
+If asked about specific numbers or item names you weren't given, say so.
+Be concrete, opinionated, tactical. No filler. Under 1,800 characters.
 
 QUESTION:
 {q}
