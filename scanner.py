@@ -11,7 +11,6 @@ def log(msg):
     print(msg, flush=True)
 
 
-# RoProxy — relays Roblox API calls from residential IPs so keyword search works
 CATALOG_APIS = [
     "https://catalog.roproxy.com/v1/search/items",
     "https://catalog.roblox.com/v1/search/items",
@@ -21,18 +20,15 @@ CATEGORIES = [11, 3, 4, 12, 5]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
 WORKERS = 3
 DELAY = 0.4
-MAX_PAGES_PER_QUERY = 15   # bumped from 10 → deeper emote coverage
+MAX_PAGES_PER_QUERY = 12
 HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 60
 
-# ---------------------------------------------------------------------------
-# EMOTE DISCOVERY — the critical fix
-# Roblox catalog: category 12 = Community Creations, subcategory 39 = Emotes
-# Without subcategory 39, emotes get buried under other Community Creations items.
-# ---------------------------------------------------------------------------
-EMOTE_CATEGORY = 12
-EMOTE_SUBCATEGORY = 39
+# Real Roblox asset IDs are currently ~1.3–1.6 billion (10 digits).
+# Anything outside this range is garbage from a wrong API field.
+MIN_VALID_ID = 1_000_000
+MAX_VALID_ID = 10_000_000_000
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -58,52 +54,46 @@ CLASSIC_KEYWORDS = [
     "denim", "leather", "sports", "jersey", "varsity", "anime", "kawaii"
 ]
 
-# Massively expanded — 180 terms to catch every emote subgenre
 EMOTE_KEYWORDS = [
-    # Core dance moves
     "dance", "floss", "griddy", "dab", "moonwalk", "shuffle", "renegade",
     "wave", "spin", "twirl", "kick", "bounce", "jump", "walk", "run",
-    "gangnam", "salsa", "ballet", "breakdance", "krump", "hiphop", "hip-hop",
+    "gangnam", "salsa", "ballet", "breakdance", "krump", "hiphop",
     "twist", "robot", "vogue", "stanky", "dougie", "whip", "nae nae",
-    "harlem shake", "milky", "milkshake", "tiktok", "renegade",
-    # Gestures / reactions
-    "wave", "clap", "cheer", "salute", "pose", "flex", "point", "thumbsup",
-    "peace", "handshake", "hug", "highfive", "fist", "bump", "heart",
-    "kiss", "wink", "nod", "shrug", "pray", "beg", "thumbs",
-    # Emotions
+    "milky", "milkshake", "tiktok",
+    "clap", "cheer", "salute", "pose", "flex", "point", "thumbsup",
+    "peace", "handshake", "hug", "highfive", "heart",
+    "kiss", "wink", "nod", "shrug", "pray",
     "laugh", "cry", "rage", "angry", "sad", "happy", "silly", "cringe",
-    "shy", "embarrassed", "confused", "shock", "surprised", "smile", "smirk",
-    # Idle / movement loops
+    "shy", "confused", "shock", "surprised", "smile",
     "idle", "sit", "crouch", "sleep", "meditate", "levitate", "float",
-    "hover", "fly", "swim", "swim", "victory", "defeat", "die", "fall",
-    # Animal / character emotes
+    "hover", "fly", "swim", "victory", "defeat", "fall",
     "cat", "dog", "bunny", "bear", "panda", "fox", "wolf", "dragon",
-    "frog", "monkey", "penguin", "duck", "chicken", "crab", "snake",
-    # Anime / pop culture
+    "frog", "monkey", "penguin", "duck",
     "anime", "naruto", "dragonball", "jujutsu", "demon slayer", "onepiece",
-    "kpop", "blackpink", "bts", "twice", "bts", "korean", "japanese",
-    "jojo", "sasuke", "goku", "luffy", "itachi", "gojo", "levi",
-    # Slang / meme emotes
+    "kpop", "blackpink", "bts", "twice", "korean", "japanese",
+    "jojo", "goku", "luffy", "gojo",
     "sigma", "rizz", "skibidi", "ohio", "gyatt", "mewing", "aura",
-    "based", "cringe", "sus", "ratio", "goat", "slay", "bussin",
-    "griddy", "fanum", "cap", "yeet", "poggers", "bruh", "sussy",
-    # Reactions / emotes catalog
-    "emote", "expression", "gesture", "reaction", "animation", "loop",
+    "sus", "ratio", "goat", "slay", "bussin", "fanum", "cap", "yeet", "bruh",
+    "emote", "expression", "gesture", "reaction", "animation",
     "greeting", "hello", "goodbye", "welcome", "swag", "hype", "party",
-    "groove", "sway", "smooth", "cool", "savage", "epic", "goofy",
-    # Russian / cultural
-    "russian", "slav", "kazakh", "polish", "gangnam", "bollywood",
-    # Misc viral
-    "sturdy", "default", "classic", "old", "nostalgia", "retro",
-    "among", "imposter", "fortnite", "minecraft", "fnaf", "poppy",
-    "twerk", "booty", "shmoney", "hit", "folks",
-    # Emotional reactions
-    "smug", "laughing", "crying", "sobbing", "dying", "dead", "ghost",
-    # Sports / action
-    "boxing", "karate", "taekwondo", "kungfu", "punch", "kickbox",
+    "groove", "sway", "smooth", "savage", "epic", "goofy",
+    "russian", "slav", "gangnam", "bollywood",
+    "retro", "among", "imposter", "fortnite", "minecraft", "fnaf",
+    "twerk", "shmoney",
+    "smug", "crying", "sobbing", "dying", "dead", "ghost",
+    "boxing", "karate", "taekwondo", "kungfu", "punch",
 ]
 
 PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100), (101, 500), (501, 10000)]
+
+
+def is_valid_asset_id(iid):
+    """Reject bundle IDs, user IDs, timestamps, and any other garbage."""
+    try:
+        n = int(iid)
+    except (TypeError, ValueError):
+        return False
+    return MIN_VALID_ID <= n <= MAX_VALID_ID
 
 
 def get_dynamic_keywords():
@@ -125,7 +115,6 @@ def get_dynamic_keywords():
 
 
 def try_api(api_url, params):
-    """Try one API endpoint. Return (found_set, success_bool)."""
     found = set()
     cursor = ""
     pages = 0
@@ -135,12 +124,7 @@ def try_api(api_url, params):
         p = params.copy()
         p["cursor"] = cursor
         try:
-            resp = requests.get(
-                api_url,
-                params=p,
-                headers=HEADERS,
-                timeout=HTTP_TIMEOUT
-            )
+            resp = requests.get(api_url, params=p, headers=HEADERS, timeout=HTTP_TIMEOUT)
             if resp.status_code == 429:
                 retries_429 += 1
                 if retries_429 > MAX_429_RETRIES:
@@ -153,7 +137,9 @@ def try_api(api_url, params):
 
             data = resp.json()
             for item in data.get("data", []):
-                found.add(item["id"])
+                iid = item.get("id")
+                if is_valid_asset_id(iid):
+                    found.add(int(iid))
 
             cursor = data.get("nextPageCursor")
             if not cursor:
@@ -169,7 +155,6 @@ def try_api(api_url, params):
 
 
 def scan_query(params):
-    """Try RoProxy first, fall back to direct Roblox."""
     for api_url in CATALOG_APIS:
         found, success = try_api(api_url, params)
         if found:
@@ -181,57 +166,22 @@ def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
-    # ---- General category scans ----
+    # General category sweeps
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({"category": cat, "sortType": sort, "limit": 30})
 
-    # =========================================================
-    # DEDICATED EMOTE DISCOVERY — the fix
-    # Category 12 + Subcategory 39 = Emotes specifically
-    # =========================================================
-    for sort in SORT_TYPES:
-        queries.append({
-            "category": EMOTE_CATEGORY,
-            "subcategory": EMOTE_SUBCATEGORY,
-            "sortType": sort,
-            "limit": 30,
-        })
-
-    # Emote price-band sweeps — catches cheap + premium emotes
-    for min_p, max_p in PRICE_RANGES:
-        queries.append({
-            "category": EMOTE_CATEGORY,
-            "subcategory": EMOTE_SUBCATEGORY,
-            "minPrice": min_p,
-            "maxPrice": max_p,
-            "sortType": 2,
-            "limit": 30,
-        })
-
-    # =========================================================
-    # KEYWORD SEARCHES
-    # =========================================================
+    # Keyword sweeps
     all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
     for kw in all_keywords:
         for sort in [0, 2]:
             queries.append({"keyword": kw, "sortType": sort, "limit": 30})
 
-    # Emote keyword + subcategory combined (deep coverage)
-    for kw in EMOTE_KEYWORDS[:60]:  # top 60 emote keywords get extra depth
-        queries.append({
-            "keyword": kw,
-            "category": EMOTE_CATEGORY,
-            "subcategory": EMOTE_SUBCATEGORY,
-            "sortType": 2,
-            "limit": 30,
-        })
-
-    # ---- Price sweep for non-emote categories ----
+    # Price-band sweeps catch long-tail items
     for min_p, max_p in PRICE_RANGES:
         queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
 
-    # ---- Learned keywords from DB ----
+    # Learned keywords
     for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
 
@@ -260,10 +210,10 @@ def run_scanner():
             except Exception as e:
                 log(f"  Query #{done} failed: {e}")
 
-            if done <= 10 or done % 10 == 0:
+            if done <= 10 or done % 20 == 0:
                 log(f"  {done}/{len(queries)} — {len(all_ids)} IDs")
 
-    log(f"✅ Scan collected {len(all_ids)} IDs in {time.time()-start:.1f}s")
+    log(f"✅ Scan collected {len(all_ids)} valid IDs in {time.time()-start:.1f}s")
 
     if not all_ids:
         log("⚠️ No IDs collected — bailing.")
