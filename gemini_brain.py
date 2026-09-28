@@ -1,7 +1,6 @@
 """
-gemini_brain.py — Elite 2-pass hybrid AI for Roblox UGC domination.
-Uses the NEW google-genai SDK (supports AQ.* format keys).
-Auto-retries on 503/429 (Google capacity spikes).
+gemini_brain.py — Hybrid AI for Roblox UGC domination.
+Primary: Gemini. Fallback: OpenRouter.
 """
 
 import os
@@ -14,7 +13,12 @@ from google.genai import types
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+
 _client = None
+_openrouter_client = None
 _configured = False
 
 STOPWORDS = {
@@ -24,34 +28,50 @@ STOPWORDS = {
 
 
 def _ensure():
-    global _client, _configured
+    global _client, _openrouter_client, _configured
     if _configured:
-        return _client is not None
+        return _client is not None or _openrouter_client is not None
     _configured = True
-    if not GEMINI_API_KEY:
+
+    # ---- Gemini ----
+    if GEMINI_API_KEY:
+        try:
+            _client = genai.Client(api_key=GEMINI_API_KEY)
+            print(f"[gemini] configured model={MODEL_NAME}")
+        except Exception as e:
+            print(f"[gemini] configure failed: {e}")
+            _client = None
+    else:
         print("[gemini] GEMINI_API_KEY not set")
-        return False
-    try:
-        _client = genai.Client(api_key=GEMINI_API_KEY)
-        print(f"[gemini] configured model={MODEL_NAME}")
-        return True
-    except Exception as e:
-        print(f"[gemini] configure failed: {e}")
-        _client = None
-        return False
+
+    # ---- OpenRouter ----
+    if OPENROUTER_API_KEY:
+        try:
+            from openai import OpenAI
+            _openrouter_client = OpenAI(
+                api_key=OPENROUTER_API_KEY,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            print(f"[openrouter] configured model={OPENROUTER_MODEL}")
+        except Exception as e:
+            print(f"[openrouter] configure failed: {e}")
+            _openrouter_client = None
+    else:
+        print("[openrouter] OPENROUTER_API_KEY not set")
+
+    return _client is not None or _openrouter_client is not None
 
 
 def is_available() -> bool:
     return _ensure()
 
 
-def _generate(prompt: str, json_mode: bool = False,
-              temperature: float = 0.7, max_tokens: int = 8192,
-              max_retries: int = 5):
-    """Call Gemini with auto-retry on transient errors (503, 429)."""
-    if not _ensure():
+def _gemini_generate(prompt: str, json_mode: bool = False,
+                     temperature: float = 0.7, max_tokens: int = 8192,
+                     max_retries: int = 4):
+    """Gemini call with auto-retry on transient errors."""
+    if not _client:
         return None
-
     for attempt in range(max_retries):
         try:
             cfg = types.GenerateContentConfig(
@@ -61,22 +81,14 @@ def _generate(prompt: str, json_mode: bool = False,
             if json_mode:
                 cfg.response_mime_type = "application/json"
             resp = _client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config=cfg,
-            )
+                model=MODEL_NAME, contents=prompt, config=cfg)
             text = (resp.text or "").strip()
-            if not text:
-                fr = "unknown"
-                if getattr(resp, "candidates", None):
-                    fr = getattr(resp.candidates[0], "finish_reason", "unknown")
-                print(f"[gemini] empty response (attempt {attempt+1}), "
-                      f"finish_reason={fr}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-                return None
-            return text
+            if text:
+                return text
+            fr = "unknown"
+            if getattr(resp, "candidates", None):
+                fr = getattr(resp.candidates[0], "finish_reason", "unknown")
+            print(f"[gemini] empty response (attempt {attempt+1}), fr={fr}")
         except Exception as e:
             err = str(e)
             retryable = any(x in err for x in [
@@ -86,10 +98,74 @@ def _generate(prompt: str, json_mode: bool = False,
             ])
             print(f"[gemini] attempt {attempt+1}/{max_retries} "
                   f"failed: {type(e).__name__}: {err[:180]}")
-            if retryable and attempt < max_retries - 1:
-                time.sleep(2 + attempt * 2)  # 2s, 4s, 6s, 8s
-                continue
-            return None
+            if not retryable:
+                return None
+        if attempt < max_retries - 1:
+            time.sleep(2 + attempt * 2)
+    return None
+
+
+def _openrouter_generate(prompt: str, json_mode: bool = False,
+                         temperature: float = 0.7, max_tokens: int = 4096,
+                         max_retries: int = 3):
+    """OpenRouter call with auto-retry on transient errors."""
+    if not _openrouter_client:
+        return None
+    for attempt in range(max_retries):
+        try:
+            kwargs = {
+                "model": OPENROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = _openrouter_client.chat.completions.create(**kwargs)
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+            print(f"[openrouter] empty response (attempt {attempt+1})")
+        except Exception as e:
+            err = str(e)
+            retryable = any(x in err for x in [
+                "503", "UNAVAILABLE", "high demand",
+                "429", "RESOURCE_EXHAUSTED", "overloaded",
+                "500", "timeout",
+            ])
+            print(f"[openrouter] attempt {attempt+1}/{max_retries} "
+                  f"failed: {type(e).__name__}: {err[:180]}")
+            if not retryable:
+                return None
+        if attempt < max_retries - 1:
+            time.sleep(2 + attempt * 2)
+    return None
+
+
+def _generate(prompt: str, json_mode: bool = False,
+              temperature: float = 0.7, max_tokens: int = 8192,
+              prefer: str = "gemini"):
+    """
+    Try Gemini first (with retries). If all fail, fall back to OpenRouter.
+    """
+    if not _ensure():
+        return None
+
+    # ---- TIER 1: Gemini ----
+    if _client is not None:
+        out = _gemini_generate(prompt, json_mode, temperature, max_tokens)
+        if out:
+            return out
+        print("[fallback] Gemini exhausted — switching to OpenRouter")
+
+    # ---- TIER 2: OpenRouter ----
+    if _openrouter_client is not None:
+        out = _openrouter_generate(prompt, json_mode, temperature,
+                                    min(max_tokens, 4096))
+        if out:
+            return out
+        print("[fallback] OpenRouter also exhausted")
+
     return None
 
 
@@ -132,7 +208,8 @@ def extract_keywords(casual_description: str) -> dict:
     if not casual_description or not casual_description.strip():
         return {}
     prompt = _EXTRACT_PROMPT.format(desc=casual_description.strip())
-    raw = _generate(prompt, json_mode=True, temperature=0.25, max_tokens=1024)
+    raw = _generate(prompt, json_mode=True, temperature=0.25,
+                    max_tokens=1024, prefer="gemini")
     if not raw:
         return {}
     try:
@@ -220,9 +297,10 @@ def expand_search_terms(intent: dict, db_vocab_sample: list, failed_terms: list)
         db_vocab_sample=vocab_str,
     )
 
-    raw = _generate(prompt, json_mode=True, temperature=0.6, max_tokens=1024)
+    raw = _generate(prompt, json_mode=True, temperature=0.6,
+                    max_tokens=1024, prefer="gemini")
     if not raw:
-        return {"expanded_terms": [], "reasoning": "gemini returned nothing"}
+        return {"expanded_terms": [], "reasoning": "ai returned nothing"}
 
     try:
         data = json.loads(raw)
@@ -254,7 +332,7 @@ WEAPON 1 — HARD DATA (given below, this is the ONLY source of truth for names,
 - ALLOW-LIST of real keywords pulled from millions of live Roblox items
 - TOP COMPETING ITEMS with real favourite counts and prices
 - MARKET STATS (item count, price range, sales, competition density)
-- SEARCH DIAGNOSTICS (direct hits vs Gemini-bridged terms)
+- SEARCH DIAGNOSTICS (direct hits vs AI-bridged terms)
 
 WEAPON 2 — YOUR LETHAL CULTURE BRAIN (use this freely):
 - TikTok / YouTube / Instagram virality mechanics
@@ -365,7 +443,8 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         search_diagnostics="\n".join(diag_lines) or "(none)",
     )
 
-    raw = _generate(prompt, json_mode=True, temperature=0.85, max_tokens=8192)
+    raw = _generate(prompt, json_mode=True, temperature=0.85,
+                    max_tokens=8192, prefer="gemini")
     if not raw:
         return {}
     try:
@@ -432,9 +511,11 @@ QUESTION:
 {q}
 """
 
+
 def ask_ai(question: str) -> str:
     if not question or not question.strip():
         return ""
     out = _generate(_ASK_PROMPT.format(q=question.strip()),
-                    json_mode=False, temperature=0.8, max_tokens=2048)
+                    json_mode=False, temperature=0.8,
+                    max_tokens=2048, prefer="gemini")
     return out or ""
