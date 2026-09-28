@@ -1888,11 +1888,10 @@ async def track(ctx, item_id: int):
 
 
 # =========================================================================
-# GEMINI AI COMMANDS — Elite 3-Tier
+# GEMINI AI COMMANDS
 # =========================================================================
 
 def _db_search(patterns):
-    """Run an ILIKE ANY() search over name + description."""
     if not patterns:
         return []
     sql = """
@@ -1937,7 +1936,6 @@ def _term_match_count(term):
 
 
 def _get_db_vocab_sample(limit=400):
-    """Top N most common single-word terms across popular DB items."""
     try:
         conn = get_db(); cur = conn.cursor()
         try:
@@ -1957,17 +1955,10 @@ def _get_db_vocab_sample(limit=400):
 
 
 def _build_allow_list(intent, max_keywords=60):
-    """
-    Smart 3-tier DB search:
-      Tier 1 — direct term match (name + description)
-      Tier 2 — if < 50 direct hits, bridge failed terms to real DB vocab
-      Tier 3 — merge, build allow-list, compute competition stats
-    """
     terms = all_terms(intent)
     if not terms:
         return [], [], {}
 
-    # ---- TIER 1: direct ----
     rows_by_id = {}
     patterns = [f"%{t}%" for t in terms if len(t) >= 2]
     if patterns:
@@ -1975,7 +1966,6 @@ def _build_allow_list(intent, max_keywords=60):
             rows_by_id[r[0]] = r
     direct_count = len(rows_by_id)
 
-    # ---- TIER 2: bridge via Gemini ----
     expanded_terms = []
     bridge_reasoning = ""
     failed_terms = []
@@ -2006,7 +1996,6 @@ def _build_allow_list(intent, max_keywords=60):
             "reasoning": bridge_reasoning,
         }
 
-    # ---- build allow-list from real titles ----
     freq = {}
     bigrams = {}
     token_re = re.compile(r"[a-z0-9]+")
@@ -2025,7 +2014,6 @@ def _build_allow_list(intent, max_keywords=60):
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
-    # ---- top items ----
     top_rows = sorted(rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
     top_items = [
         {"name": r[1], "favourite_count": r[2] or 0,
@@ -2033,7 +2021,6 @@ def _build_allow_list(intent, max_keywords=60):
         for r in top_rows
     ]
 
-    # ---- competition stats ----
     prices = [r[3] or 0 for r in rows if (r[3] or 0) > 0]
     favs = sorted([r[2] or 0 for r in rows], reverse=True)
     total = len(favs)
@@ -2269,6 +2256,102 @@ async def ask_cmd(ctx, *, question: str = ""):
 
     for i in range(0, len(answer), 1900):
         await ctx.send(answer[i:i + 1900])
+
+
+# =========================================================================
+# AI DEBUG
+# =========================================================================
+
+@bot.command(name="ai_debug")
+async def ai_debug(ctx):
+    """Diagnostic — shows exactly what's failing with Gemini."""
+    lines = ["**🔬 Gemini Debug Report**\n"]
+
+    key = os.getenv("GEMINI_API_KEY", "")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    lines.append(f"**Env vars:**")
+    lines.append(f"• GEMINI_API_KEY: `{key[:8] if key else 'MISSING'}...` (len {len(key)})")
+    lines.append(f"• GEMINI_MODEL: `{model}`")
+    lines.append("")
+
+    if not key:
+        lines.append("❌ GEMINI_API_KEY is empty. Add it on Render.")
+        await ctx.send("\n".join(lines))
+        return
+
+    lines.append("**Installed SDKs:**")
+    has_new = False
+    has_old = False
+    try:
+        import google.genai as new_genai
+        ver = getattr(new_genai, "__version__", "unknown")
+        lines.append(f"• `google-genai` (new): ✅ v{ver}")
+        has_new = True
+    except Exception as e:
+        lines.append(f"• `google-genai` (new): ❌ {e}")
+
+    try:
+        import google.generativeai as old_gen
+        ver = getattr(old_gen, "__version__", "unknown")
+        lines.append(f"• `google-generativeai` (old): ✅ v{ver}")
+        has_old = True
+    except Exception as e:
+        lines.append(f"• `google-generativeai` (old): ❌ {e}")
+    lines.append("")
+
+    lines.append("**Live API test** (`say hello`):")
+
+    if has_new:
+        try:
+            from google import genai as g
+            client = g.Client(api_key=key)
+            resp = client.models.generate_content(
+                model=model,
+                contents="Say only the word: hello",
+            )
+            text = (resp.text or "").strip()
+            lines.append(f"• NEW SDK response: `{repr(text)[:150]}`")
+            if not text:
+                lines.append("• ⚠️ Empty response — checking finish_reason...")
+                if getattr(resp, "candidates", None):
+                    c = resp.candidates[0]
+                    fr = getattr(c, "finish_reason", "?")
+                    lines.append(f"• finish_reason: `{fr}`")
+                else:
+                    lines.append("• ❌ No candidates returned at all")
+        except Exception as e:
+            lines.append(f"• ❌ NEW SDK error: `{type(e).__name__}: {str(e)[:250]}`")
+
+    if has_old and not has_new:
+        try:
+            import google.generativeai as old_gen
+            old_gen.configure(api_key=key)
+            m = old_gen.GenerativeModel(model)
+            resp = m.generate_content("Say only the word: hello")
+            text = (resp.text or "").strip()
+            lines.append(f"• OLD SDK response: `{repr(text)[:150]}`")
+        except Exception as e:
+            lines.append(f"• ❌ OLD SDK error: `{type(e).__name__}: {str(e)[:250]}`")
+
+    if has_new:
+        lines.append("")
+        lines.append("**Model name probe:**")
+        for m_name in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"]:
+            try:
+                from google import genai as g
+                client = g.Client(api_key=key)
+                resp = client.models.generate_content(
+                    model=m_name,
+                    contents="hi",
+                )
+                t = (resp.text or "").strip()
+                lines.append(f"• `{m_name}` → ✅ `{t[:40]}`")
+            except Exception as e:
+                lines.append(f"• `{m_name}` → ❌ {str(e)[:80]}")
+
+    body = "\n".join(lines)
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
 
 
 app = Flask(__name__)
