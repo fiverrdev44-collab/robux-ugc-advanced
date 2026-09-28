@@ -1,34 +1,29 @@
 import os
-import sys
 import requests
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
-
-def log(msg):
-    print(msg, flush=True)
-
-
-CATALOG_APIS = [
-    "https://catalog.roproxy.com/v1/search/items",
-    "https://catalog.roblox.com/v1/search/items",
+ITEM_APIS = [
+    "https://catalog.roproxy.com/v1/catalog/items/{}/details?itemType=Asset",
+    "https://catalog.roproxy.io/v1/catalog/items/{}/details?itemType=Asset",
+    "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset",
 ]
+AUTH_URL = "https://auth.roblox.com/v2/logout"
 
-CATEGORIES = [11, 3, 4, 12, 5]
-SORT_TYPES = [0, 1, 2, 3, 4, 5]
+BATCH_SIZE = 1500
 WORKERS = 3
-DELAY = 0.4
-MAX_PAGES_PER_QUERY = 12
-HTTP_TIMEOUT = 10
-MAX_429_RETRIES = 3
-QUERY_TIMEOUT = 60
+ITEM_DELAY = 0.5
 
-# Real Roblox asset IDs are currently ~1.3–1.6 billion (10 digits).
-# Anything outside this range is garbage from a wrong API field.
+REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
+PRIORITY = os.getenv("PRIORITY", "newest").lower()
+
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 10_000_000_000
+
+COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
+if not COOKIE:
+    raise ValueError("ROBLOSECURITY_COOKIE environment variable not set!")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -39,210 +34,174 @@ HEADERS = {
     "Origin": "https://www.roblox.com",
 }
 
-UGC_KEYWORDS = [
-    "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
-    "ear", "horn", "crown", "chain", "necklace", "backpack", "bag", "sword",
-    "pet", "cute", "emo", "goth", "y2k", "pastel", "cyber", "kawaii", "fluffy",
-    "bear", "cat", "dog", "dragon", "angel", "demon", "robot", "armor", "cape",
-    "mask", "glasses", "bandage", "coquette", "grunge", "vampire", "fairy"
-]
+session = requests.Session()
+session.cookies[".ROBLOSECURITY"] = COOKIE
+session.headers.update(HEADERS)
 
-CLASSIC_KEYWORDS = [
-    "t-shirt", "tshirt", "shirt", "pants", "jeans", "hoodie", "sweater",
-    "jacket", "plaid", "flannel", "preppy", "grunge", "y2k", "emo", "goth",
-    "aesthetic", "streetwear", "casual", "dress", "skirt", "shorts", "cargo",
-    "denim", "leather", "sports", "jersey", "varsity", "anime", "kawaii"
-]
-
-EMOTE_KEYWORDS = [
-    "dance", "floss", "griddy", "dab", "moonwalk", "shuffle", "renegade",
-    "wave", "spin", "twirl", "kick", "bounce", "jump", "walk", "run",
-    "gangnam", "salsa", "ballet", "breakdance", "krump", "hiphop",
-    "twist", "robot", "vogue", "stanky", "dougie", "whip", "nae nae",
-    "milky", "milkshake", "tiktok",
-    "clap", "cheer", "salute", "pose", "flex", "point", "thumbsup",
-    "peace", "handshake", "hug", "highfive", "heart",
-    "kiss", "wink", "nod", "shrug", "pray",
-    "laugh", "cry", "rage", "angry", "sad", "happy", "silly", "cringe",
-    "shy", "confused", "shock", "surprised", "smile",
-    "idle", "sit", "crouch", "sleep", "meditate", "levitate", "float",
-    "hover", "fly", "swim", "victory", "defeat", "fall",
-    "cat", "dog", "bunny", "bear", "panda", "fox", "wolf", "dragon",
-    "frog", "monkey", "penguin", "duck",
-    "anime", "naruto", "dragonball", "jujutsu", "demon slayer", "onepiece",
-    "kpop", "blackpink", "bts", "twice", "korean", "japanese",
-    "jojo", "goku", "luffy", "gojo",
-    "sigma", "rizz", "skibidi", "ohio", "gyatt", "mewing", "aura",
-    "sus", "ratio", "goat", "slay", "bussin", "fanum", "cap", "yeet", "bruh",
-    "emote", "expression", "gesture", "reaction", "animation",
-    "greeting", "hello", "goodbye", "welcome", "swag", "hype", "party",
-    "groove", "sway", "smooth", "savage", "epic", "goofy",
-    "russian", "slav", "gangnam", "bollywood",
-    "retro", "among", "imposter", "fortnite", "minecraft", "fnaf",
-    "twerk", "shmoney",
-    "smug", "crying", "sobbing", "dying", "dead", "ghost",
-    "boxing", "karate", "taekwondo", "kungfu", "punch",
-]
-
-PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100), (101, 500), (501, 10000)]
+# Track failure reason counts for diagnostics
+_fail_codes = {}
 
 
-def is_valid_asset_id(iid):
-    """Reject bundle IDs, user IDs, timestamps, and any other garbage."""
+def log(msg):
+    print(msg, flush=True)
+
+
+def get_csrf_token():
+    log("🔐 Fetching X-CSRF-Token...")
     try:
-        n = int(iid)
-    except (TypeError, ValueError):
-        return False
-    return MIN_VALID_ID <= n <= MAX_VALID_ID
-
-
-def get_dynamic_keywords():
-    log("🧠 Loading learned keywords...")
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT keyword FROM learned_keywords ORDER BY score DESC LIMIT 100")
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        existing = set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS)
-        dynamic = [row[0] for row in rows if row[0] and row[0] not in existing][:80]
-        log(f"🧠 Loaded {len(dynamic)} learned keywords.")
-        return dynamic
+        resp = session.post(AUTH_URL, timeout=10)
+        token = resp.headers.get("X-CSRF-Token")
+        if token:
+            session.headers["X-CSRF-Token"] = token
+            log(f"✅ Got CSRF token: {token[:8]}...")
+            return True
     except Exception as e:
-        log(f"⚠️ Learned keywords error: {e}")
-        return []
+        log(f"⚠️ CSRF error: {e}")
+    return False
 
 
-def try_api(api_url, params):
-    found = set()
-    cursor = ""
-    pages = 0
-    retries_429 = 0
-
-    while pages < MAX_PAGES_PER_QUERY:
-        p = params.copy()
-        p["cursor"] = cursor
-        try:
-            resp = requests.get(api_url, params=p, headers=HEADERS, timeout=HTTP_TIMEOUT)
-            if resp.status_code == 429:
-                retries_429 += 1
-                if retries_429 > MAX_429_RETRIES:
-                    return found, len(found) > 0
-                time.sleep(1)
-                continue
-
-            if resp.status_code != 200:
-                return found, len(found) > 0
-
-            data = resp.json()
-            for item in data.get("data", []):
-                iid = item.get("id")
-                if is_valid_asset_id(iid):
-                    found.add(int(iid))
-
-            cursor = data.get("nextPageCursor")
-            if not cursor:
-                return found, True
-
-            pages += 1
-        except Exception:
-            return found, len(found) > 0
-
-        time.sleep(DELAY)
-
-    return found, True
-
-
-def scan_query(params):
-    for api_url in CATALOG_APIS:
-        found, success = try_api(api_url, params)
-        if found:
-            return found
-    return set()
-
-
-def build_all_queries():
-    log("🔨 Building query list...")
-    queries = []
-
-    # General category sweeps
-    for cat in CATEGORIES:
-        for sort in SORT_TYPES:
-            queries.append({"category": cat, "sortType": sort, "limit": 30})
-
-    # Keyword sweeps
-    all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
-    for kw in all_keywords:
-        for sort in [0, 2]:
-            queries.append({"keyword": kw, "sortType": sort, "limit": 30})
-
-    # Price-band sweeps catch long-tail items
-    for min_p, max_p in PRICE_RANGES:
-        queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
-
-    # Learned keywords
-    for kw in get_dynamic_keywords():
-        queries.append({"keyword": kw, "sortType": 2, "limit": 30})
-
-    log(f"🔨 Built {len(queries)} queries.")
-    return queries
-
-
-def run_scanner():
-    log("🚀 Scanner started.")
-    setup_database()
-    log("📦 DB setup done.")
-
-    queries = build_all_queries()
-    log(f"🚀 Running {len(queries)} queries with {WORKERS} workers...")
-    start = time.time()
-
-    all_ids = set()
-    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-        futures = {executor.submit(scan_query, q): q for q in queries}
-        done = 0
-        for future in as_completed(futures):
-            done += 1
+def fetch_item(item_id):
+    for api_template in ITEM_APIS:
+        url = api_template.format(item_id)
+        for attempt in range(2):
             try:
-                found = future.result(timeout=QUERY_TIMEOUT)
-                all_ids.update(found)
+                resp = session.get(url, timeout=12)
+                time.sleep(ITEM_DELAY)
+
+                code = resp.status_code
+                if code == 200:
+                    return item_id, resp.json()
+                if code == 404:
+                    _fail_codes[404] = _fail_codes.get(404, 0) + 1
+                    return item_id, None
+                if code == 429:
+                    _fail_codes[429] = _fail_codes.get(429, 0) + 1
+                    time.sleep(2)
+                    continue
+                if code == 403 and "roblox.com" in url:
+                    _fail_codes[403] = _fail_codes.get(403, 0) + 1
+                    get_csrf_token()
+                    continue
+                _fail_codes[code] = _fail_codes.get(code, 0) + 1
+                break
             except Exception as e:
-                log(f"  Query #{done} failed: {e}")
+                _fail_codes["exc"] = _fail_codes.get("exc", 0) + 1
+                time.sleep(0.5)
+                continue
+    return item_id, None
 
-            if done <= 10 or done % 20 == 0:
-                log(f"  {done}/{len(queries)} — {len(all_ids)} IDs")
 
-    log(f"✅ Scan collected {len(all_ids)} valid IDs in {time.time()-start:.1f}s")
-
-    if not all_ids:
-        log("⚠️ No IDs collected — bailing.")
-        return
-
-    log("💾 Writing to database...")
+def enrich_items():
+    setup_database()
     conn = get_db_connection()
     cur = conn.cursor()
-    ids_list = [(iid,) for iid in all_ids]
-    new_count = 0
-    for i in range(0, len(ids_list), 1000):
-        chunk = ids_list[i:i+1000]
-        execute_values(
-            cur,
-            "INSERT INTO discovered_items (id) VALUES %s ON CONFLICT (id) DO NOTHING",
-            chunk
-        )
-        new_count += cur.rowcount
-        conn.commit()
+
+    get_csrf_token()
+
+    if REFRESH_EXISTING:
+        log("🔄 REFRESH MODE")
+        cur.execute("""
+            SELECT id FROM items
+            WHERE favorite_count > 0
+            ORDER BY favorite_count DESC
+            LIMIT %s
+        """, (BATCH_SIZE,))
+    else:
+        order = "DESC" if PRIORITY == "newest" else "ASC"
+        log(f"🆕 NORMAL MODE ({PRIORITY})")
+        cur.execute(f"""
+            SELECT d.id
+            FROM discovered_items d
+            WHERE NOT EXISTS (
+                SELECT 1 FROM items i WHERE i.id = d.id
+            )
+            AND d.id BETWEEN %s AND %s
+            ORDER BY d.id {order}
+            LIMIT %s
+        """, (MIN_VALID_ID, MAX_VALID_ID, BATCH_SIZE))
+
+    ids = [row[0] for row in cur.fetchall()]
     cur.close()
     conn.close()
-    log(f"✅ Inserted {new_count} NEW item IDs.")
+
+    if not ids:
+        log("✅ Nothing to enrich.")
+        return
+
+    log(f"🔧 Enriching {len(ids)} items with {WORKERS} workers...")
+    log(f"   ID range: {min(ids)} → {max(ids)}")
+    start = time.time()
+
+    results = []
+    failed = 0
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(fetch_item, iid): iid for iid in ids}
+        for i, future in enumerate(as_completed(futures), 1):
+            try:
+                item_id, data = future.result(timeout=30)
+                if data:
+                    results.append((item_id, data))
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+
+            if i <= 10 or i % 100 == 0:
+                elapsed = time.time() - start
+                rate = i / elapsed if elapsed > 0 else 0
+                log(f"  {i}/{len(ids)} — ok: {len(results)}, fail: {failed} ({rate:.1f}/s)")
+
+    log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
+    log(f"📊 Failure breakdown: {_fail_codes}")
+
+    # ---- DB WRITE ----
+    conn = get_db_connection()
+    cur = conn.cursor()
+    enriched = 0
+    emote_count = 0
+    for item_id, d in results:
+        try:
+            favs = d.get("favoriteCount", 0) or 0
+            sales = d.get("purchaseCount", 0) or 0
+            price = d.get("price", 0) or 0
+            name = d.get("name", "") or ""
+            desc = d.get("description", "") or ""
+            creator = d.get("creatorName", "") or ""
+            asset_type = d.get("assetType", 0) or 0
+
+            if asset_type == 61:
+                emote_count += 1
+
+            cur.execute("""
+                INSERT INTO items (
+                    id, name, favorite_count, price, total_sales,
+                    description, creator_name, asset_type_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    favorite_count = EXCLUDED.favorite_count,
+                    total_sales = EXCLUDED.total_sales,
+                    price = EXCLUDED.price,
+                    description = EXCLUDED.description,
+                    name = EXCLUDED.name,
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    fetched_at = CURRENT_TIMESTAMP
+            """, (item_id, name, favs, price, sales, desc, creator, asset_type))
+
+            cur.execute("""
+                INSERT INTO item_history (item_id, favorite_count, total_sales, price)
+                VALUES (%s, %s, %s, %s)
+            """, (item_id, favs, sales, price))
+
+            enriched += 1
+        except Exception as e:
+            log(f"  DB error {item_id}: {e}")
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    log(f"✅ Enriched {enriched} items ({emote_count} emotes) in {time.time()-start:.1f}s")
 
 
 if __name__ == "__main__":
-    try:
-        run_scanner()
-    except Exception as e:
-        log(f"❌ FATAL: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    enrich_items()
