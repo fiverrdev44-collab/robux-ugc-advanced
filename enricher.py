@@ -13,7 +13,7 @@ AUTH_URL = "https://auth.roblox.com/v2/logout"
 
 BATCH_SIZE = 1500
 WORKERS = 3
-ITEM_DELAY = 0.5
+ITEM_DELAY = 0.7
 
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
