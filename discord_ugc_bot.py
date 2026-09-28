@@ -2014,12 +2014,17 @@ def _build_allow_list(intent, max_keywords=60):
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
-    # Filter out Limiteds / absurd prices
     sane_rows = [r for r in rows
                  if not r[3] or MIN_PRICE <= r[3] <= MAX_PRICE]
 
-    # Relevance filter: require 2+ search-term matches in item NAME
-    strong_terms = [t for t in terms if len(t) >= 3]
+    GENERIC_TERMS = {
+        "cute", "kawaii", "pink", "red", "white", "black", "blue", "brown",
+        "green", "yellow", "purple", "orange", "gold", "silver", "gray", "grey",
+        "y2k", "pastel", "grunge", "emo", "preppy", "aesthetic", "soft", "dark",
+        "playful", "whimsical", "fun", "sweet", "pretty", "beautiful",
+        "cool", "nice", "small", "big", "tiny", "little",
+    }
+    strong_terms = [t for t in terms if len(t) >= 3 and t.lower() not in GENERIC_TERMS]
 
     def _match_score(r):
         name = (r[1] or "").lower()
@@ -2070,7 +2075,8 @@ def _build_allow_list(intent, max_keywords=60):
     return allow_list, top_items, stats
 
 
-def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown"):
+def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
+                   total_verified=0, total_rejected=0):
     lines = ["# 🧠 UGC STRATEGY REPORT"]
     if item_type and item_type != "unknown":
         lines.append(f"*Detected item type: **{item_type.upper()}***")
@@ -2080,20 +2086,17 @@ def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown")
         lines.append("*Search tier: **Tier 1** (direct DB hits)*")
     lines.append("")
 
-    if verified_titles:
-        lines.append("## ✅ Verified Titles (DB-Safe)")
-        for i, t in enumerate(verified_titles, 1):
-            lines.append(f"**{i}.** `{t}`")
+    lines.append("## 📝 New Titles — Grouped by Strategy\n")
+    if verified_groups:
+        for group_name, titles in verified_groups.items():
+            lines.append(f"**{group_name}**")
+            for t in titles:
+                lines.append(f"• `{t}`")
+            lines.append("")
     else:
-        lines.append("## ⚠️ No Titles Passed Verification")
-        for t in (synth.get("titles") or [])[:3]:
-            lines.append(f"- ~~{t}~~")
-    if rejected:
-        lines.append("")
-        lines.append("**Rejected (words not in DB):**")
-        for t, bad in rejected[:2]:
-            lines.append(f"- `{t}` → bad: {', '.join(bad)}")
-    lines.append("")
+        lines.append("⚠️ No titles passed verification.\n")
+    if total_verified:
+        lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
 
     sections = [
         ("search_diagnosis",    "## 🔍 Search Diagnosis"),
@@ -2147,7 +2150,7 @@ async def ai_status(ctx):
             "**🧠 AI Status: ONLINE**",
             f"• Primary: `Gemini` ({gmodel})",
             f"• Fallback: {'`OpenRouter` (' + omodel + ')' if has_or else '❌ not configured'}",
-            "Commands: `!brainstorm`, `!ask`, `!ai_debug`",
+            "Commands: `!brainstorm`, `!rescue`, `!ask`, `!ai_debug`",
         ]
         await ctx.send("\n".join(lines))
     else:
@@ -2283,14 +2286,246 @@ async def brainstorm(ctx, *, description: str = ""):
             await ctx.send(body[i:i + 1900])
         return
 
-    verified, rejected = verify_titles(synth.get("titles") or [], allow_list)
-    body = _fmt_ai_result(synth, verified, rejected, stats, item_type)
+    all_groups = {
+        "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
+        "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
+        "🔎 Long-tail SEO (4+ keywords)":    synth.get("titles_longtail") or [],
+        "🔥 Viral bait (meme hook)":         synth.get("titles_viral") or [],
+    }
+    if not any(all_groups.values()):
+        all_groups = {"Titles": synth.get("titles") or []}
+
+    verified_groups = {}
+    total_verified = 0
+    total_rejected = 0
+    for group_name, group_titles in all_groups.items():
+        v, r = verify_titles(group_titles, allow_list)
+        if v:
+            verified_groups[group_name] = v
+            total_verified += len(v)
+        total_rejected += len(r)
+
+    body = _fmt_ai_result(synth, verified_groups, [], stats, item_type,
+                          total_verified=total_verified,
+                          total_rejected=total_rejected)
 
     try:
         await progress.delete()
     except Exception:
         pass
 
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+        await asyncio.sleep(0.3)
+
+
+@bot.command(name="rescue")
+async def rescue(ctx, *, description: str = ""):
+    """
+    Diagnose a launched UGC that's underperforming and get new titles + description.
+    Usage: !rescue rasputin dance emote, launched 3 days ago, 40 favs, no sales, R$75
+    """
+    if not description.strip():
+        await ctx.send(
+            "Usage: `!rescue <describe your launched item + stats>`\n"
+            "Example: `!rescue rasputin dance emote, launched 3 days ago, 40 favs, 0 sales, R$75`"
+        )
+        return
+    if not is_available():
+        await ctx.send("AI is offline. Run `!ai_status`.")
+        return
+
+    progress = await ctx.send("🩺 **Analyzing your item...**")
+
+    intent = extract_keywords(description)
+    if not intent:
+        words_raw = re.findall(r"[a-z]{3,}", description.lower())
+        intent = {
+            "primary": words_raw, "synonyms": [], "style": [], "vibe": [],
+            "colors": [], "references": [], "search_terms": words_raw,
+            "item_type": "unknown", "trend_source": "none",
+        }
+
+    item_type = intent.get("item_type", "unknown")
+    terms = all_terms(intent)
+
+    try:
+        allow_list, top_items, stats = await asyncio.to_thread(
+            _build_allow_list, intent
+        )
+    except Exception as e:
+        await progress.edit(content=f"❌ DB search failed: `{e}`")
+        return
+
+    if not allow_list:
+        await progress.edit(content="❌ No DB matches. Run the enricher more.")
+        return
+
+    comp_lines = []
+    for it in top_items[:10]:
+        name = (it.get("name") or "")[:70]
+        favs = it.get("favourite_count") or 0
+        price = it.get("price") or 0
+        comp_lines.append(f"• `{name}` — {favs:,} favs · R${price}")
+
+    await progress.edit(
+        content=(f"🩺 **Item type:** {item_type}\n"
+                 f"**Matched {stats['count']:,} competitors** in this niche.\n\n"
+                 f"🧠 **AI is diagnosing your launch and writing new titles...**")
+    )
+
+    rescue_prompt = f"""You are a Roblox UGC title doctor. A creator launched an item that is NOT SELLING.
+
+THEIR DESCRIPTION / CURRENT SITUATION:
+{description}
+
+ITEM TYPE DETECTED: {item_type}
+
+REAL DB KEYWORDS available (you MUST use these for titles):
+{', '.join(allow_list[:60])}
+
+TOP 10 COMPETITORS in this niche (these are what WINNERS look like):
+{chr(10).join(comp_lines)}
+
+MARKET STATS:
+- competitors: {stats.get('count', 0):,}
+- avg favs: {stats.get('avg_favs', 0):,}
+- median favs: {stats.get('median_favs', 0):,}
+- winner bar (top 10%): {stats.get('winner_favs', 0):,} favs
+- avg price: R${stats.get('price_avg', 0)}
+- price range: R${stats.get('price_min', 0)}-R${stats.get('price_max', 0)}
+
+YOUR JOB — return ONLY valid JSON:
+
+{{
+  "diagnosis": "3-4 sentences: why their item probably isn't selling. Compare their launch to the winner bar and competitor patterns. Be blunt.",
+  "what_winners_do": "2-3 sentences: the specific naming/styling pattern that the top 10 competitors share — what makes them rank.",
+  "titles_safe": ["3 titles that MIRROR what top competitors already do — highest chance of ranking"],
+  "titles_differentiated": ["3 titles that use the SAME niche keywords but a UNIQUE angle — beat the crowd"],
+  "titles_longtail": ["2 titles with 4+ keywords packed in — rank for rare long-tail searches"],
+  "titles_viral": ["2 titles that hook meme/TikTok/Sound trends — highest CTR potential"],
+  "new_description": "Full 2-3 sentence SEO description they can copy-paste. Keyword-rich. Must only use words from the keyword allow-list above plus glue words.",
+  "price_advice": "1-2 sentences: should they keep, raise, or drop the price? Reference the real median from the stats.",
+  "relaunch_plan": "2-3 sentences: concrete next action — reupload new title, or run ads, or pivot theme.",
+  "kill_or_keep": "KEEP / RESCUE / KILL — one word plus one sentence why"
+}}
+
+RULES:
+- Every word in every title MUST exist in the keyword allow-list above (plus tiny glue: a, an, the, of, and, or, for, to, in, on, with, my, your, numbers).
+- Do NOT invent keywords.
+- Do NOT fabricate stats. Only use the numbers given.
+- Titles in each group must feel DIFFERENT from each other. No repeating the same 3 words.
+- Safe = what already wins. Differentiated = unique twist. Longtail = 4+ keywords. Viral = meme hook.
+- Be direct. Assume this person has lost money and needs honest advice.
+- Output ONLY the JSON object.
+"""
+
+    synth = None
+    try:
+        synth = await asyncio.to_thread(
+            synthesize_hybrid, rescue_prompt, allow_list, top_items, stats,
+            item_type, intent.get("trend_source", "none"),
+            {"direct_matches": stats.get("direct_matches", 0),
+             "expansion_used": stats.get("expansion_used", False),
+             "expanded_terms": stats.get("expanded_terms", []),
+             "failed_terms": stats.get("failed_terms", []),
+             "reasoning": stats.get("reasoning", "")}
+        )
+    except Exception as e:
+        print(f"[rescue] failed: {e}", flush=True)
+        synth = None
+
+    if not synth:
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        lines = ["⚠️ **AI offline — here's what winners in your niche look like.**\n"]
+        lines.append(f"**Your niche:** `{', '.join(terms[:10])}`")
+        lines.append(f"**Competitors:** {stats['count']:,} items")
+        lines.append(f"**Winner bar:** {stats.get('winner_favs', 0):,} favs to reach top 10%")
+        lines.append(f"**Median price:** R${stats.get('price_avg', 0)}")
+        lines.append("\n**🥊 Top 10 competitors (copy their naming pattern):**")
+        lines.extend(comp_lines)
+        lines.append("\n**🎯 Real keywords you could use in your title:**")
+        lines.append(", ".join(f"`{k}`" for k in allow_list[:25]))
+        lines.append("\nRetry `!rescue` in 5–10 minutes when AI is back.")
+
+        body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i + 1900])
+        return
+
+    try:
+        await progress.delete()
+    except Exception:
+        pass
+
+    lines = ["# 🩺 RESCUE REPORT\n"]
+
+    if synth.get("diagnosis"):
+        lines.append("## 🔍 Diagnosis")
+        lines.append(synth["diagnosis"])
+        lines.append("")
+
+    if synth.get("what_winners_do"):
+        lines.append("## 🏆 What Winners Do")
+        lines.append(synth["what_winners_do"])
+        lines.append("")
+
+    groups = [
+        ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
+        ("🎯 DIFFERENTIATED (unique angle)", synth.get("titles_differentiated") or []),
+        ("🔎 LONG-TAIL SEO (4+ keywords)",   synth.get("titles_longtail") or []),
+        ("🔥 VIRAL BAIT (meme hook)",        synth.get("titles_viral") or []),
+    ]
+
+    lines.append("## 📝 New Titles — Grouped by Strategy\n")
+    total_verified = 0
+    total_rejected = 0
+    for group_name, group_titles in groups:
+        if not group_titles:
+            continue
+        verified, rejected = verify_titles(group_titles, allow_list)
+        total_verified += len(verified)
+        total_rejected += len(rejected)
+        if verified:
+            lines.append(f"**{group_name}**")
+            for t in verified:
+                lines.append(f"• `{t}`")
+            lines.append("")
+    lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
+
+    if synth.get("new_description"):
+        lines.append("## 📝 New Description (copy-paste)")
+        lines.append(synth["new_description"])
+        lines.append("")
+
+    if synth.get("price_advice"):
+        lines.append("## 💰 Price Advice")
+        lines.append(synth["price_advice"])
+        lines.append("")
+
+    if synth.get("relaunch_plan"):
+        lines.append("## 🚀 Relaunch Plan")
+        lines.append(synth["relaunch_plan"])
+        lines.append("")
+
+    if synth.get("kill_or_keep"):
+        lines.append("## ⚖️ Verdict")
+        lines.append(synth["kill_or_keep"])
+        lines.append("")
+
+    lines.append("---")
+    lines.append("**🥊 Top 10 competitors in your niche:**")
+    lines.extend(comp_lines)
+    lines.append("")
+    lines.append(f"_Market: {stats.get('count', 0):,} competitors · "
+                 f"winner bar {stats.get('winner_favs', 0):,} favs · "
+                 f"median price R${stats.get('price_avg', 0)}_")
+
+    body = "\n".join(lines)
     for i in range(0, len(body), 1900):
         await ctx.send(body[i:i + 1900])
         await asyncio.sleep(0.3)
@@ -2325,13 +2560,8 @@ async def ask_cmd(ctx, *, question: str = ""):
         await ctx.send(answer[i:i + 1900])
 
 
-# =========================================================================
-# AI DEBUG
-# =========================================================================
-
 @bot.command(name="ai_debug")
 async def ai_debug(ctx):
-    """Diagnostic — shows status of every AI provider."""
     lines = ["**🔬 AI Debug Report**\n"]
 
     gkey = os.getenv("GEMINI_API_KEY", "")
