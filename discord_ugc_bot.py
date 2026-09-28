@@ -1888,7 +1888,7 @@ async def track(ctx, item_id: int):
 
 
 # =========================================================================
-# GEMINI AI COMMANDS
+# AI COMMANDS
 # =========================================================================
 
 def _db_search(patterns):
@@ -2014,11 +2014,24 @@ def _build_allow_list(intent, max_keywords=60):
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
-    # Filter out Limiteds / absurd prices BEFORE ranking and averaging
+    # Filter out Limiteds / absurd prices
     sane_rows = [r for r in rows
                  if not r[3] or MIN_PRICE <= r[3] <= MAX_PRICE]
 
-    top_rows = sorted(sane_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
+    # Relevance filter: require 2+ search-term matches in item NAME
+    strong_terms = [t for t in terms if len(t) >= 3]
+
+    def _match_score(r):
+        name = (r[1] or "").lower()
+        return sum(1 for t in strong_terms if t in name)
+
+    relevant_rows = [r for r in sane_rows if _match_score(r) >= 2]
+    if len(relevant_rows) < 5:
+        relevant_rows = [r for r in sane_rows if _match_score(r) >= 1]
+    if len(relevant_rows) < 5:
+        relevant_rows = sane_rows
+
+    top_rows = sorted(relevant_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
     top_items = [
         {"name": r[1], "favourite_count": r[2] or 0,
          "price": r[3] or 0, "total_sales": r[4] or 0}
@@ -2128,7 +2141,7 @@ def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown")
 async def ai_status(ctx):
     if is_available():
         gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-        omodel = os.getenv("OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+        omodel = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
         has_or = bool(os.getenv("OPENROUTER_API_KEY", "").strip())
         lines = [
             "**🧠 AI Status: ONLINE**",
@@ -2325,7 +2338,7 @@ async def ai_debug(ctx):
     gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
     okey = os.getenv("OPENROUTER_API_KEY", "")
     omodel = os.getenv("OPENROUTER_MODEL",
-                       "nvidia/nemotron-3-super-120b-a12b:free")
+                       "meta-llama/llama-3.3-70b-instruct:free")
 
     lines.append("**Env vars:**")
     lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
@@ -2334,7 +2347,6 @@ async def ai_debug(ctx):
     lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
     lines.append("")
 
-    # Gemini test
     lines.append("**Gemini test** (`say hello`):")
     if not gkey:
         lines.append("• ❌ GEMINI_API_KEY not set")
@@ -2358,7 +2370,6 @@ async def ai_debug(ctx):
             lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
     lines.append("")
 
-    # OpenRouter test
     lines.append("**OpenRouter test** (`say hello`):")
     if not okey:
         lines.append("• ❌ OPENROUTER_API_KEY not set")
