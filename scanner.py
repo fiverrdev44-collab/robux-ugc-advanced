@@ -25,8 +25,10 @@ HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 60
 
-# Real Roblox asset IDs are currently ~1.3–1.6 billion (10 digits).
-# Anything outside this range is garbage from a wrong API field.
+# Roblox: category 12 = Community Creations, subcategory 39 = Emotes
+EMOTE_CATEGORY = 12
+EMOTE_SUBCATEGORY = 39
+
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 10_000_000_000
 
@@ -77,7 +79,7 @@ EMOTE_KEYWORDS = [
     "emote", "expression", "gesture", "reaction", "animation",
     "greeting", "hello", "goodbye", "welcome", "swag", "hype", "party",
     "groove", "sway", "smooth", "savage", "epic", "goofy",
-    "russian", "slav", "gangnam", "bollywood",
+    "russian", "slav", "bollywood",
     "retro", "among", "imposter", "fortnite", "minecraft", "fnaf",
     "twerk", "shmoney",
     "smug", "crying", "sobbing", "dying", "dead", "ghost",
@@ -94,6 +96,19 @@ def is_valid_asset_id(iid):
     except (TypeError, ValueError):
         return False
     return MIN_VALID_ID <= n <= MAX_VALID_ID
+
+
+def is_asset_item(item):
+    """
+    Only trust items the API marks as Asset.
+    Bundles / Universes have different itemType and 15-digit IDs.
+    """
+    if not isinstance(item, dict):
+        return False
+    item_type = (item.get("itemType") or "").lower()
+    if item_type and item_type != "asset":
+        return False
+    return is_valid_asset_id(item.get("id"))
 
 
 def get_dynamic_keywords():
@@ -137,9 +152,8 @@ def try_api(api_url, params):
 
             data = resp.json()
             for item in data.get("data", []):
-                iid = item.get("id")
-                if is_valid_asset_id(iid):
-                    found.add(int(iid))
+                if is_asset_item(item):
+                    found.add(int(item["id"]))
 
             cursor = data.get("nextPageCursor")
             if not cursor:
@@ -166,22 +180,55 @@ def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
-    # General category sweeps
+    # ---- General category sweeps ----
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({"category": cat, "sortType": sort, "limit": 30})
 
-    # Keyword sweeps
+    # =========================================================
+    # DEDICATED EMOTE DISCOVERY
+    # Category 12 + Subcategory 39 = Emotes specifically
+    # =========================================================
+    for sort in SORT_TYPES:
+        queries.append({
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "sortType": sort,
+            "limit": 30,
+        })
+
+    # Emote keyword + subcategory = deeper coverage
+    for kw in EMOTE_KEYWORDS[:60]:
+        queries.append({
+            "keyword": kw,
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "sortType": 2,
+            "limit": 30,
+        })
+
+    # Emote price-band sweeps
+    for min_p, max_p in PRICE_RANGES:
+        queries.append({
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "minPrice": min_p,
+            "maxPrice": max_p,
+            "sortType": 2,
+            "limit": 30,
+        })
+
+    # ---- General keyword sweeps ----
     all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
     for kw in all_keywords:
         for sort in [0, 2]:
             queries.append({"keyword": kw, "sortType": sort, "limit": 30})
 
-    # Price-band sweeps catch long-tail items
+    # ---- Price-band sweeps for everything ----
     for min_p, max_p in PRICE_RANGES:
         queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
 
-    # Learned keywords
+    # ---- Learned keywords ----
     for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
 
