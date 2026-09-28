@@ -19,7 +19,7 @@ REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
 MIN_VALID_ID = 1_000_000
-MAX_VALID_ID = 10_000_000_000
+MAX_VALID_ID = 2_000_000_000
 
 COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
 if not COOKIE:
