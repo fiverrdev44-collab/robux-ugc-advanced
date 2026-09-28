@@ -75,7 +75,7 @@ _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 The creator describes what they want to make in casual language.
 Extract structured intent for a database search. Return ONLY valid JSON:
 
-{
+{{
   "item_type":    "<one of: emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
   "primary":      ["..."],
   "synonyms":     ["..."],
@@ -85,7 +85,7 @@ Extract structured intent for a database search. Return ONLY valid JSON:
   "references":   ["..."],
   "trend_source": "<one of: tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
   "search_terms": ["..."]
-}
+}}
 
 RULES:
 - Lowercase. Single words or short 2-word phrases. No punctuation.
