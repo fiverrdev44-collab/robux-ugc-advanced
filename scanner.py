@@ -17,14 +17,22 @@ CATALOG_APIS = [
     "https://catalog.roblox.com/v1/search/items",
 ]
 
-CATEGORIES = [11, 3, 4, 12]
+CATEGORIES = [11, 3, 4, 12, 5]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
 WORKERS = 3
 DELAY = 0.2
-MAX_PAGES_PER_QUERY = 10
+MAX_PAGES_PER_QUERY = 15   # bumped from 10 → deeper emote coverage
 HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 60
+
+# ---------------------------------------------------------------------------
+# EMOTE DISCOVERY — the critical fix
+# Roblox catalog: category 12 = Community Creations, subcategory 39 = Emotes
+# Without subcategory 39, emotes get buried under other Community Creations items.
+# ---------------------------------------------------------------------------
+EMOTE_CATEGORY = 12
+EMOTE_SUBCATEGORY = 39
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -50,15 +58,52 @@ CLASSIC_KEYWORDS = [
     "denim", "leather", "sports", "jersey", "varsity", "anime", "kawaii"
 ]
 
+# Massively expanded — 180 terms to catch every emote subgenre
 EMOTE_KEYWORDS = [
-    "dance", "floss", "wave", "griddy", "emote", "russian", "meme",
-    "renegade", "shuffle", "spin", "flip", "kick", "punch", "idle", "sit",
-    "laugh", "cry", "rage", "silly", "bunny", "dab", "sigma", "rizz",
-    "skibidi", "moonwalk", "robot", "victory", "clap", "cheer", "flex",
-    "salute", "pose", "walk", "swim", "fly", "float", "anime", "aura"
+    # Core dance moves
+    "dance", "floss", "griddy", "dab", "moonwalk", "shuffle", "renegade",
+    "wave", "spin", "twirl", "kick", "bounce", "jump", "walk", "run",
+    "gangnam", "salsa", "ballet", "breakdance", "krump", "hiphop", "hip-hop",
+    "twist", "robot", "vogue", "stanky", "dougie", "whip", "nae nae",
+    "harlem shake", "milky", "milkshake", "tiktok", "renegade",
+    # Gestures / reactions
+    "wave", "clap", "cheer", "salute", "pose", "flex", "point", "thumbsup",
+    "peace", "handshake", "hug", "highfive", "fist", "bump", "heart",
+    "kiss", "wink", "nod", "shrug", "pray", "beg", "thumbs",
+    # Emotions
+    "laugh", "cry", "rage", "angry", "sad", "happy", "silly", "cringe",
+    "shy", "embarrassed", "confused", "shock", "surprised", "smile", "smirk",
+    # Idle / movement loops
+    "idle", "sit", "crouch", "sleep", "meditate", "levitate", "float",
+    "hover", "fly", "swim", "swim", "victory", "defeat", "die", "fall",
+    # Animal / character emotes
+    "cat", "dog", "bunny", "bear", "panda", "fox", "wolf", "dragon",
+    "frog", "monkey", "penguin", "duck", "chicken", "crab", "snake",
+    # Anime / pop culture
+    "anime", "naruto", "dragonball", "jujutsu", "demon slayer", "onepiece",
+    "kpop", "blackpink", "bts", "twice", "bts", "korean", "japanese",
+    "jojo", "sasuke", "goku", "luffy", "itachi", "gojo", "levi",
+    # Slang / meme emotes
+    "sigma", "rizz", "skibidi", "ohio", "gyatt", "mewing", "aura",
+    "based", "cringe", "sus", "ratio", "goat", "slay", "bussin",
+    "griddy", "fanum", "cap", "yeet", "poggers", "bruh", "sussy",
+    # Reactions / emotes catalog
+    "emote", "expression", "gesture", "reaction", "animation", "loop",
+    "greeting", "hello", "goodbye", "welcome", "swag", "hype", "party",
+    "groove", "sway", "smooth", "cool", "savage", "epic", "goofy",
+    # Russian / cultural
+    "russian", "slav", "kazakh", "polish", "gangnam", "bollywood",
+    # Misc viral
+    "sturdy", "default", "classic", "old", "nostalgia", "retro",
+    "among", "imposter", "fortnite", "minecraft", "fnaf", "poppy",
+    "twerk", "booty", "shmoney", "hit", "folks",
+    # Emotional reactions
+    "smug", "laughing", "crying", "sobbing", "dying", "dead", "ghost",
+    # Sports / action
+    "boxing", "karate", "taekwondo", "kungfu", "punch", "kickbox",
 ]
 
-PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100)]
+PRICE_RANGES = [(0, 0), (1, 10), (11, 50), (51, 100), (101, 500), (501, 10000)]
 
 
 def get_dynamic_keywords():
@@ -136,18 +181,57 @@ def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
+    # ---- General category scans ----
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({"category": cat, "sortType": sort, "limit": 30})
 
+    # =========================================================
+    # DEDICATED EMOTE DISCOVERY — the fix
+    # Category 12 + Subcategory 39 = Emotes specifically
+    # =========================================================
+    for sort in SORT_TYPES:
+        queries.append({
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "sortType": sort,
+            "limit": 30,
+        })
+
+    # Emote price-band sweeps — catches cheap + premium emotes
+    for min_p, max_p in PRICE_RANGES:
+        queries.append({
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "minPrice": min_p,
+            "maxPrice": max_p,
+            "sortType": 2,
+            "limit": 30,
+        })
+
+    # =========================================================
+    # KEYWORD SEARCHES
+    # =========================================================
     all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
     for kw in all_keywords:
         for sort in [0, 2]:
             queries.append({"keyword": kw, "sortType": sort, "limit": 30})
 
+    # Emote keyword + subcategory combined (deep coverage)
+    for kw in EMOTE_KEYWORDS[:60]:  # top 60 emote keywords get extra depth
+        queries.append({
+            "keyword": kw,
+            "category": EMOTE_CATEGORY,
+            "subcategory": EMOTE_SUBCATEGORY,
+            "sortType": 2,
+            "limit": 30,
+        })
+
+    # ---- Price sweep for non-emote categories ----
     for min_p, max_p in PRICE_RANGES:
         queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
 
+    # ---- Learned keywords from DB ----
     for kw in get_dynamic_keywords():
         queries.append({"keyword": kw, "sortType": 2, "limit": 30})
 
