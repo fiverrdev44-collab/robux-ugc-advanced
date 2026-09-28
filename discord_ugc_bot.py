@@ -11,6 +11,14 @@ import math
 import re
 from flask import Flask
 from collections import Counter, defaultdict
+from gemini_brain import (
+    extract_keywords,
+    all_terms,
+    synthesize_hybrid,
+    verify_titles,
+    ask_ai,
+    is_available,
+)
 
 TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -192,7 +200,7 @@ def analyze_opportunity(cur, kw):
                 SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
                        favorite_count, price, creator_name
                 FROM items
-                WHERE (name ~* %s OR COALESCE(LOWER(description), '') ~* %s)
+                WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
                   AND favorite_count > 0 LIMIT 2000
             """, (pattern, pattern))
             all_items = cur.fetchall()
@@ -1890,6 +1898,226 @@ async def track(ctx, item_id: int):
         embed.add_field(name=f"🕐 {when.strftime('%m/%d %H:%M')}",
                         value=f"Favs: **{favs:,}** | Price: **{price} R$**", inline=False)
     await ctx.send(embed=embed)
+
+
+# =========================================================================
+# GEMINI AI COMMANDS
+# =========================================================================
+
+async def _build_allow_list(intent, max_keywords=60):
+    """Query DB with extracted terms, build allow-list from real titles."""
+    terms = all_terms(intent)
+    if not terms:
+        return [], [], {}
+
+    patterns = [f"%{t}%" for t in terms if len(t) >= 2]
+    if not patterns:
+        return [], [], {}
+
+    sql = """
+        SELECT name, favorite_count, price, total_sales, description
+        FROM items
+        WHERE lower(name) LIKE ANY(%s)
+        LIMIT 2000
+    """
+
+    rows = []
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute(sql, (patterns,))
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        print(f"[brainstorm] db query failed: {e}", flush=True)
+        return [], [], {}
+
+    if not rows:
+        return [], [], {}
+
+    freq = {}
+    bigrams = {}
+    token_re = re.compile(r"[a-z0-9]+")
+    for r in rows:
+        name = (r[0] or "").lower()
+        toks = token_re.findall(name)
+        for t in toks:
+            if len(t) >= 2:
+                freq[t] = freq.get(t, 0) + 1
+        for a, b in zip(toks, toks[1:]):
+            bg = f"{a} {b}"
+            bigrams[bg] = bigrams.get(bg, 0) + 1
+
+    unigrams = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])]
+    top_bigrams = [b for b, _ in sorted(bigrams.items(), key=lambda x: -x[1])[:15]]
+    allow_list = unigrams[:max_keywords]
+    allow_list += [b for b in top_bigrams if b not in allow_list]
+
+    top_rows = sorted(rows, key=lambda r: (r[1] or 0), reverse=True)[:10]
+    top_items = [
+        {"name": r[0], "favourite_count": r[1] or 0,
+         "price": r[2] or 0, "total_sales": r[3] or 0}
+        for r in top_rows
+    ]
+
+    prices = [r[2] or 0 for r in rows if (r[2] or 0) > 0]
+    stats = {
+        "count": len(rows),
+        "price_min": min(prices) if prices else 0,
+        "price_avg": round(sum(prices) / len(prices)) if prices else 0,
+        "price_max": max(prices) if prices else 0,
+        "total_sales": sum((r[3] or 0) for r in rows),
+    }
+    return allow_list, top_items, stats
+
+
+def _fmt_ai_result(synth, verified_titles, rejected, stats):
+    lines = ["**🧠 GEMINI BRAINSTORM**\n"]
+
+    if verified_titles:
+        lines.append("**✅ Verified titles (DB-safe):**")
+        for i, t in enumerate(verified_titles, 1):
+            lines.append(f"{i}. `{t}`")
+    else:
+        lines.append("**⚠️ No titles passed verification.** Raw AI output:")
+        for t in (synth.get("titles") or [])[:3]:
+            lines.append(f"- ~~{t}~~")
+
+    if rejected:
+        lines.append("\n**❌ Rejected (words not in DB):**")
+        for t, bad in rejected[:3]:
+            lines.append(f"- `{t}` → bad: {', '.join(bad)}")
+
+    lines.append("")
+    for key, label in [
+        ("diagnosis", "🔍 Diagnosis"),
+        ("price_reasoning", "💰 Price"),
+        ("seo_description", "📝 SEO description"),
+        ("verdict", "⚖️ Verdict"),
+        ("algo_tip", "🤖 Algo tip"),
+        ("trend_analysis", "📈 Trend"),
+        ("cultural_relevance", "🌍 Culture"),
+    ]:
+        if synth.get(key):
+            lines.append(f"**{label}**\n{synth[key]}\n")
+
+    if synth.get("killer_keywords"):
+        kw = ", ".join(synth["killer_keywords"][:15])
+        lines.append(f"**🎯 Killer keywords**\n{kw}\n")
+
+    lines.append(
+        f"_Market: {stats.get('count', 0)} items | "
+        f"price avg R${stats.get('price_avg', 0)} | "
+        f"allow-list built from real titles._"
+    )
+    return "\n".join(lines)
+
+
+@bot.command(name="ai_status")
+async def ai_status(ctx):
+    if is_available():
+        await ctx.send(
+            "**🧠 Gemini AI: ONLINE**\n"
+            f"Model: `{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}`\n"
+            "Commands ready: `!brainstorm`, `!ask`"
+        )
+    else:
+        await ctx.send(
+            "**🧠 Gemini AI: OFFLINE**\n"
+            "Check that `GEMINI_API_KEY` is set on Render and that "
+            "`google-generativeai` is in `requirements.txt`."
+        )
+
+
+@bot.command(name="brainstorm")
+async def brainstorm(ctx, *, description: str = ""):
+    if not description.strip():
+        await ctx.send("Usage: `!brainstorm girl dancing korean style, pink neon`")
+        return
+    if not is_available():
+        await ctx.send("Gemini is offline. Run `!ai_status`.")
+        return
+
+    progress = await ctx.send("🧠 Thinking... (Pass 1: extracting intent)")
+
+    intent = extract_keywords(description)
+    if not intent:
+        await progress.edit(content="❌ Pass 1 failed — Gemini returned nothing.")
+        return
+
+    try:
+        allow_list, top_items, stats = await asyncio.to_thread(
+            _build_allow_list, intent
+        )
+    except Exception as e:
+        await progress.edit(content=f"❌ DB query failed: `{e}`")
+        return
+
+    if not allow_list:
+        await progress.edit(
+            content=("❌ No DB items matched your description. "
+                     "Try different words, or run more enricher passes.")
+        )
+        return
+
+    await progress.edit(
+        content=(f"🔎 Matched {stats['count']} real items → "
+                 f"allow-list: {len(allow_list)} keywords. "
+                 f"(Pass 2: synthesizing)")
+    )
+
+    try:
+        synth = await asyncio.to_thread(
+            synthesize_hybrid, description, allow_list, top_items, stats
+        )
+    except Exception as e:
+        await progress.edit(content=f"❌ Pass 2 failed: `{e}`")
+        return
+
+    if not synth:
+        await progress.edit(content="❌ Pass 2 failed — Gemini returned nothing.")
+        return
+
+    verified, rejected = verify_titles(synth.get("titles") or [], allow_list)
+    body = _fmt_ai_result(synth, verified, rejected, stats)
+
+    try:
+        await progress.delete()
+    except Exception:
+        pass
+
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+
+
+@bot.command(name="ask")
+async def ask_cmd(ctx, *, question: str = ""):
+    if not question.strip():
+        await ctx.send("Usage: `!ask how does the Roblox UGC algo rank new items?`")
+        return
+    if not is_available():
+        await ctx.send("Gemini is offline. Run `!ai_status`.")
+        return
+
+    progress = await ctx.send("🧠 Thinking...")
+    try:
+        answer = await asyncio.to_thread(ask_ai, question)
+    except Exception as e:
+        await progress.edit(content=f"❌ Gemini failed: `{e}`")
+        return
+
+    if not answer:
+        await progress.edit(content="❌ Gemini returned nothing.")
+        return
+
+    try:
+        await progress.delete()
+    except Exception:
+        pass
+
+    for i in range(0, len(answer), 1900):
+        await ctx.send(answer[i:i + 1900])
 
 
 app = Flask(__name__)
