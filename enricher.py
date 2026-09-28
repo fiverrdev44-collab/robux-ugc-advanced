@@ -4,7 +4,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection, setup_database
 
-# Multiple RoProxy mirrors — tries each in order until one works
 ITEM_APIS = [
     "https://catalog.roproxy.com/v1/catalog/items/{}/details?itemType=Asset",
     "https://catalog.roproxy.io/v1/catalog/items/{}/details?itemType=Asset",
@@ -12,12 +11,16 @@ ITEM_APIS = [
 ]
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
-BATCH_SIZE = 500
-WORKERS = 3
-ITEM_DELAY = 0.3
+# Bumped from 500 → 1500 (3x per run, still polite)
+BATCH_SIZE = 1500
+WORKERS = 4
+ITEM_DELAY = 0.25
 
 # Set REFRESH_MODE=true via env var to re-enrich top items (builds velocity history)
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
+
+# Set PRIORITY=newest (default) or PRIORITY=oldest
+PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
 COOKIE = os.getenv("ROBLOSECURITY_COOKIE")
 if not COOKIE:
@@ -42,7 +45,6 @@ def log(msg):
 
 
 def get_csrf_token():
-    """Fetch CSRF token (needed for direct Roblox fallback)."""
     log("🔐 Fetching X-CSRF-Token...")
     try:
         resp = session.post(AUTH_URL, timeout=10)
@@ -57,7 +59,6 @@ def get_csrf_token():
 
 
 def fetch_item(item_id):
-    """Try each mirror in order until one succeeds."""
     for api_template in ITEM_APIS:
         url = api_template.format(item_id)
         for attempt in range(3):
@@ -71,7 +72,7 @@ def fetch_item(item_id):
                 if resp.status_code == 403 and "roblox.com" in url:
                     get_csrf_token()
                     continue
-                break  # try next API
+                break
             except Exception:
                 time.sleep(0.5)
                 continue
@@ -83,7 +84,6 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Try to get CSRF (only needed if RoProxy fails)
     get_csrf_token()
 
     # ---- PICK ITEMS TO ENRICH ----
@@ -96,10 +96,19 @@ def enrich_items():
             LIMIT %s
         """, (BATCH_SIZE,))
     else:
-        log("🆕 NORMAL MODE: enriching new items only")
-        cur.execute("""
-            SELECT id FROM discovered_items 
-            WHERE id NOT IN (SELECT id FROM items) 
+        order = "DESC" if PRIORITY == "newest" else "ASC"
+        log(f"🆕 NORMAL MODE: enriching new items (priority: {PRIORITY})")
+
+        # NOT EXISTS is much faster than NOT IN on large tables
+        # ORDER BY id DESC puts newest Roblox items first —
+        # this is what makes the freshly-scanned emotes process first
+        cur.execute(f"""
+            SELECT d.id
+            FROM discovered_items d
+            WHERE NOT EXISTS (
+                SELECT 1 FROM items i WHERE i.id = d.id
+            )
+            ORDER BY d.id {order}
             LIMIT %s
         """, (BATCH_SIZE,))
 
@@ -112,6 +121,7 @@ def enrich_items():
         return
 
     log(f"🔧 Enriching {len(ids)} items with {WORKERS} workers (RoProxy)...")
+    log(f"   ID range: {min(ids)} → {max(ids)}")
     start = time.time()
 
     results = []
@@ -128,8 +138,10 @@ def enrich_items():
             except Exception:
                 failed += 1
 
-            if i <= 10 or i % 10 == 0:
-                log(f"  {i}/{len(ids)} — success: {len(results)}, failed: {failed}")
+            if i <= 10 or i % 50 == 0:
+                elapsed = time.time() - start
+                rate = i / elapsed if elapsed > 0 else 0
+                log(f"  {i}/{len(ids)} — ok: {len(results)}, fail: {failed} ({rate:.1f}/s)")
 
     log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
 
@@ -137,6 +149,7 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
     enriched = 0
+    emote_count = 0
     for item_id, d in results:
         try:
             favs = d.get("favoriteCount", 0) or 0
@@ -146,6 +159,9 @@ def enrich_items():
             desc = d.get("description", "") or ""
             creator = d.get("creatorName", "") or ""
             asset_type = d.get("assetType", 0) or 0
+
+            if asset_type == 61:
+                emote_count += 1
 
             cur.execute("""
                 INSERT INTO items (
@@ -159,10 +175,10 @@ def enrich_items():
                     price = EXCLUDED.price,
                     description = EXCLUDED.description,
                     name = EXCLUDED.name,
+                    asset_type_id = EXCLUDED.asset_type_id,
                     fetched_at = CURRENT_TIMESTAMP
             """, (item_id, name, favs, price, sales, desc, creator, asset_type))
 
-            # Always insert a new history snapshot (this is what enables velocity tracking)
             cur.execute("""
                 INSERT INTO item_history (item_id, favorite_count, total_sales, price)
                 VALUES (%s, %s, %s, %s)
@@ -175,7 +191,7 @@ def enrich_items():
     conn.commit()
     cur.close()
     conn.close()
-    log(f"✅ Enriched {enriched} items in {time.time()-start:.1f}s total.")
+    log(f"✅ Enriched {enriched} items ({emote_count} emotes) in {time.time()-start:.1f}s total.")
 
 
 if __name__ == "__main__":
