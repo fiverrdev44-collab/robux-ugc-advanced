@@ -18,6 +18,7 @@ from gemini_brain import (
     verify_titles,
     ask_ai,
     is_available,
+    expand_search_terms,
 )
 
 TOKEN = os.getenv("TOKEN")
@@ -138,7 +139,6 @@ def matches_seed(text, seed):
 
 
 def is_emote_word(cur, word):
-    """Self-learning: check if word appears in real emote items in DB."""
     if word in EMOTE_KEYWORDS_HINT:
         return True
     try:
@@ -168,11 +168,8 @@ def classify_word(word):
 def analyze_opportunity(cur, kw):
     kw_words = [w for w in kw.lower().split() if len(w) >= 2]
     pattern = word_boundary_pattern(kw)
-
-    # Detect if emote seed (self-learning)
     is_emote_seed = any(is_emote_word(cur, w) for w in kw_words)
 
-    # ---- STEP 1: Try exact phrase ----
     all_items = []
     try:
         if is_emote_seed:
@@ -209,7 +206,6 @@ def analyze_opportunity(cur, kw):
         rollback_quietly(cur)
         all_items = []
 
-    # ---- STEP 2: Multi-word fallback ----
     used_fallback = False
     if len(all_items) < 15 and len(kw_words) > 1:
         combined = {}
@@ -245,7 +241,6 @@ def analyze_opportunity(cur, kw):
     if not all_items:
         return None
 
-    # ---- STEP 3: Search suggestions ----
     suggs = []
     try:
         cur.execute("""
@@ -262,7 +257,6 @@ def analyze_opportunity(cur, kw):
     except Exception:
         rollback_quietly(cur)
 
-    # ---- STEP 4: Build keyword stats ----
     stats = defaultdict(lambda: {"favs": 0, "count": 0})
 
     for _, name, desc, favs, price, creator in all_items:
@@ -1027,11 +1021,9 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("❌ Need at least one real word.")
         return
 
-    # Section 1 - understanding (uses DB check for emote detection)
     classifications = []
     icons = {"slang": "⚡", "color": "🎨", "style": "✨", "item": "🧢",
              "emote": "💃", "number": "🔢", "unknown": "❔"}
-    # Do a quick DB connection for classification
     try:
         conn_c = get_db(); cur_c = conn_c.cursor()
         for w in words:
@@ -1255,7 +1247,6 @@ async def guide(ctx, *, idea: str = None):
     except Exception: pass
     await asyncio.sleep(0.3)
 
-    # Pulse
     pulse = discord.Embed(title="📊 Section 1 — Market Pulse",
                           description="Real data per word:", color=0x66ccff)
     for i, w in enumerate(word_stats, 1):
@@ -1287,7 +1278,6 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("🔄 Loading Section 2...")
         await asyncio.sleep(0.3)
 
-    # Section 2
     if not goto_strategy:
         if opportunity_data and opportunity_data.get("top_keywords"):
             kw_all = opportunity_data["top_keywords"][:15]
@@ -1377,7 +1367,6 @@ async def guide(ctx, *, idea: str = None):
             await ctx.send("🔄 Loading Section 3...")
             await asyncio.sleep(0.3)
 
-    # Section 3
     verdict = smart_verdict(word_stats, combo_stats)
 
     if not goto_strategy:
@@ -1428,7 +1417,6 @@ async def guide(ctx, *, idea: str = None):
         await ctx.send("🔄 Loading final section...")
         await asyncio.sleep(0.3)
 
-    # Section 4 — 3 combined embeds
     try:
         combo = discord.Embed(title="💰 Section 4 — ROI, Pricing & Alternatives",
                               color=0x00ff88)
@@ -1530,7 +1518,6 @@ async def guide(ctx, *, idea: str = None):
 
 @bot.command(name="emote_status")
 async def emote_status(ctx):
-    """Diagnostic — shows how many emotes are in the DB."""
     try:
         conn = get_db(); cur = conn.cursor()
         try:
@@ -1901,46 +1888,130 @@ async def track(ctx, item_id: int):
 
 
 # =========================================================================
-# GEMINI AI COMMANDS
+# GEMINI AI COMMANDS — Elite 3-Tier
 # =========================================================================
 
-async def _build_allow_list(intent, max_keywords=60):
-    """Query DB with extracted terms, build allow-list from real titles."""
+def _db_search(patterns):
+    """Run an ILIKE ANY() search over name + description."""
+    if not patterns:
+        return []
+    sql = """
+        SELECT id, name, favorite_count, price, total_sales, description
+        FROM items
+        WHERE lower(name) LIKE ANY(%s)
+           OR lower(COALESCE(description, '')) LIKE ANY(%s)
+        LIMIT 2500
+    """
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute(sql, (patterns, patterns))
+            return cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        print(f"[db-search] {e}", flush=True)
+        return []
+
+
+def _term_match_count(term):
+    if not term or len(term) < 3:
+        return 0
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute(
+                """SELECT COUNT(*) FROM (
+                     SELECT 1 FROM items
+                     WHERE lower(name) LIKE %s
+                        OR lower(COALESCE(description,'')) LIKE %s
+                     LIMIT 500
+                   ) sub""",
+                (f"%{term}%", f"%{term}%")
+            )
+            return cur.fetchone()[0] or 0
+        finally:
+            cur.close(); conn.close()
+    except Exception:
+        return 0
+
+
+def _get_db_vocab_sample(limit=400):
+    """Top N most common single-word terms across popular DB items."""
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT name FROM items WHERE favorite_count > 50 LIMIT 5000")
+            rows = cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+    except Exception:
+        return []
+    counter = Counter()
+    token_re = re.compile(r"[a-z]+")
+    for (name,) in rows:
+        for w in set(token_re.findall((name or "").lower())):
+            if len(w) >= 3 and w not in STOP_WORDS:
+                counter[w] += 1
+    return [w for w, _ in counter.most_common(limit)]
+
+
+def _build_allow_list(intent, max_keywords=60):
+    """
+    Smart 3-tier DB search:
+      Tier 1 — direct term match (name + description)
+      Tier 2 — if < 50 direct hits, bridge failed terms to real DB vocab
+      Tier 3 — merge, build allow-list, compute competition stats
+    """
     terms = all_terms(intent)
     if not terms:
         return [], [], {}
 
+    # ---- TIER 1: direct ----
+    rows_by_id = {}
     patterns = [f"%{t}%" for t in terms if len(t) >= 2]
-    if not patterns:
-        return [], [], {}
+    if patterns:
+        for r in _db_search(patterns):
+            rows_by_id[r[0]] = r
+    direct_count = len(rows_by_id)
 
-    sql = """
-        SELECT name, favorite_count, price, total_sales, description
-        FROM items
-        WHERE lower(name) LIKE ANY(%s)
-        LIMIT 2000
-    """
-
-    rows = []
-    try:
-        conn = get_db(); cur = conn.cursor()
+    # ---- TIER 2: bridge via Gemini ----
+    expanded_terms = []
+    bridge_reasoning = ""
+    failed_terms = []
+    if direct_count < 50:
         try:
-            cur.execute(sql, (patterns,))
-            rows = cur.fetchall()
-        finally:
-            cur.close(); conn.close()
-    except Exception as e:
-        print(f"[brainstorm] db query failed: {e}", flush=True)
-        return [], [], {}
+            failed_terms = [t for t in terms if len(t) >= 3 and _term_match_count(t) < 3]
+            if failed_terms:
+                db_vocab = _get_db_vocab_sample(400)
+                if db_vocab:
+                    exp = expand_search_terms(intent, db_vocab, failed_terms)
+                    expanded_terms = exp.get("expanded_terms", [])
+                    bridge_reasoning = exp.get("reasoning", "")
+                    if expanded_terms:
+                        p2 = [f"%{t}%" for t in expanded_terms if len(t) >= 2]
+                        if p2:
+                            for r in _db_search(p2):
+                                rows_by_id[r[0]] = r
+        except Exception as e:
+            print(f"[bridge] failed: {e}", flush=True)
 
+    rows = list(rows_by_id.values())
     if not rows:
-        return [], [], {}
+        return [], [], {
+            "direct_matches": 0,
+            "expansion_used": bool(expanded_terms),
+            "expanded_terms": expanded_terms,
+            "failed_terms": failed_terms,
+            "reasoning": bridge_reasoning,
+        }
 
+    # ---- build allow-list from real titles ----
     freq = {}
     bigrams = {}
     token_re = re.compile(r"[a-z0-9]+")
     for r in rows:
-        name = (r[0] or "").lower()
+        name = (r[1] or "").lower()
         toks = token_re.findall(name)
         for t in toks:
             if len(t) >= 2:
@@ -1954,62 +2025,107 @@ async def _build_allow_list(intent, max_keywords=60):
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
-    top_rows = sorted(rows, key=lambda r: (r[1] or 0), reverse=True)[:10]
+    # ---- top items ----
+    top_rows = sorted(rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
     top_items = [
-        {"name": r[0], "favourite_count": r[1] or 0,
-         "price": r[2] or 0, "total_sales": r[3] or 0}
+        {"name": r[1], "favourite_count": r[2] or 0,
+         "price": r[3] or 0, "total_sales": r[4] or 0}
         for r in top_rows
     ]
 
-    prices = [r[2] or 0 for r in rows if (r[2] or 0) > 0]
+    # ---- competition stats ----
+    prices = [r[3] or 0 for r in rows if (r[3] or 0) > 0]
+    favs = sorted([r[2] or 0 for r in rows], reverse=True)
+    total = len(favs)
+    avg_favs = round(sum(favs) / total) if total else 0
+    median_favs = favs[total // 2] if total else 0
+    winner_favs = favs[max(0, total // 10)] if total else 0
+    winner_count = sum(1 for f in favs if f > 10000)
+    loser_count = sum(1 for f in favs if f < 1000)
+
     stats = {
-        "count": len(rows),
+        "count": total,
         "price_min": min(prices) if prices else 0,
         "price_avg": round(sum(prices) / len(prices)) if prices else 0,
         "price_max": max(prices) if prices else 0,
-        "total_sales": sum((r[3] or 0) for r in rows),
+        "total_sales": sum((r[4] or 0) for r in rows),
+        "avg_favs": avg_favs,
+        "median_favs": median_favs,
+        "winner_favs": winner_favs,
+        "winner_count": winner_count,
+        "loser_count": loser_count,
+        "direct_matches": direct_count,
+        "expansion_used": bool(expanded_terms),
+        "expanded_terms": expanded_terms[:15],
+        "failed_terms": failed_terms[:10],
+        "reasoning": bridge_reasoning,
     }
     return allow_list, top_items, stats
 
 
-def _fmt_ai_result(synth, verified_titles, rejected, stats):
-    lines = ["**🧠 GEMINI BRAINSTORM**\n"]
+def _fmt_ai_result(synth, verified_titles, rejected, stats, item_type="unknown"):
+    lines = ["# 🧠 UGC STRATEGY REPORT"]
+    if item_type and item_type != "unknown":
+        lines.append(f"*Detected item type: **{item_type.upper()}***")
+    if stats.get("expansion_used"):
+        lines.append("*Search tier: **Tier 2** (Gemini bridged missing terms)*")
+    else:
+        lines.append("*Search tier: **Tier 1** (direct DB hits)*")
+    lines.append("")
 
     if verified_titles:
-        lines.append("**✅ Verified titles (DB-safe):**")
+        lines.append("## ✅ Verified Titles (DB-Safe)")
         for i, t in enumerate(verified_titles, 1):
-            lines.append(f"{i}. `{t}`")
+            lines.append(f"**{i}.** `{t}`")
     else:
-        lines.append("**⚠️ No titles passed verification.** Raw AI output:")
+        lines.append("## ⚠️ No Titles Passed Verification")
         for t in (synth.get("titles") or [])[:3]:
             lines.append(f"- ~~{t}~~")
-
     if rejected:
-        lines.append("\n**❌ Rejected (words not in DB):**")
-        for t, bad in rejected[:3]:
+        lines.append("")
+        lines.append("**Rejected (words not in DB):**")
+        for t, bad in rejected[:2]:
             lines.append(f"- `{t}` → bad: {', '.join(bad)}")
-
     lines.append("")
-    for key, label in [
-        ("diagnosis", "🔍 Diagnosis"),
-        ("price_reasoning", "💰 Price"),
-        ("seo_description", "📝 SEO description"),
-        ("verdict", "⚖️ Verdict"),
-        ("algo_tip", "🤖 Algo tip"),
-        ("trend_analysis", "📈 Trend"),
-        ("cultural_relevance", "🌍 Culture"),
-    ]:
-        if synth.get(key):
-            lines.append(f"**{label}**\n{synth[key]}\n")
+
+    sections = [
+        ("search_diagnosis",    "## 🔍 Search Diagnosis"),
+        ("positioning",         "## 🎯 Positioning"),
+        ("market_diagnosis",    "## 📊 Market Diagnosis"),
+        ("trend_intel",         "## 🌊 Trend Intelligence"),
+        ("price_strategy",      "## 💰 Price Strategy"),
+        ("seo_description",     "## 📝 SEO Description (copy-paste)"),
+        ("algo_strategy",       "## 🤖 Algorithm Strategy"),
+        ("social_playbook",     "## 📱 Social Playbook"),
+        ("cultural_ammo",       "## 🎬 Cultural Ammo"),
+        ("risk_analysis",       "## ⚠️ Risk Analysis"),
+        ("expected_performance","## 📈 Expected Performance"),
+        ("verdict",             "## ⚖️ Verdict"),
+    ]
+    for key, header in sections:
+        v = synth.get(key)
+        if v:
+            lines.append(header)
+            lines.append(str(v))
+            lines.append("")
 
     if synth.get("killer_keywords"):
-        kw = ", ".join(synth["killer_keywords"][:15])
-        lines.append(f"**🎯 Killer keywords**\n{kw}\n")
+        lines.append("## 🎯 Killer Keywords")
+        lines.append(", ".join(f"`{k}`" for k in synth["killer_keywords"][:15]))
+        lines.append("")
 
+    if synth.get("bonus_plays"):
+        lines.append("## 💎 Bonus Plays")
+        for b in synth["bonus_plays"][:5]:
+            lines.append(f"- {b}")
+        lines.append("")
+
+    lines.append("---")
     lines.append(
-        f"_Market: {stats.get('count', 0)} items | "
-        f"price avg R${stats.get('price_avg', 0)} | "
-        f"allow-list built from real titles._"
+        f"_Data: **{stats.get('count', 0):,}** items · "
+        f"avg favs **{stats.get('avg_favs', 0):,}** · "
+        f"winner bar **{stats.get('winner_favs', 0):,}** · "
+        f"avg price **R${stats.get('price_avg', 0)}**_"
     )
     return "\n".join(lines)
 
@@ -2020,7 +2136,8 @@ async def ai_status(ctx):
         await ctx.send(
             "**🧠 Gemini AI: ONLINE**\n"
             f"Model: `{os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')}`\n"
-            "Commands ready: `!brainstorm`, `!ask`"
+            "Commands ready: `!brainstorm`, `!ask`\n"
+            "Search tiers: Tier 1 (direct) + Tier 2 (Gemini bridge)"
         )
     else:
         await ctx.send(
@@ -2033,54 +2150,87 @@ async def ai_status(ctx):
 @bot.command(name="brainstorm")
 async def brainstorm(ctx, *, description: str = ""):
     if not description.strip():
-        await ctx.send("Usage: `!brainstorm girl dancing korean style, pink neon`")
+        await ctx.send("Usage: `!brainstorm rasputin dance emote from youtube`")
         return
     if not is_available():
         await ctx.send("Gemini is offline. Run `!ai_status`.")
         return
 
-    progress = await ctx.send("🧠 Thinking... (Pass 1: extracting intent)")
+    progress = await ctx.send("🧠 **Pass 1:** Extracting intent...")
 
     intent = extract_keywords(description)
     if not intent:
         await progress.edit(content="❌ Pass 1 failed — Gemini returned nothing.")
         return
 
+    item_type = intent.get("item_type", "unknown")
+    trend_source = intent.get("trend_source", "none")
+    terms = all_terms(intent)
+
+    await progress.edit(
+        content=(f"🧠 **Pass 1 done.**\n"
+                 f"• Item type: **{item_type}**\n"
+                 f"• Trend source: **{trend_source}**\n"
+                 f"• Terms: `{', '.join(terms[:15])}`\n\n"
+                 f"🔎 **Tier 1:** Direct DB search...")
+    )
+
     try:
         allow_list, top_items, stats = await asyncio.to_thread(
             _build_allow_list, intent
         )
     except Exception as e:
-        await progress.edit(content=f"❌ DB query failed: `{e}`")
+        await progress.edit(content=f"❌ DB search failed: `{e}`")
         return
 
     if not allow_list:
         await progress.edit(
-            content=("❌ No DB items matched your description. "
-                     "Try different words, or run more enricher passes.")
+            content=("❌ **Nothing matched — not even after Gemini bridge.**\n"
+                     "Your DB is too small for this niche. Run the enricher 10+ "
+                     "more times, then try again.")
         )
         return
 
+    if stats.get("expansion_used"):
+        bridge_msg = (
+            f"🌉 **Tier 2: Gemini bridge engaged.**\n"
+            f"• Failed user terms: `{', '.join(stats.get('failed_terms', [])[:8])}`\n"
+            f"• Bridge reasoning: *{stats.get('reasoning', '—')}*\n"
+            f"• Bridged to: `{', '.join(stats.get('expanded_terms', [])[:12])}`\n\n"
+        )
+    else:
+        bridge_msg = f"✅ **Tier 1 hit.** All terms exist in DB.\n\n"
+
     await progress.edit(
-        content=(f"🔎 Matched {stats['count']} real items → "
-                 f"allow-list: {len(allow_list)} keywords. "
-                 f"(Pass 2: synthesizing)")
+        content=(bridge_msg +
+                 f"📊 Matched **{stats['count']:,}** real items.\n"
+                 f"• Avg favs: **{stats.get('avg_favs', 0):,}**  "
+                 f"• Winner threshold: **{stats.get('winner_favs', 0):,}** favs\n"
+                 f"• Winners (>10k): **{stats.get('winner_count', 0):,}**  "
+                 f"• Strugglers (<1k): **{stats.get('loser_count', 0):,}**\n\n"
+                 f"🧠 **Pass 2:** Gemini strategist at work...")
     )
 
     try:
         synth = await asyncio.to_thread(
-            synthesize_hybrid, description, allow_list, top_items, stats
+            synthesize_hybrid, description, allow_list, top_items, stats,
+            item_type, trend_source,
+            {"direct_matches": stats.get("direct_matches", 0),
+             "expansion_used": stats.get("expansion_used", False),
+             "expanded_terms": stats.get("expanded_terms", []),
+             "failed_terms": stats.get("failed_terms", []),
+             "reasoning": stats.get("reasoning", "")}
         )
     except Exception as e:
         await progress.edit(content=f"❌ Pass 2 failed: `{e}`")
         return
 
     if not synth:
-        await progress.edit(content="❌ Pass 2 failed — Gemini returned nothing.")
+        await progress.edit(content="❌ Synthesis failed — Gemini returned nothing.")
         return
 
     verified, rejected = verify_titles(synth.get("titles") or [], allow_list)
-    body = _fmt_ai_result(synth, verified, rejected, stats)
+    body = _fmt_ai_result(synth, verified, rejected, stats, item_type)
 
     try:
         await progress.delete()
@@ -2089,6 +2239,7 @@ async def brainstorm(ctx, *, description: str = ""):
 
     for i in range(0, len(body), 1900):
         await ctx.send(body[i:i + 1900])
+        await asyncio.sleep(0.3)
 
 
 @bot.command(name="ask")
