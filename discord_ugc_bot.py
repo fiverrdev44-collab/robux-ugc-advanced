@@ -2014,14 +2014,21 @@ def _build_allow_list(intent, max_keywords=60):
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
-    top_rows = sorted(rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
+    # Filter out Limiteds / absurd prices BEFORE ranking and averaging
+    sane_rows = [r for r in rows
+                 if not r[3] or MIN_PRICE <= r[3] <= MAX_PRICE]
+
+    top_rows = sorted(sane_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
     top_items = [
         {"name": r[1], "favourite_count": r[2] or 0,
          "price": r[3] or 0, "total_sales": r[4] or 0}
         for r in top_rows
     ]
 
-    prices = [r[3] or 0 for r in rows if (r[3] or 0) > 0]
+    prices = [r[3] for r in sane_rows if r[3] and MIN_PRICE <= r[3] <= MAX_PRICE]
+    prices_sorted = sorted(prices)
+    price_median = prices_sorted[len(prices_sorted) // 2] if prices_sorted else 0
+
     favs = sorted([r[2] or 0 for r in rows], reverse=True)
     total = len(favs)
     avg_favs = round(sum(favs) / total) if total else 0
@@ -2033,7 +2040,7 @@ def _build_allow_list(intent, max_keywords=60):
     stats = {
         "count": total,
         "price_min": min(prices) if prices else 0,
-        "price_avg": round(sum(prices) / len(prices)) if prices else 0,
+        "price_avg": price_median,
         "price_max": max(prices) if prices else 0,
         "total_sales": sum((r[4] or 0) for r in rows),
         "avg_favs": avg_favs,
