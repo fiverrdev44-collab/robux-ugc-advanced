@@ -14,7 +14,7 @@ AUTH_URL = "https://auth.roblox.com/v2/logout"
 # Bumped from 500 → 1500 (3x per run, still polite)
 BATCH_SIZE = 1500
 WORKERS = 4
-ITEM_DELAY = 0.25
+ITEM_DELAY = 0.5
 
 # Set REFRESH_MODE=true via env var to re-enrich top items (builds velocity history)
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
