@@ -88,10 +88,18 @@ def _gemini_generate(prompt: str, json_mode: bool = False,
             print(f"[gemini] empty response (attempt {attempt+1}), fr={fr}")
         except Exception as e:
             err = str(e)
+            # Hard quota / auth failures — don't waste retries
+            hard_fail = any(x in err for x in [
+                "429", "RESOURCE_EXHAUSTED", "quota",
+                "API key not valid", "PERMISSION_DENIED",
+            ])
+            if hard_fail:
+                print(f"[gemini] hard fail, skipping retries: {err[:180]}")
+                return None
             retryable = any(x in err for x in [
                 "503", "UNAVAILABLE", "high demand",
-                "429", "RESOURCE_EXHAUSTED", "overloaded",
-                "500", "INTERNAL", "timeout", "Timeout",
+                "overloaded", "500", "INTERNAL",
+                "timeout", "Timeout",
             ])
             print(f"[gemini] attempt {attempt+1}/{max_retries} "
                   f"failed: {type(e).__name__}: {err[:180]}")
@@ -103,8 +111,10 @@ def _gemini_generate(prompt: str, json_mode: bool = False,
 
 
 def _openrouter_generate(prompt: str, json_mode: bool = False,
-                         temperature: float = 0.7, max_tokens: int = 4096,
+                         temperature: float = 0.7, max_tokens: int = 8192,
                          max_retries: int = 3):
+    """OpenRouter call — supports reasoning models (Nemotron) with proper
+    max_tokens + 90s timeout so the reasoning pass doesn't get cut off."""
     if not _openrouter_client:
         return None
     for attempt in range(max_retries):
@@ -114,6 +124,7 @@ def _openrouter_generate(prompt: str, json_mode: bool = False,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "timeout": 90,
             }
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -127,7 +138,7 @@ def _openrouter_generate(prompt: str, json_mode: bool = False,
             retryable = any(x in err for x in [
                 "503", "UNAVAILABLE", "high demand",
                 "429", "RESOURCE_EXHAUSTED", "overloaded",
-                "500", "timeout",
+                "500", "timeout", "Timeout",
             ])
             print(f"[openrouter] attempt {attempt+1}/{max_retries} "
                   f"failed: {type(e).__name__}: {err[:180]}")
@@ -151,8 +162,7 @@ def _generate(prompt: str, json_mode: bool = False,
         print("[fallback] Gemini exhausted — switching to OpenRouter")
 
     if _openrouter_client is not None:
-        out = _openrouter_generate(prompt, json_mode, temperature,
-                                    min(max_tokens, 4096))
+        out = _openrouter_generate(prompt, json_mode, temperature, max_tokens)
         if out:
             return out
         print("[fallback] OpenRouter also exhausted")
