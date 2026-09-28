@@ -1,16 +1,18 @@
 """
 gemini_brain.py — Elite 2-pass hybrid AI for Roblox UGC domination.
 Uses the NEW google-genai SDK (supports AQ.* format keys).
+Auto-retries on 503/429 (Google capacity spikes).
 """
 
 import os
 import re
 import json
+import time
 from google import genai
 from google.genai import types
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 _client = None
 _configured = False
@@ -44,29 +46,51 @@ def is_available() -> bool:
 
 
 def _generate(prompt: str, json_mode: bool = False,
-              temperature: float = 0.7, max_tokens: int = 8192):
+              temperature: float = 0.7, max_tokens: int = 8192,
+              max_retries: int = 5):
+    """Call Gemini with auto-retry on transient errors (503, 429)."""
     if not _ensure():
         return None
-    try:
-        cfg = types.GenerateContentConfig(
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-        )
-        if json_mode:
-            cfg.response_mime_type = "application/json"
-        resp = _client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=cfg,
-        )
-        text = (resp.text or "").strip()
-        if not text:
-            print(f"[gemini] empty response. finish_reason="
-                  f"{getattr(resp.candidates[0], 'finish_reason', 'unknown') if resp.candidates else 'no candidates'}")
-        return text
-    except Exception as e:
-        print(f"[gemini] generate failed: {type(e).__name__}: {e}")
-        return None
+
+    for attempt in range(max_retries):
+        try:
+            cfg = types.GenerateContentConfig(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+            if json_mode:
+                cfg.response_mime_type = "application/json"
+            resp = _client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config=cfg,
+            )
+            text = (resp.text or "").strip()
+            if not text:
+                fr = "unknown"
+                if getattr(resp, "candidates", None):
+                    fr = getattr(resp.candidates[0], "finish_reason", "unknown")
+                print(f"[gemini] empty response (attempt {attempt+1}), "
+                      f"finish_reason={fr}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return None
+            return text
+        except Exception as e:
+            err = str(e)
+            retryable = any(x in err for x in [
+                "503", "UNAVAILABLE", "high demand",
+                "429", "RESOURCE_EXHAUSTED", "overloaded",
+                "500", "INTERNAL", "timeout", "Timeout",
+            ])
+            print(f"[gemini] attempt {attempt+1}/{max_retries} "
+                  f"failed: {type(e).__name__}: {err[:180]}")
+            if retryable and attempt < max_retries - 1:
+                time.sleep(2 + attempt * 2)  # 2s, 4s, 6s, 8s
+                continue
+            return None
+    return None
 
 
 # =========================================================================
