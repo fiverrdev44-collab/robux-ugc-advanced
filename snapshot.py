@@ -21,7 +21,7 @@ TOP_ITEMS_LIMIT = 5000
 MIN_FAVS = 50
 
 # Delay between DB inserts (not needed for API, only DB)
-BATCH_SIZE = 500
+BATCH_SIZE = 1000
 
 
 def snapshot_top_items():
