@@ -1,6 +1,7 @@
 """
 gemini_brain.py — Hybrid AI for Roblox UGC domination.
-Primary: Gemini. Fallback: OpenRouter (text + vision).
+Vision chain: Gemini → OpenRouter → Groq.
+Text chain:   Gemini → OpenRouter.
 """
 
 import os
@@ -18,10 +19,15 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 OPENROUTER_VISION_MODEL = os.getenv(
-    "OPENROUTER_VISION_MODEL", "meta-llama/llama-3.2-11b-vision-instruct:free")
+    "OPENROUTER_VISION_MODEL", "qwen/qwen-2-vl-7b-instruct:free")
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_VISION_MODEL = os.getenv(
+    "GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 
 _client = None
 _openrouter_client = None
+_groq_client = None
 _configured = False
 
 STOPWORDS = {
@@ -31,9 +37,11 @@ STOPWORDS = {
 
 
 def _ensure():
-    global _client, _openrouter_client, _configured
+    global _client, _openrouter_client, _groq_client, _configured
     if _configured:
-        return _client is not None or _openrouter_client is not None
+        return (_client is not None
+                or _openrouter_client is not None
+                or _groq_client is not None)
     _configured = True
 
     if GEMINI_API_KEY:
@@ -61,7 +69,23 @@ def _ensure():
     else:
         print("[openrouter] OPENROUTER_API_KEY not set")
 
-    return _client is not None or _openrouter_client is not None
+    if GROQ_API_KEY:
+        try:
+            from openai import OpenAI
+            _groq_client = OpenAI(
+                api_key=GROQ_API_KEY,
+                base_url="https://api.groq.com/openai/v1",
+            )
+            print(f"[groq] configured vision model={GROQ_VISION_MODEL}")
+        except Exception as e:
+            print(f"[groq] configure failed: {e}")
+            _groq_client = None
+    else:
+        print("[groq] GROQ_API_KEY not set (vision fallback 3 disabled)")
+
+    return (_client is not None
+            or _openrouter_client is not None
+            or _groq_client is not None)
 
 
 def is_available() -> bool:
@@ -150,6 +174,42 @@ def _openrouter_generate(prompt: str, json_mode: bool = False,
     return None
 
 
+def _groq_generate(prompt: str, json_mode: bool = False,
+                   temperature: float = 0.7, max_tokens: int = 8192,
+                   max_retries: int = 3):
+    """Groq text generation (used as final text fallback)."""
+    if not _groq_client:
+        return None
+    for attempt in range(max_retries):
+        try:
+            kwargs = {
+                "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "timeout": 90,
+            }
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            resp = _groq_client.chat.completions.create(**kwargs)
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+            print(f"[groq] empty response (attempt {attempt+1})")
+        except Exception as e:
+            err = str(e)
+            retryable = any(x in err for x in [
+                "503", "429", "overloaded", "500", "timeout",
+            ])
+            print(f"[groq] attempt {attempt+1}/{max_retries} "
+                  f"failed: {type(e).__name__}: {err[:180]}")
+            if not retryable:
+                return None
+        if attempt < max_retries - 1:
+            time.sleep(2 + attempt * 2)
+    return None
+
+
 def _generate(prompt: str, json_mode: bool = False,
               temperature: float = 0.7, max_tokens: int = 8192,
               prefer: str = "gemini"):
@@ -166,7 +226,13 @@ def _generate(prompt: str, json_mode: bool = False,
         out = _openrouter_generate(prompt, json_mode, temperature, max_tokens)
         if out:
             return out
-        print("[fallback] OpenRouter also exhausted")
+        print("[fallback] OpenRouter exhausted — switching to Groq")
+
+    if _groq_client is not None:
+        out = _groq_generate(prompt, json_mode, temperature, max_tokens)
+        if out:
+            return out
+        print("[fallback] Groq also exhausted")
 
     return None
 
@@ -506,7 +572,7 @@ def verify_titles(titles: list, allow_list: list):
 
 
 # =========================================================================
-# VISION — UGC image analysis (multi-image + OpenRouter fallback)
+# VISION — UGC image analysis (3-tier: Gemini → OpenRouter → Groq)
 # =========================================================================
 _VISION_PROMPT = """You are a Roblox UGC visual analyst AND culture strategist. 
 You will receive 1-4 images of the SAME UGC item from different angles 
@@ -562,7 +628,7 @@ CREATOR'S DESCRIPTION: {desc}
 
 
 def _parse_vision_result(raw: str) -> dict:
-    """Parse and normalize vision JSON from either provider."""
+    """Parse and normalize vision JSON from any provider."""
     if not raw:
         return {}
     try:
@@ -599,10 +665,27 @@ def _parse_vision_result(raw: str) -> dict:
     return data
 
 
+def _build_vision_messages(images, prompt_text):
+    """OpenAI-format multimodal message payload."""
+    content = []
+    for i, img in enumerate(images, 1):
+        content.append({"type": "text", "text": f"Image {i}:"})
+        b64 = base64.b64encode(img["bytes"]).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{img['mime']};base64,{b64}"}
+        })
+    content.append({"type": "text", "text": prompt_text})
+    return [{"role": "user", "content": content}]
+
+
 def analyze_image_for_ugc(images: list, user_description: str = "") -> dict:
     """
-    Send 1-4 images to Gemini (primary) or OpenRouter vision (fallback).
-    images = [{"bytes": b"...", "mime": "image/png"}, ...]
+    Analyze 1-4 images through 3 tiers:
+      Tier 1: Gemini vision
+      Tier 2: OpenRouter vision
+      Tier 3: Groq vision
+    Returns parsed dict, or {} if all tiers fail.
     """
     if not _ensure() or not images:
         return {}
@@ -633,28 +716,20 @@ def analyze_image_for_ugc(images: list, user_description: str = "") -> dict:
             if raw:
                 result = _parse_vision_result(raw)
                 if result:
+                    print("[vision] gemini succeeded")
                     return result
-            print("[vision] gemini empty, trying OpenRouter vision fallback")
+            print("[vision] gemini empty → OpenRouter")
         except Exception as e:
-            print(f"[vision] gemini failed: {type(e).__name__}: {str(e)[:200]}")
-            print("[vision] trying OpenRouter vision fallback")
+            print(f"[vision] gemini failed: {type(e).__name__}: {str(e)[:180]}")
+            print("[vision] → OpenRouter")
 
     # --- TIER 2: OpenRouter vision ---
     if _openrouter_client is not None:
         try:
-            content = []
-            for i, img in enumerate(images, 1):
-                content.append({"type": "text", "text": f"Image {i}:"})
-                b64 = base64.b64encode(img["bytes"]).decode("utf-8")
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{img['mime']};base64,{b64}"}
-                })
-            content.append({"type": "text", "text": prompt_text})
-
+            messages = _build_vision_messages(images, prompt_text)
             resp = _openrouter_client.chat.completions.create(
                 model=OPENROUTER_VISION_MODEL,
-                messages=[{"role": "user", "content": content}],
+                messages=messages,
                 temperature=0.3,
                 max_tokens=1500,
                 timeout=90,
@@ -663,12 +738,33 @@ def analyze_image_for_ugc(images: list, user_description: str = "") -> dict:
             if raw:
                 result = _parse_vision_result(raw)
                 if result:
-                    print("[vision] OpenRouter fallback succeeded")
+                    print("[vision] OpenRouter succeeded")
                     return result
-            print("[vision] OpenRouter empty response")
+            print("[vision] OpenRouter empty → Groq")
         except Exception as e:
-            print(f"[vision] OpenRouter fallback failed: "
-                  f"{type(e).__name__}: {str(e)[:200]}")
+            print(f"[vision] OpenRouter failed: {type(e).__name__}: {str(e)[:180]}")
+            print("[vision] → Groq")
+
+    # --- TIER 3: Groq vision ---
+    if _groq_client is not None:
+        try:
+            messages = _build_vision_messages(images, prompt_text)
+            resp = _groq_client.chat.completions.create(
+                model=GROQ_VISION_MODEL,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1500,
+                timeout=90,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw:
+                result = _parse_vision_result(raw)
+                if result:
+                    print("[vision] Groq succeeded")
+                    return result
+            print("[vision] Groq empty")
+        except Exception as e:
+            print(f"[vision] Groq failed: {type(e).__name__}: {str(e)[:180]}")
 
     return {}
 
