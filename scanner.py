@@ -12,6 +12,29 @@ def log(msg):
 
 
 # ============================================================
+# COOKIE POOLING
+# ------------------------------------------------------------
+# Reads ROBLOSECURITY_COOKIE_1 .. _5 (falls back to single
+# ROBLOSECURITY_COOKIE if numbered ones aren't set).
+# Each cookie gets its own requests.Session with its own
+# cookie jar, so requests spread across accounts and avoid
+# per-account rate limits.
+# ============================================================
+COOKIES = []
+for i in range(1, 6):
+    c = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
+    if c:
+        COOKIES.append(c.strip())
+
+if not COOKIES:
+    single = os.getenv("ROBLOSECURITY_COOKIE")
+    if single:
+        COOKIES.append(single.strip())
+
+if not COOKIES:
+    raise ValueError("No ROBLOSECURITY_COOKIE configured!")
+
+# ============================================================
 # ENDPOINTS
 # ------------------------------------------------------------
 # The /details endpoint is REQUIRED for Category+Subcategory
@@ -28,41 +51,48 @@ CATALOG_APIS = [
 # 13 = CommunityCreations (UGC landing category)
 CATEGORIES = [11, 3, 4, 12, 5, 13]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
-WORKERS = 3
-DELAY = 0.4
+
+# ============================================================
+# THROUGHPUT
+# ------------------------------------------------------------
+# WORKERS scales with cookie count — each cookie gets its own
+# dedicated workers, so throughput is roughly N_cookies × 3.
+# With 2 cookies = 6 workers = ~2x the old single-cookie speed.
+# ============================================================
+WORKERS_PER_COOKIE = 3
+WORKERS = WORKERS_PER_COOKIE * len(COOKIES)
+
+DELAY = 0.4                # seconds between requests per worker
 MAX_PAGES_PER_QUERY = 12
 HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 60
 
 # Roblox catalog constants
-# Category 12 = AvatarAnimations
-# Category 13 = CommunityCreations
-# Subcategory 39 = EmoteAnimations
 EMOTE_CATEGORY = 12
 EMOTE_SUBCATEGORY = 39
 COMMUNITY_CATEGORY = 13
 
-# salesTypeFilter=1 means "only items that are actually for sale".
 SALES_TYPE_FOR_SALE = 1
-
-# Asset type 61 = EmoteAnimation.
 ASSET_TYPE_EMOTE = 61
 
 # ============================================================
 # ID BOUNDS — CRITICAL FIX
 # ------------------------------------------------------------
 # Modern Roblox catalog IDs (including ALL UGC emotes created
-# since 2023) are 13-15 digits, in the 10^12 – 10^15 range.
-# The old MAX_VALID_ID of 10^10 silently rejected every emote
-# before it could be saved.
-#
-# Set to 10^17 — plenty of headroom for Roblox's ID growth,
-# still well under Postgres bigint max (9.2 × 10^18).
+# since 2023) are 13-15 digits (10^12 – 10^15). The old
+# MAX_VALID_ID of 10^10 silently rejected every emote before
+# it could be saved.
 # ============================================================
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
 
+# ============================================================
+# SESSIONS
+# ------------------------------------------------------------
+# One requests.Session per cookie. Round-robin selected per
+# request so load spreads evenly across accounts.
+# ============================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -71,6 +101,24 @@ HEADERS = {
     "Referer": "https://www.roblox.com/",
     "Origin": "https://www.roblox.com",
 }
+
+SESSIONS = []
+for cookie in COOKIES:
+    s = requests.Session()
+    s.cookies[".ROBLOSECURITY"] = cookie
+    s.headers.update(HEADERS)
+    SESSIONS.append(s)
+
+_session_idx = 0
+
+
+def get_session():
+    """Round-robin session selection."""
+    global _session_idx
+    s = SESSIONS[_session_idx % len(SESSIONS)]
+    _session_idx += 1
+    return s
+
 
 UGC_KEYWORDS = [
     "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
@@ -161,6 +209,11 @@ def get_dynamic_keywords():
 
 
 def try_api(api_url, params):
+    """
+    Fetch one query's worth of results across pagination.
+    Uses a round-robin session from the cookie pool.
+    """
+    session = get_session()
     found = set()
     cursor = ""
     pages = 0
@@ -170,12 +223,15 @@ def try_api(api_url, params):
         p = params.copy()
         p["cursor"] = cursor
         try:
-            resp = requests.get(api_url, params=p, headers=HEADERS, timeout=HTTP_TIMEOUT)
+            resp = session.get(api_url, params=p, timeout=HTTP_TIMEOUT)
             if resp.status_code == 429:
                 retries_429 += 1
                 if retries_429 > MAX_429_RETRIES:
                     return found, len(found) > 0
-                time.sleep(1)
+                retry_after = int(resp.headers.get("Retry-After", 2))
+                time.sleep(retry_after)
+                # Rotate to a different cookie on 429
+                session = get_session()
                 continue
 
             if resp.status_code != 200:
@@ -300,8 +356,11 @@ def run_scanner():
     setup_database()
     log("📦 DB setup done.")
 
+    log(f"🔐 Loaded {len(SESSIONS)} cookie session(s) for scanning.")
+
     queries = build_all_queries()
-    log(f"🚀 Running {len(queries)} queries with {WORKERS} workers...")
+    log(f"🚀 Running {len(queries)} queries with {WORKERS} workers "
+        f"({WORKERS_PER_COOKIE} per cookie × {len(SESSIONS)} cookies)...")
     start = time.time()
 
     all_ids = set()
@@ -317,7 +376,10 @@ def run_scanner():
                 log(f"  Query #{done} failed: {e}")
 
             if done <= 10 or done % 20 == 0:
-                log(f"  {done}/{len(queries)} — {len(all_ids)} IDs")
+                elapsed = time.time() - start
+                rate = done / elapsed if elapsed > 0 else 0
+                log(f"  {done}/{len(queries)} — {len(all_ids)} IDs "
+                    f"({rate:.1f} q/s)")
 
     log(f"✅ Scan collected {len(all_ids)} valid IDs in {time.time()-start:.1f}s")
 
