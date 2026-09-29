@@ -12,7 +12,7 @@ concurrency:
 jobs:
   enrich:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -28,6 +28,7 @@ jobs:
       - name: Run enricher
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          ROBLOSECURITY_COOKIE: ${{ secrets.ROBLOSECURITY_COOKIE }}
+          ROBLOSECURITY_COOKIE_1: ${{ secrets.ROBLOSECURITY_COOKIE_1 }}
+          ROBLOSECURITY_COOKIE_2: ${{ secrets.ROBLOSECURITY_COOKIE_2 }}
           PYTHONUNBUFFERED: "1"
         run: python -u enricher.py
