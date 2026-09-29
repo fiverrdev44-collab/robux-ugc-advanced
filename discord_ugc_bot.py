@@ -19,6 +19,7 @@ from gemini_brain import (
     ask_ai,
     is_available,
     expand_search_terms,
+    analyze_image_for_ugc,
 )
 
 TOKEN = os.getenv("TOKEN")
@@ -2150,7 +2151,7 @@ async def ai_status(ctx):
             "**🧠 AI Status: ONLINE**",
             f"• Primary: `Gemini` ({gmodel})",
             f"• Fallback: {'`OpenRouter` (' + omodel + ')' if has_or else '❌ not configured'}",
-            "Commands: `!brainstorm`, `!rescue`, `!ask`, `!ai_debug`",
+            "Commands: `!brainstorm`, `!rescue`, `!analyze_image`, `!ask`, `!ai_debug`",
         ]
         await ctx.send("\n".join(lines))
     else:
@@ -2321,10 +2322,7 @@ async def brainstorm(ctx, *, description: str = ""):
 
 @bot.command(name="rescue")
 async def rescue(ctx, *, description: str = ""):
-    """
-    Diagnose a launched UGC that's underperforming and get new titles + description.
-    Usage: !rescue rasputin dance emote, launched 3 days ago, 40 favs, no sales, R$75
-    """
+    """Diagnose a launched UGC that's underperforming. See usage in-chat."""
     if not description.strip():
         await ctx.send(
             "Usage: `!rescue <describe your launched item + stats>`\n"
@@ -2398,25 +2396,23 @@ MARKET STATS:
 YOUR JOB — return ONLY valid JSON:
 
 {{
-  "diagnosis": "3-4 sentences: why their item probably isn't selling. Compare their launch to the winner bar and competitor patterns. Be blunt.",
-  "what_winners_do": "2-3 sentences: the specific naming/styling pattern that the top 10 competitors share — what makes them rank.",
-  "titles_safe": ["3 titles that MIRROR what top competitors already do — highest chance of ranking"],
-  "titles_differentiated": ["3 titles that use the SAME niche keywords but a UNIQUE angle — beat the crowd"],
-  "titles_longtail": ["2 titles with 4+ keywords packed in — rank for rare long-tail searches"],
-  "titles_viral": ["2 titles that hook meme/TikTok/Sound trends — highest CTR potential"],
-  "new_description": "Full 2-3 sentence SEO description they can copy-paste. Keyword-rich. Must only use words from the keyword allow-list above plus glue words.",
-  "price_advice": "1-2 sentences: should they keep, raise, or drop the price? Reference the real median from the stats.",
-  "relaunch_plan": "2-3 sentences: concrete next action — reupload new title, or run ads, or pivot theme.",
-  "kill_or_keep": "KEEP / RESCUE / KILL — one word plus one sentence why"
+  "diagnosis": "3-4 sentences: why their item probably isn't selling. Be blunt.",
+  "what_winners_do": "2-3 sentences: the specific naming/styling pattern the top 10 competitors share.",
+  "titles_safe": ["3 titles that MIRROR what top competitors already do"],
+  "titles_differentiated": ["3 titles that use SAME niche keywords but UNIQUE angle"],
+  "titles_longtail": ["2 titles with 4+ keywords packed in"],
+  "titles_viral": ["2 titles that hook meme/TikTok/Sound trends"],
+  "new_description": "Full 2-3 sentence SEO description, keyword-rich. Only allow-list words plus glue.",
+  "price_advice": "1-2 sentences: keep, raise, or drop price? Reference real median.",
+  "relaunch_plan": "2-3 sentences: concrete next action.",
+  "kill_or_keep": "KEEP / RESCUE / KILL — one word plus one sentence"
 }}
 
 RULES:
-- Every word in every title MUST exist in the keyword allow-list above (plus tiny glue: a, an, the, of, and, or, for, to, in, on, with, my, your, numbers).
-- Do NOT invent keywords.
-- Do NOT fabricate stats. Only use the numbers given.
-- Titles in each group must feel DIFFERENT from each other. No repeating the same 3 words.
-- Safe = what already wins. Differentiated = unique twist. Longtail = 4+ keywords. Viral = meme hook.
-- Be direct. Assume this person has lost money and needs honest advice.
+- Every word in every title MUST exist in the allow-list above (plus glue: a, an, the, of, and, or, for, to, in, on, with, my, your, numbers).
+- Do NOT invent keywords. Do NOT fabricate stats.
+- Titles in each group must feel DIFFERENT.
+- Be direct. Assume this person lost money.
 - Output ONLY the JSON object.
 """
 
@@ -2531,116 +2527,270 @@ RULES:
         await asyncio.sleep(0.3)
 
 
-@bot.command(name="ask")
-async def ask_cmd(ctx, *, question: str = ""):
-    if not question.strip():
-        await ctx.send("Usage: `!ask how does the Roblox UGC algo rank new items?`")
-        return
+@bot.command(name="analyze_image")
+async def analyze_image(ctx, *, description: str = ""):
+    """
+    Upload 1-4 UGC images + optional notes. Bot analyzes and produces full report.
+    Usage: attach image(s), then: !analyze_image <optional notes>
+    """
     if not is_available():
         await ctx.send("AI is offline. Run `!ai_status`.")
         return
 
-    progress = await ctx.send("🧠 Thinking...")
-    try:
-        answer = await asyncio.to_thread(ask_ai, question)
-    except Exception as e:
-        await progress.edit(content=f"❌ AI failed: `{e}`")
+    if not ctx.message.attachments:
+        await ctx.send(
+            "**Usage:** attach 1-4 images and type `!analyze_image <notes>`\n"
+            "Example: `!analyze_image my green slime cat beanie, 17 favs, R$75`\n"
+            "_Tip: upload multiple angles (front/side/back/on-avatar) for best analysis._"
+        )
         return
 
-    if not answer:
-        await progress.edit(content="❌ AI returned nothing. Try again in a moment.")
+    attachments = ctx.message.attachments[:4]
+    if len(ctx.message.attachments) > 4:
+        await ctx.send("ℹ️ Using first 4 images only.")
+
+    progress = await ctx.send(f"🖼️ **Reading {len(attachments)} image(s)...**")
+
+    images = []
+    for a in attachments:
+        ctype = a.content_type or ""
+        if not ctype.startswith("image/"):
+            continue
+        try:
+            b = await a.read()
+        except Exception as e:
+            await progress.edit(content=f"❌ Couldn't download `{a.filename}`: `{e}`")
+            return
+        if len(b) > 8 * 1024 * 1024:
+            await ctx.send(f"⚠️ `{a.filename}` > 8MB — skipped.")
+            continue
+        images.append({"bytes": b, "mime": ctype})
+
+    if not images:
+        await progress.edit(content="❌ No valid image attachments found.")
         return
+
+    await progress.edit(
+        content=f"🖼️ **Analyzing {len(images)} image(s) with Gemini vision...**")
+    try:
+        vision = await asyncio.to_thread(
+            analyze_image_for_ugc, images, description
+        )
+    except Exception as e:
+        print(f"[analyze_image] vision failed: {e}", flush=True)
+        vision = {}
+
+    if not vision:
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        lines = ["⚠️ **Vision analysis failed (both Gemini and OpenRouter).**\n"]
+        lines.append(
+            "*(Vision quota exhausted or temporary spike. Retry in 5–10 min.)*\n"
+        )
+        lines.append("**What you can do instead:**")
+        lines.append("• `!brainstorm <casual description>` — describe the item in words")
+        lines.append("• `!opportunity <keyword>` — market data without AI")
+        lines.append("• Retry `!analyze_image` later")
+        body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i + 1900])
+        return
+
+    search_desc = vision.get("search_description", "")
+    if not search_desc:
+        parts = (vision.get("visual_style", [])
+                 + vision.get("distinctive_features", [])
+                 + vision.get("visual_colors", []))
+        search_desc = " ".join(parts[:8]) or description or "ugc item"
+
+    await progress.edit(
+        content=(f"🖼️ **Vision done.**\n"
+                 f"• Colors: `{', '.join(vision.get('visual_colors', []))}`\n"
+                 f"• Style: `{', '.join(vision.get('visual_style', []))}`\n"
+                 f"• Features: `{', '.join(vision.get('distinctive_features', []))}`\n"
+                 f"• Item type: **{vision.get('item_type_visual', 'unknown')}**\n\n"
+                 f"🔎 **Searching DB for similar items...**")
+    )
+
+    intent = extract_keywords(search_desc)
+    if not intent:
+        intent = {
+            "primary": (vision.get("visual_style", [])
+                        + vision.get("distinctive_features", [])),
+            "synonyms": [], "style": vision.get("visual_style", []),
+            "vibe": vision.get("visual_mood", []),
+            "colors": vision.get("visual_colors", []),
+            "references": [],
+            "search_terms": (vision.get("distinctive_features", [])
+                             + vision.get("visual_colors", [])),
+            "item_type": vision.get("item_type_visual", "unknown"),
+            "trend_source": "none",
+        }
+    intent["item_type"] = vision.get("item_type_visual", "unknown")
+
+    try:
+        allow_list, top_items, stats = await asyncio.to_thread(
+            _build_allow_list, intent
+        )
+    except Exception as e:
+        await progress.edit(content=f"❌ DB search failed: `{e}`")
+        return
+
+    if not allow_list:
+        await progress.edit(
+            content="❌ No DB items matched this visual description. "
+                    "Run the enricher more for this category."
+        )
+        return
+
+    await progress.edit(
+        content=(f"📊 Matched **{stats['count']:,}** real items.\n"
+                 f"🧠 **Pass 2:** Gemini strategist at work...")
+    )
+
+    full_desc = (
+        f"[IMAGE DESCRIPTION] {vision.get('visual_summary', '')}\n"
+        f"[DETECTED COLORS] {', '.join(vision.get('visual_colors', []))}\n"
+        f"[DETECTED STYLE] {', '.join(vision.get('visual_style', []))}\n"
+        f"[DETECTED MOOD] {', '.join(vision.get('visual_mood', []))}\n"
+        f"[DISTINCTIVE FEATURES] {', '.join(vision.get('distinctive_features', []))}\n"
+        f"[ITEM TYPE] {vision.get('item_type_visual', 'unknown')}\n"
+        f"[LIKELY AESTHETIC] {', '.join(vision.get('likely_aesthetic', []))}\n"
+        f"[LIKELY TREND SOURCE] {vision.get('likely_trend_source', 'none')}\n"
+        f"[TREND CONTEXT] {vision.get('likely_trend_context', '')}\n"
+        f"[VIBE REFERENCES] {', '.join(vision.get('vibe_references', []))}\n"
+        f"[TARGET AUDIENCE] {vision.get('target_audience', '')}\n"
+        f"[COLOR PSYCHOLOGY] {vision.get('color_psychology', '')}\n"
+        f"[IP WARNING] {vision.get('ip_reference_warning', 'NONE')}\n"
+        f"[CREATOR NOTES] {description or '(none)'}"
+    )
+
+    synth = None
+    try:
+        synth = await asyncio.to_thread(
+            synthesize_hybrid, full_desc, allow_list, top_items, stats,
+            vision.get("item_type_visual", "unknown"), "none",
+            {"direct_matches": stats.get("direct_matches", 0),
+             "expansion_used": stats.get("expansion_used", False),
+             "expanded_terms": stats.get("expanded_terms", []),
+             "failed_terms": stats.get("failed_terms", []),
+             "reasoning": stats.get("reasoning", "")}
+        )
+    except Exception as e:
+        print(f"[analyze_image] synth failed: {e}", flush=True)
+        synth = None
 
     try:
         await progress.delete()
     except Exception:
         pass
 
-    for i in range(0, len(answer), 1900):
-        await ctx.send(answer[i:i + 1900])
+    vision_lines = ["# 🖼️ IMAGE + CULTURE ANALYSIS\n"]
 
+    vision_lines.append("## 👁️ What I See")
+    vision_lines.append(vision.get("visual_summary", "—"))
+    vision_lines.append("")
+    vision_lines.append(
+        f"**Colors:** {', '.join(f'`{c}`' for c in vision.get('visual_colors', []))}"
+    )
+    vision_lines.append(
+        f"**Style:** {', '.join(f'`{s}`' for s in vision.get('visual_style', []))}"
+    )
+    vision_lines.append(
+        f"**Features:** {', '.join(f'`{f}`' for f in vision.get('distinctive_features', []))}"
+    )
+    vision_lines.append(
+        f"**Detected item type:** `{vision.get('item_type_visual', 'unknown')}`"
+    )
+    vision_lines.append("")
 
-@bot.command(name="ai_debug")
-async def ai_debug(ctx):
-    lines = ["**🔬 AI Debug Report**\n"]
+    if vision.get("likely_aesthetic"):
+        vision_lines.append("## 🎨 Aesthetic")
+        vision_lines.append(", ".join(f"`{a}`" for a in vision["likely_aesthetic"]))
+        vision_lines.append("")
 
-    gkey = os.getenv("GEMINI_API_KEY", "")
-    gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    okey = os.getenv("OPENROUTER_API_KEY", "")
-    omodel = os.getenv("OPENROUTER_MODEL",
-                       "meta-llama/llama-3.3-70b-instruct:free")
+    if vision.get("likely_trend_context"):
+        vision_lines.append("## 🌊 Trend Context")
+        vision_lines.append(f"**Source:** `{vision.get('likely_trend_source', 'none')}`")
+        vision_lines.append(vision["likely_trend_context"])
+        vision_lines.append("")
 
-    lines.append("**Env vars:**")
-    lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
-    lines.append(f"• GEMINI_MODEL: `{gmodel}`")
-    lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
-    lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
-    lines.append("")
+    if vision.get("vibe_references"):
+        vision_lines.append("## 🎬 Vibe References")
+        vision_lines.append(", ".join(f"`{r}`" for r in vision["vibe_references"]))
+        vision_lines.append("")
 
-    lines.append("**Gemini test** (`say hello`):")
-    if not gkey:
-        lines.append("• ❌ GEMINI_API_KEY not set")
-    else:
-        try:
-            from google import genai as g
-            client = g.Client(api_key=gkey)
-            resp = client.models.generate_content(
-                model=gmodel,
-                contents="Say only the word: hello",
-            )
-            text = (resp.text or "").strip()
-            if text:
-                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-            else:
-                lines.append("• ⚠️ Empty response")
-                if getattr(resp, "candidates", None):
-                    fr = getattr(resp.candidates[0], "finish_reason", "?")
-                    lines.append(f"• finish_reason: `{fr}`")
-        except Exception as e:
-            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
-    lines.append("")
+    if vision.get("color_psychology"):
+        vision_lines.append("## 🎨 Color Psychology")
+        vision_lines.append(vision["color_psychology"])
+        vision_lines.append("")
 
-    lines.append("**OpenRouter test** (`say hello`):")
-    if not okey:
-        lines.append("• ❌ OPENROUTER_API_KEY not set")
-    else:
-        try:
-            from openai import OpenAI
-            or_client = OpenAI(
-                api_key=okey,
-                base_url="https://openrouter.ai/api/v1",
-            )
-            resp = or_client.chat.completions.create(
-                model=omodel,
-                messages=[{"role": "user", "content": "Say only the word: hello"}],
-                max_tokens=20,
-            )
-            text = (resp.choices[0].message.content or "").strip()
-            if text:
-                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-            else:
-                lines.append("• ⚠️ Empty response")
-        except Exception as e:
-            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+    if vision.get("target_audience"):
+        vision_lines.append("## 👥 Target Audience")
+        vision_lines.append(vision["target_audience"])
+        vision_lines.append("")
 
-    body = "\n".join(lines)
-    for i in range(0, len(body), 1900):
-        await ctx.send(body[i:i + 1900])
+    if vision.get("composition_notes"):
+        vision_lines.append("## 📐 Composition")
+        vision_lines.append(vision["composition_notes"])
+        vision_lines.append("")
 
+    ip_warn = vision.get("ip_reference_warning", "NONE")
+    if ip_warn and ip_warn != "NONE":
+        vision_lines.append("## 🚨 IP / TRADEMARK WARNING")
+        vision_lines.append(
+            f"**{ip_warn}**\n"
+            "Do NOT use names from that IP in the title. Roblox will remove the item."
+        )
+        vision_lines.append("")
 
-app = Flask(__name__)
+    match = vision.get("title_color_match", "?")
+    if match == "NO":
+        vision_lines.append("## 🚨 Color Mismatch")
+        vision_lines.append(
+            "Title/description mentions a color that doesn't match the image. "
+            "Fix the title to match what buyers see."
+        )
+        vision_lines.append("")
+    elif match == "PARTIAL":
+        vision_lines.append("## ⚠️ Partial Color Mismatch")
+        vision_lines.append("Check title vs image — some colors don't align.")
+        vision_lines.append("")
 
+    vision_body = "\n".join(vision_lines)
+    for i in range(0, len(vision_body), 1900):
+        await ctx.send(vision_body[i:i + 1900])
 
-@app.route('/')
-def health():
-    return "OK", 200
+    if not synth:
+        await ctx.send(
+            "⚠️ **Strategy synthesis failed** (both AI providers rate-limited). "
+            "The vision analysis above is still valid. Try `!brainstorm` with the "
+            "detected keywords, or wait 5 min and retry."
+        )
+        return
 
+    all_groups = {
+        "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
+        "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
+        "🔎 Long-tail SEO (4+ keywords)":    synth.get("titles_longtail") or [],
+        "🔥 Viral bait (meme hook)":         synth.get("titles_viral") or [],
+    }
+    if not any(all_groups.values()):
+        all_groups = {"Titles": synth.get("titles") or []}
 
-def run_flask():
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    verified_groups = {}
+    total_verified = 0
+    total_rejected = 0
+    for group_name, group_titles in all_groups.items():
+        v, r = verify_titles(group_titles, allow_list)
+        if v:
+            verified_groups[group_name] = v
+            total_verified += len(v)
+        total_rejected += len(r)
 
-
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    bot.run(TOKEN)
+    body = _fmt_ai_result(
+        synth, verified_groups, [], stats,
+        vision.get("item
