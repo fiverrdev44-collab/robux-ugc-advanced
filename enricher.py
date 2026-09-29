@@ -7,9 +7,8 @@ from database import get_db_connection, setup_database
 # ============================================================
 # COOKIE POOLING
 # ------------------------------------------------------------
-# Set up to 5 cookies on Render:
-#   ROBLOSECURITY_COOKIE_1, ROBLOSECURITY_COOKIE_2, ... _5
-# Falls back to single ROBLOSECURITY_COOKIE if numbered ones missing.
+# Reads ROBLOSECURITY_COOKIE_1 .. _5 (falls back to single
+# ROBLOSECURITY_COOKIE if numbered ones aren't set).
 # ============================================================
 
 COOKIES = []
@@ -26,19 +25,28 @@ if not COOKIES:
 if not COOKIES:
     raise ValueError("No ROBLOSECURITY_COOKIE configured!")
 
-# Batch endpoint — POST list of {itemType, id} → returns details for up to ~120
-BATCH_ENDPOINT = "https://catalog.roblox.com/v1/catalog/items/details"
-# Single-item fallback (economy endpoint returns AssetTypeId reliably)
-FALLBACK_ENDPOINT = "https://economy.roblox.com/v2/assets/{}/details"
+# ============================================================
+# ENDPOINT
+# ------------------------------------------------------------
+# The batch POST endpoint (catalog.roblox.com/v1/catalog/
+# items/details) is hard-429'd from GitHub Actions IPs — no
+# cookie count fixes that. The economy single-item endpoint
+# is tolerant of datacenter IPs and works reliably.
+# ============================================================
+DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
-BATCH_SIZE = 1500          # IDs to pull from DB per run
-BATCH_CHUNK = 100          # IDs per batch POST request
+BATCH_SIZE = 1500
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 2_000_000_000
+
+# Per-cookie delay between requests. 0.9s ≈ 1.1 req/sec per
+# cookie. With 2 cookies = ~2.2 req/sec total, safely under
+# Roblox's per-account soft limit.
+SESSION_DELAY = 0.9
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -49,7 +57,6 @@ HEADERS = {
     "Origin": "https://www.roblox.com",
 }
 
-# One session per cookie
 SESSIONS = []
 for cookie in COOKIES:
     s = requests.Session()
@@ -57,20 +64,11 @@ for cookie in COOKIES:
     s.headers.update(HEADERS)
     SESSIONS.append(s)
 
-_session_idx = 0
 _fail_codes = {}
 
 
 def log(msg):
     print(msg, flush=True)
-
-
-def get_session():
-    """Round-robin session selection."""
-    global _session_idx
-    s = SESSIONS[_session_idx % len(SESSIONS)]
-    _session_idx += 1
-    return s
 
 
 def get_csrf_token(session):
@@ -80,64 +78,48 @@ def get_csrf_token(session):
         if token:
             session.headers["X-CSRF-Token"] = token
             return True
-    except Exception as e:
-        log(f"⚠️ CSRF error: {e}")
+    except Exception:
+        pass
     return False
 
 
-def fetch_batch(session, ids):
+def fetch_worker(session, ids, worker_id):
     """
-    POST /v1/catalog/items/details with a batch of asset IDs.
-    Returns (ok_count, {id: data}, failed_ids).
+    One worker owns one session (one cookie) and processes its
+    slice of IDs sequentially with a polite delay between calls.
     """
-    payload = {"items": [{"itemType": "Asset", "id": i} for i in ids]}
-    for attempt in range(3):
-        try:
-            resp = session.post(
-                BATCH_ENDPOINT,
-                json=payload,
-                timeout=15,
-                headers={"Content-Type": "application/json"},
-            )
-            code = resp.status_code
-            if code == 200:
-                data = resp.json().get("data", [])
-                by_id = {d["id"]: d for d in data if "id" in d}
-                failed = [i for i in ids if i not in by_id]
-                return len(by_id), by_id, failed
-            if code == 429:
-                _fail_codes[429] = _fail_codes.get(429, 0) + 1
-                retry_after = int(resp.headers.get("Retry-After", 5))
-                log(f"  ⏳ 429 — waiting {retry_after}s (attempt {attempt+1})")
-                time.sleep(retry_after)
-                continue
-            if code == 403:
-                _fail_codes[403] = _fail_codes.get(403, 0) + 1
-                get_csrf_token(session)
-                continue
-            _fail_codes[code] = _fail_codes.get(code, 0) + 1
-            return 0, {}, list(ids)
-        except Exception:
-            _fail_codes["exc"] = _fail_codes.get("exc", 0) + 1
-            time.sleep(1)
-    return 0, {}, list(ids)
+    results = {}
+    for idx, item_id in enumerate(ids):
+        for attempt in range(3):
+            try:
+                resp = session.get(DETAILS_URL.format(item_id), timeout=12)
+                code = resp.status_code
+                if code == 200:
+                    results[item_id] = resp.json()
+                    break
+                if code == 404:
+                    _fail_codes[404] = _fail_codes.get(404, 0) + 1
+                    break
+                if code == 429:
+                    _fail_codes[429] = _fail_codes.get(429, 0) + 1
+                    retry_after = int(resp.headers.get("Retry-After", 3))
+                    time.sleep(retry_after)
+                    continue
+                if code == 403:
+                    _fail_codes[403] = _fail_codes.get(403, 0) + 1
+                    get_csrf_token(session)
+                    continue
+                _fail_codes[code] = _fail_codes.get(code, 0) + 1
+                break
+            except Exception:
+                _fail_codes["exc"] = _fail_codes.get("exc", 0) + 1
+                time.sleep(1)
+        time.sleep(SESSION_DELAY)
 
-
-def fetch_single(session, item_id):
-    """Fallback via economy endpoint for items the batch missed."""
-    try:
-        resp = session.get(FALLBACK_ENDPOINT.format(item_id), timeout=12)
-        if resp.status_code == 200:
-            return item_id, resp.json()
-        if resp.status_code == 404:
-            _fail_codes[404] = _fail_codes.get(404, 0) + 1
-        elif resp.status_code == 429:
-            _fail_codes[429] = _fail_codes.get(429, 0) + 1
-            time.sleep(2)
-        return item_id, None
-    except Exception:
-        _fail_codes["exc"] = _fail_codes.get("exc", 0) + 1
-        return item_id, None
+        if (idx + 1) % 100 == 0:
+            log(f"  [worker {worker_id}] {idx+1}/{len(ids)} done, "
+                f"{len(results)} ok")
+    return results
 
 
 def enrich_items():
@@ -145,7 +127,6 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Refresh CSRF on all sessions
     for s in SESSIONS:
         get_csrf_token(s)
     log(f"🔐 CSRF tokens fetched for {len(SESSIONS)} session(s).")
@@ -173,48 +154,31 @@ def enrich_items():
         log("✅ Nothing to enrich.")
         return
 
-    log(f"🔧 Enriching {len(ids)} items with {len(SESSIONS)} cookie(s), "
-        f"batch size {BATCH_CHUNK}...")
+    log(f"🔧 Enriching {len(ids)} items with {len(SESSIONS)} cookie(s)...")
     start = time.time()
 
-    # Split into batches, one per executor task
-    batches = [ids[i:i + BATCH_CHUNK] for i in range(0, len(ids), BATCH_CHUNK)]
+    # Split IDs into one slice per cookie
+    slices = [[] for _ in SESSIONS]
+    for i, iid in enumerate(ids):
+        slices[i % len(SESSIONS)].append(iid)
+
     results = {}
-    failed_ids = []
-
     with ThreadPoolExecutor(max_workers=len(SESSIONS)) as ex:
-        futures = {}
-        for batch in batches:
-            s = get_session()
-            futures[ex.submit(fetch_batch, s, batch)] = batch
-
+        futures = {
+            ex.submit(fetch_worker, SESSIONS[i], slices[i], i + 1): i
+            for i in range(len(SESSIONS))
+        }
         done = 0
         for fut in as_completed(futures):
             done += 1
             try:
-                ok, by_id, failed = fut.result(timeout=60)
-                results.update(by_id)
-                failed_ids.extend(failed)
-            except Exception:
-                pass
-            if done % 5 == 0 or done == len(batches):
-                elapsed = time.time() - start
-                log(f"  batches: {done}/{len(batches)} — "
-                    f"items: {len(results)} ok, {len(failed_ids)} pending "
-                    f"({elapsed:.0f}s)")
-
-    # Retry a capped number of misses via single endpoint
-    if failed_ids:
-        retry_cap = min(len(failed_ids), 200)
-        log(f"🔁 Retrying {retry_cap} misses via single endpoint...")
-        for i, iid in enumerate(failed_ids[:retry_cap]):
-            s = get_session()
-            _, data = fetch_single(s, iid)
-            if data:
-                results[iid] = data
-            time.sleep(0.3)
-            if (i + 1) % 50 == 0:
-                log(f"  retried {i+1}/{retry_cap} — now {len(results)} ok")
+                r = fut.result(timeout=3600)
+                results.update(r)
+            except Exception as e:
+                log(f"  worker {done} error: {e}")
+            elapsed = time.time() - start
+            log(f"  workers done: {done}/{len(SESSIONS)} — "
+                f"items: {len(results)} ({elapsed:.0f}s)")
 
     log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
     log(f"📊 Failure breakdown: {_fail_codes}")
@@ -226,14 +190,15 @@ def enrich_items():
     emote_count = 0
     for item_id, d in results.items():
         try:
-            favs = d.get("favoriteCount", 0) or 0
-            price = d.get("price", 0) or 0
-            sales = d.get("purchaseCount", 0) or 0
-            name = d.get("name", "") or ""
-            desc = d.get("description", "") or ""
-            creator = d.get("creatorName", "") or ""
-            # Some responses use assetType, some use AssetTypeId
-            asset_type = d.get("assetType", d.get("AssetTypeId", 0)) or 0
+            # economy endpoint uses capitalized field names
+            favs = d.get("FavoriteCount", 0) or 0
+            price = d.get("PriceInRobux", 0) or 0
+            sales = d.get("Sales", 0) or 0
+            name = d.get("Name", "") or ""
+            desc = d.get("Description", "") or ""
+            creator_obj = d.get("Creator") or {}
+            creator = creator_obj.get("Name", "") if isinstance(creator_obj, dict) else ""
+            asset_type = d.get("AssetTypeId", 0) or 0
 
             if asset_type == 61:
                 emote_count += 1
