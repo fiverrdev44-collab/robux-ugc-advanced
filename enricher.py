@@ -6,11 +6,7 @@ from database import get_db_connection, setup_database
 
 # ============================================================
 # COOKIE POOLING
-# ------------------------------------------------------------
-# Reads ROBLOSECURITY_COOKIE_1 .. _5 (falls back to single
-# ROBLOSECURITY_COOKIE if numbered ones aren't set).
 # ============================================================
-
 COOKIES = []
 for i in range(1, 6):
     c = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
@@ -28,10 +24,8 @@ if not COOKIES:
 # ============================================================
 # ENDPOINT
 # ------------------------------------------------------------
-# The batch POST endpoint (catalog.roblox.com/v1/catalog/
-# items/details) is hard-429'd from GitHub Actions IPs — no
-# cookie count fixes that. The economy single-item endpoint
-# is tolerant of datacenter IPs and works reliably.
+# The economy single-item endpoint is tolerant of datacenter
+# IPs (GitHub Actions) — the batch POST endpoint is not.
 # ============================================================
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
@@ -40,12 +34,20 @@ BATCH_SIZE = 1500
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
+# ============================================================
+# ID BOUNDS — CRITICAL FIX
+# ------------------------------------------------------------
+# Modern Roblox catalog IDs (including ALL UGC emotes created
+# since 2023) are 13-15 digits (10^12 – 10^15). The old
+# MAX_VALID_ID of 2×10^9 silently filtered every emote out of
+# the enrichment SELECT query.
+#
+# Set to 10^17 — matches scanner.py bounds and covers all
+# current and future Roblox asset IDs.
+# ============================================================
 MIN_VALID_ID = 1_000_000
-MAX_VALID_ID = 2_000_000_000
+MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
 
-# Per-cookie delay between requests. 0.9s ≈ 1.1 req/sec per
-# cookie. With 2 cookies = ~2.2 req/sec total, safely under
-# Roblox's per-account soft limit.
 SESSION_DELAY = 0.9
 
 HEADERS = {
@@ -190,7 +192,6 @@ def enrich_items():
     emote_count = 0
     for item_id, d in results.items():
         try:
-            # economy endpoint uses capitalized field names
             favs = d.get("FavoriteCount", 0) or 0
             price = d.get("PriceInRobux", 0) or 0
             sales = d.get("Sales", 0) or 0
