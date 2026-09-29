@@ -11,12 +11,22 @@ def log(msg):
     print(msg, flush=True)
 
 
+# ============================================================
+# ENDPOINTS
+# ------------------------------------------------------------
+# The /details endpoint is REQUIRED for Category+Subcategory
+# filtering. Without /details, the API silently ignores filters
+# and returns generic items (which is why emotes never showed up).
+# ============================================================
 CATALOG_APIS = [
-    "https://catalog.roproxy.com/v1/search/items",
-    "https://catalog.roblox.com/v1/search/items",
+    "https://catalog.roproxy.com/v1/search/items/details",
+    "https://catalog.roblox.com/v1/search/items/details",
 ]
 
-CATEGORIES = [11, 3, 4, 12, 5]
+# Category 11 = Accessories, 3 = Clothing, 4 = BodyParts,
+# 12 = AvatarAnimations (includes Emotes), 5 = Gear,
+# 13 = CommunityCreations (UGC landing category)
+CATEGORIES = [11, 3, 4, 12, 5, 13]
 SORT_TYPES = [0, 1, 2, 3, 4, 5]
 WORKERS = 3
 DELAY = 0.4
@@ -25,9 +35,22 @@ HTTP_TIMEOUT = 10
 MAX_429_RETRIES = 3
 QUERY_TIMEOUT = 60
 
-# Roblox: category 12 = Community Creations, subcategory 39 = Emotes
+# Roblox catalog constants
+# Category 12 = AvatarAnimations
+# Category 13 = CommunityCreations
+# Subcategory 39 = EmoteAnimations
 EMOTE_CATEGORY = 12
 EMOTE_SUBCATEGORY = 39
+COMMUNITY_CATEGORY = 13
+
+# salesTypeFilter=1 means "only items that are actually for sale".
+# This is the flag that was missing — without it the API returns
+# free/official/unavailable items instead of UGC.
+SALES_TYPE_FOR_SALE = 1
+
+# Asset type 61 = EmoteAnimation. Using this as a filter is an
+# alternative discovery path when category/subcategory fails.
+ASSET_TYPE_EMOTE = 61
 
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 10_000_000_000
@@ -100,13 +123,16 @@ def is_valid_asset_id(iid):
 
 def is_asset_item(item):
     """
-    Only trust items the API marks as Asset.
-    Bundles / Universes have different itemType and 15-digit IDs.
+    Accept items the API marks as Asset. Loosened slightly:
+    - If itemType is missing, accept (older API responses may omit it).
+    - If itemType is present, accept only if it CONTAINS "asset".
+      (Handles "Asset", "asset", and edge-case variants.)
+    Reject bundles/universes which have different itemTypes.
     """
     if not isinstance(item, dict):
         return False
     item_type = (item.get("itemType") or "").lower()
-    if item_type and item_type != "asset":
+    if item_type and "asset" not in item_type:
         return False
     return is_valid_asset_id(item.get("id"))
 
@@ -180,14 +206,20 @@ def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
-    # ---- General category sweeps ----
+    # ---- General category sweeps (with salesTypeFilter) ----
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
-            queries.append({"category": cat, "sortType": sort, "limit": 30})
+            queries.append({
+                "category": cat,
+                "sortType": sort,
+                "limit": 30,
+                "salesTypeFilter": SALES_TYPE_FOR_SALE,
+            })
 
     # =========================================================
     # DEDICATED EMOTE DISCOVERY
-    # Category 12 + Subcategory 39 = Emotes specifically
+    # Category 12 + Subcategory 39 = EmoteAnimations
+    # salesTypeFilter=1 is REQUIRED to get UGC emotes (not freebies)
     # =========================================================
     for sort in SORT_TYPES:
         queries.append({
@@ -195,6 +227,7 @@ def build_all_queries():
             "subcategory": EMOTE_SUBCATEGORY,
             "sortType": sort,
             "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
     # Emote keyword + subcategory = deeper coverage
@@ -205,6 +238,7 @@ def build_all_queries():
             "subcategory": EMOTE_SUBCATEGORY,
             "sortType": 2,
             "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
     # Emote price-band sweeps
@@ -216,21 +250,51 @@ def build_all_queries():
             "maxPrice": max_p,
             "sortType": 2,
             "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
+        })
+
+    # =========================================================
+    # ALTERNATIVE EMOTE PATH: assetType=61
+    # Some Roblox API versions honor assetType better than
+    # Category/Subcategory. Belt-and-suspenders.
+    # =========================================================
+    for sort in [0, 2, 3]:
+        queries.append({
+            "assetType": ASSET_TYPE_EMOTE,
+            "sortType": sort,
+            "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
     # ---- General keyword sweeps ----
     all_keywords = list(set(UGC_KEYWORDS + CLASSIC_KEYWORDS + EMOTE_KEYWORDS))
     for kw in all_keywords:
         for sort in [0, 2]:
-            queries.append({"keyword": kw, "sortType": sort, "limit": 30})
+            queries.append({
+                "keyword": kw,
+                "sortType": sort,
+                "limit": 30,
+                "salesTypeFilter": SALES_TYPE_FOR_SALE,
+            })
 
     # ---- Price-band sweeps for everything ----
     for min_p, max_p in PRICE_RANGES:
-        queries.append({"minPrice": min_p, "maxPrice": max_p, "sortType": 2, "limit": 30})
+        queries.append({
+            "minPrice": min_p,
+            "maxPrice": max_p,
+            "sortType": 2,
+            "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
+        })
 
     # ---- Learned keywords ----
     for kw in get_dynamic_keywords():
-        queries.append({"keyword": kw, "sortType": 2, "limit": 30})
+        queries.append({
+            "keyword": kw,
+            "sortType": 2,
+            "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
+        })
 
     log(f"🔨 Built {len(queries)} queries.")
     return queries
