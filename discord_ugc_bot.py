@@ -2791,6 +2791,99 @@ async def analyze_image(ctx, *, description: str = ""):
             total_verified += len(v)
         total_rejected += len(r)
 
-    body = _fmt_ai_result(
+        body = _fmt_ai_result(
         synth, verified_groups, [], stats,
-        vision.get("item
+        vision.get("item_type_visual", "unknown"),
+        total_verified=total_verified,
+        total_rejected=total_rejected,
+    )
+
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+        await asyncio.sleep(0.3)
+
+
+@bot.command(name="ai_debug")
+async def ai_debug(ctx):
+    lines = ["**🔬 AI Debug Report**\n"]
+
+    gkey = os.getenv("GEMINI_API_KEY", "")
+    gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    okey = os.getenv("OPENROUTER_API_KEY", "")
+    omodel = os.getenv("OPENROUTER_MODEL",
+                       "meta-llama/llama-3.3-70b-instruct:free")
+
+    lines.append("**Env vars:**")
+    lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
+    lines.append(f"• GEMINI_MODEL: `{gmodel}`")
+    lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
+    lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
+    lines.append("")
+
+    lines.append("**Gemini test** (`say hello`):")
+    if not gkey:
+        lines.append("• ❌ GEMINI_API_KEY not set")
+    else:
+        try:
+            from google import genai as g
+            client = g.Client(api_key=gkey)
+            resp = client.models.generate_content(
+                model=gmodel,
+                contents="Say only the word: hello",
+            )
+            text = (resp.text or "").strip()
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
+                if getattr(resp, "candidates", None):
+                    fr = getattr(resp.candidates[0], "finish_reason", "?")
+                    lines.append(f"• finish_reason: `{fr}`")
+        except Exception as e:
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+    lines.append("")
+
+    lines.append("**OpenRouter test** (`say hello`):")
+    if not okey:
+        lines.append("• ❌ OPENROUTER_API_KEY not set")
+    else:
+        try:
+            from openai import OpenAI
+            or_client = OpenAI(
+                api_key=okey,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            resp = or_client.chat.completions.create(
+                model=omodel,
+                messages=[{"role": "user", "content": "Say only the word: hello"}],
+                max_tokens=20,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
+        except Exception as e:
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+
+    body = "\n".join(lines)
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def health():
+    return "OK", 200
+
+
+def run_flask():
+    port = int(os.getenv("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
+    bot.run(TOKEN)
