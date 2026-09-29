@@ -1,12 +1,13 @@
 """
 gemini_brain.py — Hybrid AI for Roblox UGC domination.
-Primary: Gemini. Fallback: OpenRouter.
+Primary: Gemini. Fallback: OpenRouter (text + vision).
 """
 
 import os
 import re
 import json
 import time
+import base64
 from google import genai
 from google.genai import types
 
@@ -16,6 +17,8 @@ MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_VISION_MODEL = os.getenv(
+    "OPENROUTER_VISION_MODEL", "meta-llama/llama-3.2-11b-vision-instruct:free")
 
 _client = None
 _openrouter_client = None
@@ -51,6 +54,7 @@ def _ensure():
                 base_url="https://openrouter.ai/api/v1",
             )
             print(f"[openrouter] configured model={OPENROUTER_MODEL}")
+            print(f"[openrouter] vision model={OPENROUTER_VISION_MODEL}")
         except Exception as e:
             print(f"[openrouter] configure failed: {e}")
             _openrouter_client = None
@@ -88,7 +92,6 @@ def _gemini_generate(prompt: str, json_mode: bool = False,
             print(f"[gemini] empty response (attempt {attempt+1}), fr={fr}")
         except Exception as e:
             err = str(e)
-            # Hard quota / auth failures — don't waste retries
             hard_fail = any(x in err for x in [
                 "429", "RESOURCE_EXHAUSTED", "quota",
                 "API key not valid", "PERMISSION_DENIED",
@@ -113,8 +116,6 @@ def _gemini_generate(prompt: str, json_mode: bool = False,
 def _openrouter_generate(prompt: str, json_mode: bool = False,
                          temperature: float = 0.7, max_tokens: int = 8192,
                          max_retries: int = 3):
-    """OpenRouter call — supports reasoning models (Nemotron) with proper
-    max_tokens + 90s timeout so the reasoning pass doesn't get cut off."""
     if not _openrouter_client:
         return None
     for attempt in range(max_retries):
@@ -502,6 +503,174 @@ def verify_titles(titles: list, allow_list: list):
         else:
             valid.append(title)
     return valid, rejected
+
+
+# =========================================================================
+# VISION — UGC image analysis (multi-image + OpenRouter fallback)
+# =========================================================================
+_VISION_PROMPT = """You are a Roblox UGC visual analyst AND culture strategist. 
+You will receive 1-4 images of the SAME UGC item from different angles 
+(front, side, back, on-avatar). Analyze ALL images together to build a 
+complete picture. Examine the item using both what you SEE and your 
+knowledge of internet / meme / anime / K-pop / TikTok culture.
+
+Return ONLY valid JSON matching this schema:
+
+{{
+  "visual_colors": ["green", "black", "pink"],
+  "visual_style": ["plush", "kawaii", "blocky"],
+  "visual_mood": ["playful", "spooky-cute", "grunge"],
+  "item_type_visual": "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
+  "distinctive_features": ["x eyes", "cat ears", "stripes", "paws", "fuzzy texture"],
+  "search_description": "one casual sentence a creator would type when searching the DB for similar items",
+  "title_color_match": "<YES|NO|PARTIAL>",
+  "visual_summary": "2-3 sentences describing exactly what you see",
+
+  "likely_aesthetic": ["y2k", "slimecore", "cursed kawaii"],
+  "likely_trend_source": "<tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
+  "likely_trend_context": "2-3 sentences: what internet/TikTok/meme/anime trend does this aesthetic or creature type relate to RIGHT NOW. Be specific and current.",
+  "vibe_references": ["green slime", "shrek", "zombie cat", "tsum tsum"],
+  "ip_reference_warning": "<NONE or item may resemble copyrighted character/logo — list what it resembles>",
+  "target_audience": "2-3 sentences: who buys this? Age, aesthetic, subculture, what subreddits/Discords they hang out in.",
+  "similar_viral_items": ["examples of similar viral UGC or Roblox items you know exist"],
+  "color_psychology": "1-2 sentences on what this color palette signals to buyers.",
+  "composition_notes": "1-2 sentences on how this item renders at small size."
+}}
+
+RULES FOR VISUAL FIELDS:
+- Lowercase. Single words or short 2-word phrases.
+- item_type_visual = what the item IS based on what you SEE (not what user says).
+
+RULES FOR item_type_visual (be precise):
+- hair = sculpts the head shape itself (wigs, bangs, ponytails)
+- hat = sits ON TOP of existing hair (beanies, crowns, caps)
+- face = covers eyes/mouth/nose area (glasses, masks)
+- neck = around the neck (chains, chokers)
+- shoulder = sits on the shoulder (shoulder pets)
+- front = hangs on the chest (necklaces)
+- back = hangs on the back (wings, capes, katanas)
+- waist = around the hips/belt
+- 3d_clothing = layered apparel that fits the avatar body
+
+RULES FOR CULTURE FIELDS — USE YOUR EXTERNAL KNOWLEDGE FREELY:
+- Name SPECIFIC current trends, sounds, memes, anime arcs.
+- ip_reference_warning = flag Sanrio, Pokemon, Disney, anime characters, brand logos. Say NONE if original.
+- target_audience = SPECIFIC. Not "kids who like cute things."
+
+CREATOR'S DESCRIPTION: {desc}
+"""
+
+
+def _parse_vision_result(raw: str) -> dict:
+    """Parse and normalize vision JSON from either provider."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return {}
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return {}
+
+    for k in ("visual_colors", "visual_style", "visual_mood",
+              "distinctive_features", "likely_aesthetic",
+              "vibe_references", "similar_viral_items"):
+        val = data.get(k, [])
+        if isinstance(val, str):
+            val = [val]
+        if not isinstance(val, list):
+            val = []
+        data[k] = [str(v).lower().strip() for v in val if str(v).strip()]
+
+    for k in ("item_type_visual", "search_description", "title_color_match",
+              "visual_summary", "likely_trend_source", "likely_trend_context",
+              "ip_reference_warning", "target_audience",
+              "color_psychology", "composition_notes"):
+        data[k] = str(data.get(k, "")).strip()
+
+    data["item_type_visual"] = data["item_type_visual"].lower() or "unknown"
+    data["title_color_match"] = data["title_color_match"].upper() or "?"
+    data["likely_trend_source"] = data["likely_trend_source"].lower() or "none"
+    data["ip_reference_warning"] = data["ip_reference_warning"].upper() or "NONE"
+    return data
+
+
+def analyze_image_for_ugc(images: list, user_description: str = "") -> dict:
+    """
+    Send 1-4 images to Gemini (primary) or OpenRouter vision (fallback).
+    images = [{"bytes": b"...", "mime": "image/png"}, ...]
+    """
+    if not _ensure() or not images:
+        return {}
+
+    images = images[:4]
+    prompt_text = _VISION_PROMPT.format(
+        desc=(user_description or "").strip() or "(none)"
+    )
+
+    # --- TIER 1: Gemini vision ---
+    if _client is not None:
+        try:
+            parts = []
+            for i, img in enumerate(images, 1):
+                parts.append(f"Image {i}:")
+                parts.append(types.Part.from_bytes(
+                    data=img["bytes"], mime_type=img["mime"]))
+            parts.append(prompt_text)
+
+            cfg = types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=1500,
+                response_mime_type="application/json",
+            )
+            resp = _client.models.generate_content(
+                model=MODEL_NAME, contents=parts, config=cfg)
+            raw = (resp.text or "").strip()
+            if raw:
+                result = _parse_vision_result(raw)
+                if result:
+                    return result
+            print("[vision] gemini empty, trying OpenRouter vision fallback")
+        except Exception as e:
+            print(f"[vision] gemini failed: {type(e).__name__}: {str(e)[:200]}")
+            print("[vision] trying OpenRouter vision fallback")
+
+    # --- TIER 2: OpenRouter vision ---
+    if _openrouter_client is not None:
+        try:
+            content = []
+            for i, img in enumerate(images, 1):
+                content.append({"type": "text", "text": f"Image {i}:"})
+                b64 = base64.b64encode(img["bytes"]).decode("utf-8")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{img['mime']};base64,{b64}"}
+                })
+            content.append({"type": "text", "text": prompt_text})
+
+            resp = _openrouter_client.chat.completions.create(
+                model=OPENROUTER_VISION_MODEL,
+                messages=[{"role": "user", "content": content}],
+                temperature=0.3,
+                max_tokens=1500,
+                timeout=90,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw:
+                result = _parse_vision_result(raw)
+                if result:
+                    print("[vision] OpenRouter fallback succeeded")
+                    return result
+            print("[vision] OpenRouter empty response")
+        except Exception as e:
+            print(f"[vision] OpenRouter fallback failed: "
+                  f"{type(e).__name__}: {str(e)[:200]}")
+
+    return {}
 
 
 # =========================================================================
