@@ -44,16 +44,24 @@ EMOTE_SUBCATEGORY = 39
 COMMUNITY_CATEGORY = 13
 
 # salesTypeFilter=1 means "only items that are actually for sale".
-# This is the flag that was missing — without it the API returns
-# free/official/unavailable items instead of UGC.
 SALES_TYPE_FOR_SALE = 1
 
-# Asset type 61 = EmoteAnimation. Using this as a filter is an
-# alternative discovery path when category/subcategory fails.
+# Asset type 61 = EmoteAnimation.
 ASSET_TYPE_EMOTE = 61
 
+# ============================================================
+# ID BOUNDS — CRITICAL FIX
+# ------------------------------------------------------------
+# Modern Roblox catalog IDs (including ALL UGC emotes created
+# since 2023) are 13-15 digits, in the 10^12 – 10^15 range.
+# The old MAX_VALID_ID of 10^10 silently rejected every emote
+# before it could be saved.
+#
+# Set to 10^17 — plenty of headroom for Roblox's ID growth,
+# still well under Postgres bigint max (9.2 × 10^18).
+# ============================================================
 MIN_VALID_ID = 1_000_000
-MAX_VALID_ID = 10_000_000_000
+MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -123,10 +131,7 @@ def is_valid_asset_id(iid):
 
 def is_asset_item(item):
     """
-    Accept items the API marks as Asset. Loosened slightly:
-    - If itemType is missing, accept (older API responses may omit it).
-    - If itemType is present, accept only if it CONTAINS "asset".
-      (Handles "Asset", "asset", and edge-case variants.)
+    Accept items the API marks as Asset.
     Reject bundles/universes which have different itemTypes.
     """
     if not isinstance(item, dict):
@@ -206,7 +211,7 @@ def build_all_queries():
     log("🔨 Building query list...")
     queries = []
 
-    # ---- General category sweeps (with salesTypeFilter) ----
+    # ---- General category sweeps ----
     for cat in CATEGORIES:
         for sort in SORT_TYPES:
             queries.append({
@@ -216,11 +221,7 @@ def build_all_queries():
                 "salesTypeFilter": SALES_TYPE_FOR_SALE,
             })
 
-    # =========================================================
-    # DEDICATED EMOTE DISCOVERY
-    # Category 12 + Subcategory 39 = EmoteAnimations
-    # salesTypeFilter=1 is REQUIRED to get UGC emotes (not freebies)
-    # =========================================================
+    # ---- Dedicated emote discovery ----
     for sort in SORT_TYPES:
         queries.append({
             "category": EMOTE_CATEGORY,
@@ -230,7 +231,6 @@ def build_all_queries():
             "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
-    # Emote keyword + subcategory = deeper coverage
     for kw in EMOTE_KEYWORDS[:60]:
         queries.append({
             "keyword": kw,
@@ -241,7 +241,6 @@ def build_all_queries():
             "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
-    # Emote price-band sweeps
     for min_p, max_p in PRICE_RANGES:
         queries.append({
             "category": EMOTE_CATEGORY,
@@ -253,11 +252,7 @@ def build_all_queries():
             "salesTypeFilter": SALES_TYPE_FOR_SALE,
         })
 
-    # =========================================================
-    # ALTERNATIVE EMOTE PATH: assetType=61
-    # Some Roblox API versions honor assetType better than
-    # Category/Subcategory. Belt-and-suspenders.
-    # =========================================================
+    # ---- Alternative emote path: assetType=61 ----
     for sort in [0, 2, 3]:
         queries.append({
             "assetType": ASSET_TYPE_EMOTE,
@@ -277,7 +272,7 @@ def build_all_queries():
                 "salesTypeFilter": SALES_TYPE_FOR_SALE,
             })
 
-    # ---- Price-band sweeps for everything ----
+    # ---- Price-band sweeps ----
     for min_p, max_p in PRICE_RANGES:
         queries.append({
             "minPrice": min_p,
