@@ -82,6 +82,19 @@ ASSET_TYPE_NAMES = {
     70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
 }
 
+# ============================================================
+# FILLER WORDS — blocked from allow-list so titles can't use
+# them. If any word in a title is in this set, verify_titles
+# rejects the whole title.
+# ============================================================
+FILLER_WORDS = {
+    "troll", "funny", "meme", "memes", "lol", "sus", "sussy", "cringe",
+    "goofy", "silly", "epic", "hype", "viral", "trending", "trend",
+    "popular", "best", "top", "new", "old", "roblox", "ugc",
+    "avatar", "outfit", "character", "got", "get", "make", "made",
+    "use", "used", "has", "have",
+}
+
 MIN_PRICE = 5
 MAX_PRICE = 10000
 
@@ -2108,37 +2121,27 @@ def _build_allow_list(intent, max_keywords=60):
             bg = f"{a} {b}"
             bigrams[bg] = bigrams.get(bg, 0) + 1
 
-    unigrams = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])]
-    top_bigrams = [b for b, _ in sorted(bigrams.items(), key=lambda x: -x[1])[:15]]
+    # ============================================================
+    # ALLOW-LIST — FILLER_WORDS are stripped out so the AI can't
+    # even generate titles using them (verify_titles will reject).
+    # ============================================================
+    unigrams = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])
+                if w not in FILLER_WORDS]
+    top_bigrams = [b for b, _ in sorted(bigrams.items(), key=lambda x: -x[1])[:15]
+                   if not any(part in FILLER_WORDS for part in b.split())]
     allow_list = unigrams[:max_keywords]
     allow_list += [b for b in top_bigrams if b not in allow_list]
 
     sane_rows = [r for r in rows
                  if not r[3] or MIN_PRICE <= r[3] <= MAX_PRICE]
 
-    # ==========================================================
-    # GENERIC_TERMS — words that DO NOT count as specific when
-    # scoring relevance. Expanded to include meme filler so the
-    # AI stops combining "troll funny meme lol" into titles.
-    # ==========================================================
     GENERIC_TERMS = {
-        # Colors / aesthetics
         "cute", "kawaii", "pink", "red", "white", "black", "blue", "brown",
         "green", "yellow", "purple", "orange", "gold", "silver", "gray", "grey",
         "y2k", "pastel", "grunge", "emo", "preppy", "aesthetic", "soft", "dark",
         "playful", "whimsical", "fun", "sweet", "pretty", "beautiful",
         "cool", "nice", "small", "big", "tiny", "little",
-        # Meme filler — the biggest fix
-        "troll", "funny", "meme", "memes", "lol", "sus", "sussy", "cringe",
-        "goofy", "silly", "epic", "sigma", "rizz", "skibidi", "ohio", "gyatt",
-        "based", "cap", "yeet", "bruh", "slay", "goat", "hype", "viral",
-        "trending", "trend", "popular", "best", "top", "new", "old",
-        "roblox", "ugc", "avatar", "outfit", "character",
-        # Generic verbs
-        "has", "got", "get", "make", "made", "use", "used",
-        # Filler
-        "the", "and", "for", "with", "that", "this", "your", "my",
-    }
+    } | FILLER_WORDS
     strong_terms = [t for t in terms if len(t) >= 3 and t.lower() not in GENERIC_TERMS]
 
     def _match_score(r):
@@ -2151,7 +2154,16 @@ def _build_allow_list(intent, max_keywords=60):
     if len(relevant_rows) < 5:
         relevant_rows = sane_rows
 
-    top_rows = sorted(relevant_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
+    # ============================================================
+    # COMPETITORS — prefer items with REAL favorites. If fewer
+    # than 3 have favs, fall back to whatever we have (new DB case).
+    # ============================================================
+    items_with_favs = [r for r in relevant_rows if (r[2] or 0) > 0]
+    if len(items_with_favs) >= 3:
+        top_rows = sorted(items_with_favs, key=lambda r: (r[2] or 0), reverse=True)[:10]
+    else:
+        top_rows = sorted(relevant_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
+
     top_items = [
         {"name": r[1], "favourite_count": r[2] or 0,
          "price": r[3] or 0, "total_sales": r[4] or 0}
@@ -2486,9 +2498,6 @@ async def rescue(ctx, *, description: str = ""):
                  f"🧠 **AI is diagnosing your launch and writing new titles...**")
     )
 
-    # ==============================================================
-    # RESCUE PROMPT — tightened to stop keyword-soup titles
-    # ==============================================================
     rescue_prompt = f"""You are a Roblox UGC title doctor. A creator launched an item that is NOT SELLING.
 
 THEIR DESCRIPTION / CURRENT SITUATION:
