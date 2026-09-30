@@ -73,6 +73,16 @@ EMOTE_KEYWORDS_HINT = {
     "milky", "smooth", "spin", "kick", "bounce", "hype", "party"
 }
 
+# Roblox asset_type_id → human-readable name
+ASSET_TYPE_NAMES = {
+    2: "T-Shirt", 8: "Hat", 11: "Shirt", 12: "Pants", 17: "Head",
+    18: "Face", 19: "Gear", 41: "Hair", 42: "Face Acc", 43: "Neck Acc",
+    44: "Shoulder Acc", 45: "Front Acc", 46: "Back Acc", 47: "Waist Acc",
+    61: "Emote", 64: "3D T-Shirt", 65: "3D Shirt", 66: "3D Pants",
+    67: "3D Jacket", 68: "3D Sweater", 69: "3D Shorts",
+    70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
+}
+
 MIN_PRICE = 5
 MAX_PRICE = 10000
 
@@ -1843,30 +1853,67 @@ async def gap(ctx, *, keyword: str):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
+# =========================================================================
+# FIXED VELOCITY — all categories, requires real growth
+# =========================================================================
 @bot.command(name="velocity")
-async def velocity(ctx):
-    conn = get_db(); cur = conn.cursor()
-    cur.execute("""SELECT item_id, MAX(favorite_count) - MIN(favorite_count), COUNT(*) 
-                   FROM item_history GROUP BY item_id HAVING COUNT(*) >= 2 
-                   ORDER BY 2 DESC LIMIT 50""")
-    rows = cur.fetchall()
+async def velocity(ctx, days: int = 30, limit: int = 15):
+    """
+    Fastest-rising items over the last N days — ALL categories.
+    Usage: !velocity [days] [limit]  (default: 30 days, 15 items)
+    """
+    days = max(1, min(days, 90))
+    limit = max(1, min(limit, 25))
+    try:
+        conn = get_db(); cur = conn.cursor()
+        cur.execute(f"""
+            SELECT i.id, i.name, i.price, i.creator_name, i.asset_type_id,
+                   MAX(h.favorite_count) - MIN(h.favorite_count) AS growth,
+                   COUNT(h.*) AS snaps
+            FROM items i
+            JOIN item_history h ON h.item_id = i.id
+            WHERE h.snapshot_at >= NOW() - INTERVAL '{days} days'
+              AND i.favorite_count > 50
+            GROUP BY i.id, i.name, i.price, i.creator_name, i.asset_type_id
+            HAVING COUNT(h.*) >= 2
+               AND MAX(h.favorite_count) - MIN(h.favorite_count) > 0
+            ORDER BY growth DESC
+            LIMIT %s
+        """, (limit,))
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+    except Exception as e:
+        await ctx.send(f"❌ DB error: {e}")
+        return
+
     if not rows:
-        await ctx.send("⚠️ Not enough history. Run enricher 2+ times.")
-        cur.close(); conn.close(); return
-    items = []
-    for iid, growth, snaps in rows:
-        cur.execute("SELECT name, price FROM items WHERE id = %s", (iid,))
-        r = cur.fetchone()
-        name = r[0] if r else f"Item {iid}"
-        price = r[1] if r else "?"
-        items.append((name[:50], growth, price, growth))
-    cur.close(); conn.close()
-    embed = discord.Embed(title="🚀 Fastest Rising Items",
-                          description=f"Top **{len(items)}** items.", color=0xff5500)
-    for i, (name, growth, price, _) in enumerate(items[:10], 1):
-        embed.add_field(name=f"{i}. {name}",
-                        value=f"📈 +**{growth:,}** favs | 💰 {price} R$", inline=False)
+        await ctx.send(
+            f"⚠️ **No growth detected in the last {days} days.**\n\n"
+            f"**Possible reasons:**\n"
+            f"• Snapshot job hasn't run 2+ times yet\n"
+            f"• Items have <2 snapshots\n"
+            f"• Growth is real but tiny\n\n"
+            f"**Try:** `!velocity 90` for a wider window\n"
+            f"**Check:** `!scan_status` — History Snapshots count"
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"🚀 Fastest Rising Items (last {days}d)",
+        description=f"Top **{len(rows)}** by favorite growth · all categories",
+        color=0xff5500)
+    for i, (iid, name, price, creator, atype, growth, snaps) in enumerate(rows, 1):
+        price_str = f"{price} R$" if price else "Free"
+        type_name = ASSET_TYPE_NAMES.get(atype, f"Type {atype}")
+        embed.add_field(
+            name=f"{i}. {name[:50]}",
+            value=(f"📈 **+{growth:,}** favs · 💰 {price_str} · `{type_name}`\n"
+                   f"by {creator or '?'} · `{iid}`"),
+            inline=False)
     await ctx.send(embed=embed)
+# =========================================================================
+# END FIXED VELOCITY
+# =========================================================================
 
 
 @bot.command(name="track")
@@ -1936,23 +1983,80 @@ def _term_match_count(term):
         return 0
 
 
-def _get_db_vocab_sample(limit=400):
+_VOCAB_TYPE_TO_ASSET_ID = {
+    "emote": 61,
+}
+
+_EMOTE_BRIDGE_SEEDS = [
+    "emote", "dance", "animation", "gesture", "expression", "reaction",
+    "floss", "griddy", "dab", "wave", "shuffle", "moonwalk", "renegade",
+    "dougie", "stanky", "shmoney", "krump", "hiphop", "breakdance",
+    "gangnam", "salsa", "ballet", "vogue", "twist", "robot",
+    "spin", "twirl", "kick", "bounce", "jump", "pose", "salute", "clap",
+    "cheer", "victory", "greeting", "hello", "goodbye", "hug", "kiss",
+    "idle", "sit", "crouch", "sleep", "meditate", "levitate", "float",
+    "laugh", "cry", "smile", "silly", "rage", "shy", "smug", "confused",
+    "kpop", "korean", "anime", "naruto", "jojo", "goku", "gojo", "luffy",
+    "sigma", "rizz", "skibidi", "gyatt", "mewing", "aura", "sus", "ratio",
+    "goat", "slay", "bussin", "yeet", "bruh", "fanum", "cap",
+    "tiktok", "trend", "trending", "viral", "meme", "loop", "hype",
+    "party", "swag", "epic", "smooth", "groove", "sway",
+    "r6", "r15",
+    "cute", "emo", "edgy", "coquette", "preppy", "pastel", "cyber",
+]
+
+
+def _get_db_vocab_sample(item_type="unknown", limit=800):
+    asset_filter = _VOCAB_TYPE_TO_ASSET_ID.get((item_type or "").lower())
+    rows = []
     try:
         conn = get_db(); cur = conn.cursor()
         try:
-            cur.execute("SELECT name FROM items WHERE favorite_count > 50 LIMIT 5000")
-            rows = cur.fetchall()
+            if asset_filter is not None:
+                cur.execute(
+                    "SELECT name FROM items "
+                    "WHERE favorite_count > 50 AND asset_type_id = %s "
+                    "LIMIT 20000",
+                    (asset_filter,)
+                )
+                rows = cur.fetchall()
+                if len(rows) < 500:
+                    cur.execute(
+                        "SELECT name FROM items "
+                        "WHERE favorite_count > 50 "
+                        "LIMIT 15000"
+                    )
+                    rows.extend(cur.fetchall())
+            else:
+                cur.execute(
+                    "SELECT name FROM items "
+                    "WHERE favorite_count > 50 "
+                    "LIMIT 15000"
+                )
+                rows = cur.fetchall()
         finally:
             cur.close(); conn.close()
-    except Exception:
-        return []
+    except Exception as e:
+        print(f"[vocab-sample] {e}", flush=True)
+        rows = []
+
     counter = Counter()
     token_re = re.compile(r"[a-z]+")
     for (name,) in rows:
         for w in set(token_re.findall((name or "").lower())):
             if len(w) >= 3 and w not in STOP_WORDS:
                 counter[w] += 1
-    return [w for w, _ in counter.most_common(limit)]
+
+    vocab = [w for w, _ in counter.most_common(limit)]
+
+    if (item_type or "").lower() == "emote":
+        existing = set(vocab)
+        for w in _EMOTE_BRIDGE_SEEDS:
+            if w not in existing:
+                vocab.append(w)
+                existing.add(w)
+
+    return vocab
 
 
 def _build_allow_list(intent, max_keywords=60):
@@ -1974,7 +2078,8 @@ def _build_allow_list(intent, max_keywords=60):
         try:
             failed_terms = [t for t in terms if len(t) >= 3 and _term_match_count(t) < 3]
             if failed_terms:
-                db_vocab = _get_db_vocab_sample(400)
+                detected_type = (intent.get("item_type") or "unknown").lower()
+                db_vocab = _get_db_vocab_sample(detected_type, 800)
                 if db_vocab:
                     exp = expand_search_terms(intent, db_vocab, failed_terms)
                     expanded_terms = exp.get("expanded_terms", [])
@@ -2660,231 +2765,4 @@ async def analyze_image(ctx, *, description: str = ""):
         f"[ITEM TYPE] {vision.get('item_type_visual', 'unknown')}\n"
         f"[LIKELY AESTHETIC] {', '.join(vision.get('likely_aesthetic', []))}\n"
         f"[LIKELY TREND SOURCE] {vision.get('likely_trend_source', 'none')}\n"
-        f"[TREND CONTEXT] {vision.get('likely_trend_context', '')}\n"
-        f"[VIBE REFERENCES] {', '.join(vision.get('vibe_references', []))}\n"
-        f"[TARGET AUDIENCE] {vision.get('target_audience', '')}\n"
-        f"[COLOR PSYCHOLOGY] {vision.get('color_psychology', '')}\n"
-        f"[IP WARNING] {vision.get('ip_reference_warning', 'NONE')}\n"
-        f"[CREATOR NOTES] {description or '(none)'}"
-    )
-
-    synth = None
-    try:
-        synth = await asyncio.to_thread(
-            synthesize_hybrid, full_desc, allow_list, top_items, stats,
-            vision.get("item_type_visual", "unknown"), "none",
-            {"direct_matches": stats.get("direct_matches", 0),
-             "expansion_used": stats.get("expansion_used", False),
-             "expanded_terms": stats.get("expanded_terms", []),
-             "failed_terms": stats.get("failed_terms", []),
-             "reasoning": stats.get("reasoning", "")}
-        )
-    except Exception as e:
-        print(f"[analyze_image] synth failed: {e}", flush=True)
-        synth = None
-
-    try:
-        await progress.delete()
-    except Exception:
-        pass
-
-    vision_lines = ["# 🖼️ IMAGE + CULTURE ANALYSIS\n"]
-
-    vision_lines.append("## 👁️ What I See")
-    vision_lines.append(vision.get("visual_summary", "—"))
-    vision_lines.append("")
-    vision_lines.append(
-        f"**Colors:** {', '.join(f'`{c}`' for c in vision.get('visual_colors', []))}"
-    )
-    vision_lines.append(
-        f"**Style:** {', '.join(f'`{s}`' for s in vision.get('visual_style', []))}"
-    )
-    vision_lines.append(
-        f"**Features:** {', '.join(f'`{f}`' for f in vision.get('distinctive_features', []))}"
-    )
-    vision_lines.append(
-        f"**Detected item type:** `{vision.get('item_type_visual', 'unknown')}`"
-    )
-    vision_lines.append("")
-
-    if vision.get("likely_aesthetic"):
-        vision_lines.append("## 🎨 Aesthetic")
-        vision_lines.append(", ".join(f"`{a}`" for a in vision["likely_aesthetic"]))
-        vision_lines.append("")
-
-    if vision.get("likely_trend_context"):
-        vision_lines.append("## 🌊 Trend Context")
-        vision_lines.append(f"**Source:** `{vision.get('likely_trend_source', 'none')}`")
-        vision_lines.append(vision["likely_trend_context"])
-        vision_lines.append("")
-
-    if vision.get("vibe_references"):
-        vision_lines.append("## 🎬 Vibe References")
-        vision_lines.append(", ".join(f"`{r}`" for r in vision["vibe_references"]))
-        vision_lines.append("")
-
-    if vision.get("color_psychology"):
-        vision_lines.append("## 🎨 Color Psychology")
-        vision_lines.append(vision["color_psychology"])
-        vision_lines.append("")
-
-    if vision.get("target_audience"):
-        vision_lines.append("## 👥 Target Audience")
-        vision_lines.append(vision["target_audience"])
-        vision_lines.append("")
-
-    if vision.get("composition_notes"):
-        vision_lines.append("## 📐 Composition")
-        vision_lines.append(vision["composition_notes"])
-        vision_lines.append("")
-
-    ip_warn = vision.get("ip_reference_warning", "NONE")
-    if ip_warn and ip_warn != "NONE":
-        vision_lines.append("## 🚨 IP / TRADEMARK WARNING")
-        vision_lines.append(
-            f"**{ip_warn}**\n"
-            "Do NOT use names from that IP in the title. Roblox will remove the item."
-        )
-        vision_lines.append("")
-
-    match = vision.get("title_color_match", "?")
-    if match == "NO":
-        vision_lines.append("## 🚨 Color Mismatch")
-        vision_lines.append(
-            "Title/description mentions a color that doesn't match the image. "
-            "Fix the title to match what buyers see."
-        )
-        vision_lines.append("")
-    elif match == "PARTIAL":
-        vision_lines.append("## ⚠️ Partial Color Mismatch")
-        vision_lines.append("Check title vs image — some colors don't align.")
-        vision_lines.append("")
-
-    vision_body = "\n".join(vision_lines)
-    for i in range(0, len(vision_body), 1900):
-        await ctx.send(vision_body[i:i + 1900])
-
-    if not synth:
-        await ctx.send(
-            "⚠️ **Strategy synthesis failed** (both AI providers rate-limited). "
-            "The vision analysis above is still valid. Try `!brainstorm` with the "
-            "detected keywords, or wait 5 min and retry."
-        )
-        return
-
-    all_groups = {
-        "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
-        "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
-        "🔎 Long-tail SEO (4+ keywords)":    synth.get("titles_longtail") or [],
-        "🔥 Viral bait (meme hook)":         synth.get("titles_viral") or [],
-    }
-    if not any(all_groups.values()):
-        all_groups = {"Titles": synth.get("titles") or []}
-
-    # ---- BUGFIX: verification loop collects groups, then formatting runs ONCE outside ----
-    verified_groups = {}
-    total_verified = 0
-    total_rejected = 0
-    for group_name, group_titles in all_groups.items():
-        v, r = verify_titles(group_titles, allow_list)
-        if v:
-            verified_groups[group_name] = v
-            total_verified += len(v)
-        total_rejected += len(r)
-
-    body = _fmt_ai_result(
-        synth, verified_groups, [], stats,
-        vision.get("item_type_visual", "unknown"),
-        total_verified=total_verified,
-        total_rejected=total_rejected,
-    )
-
-    for i in range(0, len(body), 1900):
-        await ctx.send(body[i:i + 1900])
-        await asyncio.sleep(0.3)
-
-
-@bot.command(name="ai_debug")
-async def ai_debug(ctx):
-    lines = ["**🔬 AI Debug Report**\n"]
-
-    gkey = os.getenv("GEMINI_API_KEY", "")
-    gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-    okey = os.getenv("OPENROUTER_API_KEY", "")
-    omodel = os.getenv("OPENROUTER_MODEL",
-                       "meta-llama/llama-3.3-70b-instruct:free")
-
-    lines.append("**Env vars:**")
-    lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
-    lines.append(f"• GEMINI_MODEL: `{gmodel}`")
-    lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
-    lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
-    lines.append("")
-
-    lines.append("**Gemini test** (`say hello`):")
-    if not gkey:
-        lines.append("• ❌ GEMINI_API_KEY not set")
-    else:
-        try:
-            from google import genai as g
-            client = g.Client(api_key=gkey)
-            resp = client.models.generate_content(
-                model=gmodel,
-                contents="Say only the word: hello",
-            )
-            text = (resp.text or "").strip()
-            if text:
-                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-            else:
-                lines.append("• ⚠️ Empty response")
-                if getattr(resp, "candidates", None):
-                    fr = getattr(resp.candidates[0], "finish_reason", "?")
-                    lines.append(f"• finish_reason: `{fr}`")
-        except Exception as e:
-            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
-    lines.append("")
-
-    lines.append("**OpenRouter test** (`say hello`):")
-    if not okey:
-        lines.append("• ❌ OPENROUTER_API_KEY not set")
-    else:
-        try:
-            from openai import OpenAI
-            or_client = OpenAI(
-                api_key=okey,
-                base_url="https://openrouter.ai/api/v1",
-            )
-            resp = or_client.chat.completions.create(
-                model=omodel,
-                messages=[{"role": "user", "content": "Say only the word: hello"}],
-                max_tokens=20,
-            )
-            text = (resp.choices[0].message.content or "").strip()
-            if text:
-                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-            else:
-                lines.append("• ⚠️ Empty response")
-        except Exception as e:
-            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
-
-    body = "\n".join(lines)
-    for i in range(0, len(body), 1900):
-        await ctx.send(body[i:i + 1900])
-
-
-app = Flask(__name__)
-
-
-@app.route('/')
-def health():
-    return "OK", 200
-
-
-def run_flask():
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-
-if __name__ == "__main__":
-    threading.Thread(target=run_flask, daemon=True).start()
-    bot.run(TOKEN)
+        f"[TREND CONTEXT] {vision.get('likely_trend_context
