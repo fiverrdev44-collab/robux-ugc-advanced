@@ -4,9 +4,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection, setup_database
 
-# ============================================================
-# COOKIE POOLING
-# ============================================================
 COOKIES = []
 for i in range(1, 6):
     c = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
@@ -21,9 +18,6 @@ if not COOKIES:
 if not COOKIES:
     raise ValueError("No ROBLOSECURITY_COOKIE configured!")
 
-# ============================================================
-# ENDPOINT
-# ============================================================
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
@@ -32,15 +26,13 @@ REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
 MIN_VALID_ID = 1_000_000
-MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
+MAX_VALID_ID = 100_000_000_000_000_000
 
 SESSION_DELAY = 0.9
 
-# Roblox's economy endpoint returns huge sentinel values for
-# unknown/off-sale prices. Clamp these before writing to DB.
-MAX_SANE_PRICE = 1_000_000        # 1M Robux — no real emote costs this
-MAX_SANE_SALES = 100_000_000      # 100M sales — no real emote has this
-MAX_SANE_FAVS = 10_000_000_000    # 10B favs — Roblox's all-time max is ~2B
+MAX_SANE_PRICE = 1_000_000
+MAX_SANE_SALES = 100_000_000
+MAX_SANE_FAVS = 10_000_000_000
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -78,10 +70,6 @@ def get_csrf_token(session):
 
 
 def fetch_worker(session, ids, worker_id):
-    """
-    One worker owns one session (one cookie) and processes its
-    slice of IDs sequentially with a polite delay between calls.
-    """
     results = {}
     for idx, item_id in enumerate(ids):
         for attempt in range(3):
@@ -187,7 +175,6 @@ def enrich_items():
     log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
     log(f"📊 Failure breakdown: {_fail_codes}")
 
-    # Write to DB
     conn = get_db_connection()
     cur = conn.cursor()
     enriched = 0
@@ -196,7 +183,9 @@ def enrich_items():
     for item_id, d in results.items():
         try:
             favs = _safe_int(d.get("FavoriteCount"), MAX_SANE_FAVS)
-            price = _safe_int(d.get("PriceInRobux"), MAX_SANE_PRICE)
+            price = _safe_int(
+                d.get("PriceInRobux") or d.get("price") or d.get("LowestPrice"),
+                MAX_SANE_PRICE)
             sales = _safe_int(d.get("Sales"), MAX_SANE_SALES)
             name = (d.get("Name", "") or "")[:500]
             desc = (d.get("Description", "") or "")[:5000]
@@ -229,9 +218,6 @@ def enrich_items():
         except Exception as e:
             db_errors += 1
             log(f"  DB error {item_id}: {e}")
-            # CRITICAL: rollback so the next INSERT starts a fresh
-            # transaction. Without this, one bad item kills every
-            # subsequent item in the same transaction.
             try:
                 conn.rollback()
                 cur = conn.cursor()
