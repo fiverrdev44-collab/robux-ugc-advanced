@@ -18,7 +18,16 @@ if not COOKIES:
 if not COOKIES:
     raise ValueError("No ROBLOSECURITY_COOKIE configured!")
 
+# ============================================================
+# ENDPOINTS
+# ------------------------------------------------------------
+# economy endpoint: returns Name, Description, Price, AssetTypeId,
+#   Creator — but NOT FavoriteCount.
+# catalog endpoint: returns favoriteCount — but not price/description.
+# So we hit BOTH per item.
+# ============================================================
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
+FAVORITES_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
 BATCH_SIZE = 1500
@@ -28,7 +37,8 @@ PRIORITY = os.getenv("PRIORITY", "newest").lower()
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000
 
-SESSION_DELAY = 0.9
+# Two calls per item now, so reduced delay keeps throughput the same.
+SESSION_DELAY = 0.7
 
 MAX_SANE_PRICE = 1_000_000
 MAX_SANE_SALES = 100_000_000
@@ -69,6 +79,31 @@ def get_csrf_token(session):
     return False
 
 
+def fetch_favorites(session, item_id):
+    """
+    Second call: catalog endpoint returns favoriteCount.
+    Returns int or None on failure.
+    """
+    try:
+        resp = session.get(FAVORITES_URL.format(item_id), timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            favs = data.get("favoriteCount")
+            if favs is None:
+                return None
+            try:
+                return int(favs)
+            except (TypeError, ValueError):
+                return None
+        if resp.status_code == 429:
+            _fail_codes[429] = _fail_codes.get(429, 0) + 1
+            time.sleep(2)
+        return None
+    except Exception:
+        _fail_codes["exc_fav"] = _fail_codes.get("exc_fav", 0) + 1
+        return None
+
+
 def fetch_worker(session, ids, worker_id):
     results = {}
     for idx, item_id in enumerate(ids):
@@ -77,7 +112,12 @@ def fetch_worker(session, ids, worker_id):
                 resp = session.get(DETAILS_URL.format(item_id), timeout=12)
                 code = resp.status_code
                 if code == 200:
-                    results[item_id] = resp.json()
+                    data = resp.json()
+                    # Second call for favorites
+                    favs = fetch_favorites(session, item_id)
+                    if favs is not None:
+                        data["FavoriteCount"] = favs
+                    results[item_id] = data
                     break
                 if code == 404:
                     _fail_codes[404] = _fail_codes.get(404, 0) + 1
@@ -210,10 +250,10 @@ def enrich_items():
                     fetched_at = CURRENT_TIMESTAMP
             """, (item_id, name, favs, price, sales, desc, creator, asset_type))
 
-            cur.execute("""
-                INSERT INTO item_history (item_id, favorite_count, total_sales, price)
-                VALUES (%s, %s, %s, %s)
-            """, (item_id, favs, sales, price))
+            # NOTE: We deliberately DO NOT write to item_history here.
+            # Only snapshot.py writes to item_history — one row per item per
+            # day. Writing here would pollute the timeline with second-apart
+            # reads, breaking !velocity growth detection.
             enriched += 1
         except Exception as e:
             db_errors += 1
