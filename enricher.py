@@ -38,7 +38,7 @@ MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000
 
 # Two calls per item now, so reduced delay keeps throughput the same.
-SESSION_DELAY = 0.7
+SESSION_DELAY = 1.6
 
 MAX_SANE_PRICE = 1_000_000
 MAX_SANE_SALES = 100_000_000
