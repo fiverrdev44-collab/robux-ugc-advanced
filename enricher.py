@@ -23,9 +23,6 @@ if not COOKIES:
 
 # ============================================================
 # ENDPOINT
-# ------------------------------------------------------------
-# The economy single-item endpoint is tolerant of datacenter
-# IPs (GitHub Actions) — the batch POST endpoint is not.
 # ============================================================
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
@@ -34,21 +31,16 @@ BATCH_SIZE = 1500
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
-# ============================================================
-# ID BOUNDS — CRITICAL FIX
-# ------------------------------------------------------------
-# Modern Roblox catalog IDs (including ALL UGC emotes created
-# since 2023) are 13-15 digits (10^12 – 10^15). The old
-# MAX_VALID_ID of 2×10^9 silently filtered every emote out of
-# the enrichment SELECT query.
-#
-# Set to 10^17 — matches scanner.py bounds and covers all
-# current and future Roblox asset IDs.
-# ============================================================
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
 
 SESSION_DELAY = 0.9
+
+# Roblox's economy endpoint returns huge sentinel values for
+# unknown/off-sale prices. Clamp these before writing to DB.
+MAX_SANE_PRICE = 1_000_000        # 1M Robux — no real emote costs this
+MAX_SANE_SALES = 100_000_000      # 100M sales — no real emote has this
+MAX_SANE_FAVS = 10_000_000_000    # 10B favs — Roblox's all-time max is ~2B
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -124,6 +116,17 @@ def fetch_worker(session, ids, worker_id):
     return results
 
 
+def _safe_int(val, max_val, default=0):
+    """Convert to int, clamp anything absurd to the default."""
+    try:
+        n = int(val or 0)
+    except (TypeError, ValueError):
+        return default
+    if n < 0 or n > max_val:
+        return default
+    return n
+
+
 def enrich_items():
     setup_database()
     conn = get_db_connection()
@@ -159,7 +162,6 @@ def enrich_items():
     log(f"🔧 Enriching {len(ids)} items with {len(SESSIONS)} cookie(s)...")
     start = time.time()
 
-    # Split IDs into one slice per cookie
     slices = [[] for _ in SESSIONS]
     for i, iid in enumerate(ids):
         slices[i % len(SESSIONS)].append(iid)
@@ -190,16 +192,17 @@ def enrich_items():
     cur = conn.cursor()
     enriched = 0
     emote_count = 0
+    db_errors = 0
     for item_id, d in results.items():
         try:
-            favs = d.get("FavoriteCount", 0) or 0
-            price = d.get("PriceInRobux", 0) or 0
-            sales = d.get("Sales", 0) or 0
-            name = d.get("Name", "") or ""
-            desc = d.get("Description", "") or ""
+            favs = _safe_int(d.get("FavoriteCount"), MAX_SANE_FAVS)
+            price = _safe_int(d.get("PriceInRobux"), MAX_SANE_PRICE)
+            sales = _safe_int(d.get("Sales"), MAX_SANE_SALES)
+            name = (d.get("Name", "") or "")[:500]
+            desc = (d.get("Description", "") or "")[:5000]
             creator_obj = d.get("Creator") or {}
-            creator = creator_obj.get("Name", "") if isinstance(creator_obj, dict) else ""
-            asset_type = d.get("AssetTypeId", 0) or 0
+            creator = (creator_obj.get("Name", "") if isinstance(creator_obj, dict) else "")[:200]
+            asset_type = _safe_int(d.get("AssetTypeId"), 1000)
 
             if asset_type == 61:
                 emote_count += 1
@@ -224,11 +227,21 @@ def enrich_items():
             """, (item_id, favs, sales, price))
             enriched += 1
         except Exception as e:
+            db_errors += 1
             log(f"  DB error {item_id}: {e}")
+            # CRITICAL: rollback so the next INSERT starts a fresh
+            # transaction. Without this, one bad item kills every
+            # subsequent item in the same transaction.
+            try:
+                conn.rollback()
+                cur = conn.cursor()
+            except Exception:
+                pass
 
     conn.commit()
     cur.close(); conn.close()
-    log(f"✅ Enriched {enriched} items ({emote_count} emotes) in {time.time()-start:.1f}s")
+    log(f"✅ Enriched {enriched} items ({emote_count} emotes) "
+        f"in {time.time()-start:.1f}s — {db_errors} DB errors")
 
 
 if __name__ == "__main__":
