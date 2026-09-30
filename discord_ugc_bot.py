@@ -2765,4 +2765,230 @@ async def analyze_image(ctx, *, description: str = ""):
         f"[ITEM TYPE] {vision.get('item_type_visual', 'unknown')}\n"
         f"[LIKELY AESTHETIC] {', '.join(vision.get('likely_aesthetic', []))}\n"
         f"[LIKELY TREND SOURCE] {vision.get('likely_trend_source', 'none')}\n"
-        f"[TREND CONTEXT] {vision.get('likely_trend_context
+        f"[TREND CONTEXT] {vision.get('likely_trend_context', '')}\n"
+        f"[VIBE REFERENCES] {', '.join(vision.get('vibe_references', []))}\n"
+        f"[TARGET AUDIENCE] {vision.get('target_audience', '')}\n"
+        f"[COLOR PSYCHOLOGY] {vision.get('color_psychology', '')}\n"
+        f"[IP WARNING] {vision.get('ip_reference_warning', 'NONE')}\n"
+        f"[CREATOR NOTES] {description or '(none)'}"
+    )
+
+    synth = None
+    try:
+        synth = await asyncio.to_thread(
+            synthesize_hybrid, full_desc, allow_list, top_items, stats,
+            vision.get("item_type_visual", "unknown"), "none",
+            {"direct_matches": stats.get("direct_matches", 0),
+             "expansion_used": stats.get("expansion_used", False),
+             "expanded_terms": stats.get("expanded_terms", []),
+             "failed_terms": stats.get("failed_terms", []),
+             "reasoning": stats.get("reasoning", "")}
+        )
+    except Exception as e:
+        print(f"[analyze_image] synth failed: {e}", flush=True)
+        synth = None
+
+    try:
+        await progress.delete()
+    except Exception:
+        pass
+
+    vision_lines = ["# 🖼️ IMAGE + CULTURE ANALYSIS\n"]
+
+    vision_lines.append("## 👁️ What I See")
+    vision_lines.append(vision.get("visual_summary", "—"))
+    vision_lines.append("")
+    vision_lines.append(
+        f"**Colors:** {', '.join(f'`{c}`' for c in vision.get('visual_colors', []))}"
+    )
+    vision_lines.append(
+        f"**Style:** {', '.join(f'`{s}`' for s in vision.get('visual_style', []))}"
+    )
+    vision_lines.append(
+        f"**Features:** {', '.join(f'`{f}`' for f in vision.get('distinctive_features', []))}"
+    )
+    vision_lines.append(
+        f"**Detected item type:** `{vision.get('item_type_visual', 'unknown')}`"
+    )
+    vision_lines.append("")
+
+    if vision.get("likely_aesthetic"):
+        vision_lines.append("## 🎨 Aesthetic")
+        vision_lines.append(", ".join(f"`{a}`" for a in vision["likely_aesthetic"]))
+        vision_lines.append("")
+
+    if vision.get("likely_trend_context"):
+        vision_lines.append("## 🌊 Trend Context")
+        vision_lines.append(f"**Source:** `{vision.get('likely_trend_source', 'none')}`")
+        vision_lines.append(vision["likely_trend_context"])
+        vision_lines.append("")
+
+    if vision.get("vibe_references"):
+        vision_lines.append("## 🎬 Vibe References")
+        vision_lines.append(", ".join(f"`{r}`" for r in vision["vibe_references"]))
+        vision_lines.append("")
+
+    if vision.get("color_psychology"):
+        vision_lines.append("## 🎨 Color Psychology")
+        vision_lines.append(vision["color_psychology"])
+        vision_lines.append("")
+
+    if vision.get("target_audience"):
+        vision_lines.append("## 👥 Target Audience")
+        vision_lines.append(vision["target_audience"])
+        vision_lines.append("")
+
+    if vision.get("composition_notes"):
+        vision_lines.append("## 📐 Composition")
+        vision_lines.append(vision["composition_notes"])
+        vision_lines.append("")
+
+    ip_warn = vision.get("ip_reference_warning", "NONE")
+    if ip_warn and ip_warn != "NONE":
+        vision_lines.append("## 🚨 IP / TRADEMARK WARNING")
+        vision_lines.append(
+            f"**{ip_warn}**\n"
+            "Do NOT use names from that IP in the title. Roblox will remove the item."
+        )
+        vision_lines.append("")
+
+    match = vision.get("title_color_match", "?")
+    if match == "NO":
+        vision_lines.append("## 🚨 Color Mismatch")
+        vision_lines.append(
+            "Title/description mentions a color that doesn't match the image. "
+            "Fix the title to match what buyers see."
+        )
+        vision_lines.append("")
+    elif match == "PARTIAL":
+        vision_lines.append("## ⚠️ Partial Color Mismatch")
+        vision_lines.append("Check title vs image — some colors don't align.")
+        vision_lines.append("")
+
+    vision_body = "\n".join(vision_lines)
+    for i in range(0, len(vision_body), 1900):
+        await ctx.send(vision_body[i:i + 1900])
+
+    if not synth:
+        await ctx.send(
+            "⚠️ **Strategy synthesis failed** (both AI providers rate-limited). "
+            "The vision analysis above is still valid. Try `!brainstorm` with the "
+            "detected keywords, or wait 5 min and retry."
+        )
+        return
+
+    all_groups = {
+        "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
+        "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
+        "🔎 Long-tail SEO (4+ keywords)":    synth.get("titles_longtail") or [],
+        "🔥 Viral bait (meme hook)":         synth.get("titles_viral") or [],
+    }
+    if not any(all_groups.values()):
+        all_groups = {"Titles": synth.get("titles") or []}
+
+    verified_groups = {}
+    total_verified = 0
+    total_rejected = 0
+    for group_name, group_titles in all_groups.items():
+        v, r = verify_titles(group_titles, allow_list)
+        if v:
+            verified_groups[group_name] = v
+            total_verified += len(v)
+        total_rejected += len(r)
+
+    body = _fmt_ai_result(
+        synth, verified_groups, [], stats,
+        vision.get("item_type_visual", "unknown"),
+        total_verified=total_verified,
+        total_rejected=total_rejected,
+    )
+
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+        await asyncio.sleep(0.3)
+
+
+@bot.command(name="ai_debug")
+async def ai_debug(ctx):
+    lines = ["**🔬 AI Debug Report**\n"]
+
+    gkey = os.getenv("GEMINI_API_KEY", "")
+    gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    okey = os.getenv("OPENROUTER_API_KEY", "")
+    omodel = os.getenv("OPENROUTER_MODEL",
+                       "meta-llama/llama-3.3-70b-instruct:free")
+
+    lines.append("**Env vars:**")
+    lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
+    lines.append(f"• GEMINI_MODEL: `{gmodel}`")
+    lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
+    lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
+    lines.append("")
+
+    lines.append("**Gemini test** (`say hello`):")
+    if not gkey:
+        lines.append("• ❌ GEMINI_API_KEY not set")
+    else:
+        try:
+            from google import genai as g
+            client = g.Client(api_key=gkey)
+            resp = client.models.generate_content(
+                model=gmodel,
+                contents="Say only the word: hello",
+            )
+            text = (resp.text or "").strip()
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
+                if getattr(resp, "candidates", None):
+                    fr = getattr(resp.candidates[0], "finish_reason", "?")
+                    lines.append(f"• finish_reason: `{fr}`")
+        except Exception as e:
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+    lines.append("")
+
+    lines.append("**OpenRouter test** (`say hello`):")
+    if not okey:
+        lines.append("• ❌ OPENROUTER_API_KEY not set")
+    else:
+        try:
+            from openai import OpenAI
+            or_client = OpenAI(
+                api_key=okey,
+                base_url="https://openrouter.ai/api/v1",
+            )
+            resp = or_client.chat.completions.create(
+                model=omodel,
+                messages=[{"role": "user", "content": "Say only the word: hello"}],
+                max_tokens=20,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
+            else:
+                lines.append("• ⚠️ Empty response")
+        except Exception as e:
+            lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+
+    body = "\n".join(lines)
+    for i in range(0, len(body), 1900):
+        await ctx.send(body[i:i + 1900])
+
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def health():
+    return "OK", 200
+
+
+def run_flask():
+    port = int(os.getenv("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+
+if __name__ == "__main__":
+    threading.Thread(target=run_flask, daemon=True).start()
+    bot.run(TOKEN)
