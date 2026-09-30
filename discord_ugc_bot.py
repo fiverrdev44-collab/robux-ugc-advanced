@@ -73,7 +73,6 @@ EMOTE_KEYWORDS_HINT = {
     "milky", "smooth", "spin", "kick", "bounce", "hype", "party"
 }
 
-# Roblox asset_type_id → human-readable name
 ASSET_TYPE_NAMES = {
     2: "T-Shirt", 8: "Hat", 11: "Shirt", 12: "Pants", 17: "Head",
     18: "Face", 19: "Gear", 41: "Hair", 42: "Face Acc", 43: "Neck Acc",
@@ -1853,9 +1852,6 @@ async def gap(ctx, *, keyword: str):
     await ctx.send(embed=view.build_embed(), view=view)
 
 
-# =========================================================================
-# FIXED VELOCITY — all categories, requires real growth
-# =========================================================================
 @bot.command(name="velocity")
 async def velocity(ctx, days: int = 30, limit: int = 15):
     """
@@ -1911,9 +1907,6 @@ async def velocity(ctx, days: int = 30, limit: int = 15):
                    f"by {creator or '?'} · `{iid}`"),
             inline=False)
     await ctx.send(embed=embed)
-# =========================================================================
-# END FIXED VELOCITY
-# =========================================================================
 
 
 @bot.command(name="track")
@@ -2123,12 +2116,28 @@ def _build_allow_list(intent, max_keywords=60):
     sane_rows = [r for r in rows
                  if not r[3] or MIN_PRICE <= r[3] <= MAX_PRICE]
 
+    # ==========================================================
+    # GENERIC_TERMS — words that DO NOT count as specific when
+    # scoring relevance. Expanded to include meme filler so the
+    # AI stops combining "troll funny meme lol" into titles.
+    # ==========================================================
     GENERIC_TERMS = {
+        # Colors / aesthetics
         "cute", "kawaii", "pink", "red", "white", "black", "blue", "brown",
         "green", "yellow", "purple", "orange", "gold", "silver", "gray", "grey",
         "y2k", "pastel", "grunge", "emo", "preppy", "aesthetic", "soft", "dark",
         "playful", "whimsical", "fun", "sweet", "pretty", "beautiful",
         "cool", "nice", "small", "big", "tiny", "little",
+        # Meme filler — the biggest fix
+        "troll", "funny", "meme", "memes", "lol", "sus", "sussy", "cringe",
+        "goofy", "silly", "epic", "sigma", "rizz", "skibidi", "ohio", "gyatt",
+        "based", "cap", "yeet", "bruh", "slay", "goat", "hype", "viral",
+        "trending", "trend", "popular", "best", "top", "new", "old",
+        "roblox", "ugc", "avatar", "outfit", "character",
+        # Generic verbs
+        "has", "got", "get", "make", "made", "use", "used",
+        # Filler
+        "the", "and", "for", "with", "that", "this", "your", "my",
     }
     strong_terms = [t for t in terms if len(t) >= 3 and t.lower() not in GENERIC_TERMS]
 
@@ -2477,6 +2486,9 @@ async def rescue(ctx, *, description: str = ""):
                  f"🧠 **AI is diagnosing your launch and writing new titles...**")
     )
 
+    # ==============================================================
+    # RESCUE PROMPT — tightened to stop keyword-soup titles
+    # ==============================================================
     rescue_prompt = f"""You are a Roblox UGC title doctor. A creator launched an item that is NOT SELLING.
 
 THEIR DESCRIPTION / CURRENT SITUATION:
@@ -2514,11 +2526,24 @@ YOUR JOB — return ONLY valid JSON:
 }}
 
 RULES:
-- Every word in every title MUST exist in the allow-list above (plus glue: a, an, the, of, and, or, for, to, in, on, with, my, your, numbers).
-- Do NOT invent keywords. Do NOT fabricate stats.
+- Every word in every title MUST exist in the allow-list above (plus glue words).
+- Titles MUST be 3-5 words. NEVER 6+ word keyword stuffing.
+- Each title must READ AS A SENTENCE, not a list of keywords.
+- PREFER SPECIFIC words (e.g. "russian", "rasputin", "soviet") over generic ones.
 - Titles in each group must feel DIFFERENT.
+- Do NOT invent keywords. Do NOT fabricate stats.
 - Be direct. Assume this person lost money.
 - Output ONLY the JSON object.
+
+GOOD TITLE EXAMPLES:
+"Russian Rasputin Dance Emote"
+"Rasputin Meme Dance"
+"Russian Dance (Rasputin)"
+
+BAD TITLE EXAMPLES (do NOT do this):
+"troll dance funny meme lol"
+"meme dance troll funny laugh"
+"funny troll dance meme lol sussy"
 """
 
     synth = None
