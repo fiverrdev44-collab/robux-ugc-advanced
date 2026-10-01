@@ -1812,13 +1812,13 @@ async def classic(ctx, *, keyword: str):
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
+
 @bot.command(name="gap")
 async def gap(ctx, *, keyword: str = ""):
     kw = (keyword or "").strip().lower()
     try:
         conn = get_db(); cur = conn.cursor()
 
-        # Pull ALL items with real data — no keyword restriction on source
         cur.execute("""
             SELECT name, favorite_count 
             FROM items 
@@ -1831,7 +1831,6 @@ async def gap(ctx, *, keyword: str = ""):
             await ctx.send("⚠️ No emote data in DB.")
             cur.close(); conn.close(); return
 
-        # Extract candidate words from all emote names
         stats = defaultdict(lambda: {"favs": 0, "count": 0})
         for name, favs in rows:
             for w in set(extract_words(name)):
@@ -1872,12 +1871,10 @@ async def gap(ctx, *, keyword: str = ""):
             if c < 1: continue
             if c > 50: continue
             score = af / math.log1p(c)
-            # Filter OUTPUT by keyword if user gave one
             if kw and kw not in w.lower():
                 continue
             gaps.append((w, af, c, score))
 
-        # If keyword filtered everything out, retry without keyword
         if not gaps and kw:
             for w, af in candidates:
                 c = comp_map.get(w, 0)
@@ -1902,10 +1899,6 @@ async def gap(ctx, *, keyword: str = ""):
 
 @bot.command(name="velocity")
 async def velocity(ctx, days: int = 30, limit: int = 15):
-    """
-    Fastest-rising items over the last N days — ALL categories.
-    Usage: !velocity [days] [limit]  (default: 30 days, 15 items)
-    """
     days = max(1, min(days, 90))
     limit = max(1, min(limit, 25))
     try:
@@ -2100,16 +2093,123 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
     return vocab
 
 
-def _build_allow_list(intent, max_keywords=60):
+# ==============================================================
+# SATURATION CHECK + GAP ALTERNATIVES
+# Analyzes user's keywords. If saturated (200+ real competitors),
+# finds co-occurring low-competition alternatives.
+# ==============================================================
+def _find_gap_alternatives(cur, terms, top_n=5):
+    if not terms:
+        return [], {}
+
+    valid_terms = [t.lower().strip() for t in terms
+                   if len(t.strip()) >= 3 and t.lower() not in FILLER_WORDS]
+    if not valid_terms:
+        return [], {}
+
+    term_stats = {}
+    try:
+        patterns = [f"%{t}%" for t in valid_terms]
+        cur.execute("""
+            SELECT LOWER(name), favorite_count FROM items
+            WHERE LOWER(name) LIKE ANY(%s) AND favorite_count > 50
+            LIMIT 5000
+        """, (patterns,))
+        rows = cur.fetchall()
+
+        for t in valid_terms:
+            term_stats[t] = {"comp": 0, "favs_sum": 0, "favs_count": 0}
+
+        for name, favs in rows:
+            for t in valid_terms:
+                if re.search(r'\b' + re.escape(t) + r'\b', name):
+                    term_stats[t]["comp"] += 1
+                    term_stats[t]["favs_sum"] += favs or 0
+                    term_stats[t]["favs_count"] += 1
+
+        for t in valid_terms:
+            s = term_stats[t]
+            s["avg_favs"] = int(s["favs_sum"] / s["favs_count"]) if s["favs_count"] else 0
+    except Exception as e:
+        print(f"[gap-alts] term stats: {e}", flush=True)
+        return [], {}
+
+    saturated = [t for t, s in term_stats.items() if s["comp"] > 200]
+    if not saturated:
+        return [], term_stats
+
+    all_candidates = defaultdict(lambda: {"count": 0, "favs": 0})
+    for sat_term in saturated:
+        pattern = word_boundary_pattern(sat_term)
+        try:
+            cur.execute("""
+                SELECT name, favorite_count FROM items
+                WHERE name ~* %s AND favorite_count > 100
+                LIMIT 1000
+            """, (pattern,))
+            rows = cur.fetchall()
+        except Exception:
+            rollback_quietly(cur)
+            continue
+        for name, favs in rows:
+            for w in set(extract_words(name)):
+                if w in valid_terms or w in FILLER_WORDS:
+                    continue
+                all_candidates[w]["count"] += 1
+                all_candidates[w]["favs"] += favs or 0
+
+    filtered = []
+    for w, s in all_candidates.items():
+        if s["count"] < 2 or s["count"] > 50:
+            continue
+        avg = s["favs"] / s["count"]
+        if avg < 500:
+            continue
+        filtered.append((w, avg, s["count"]))
+
+    if not filtered:
+        return [], term_stats
+
+    candidate_words = [w for w, _, _ in filtered[:100]]
+    comp_map = defaultdict(int)
+    try:
+        cpatterns = [f"%{w}%" for w in candidate_words]
+        cur.execute("""
+            SELECT LOWER(name) FROM items
+            WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
+        """, (cpatterns,))
+        matched = cur.fetchall()
+        for (name,) in matched:
+            for w in candidate_words:
+                if re.search(r'\b' + re.escape(w) + r'\b', name):
+                    comp_map[w] += 1
+    except Exception as e:
+        print(f"[gap-alts] comp check: {e}", flush=True)
+
+    alternatives = []
+    for w, avg, cnt in filtered:
+        comp = comp_map.get(w, 0)
+        if comp < 1 or comp > 100:
+            continue
+        score = avg / math.log1p(comp)
+        alternatives.append({
+            "word": w,
+            "avg_favs": int(avg),
+            "count": cnt,
+            "comp": comp,
+            "score": int(score),
+        })
+
+    alternatives.sort(key=lambda x: x["score"], reverse=True)
+    return alternatives[:top_n], term_stats
+
+
+def _build_allow_list(intent, max_keywords=60, gap_words=None):
     """
     Builds the allow-list of words for title generation.
 
     Scoring: opportunity_score = avg_favs / log1p(competition)
-    This surfaces words with high favorites and low competition — the words
-    most likely to be winners.
-
-    Additionally: user's original search terms are force-included at the top
-    of the allow-list, so the AI can't drift into unrelated generic words.
+    Force-includes user's original terms AND gap_words at the top.
     """
     terms = all_terms(intent)
     if not terms:
@@ -2153,13 +2253,6 @@ def _build_allow_list(intent, max_keywords=60):
             "reasoning": bridge_reasoning,
         }
 
-    # ============================================================
-    # OPPORTUNITY SCORING — for each word, compute:
-    #   count       = how many items contain it
-    #   total_favs  = sum of favorites across those items
-    #   avg_favs    = total_favs / count
-    #   score       = avg_favs / log1p(count)  ← opportunity
-    # ============================================================
     word_stats = defaultdict(lambda: {"count": 0, "favs": 0})
     bigrams = {}
     token_re = re.compile(r"[a-z0-9]+")
@@ -2191,11 +2284,7 @@ def _build_allow_list(intent, max_keywords=60):
     opportunity_keywords = scored_words[:40]
     unigrams = [w for w, _, _, _ in opportunity_keywords]
 
-    # ============================================================
-    # FORCE-INCLUDE USER'S ORIGINAL TERMS
-    # This preserves the creator's unique hook (e.g. "flip", "360")
-    # even if those words have lower opportunity scores.
-    # ============================================================
+    # Force-include user terms at top of allow-list
     force_include = []
     for t in terms:
         t_clean = (t or "").lower().strip()
@@ -2206,6 +2295,12 @@ def _build_allow_list(intent, max_keywords=60):
     for w in force_include:
         if w not in unigrams:
             unigrams.insert(0, w)
+
+    # Inject gap words — proven low-competition alternatives
+    if gap_words:
+        for w in gap_words:
+            if w not in unigrams and w not in FILLER_WORDS:
+                unigrams.insert(0, w)
 
     top_bigrams = [b for b, _ in sorted(bigrams.items(), key=lambda x: -x[1])[:15]
                    if not any(part in FILLER_WORDS for part in b.split())]
@@ -2224,11 +2319,6 @@ def _build_allow_list(intent, max_keywords=60):
     } | FILLER_WORDS
     strong_terms = [t for t in terms if len(t) >= 3 and t.lower() not in GENERIC_TERMS]
 
-    # ============================================================
-    # TIERED RELEVANCE FILTER
-    # Prefer items that match the primary (longest) user term.
-    # This stops "Right Back!" from appearing in a Russian niche.
-    # ============================================================
     primary_terms = sorted(strong_terms, key=len, reverse=True)[:3]
 
     def _has_primary(r):
@@ -2239,22 +2329,14 @@ def _build_allow_list(intent, max_keywords=60):
         name = (r[1] or "").lower()
         return sum(1 for t in strong_terms if t in name)
 
-    # Tier 1: has primary term AND at least 1 more match
     relevant_rows = [r for r in sane_rows if _has_primary(r) and _match_score(r) >= 2]
-    # Tier 2: has primary term only
     if len(relevant_rows) < 5:
         relevant_rows = [r for r in sane_rows if _has_primary(r)]
-    # Tier 3: general 2+ matches
     if len(relevant_rows) < 5:
         relevant_rows = [r for r in sane_rows if _match_score(r) >= 2]
-    # Tier 4: anything
     if len(relevant_rows) < 5:
         relevant_rows = sane_rows
 
-    # ============================================================
-    # COMPETITORS — ALWAYS prefer items with real favorites if any exist.
-    # An honest 2-item list > a fake 10-item list.
-    # ============================================================
     items_with_favs = [r for r in relevant_rows if (r[2] or 0) > 0]
     if items_with_favs:
         top_rows = sorted(items_with_favs, key=lambda r: (r[2] or 0), reverse=True)[:10]
@@ -2419,12 +2501,58 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"• Item type: **{item_type}**\n"
                  f"• Trend source: **{trend_source}**\n"
                  f"• Terms: `{', '.join(terms[:15])}`\n\n"
-                 f"🔎 **Tier 1:** Direct DB search...")
+                 f"🔎 **Analyzing saturation...**")
+    )
+
+    # Saturation check + gap alternatives
+    gap_alternatives = []
+    term_stats = {}
+    try:
+        conn_g = get_db(); cur_g = conn_g.cursor()
+        gap_alternatives, term_stats = await asyncio.to_thread(
+            _find_gap_alternatives, cur_g, terms, 5
+        )
+        cur_g.close(); conn_g.close()
+    except Exception as e:
+        print(f"[brainstorm] gap finder failed: {e}", flush=True)
+
+    saturated_terms = [t for t, s in term_stats.items() if s.get("comp", 0) > 200]
+    if saturated_terms:
+        warn = ["⚠️ **Saturation Warning** — these keywords are heavily contested:"]
+        for t in saturated_terms:
+            s = term_stats[t]
+            warn.append(
+                f"• `{t}` — **{s['comp']:,}** competitors, "
+                f"avg {s['avg_favs']:,} favs"
+            )
+        if gap_alternatives:
+            warn.append("")
+            warn.append("**🕳️ Gap alternatives** — lower comp, same demand:")
+            for a in gap_alternatives:
+                warn.append(
+                    f"• `{a['word']}` — **{a['comp']}** competitors, "
+                    f"avg **{a['avg_favs']:,}** favs (score {a['score']:,})"
+                )
+            warn.append("")
+            warn.append("_Titles below mix your keywords with these gap words._")
+        else:
+            warn.append("")
+            warn.append("_No gap alternatives found — niche is fully saturated or DB is thin._")
+        try:
+            await ctx.send("\n".join(warn))
+        except Exception:
+            pass
+
+    gap_words = [a["word"] for a in gap_alternatives] if gap_alternatives else None
+
+    await progress.edit(
+        content=(f"🔎 **Tier 1:** Direct DB search"
+                 f"{' with gap injection' if gap_words else ''}...")
     )
 
     try:
         allow_list, top_items, stats = await asyncio.to_thread(
-            _build_allow_list, intent
+            _build_allow_list, intent, 60, gap_words
         )
     except Exception as e:
         await progress.edit(content=f"❌ DB search failed: `{e}`")
@@ -2432,34 +2560,20 @@ async def brainstorm(ctx, *, description: str = ""):
 
     if not allow_list:
         await progress.edit(
-            content=("❌ **Nothing matched — not even after AI bridge.**\n"
-                     "Your DB is too small for this niche. Run the enricher 10+ "
-                     "more times, then try again.")
+            content=("❌ **Nothing matched.**\n"
+                     "Run the enricher more for this niche.")
         )
         return
 
-    if stats.get("expansion_used"):
-        bridge_msg = (
-            f"🌉 **Tier 2: AI bridge engaged.**\n"
-            f"• Failed user terms: `{', '.join(stats.get('failed_terms', [])[:8])}`\n"
-            f"• Bridge reasoning: *{stats.get('reasoning', '—')}*\n"
-            f"• Bridged to: `{', '.join(stats.get('expanded_terms', [])[:12])}`\n\n"
-        )
-    else:
-        bridge_msg = f"✅ **Tier 1 hit.** All terms exist in DB.\n\n"
-
     await progress.edit(
-        content=(bridge_msg +
-                 f"📊 Matched **{stats['count']:,}** real items.\n"
-                 f"• Avg favs: **{stats.get('avg_favs', 0):,}**  "
-                 f"• Winner threshold: **{stats.get('winner_favs', 0):,}** favs\n"
-                 f"• Winners (>10k): **{stats.get('winner_count', 0):,}**  "
-                 f"• Strugglers (<1k): **{stats.get('loser_count', 0):,}**\n\n"
+        content=(f"📊 Matched **{stats['count']:,}** real items.\n"
+                 f"• Avg favs: **{stats.get('avg_favs', 0):,}**\n"
+                 f"• Winner threshold: **{stats.get('winner_favs', 0):,}** favs\n\n"
                  f"🧠 **Pass 2:** AI strategist at work...")
     )
 
     if stats.get("opportunity_keywords"):
-        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
+        opp_lines = ["**🕳️ Top opportunity keywords in your niche:**"]
         for kw in stats["opportunity_keywords"][:8]:
             opp_lines.append(
                 f"• `{kw['word']}` — **{kw['count']}** items, "
@@ -2492,19 +2606,11 @@ async def brainstorm(ctx, *, description: str = ""):
             pass
 
         fallback_lines = ["⚠️ **AI returned nothing — showing raw market data only.**\n"]
-        fallback_lines.append(
-            "*(Both Gemini and OpenRouter failed. Temporary capacity spike — "
-            "try again in 5–10 minutes for the full strategy report.)*\n"
-        )
         fallback_lines.append(f"**🎯 Terms:** `{', '.join(terms[:15])}`")
         fallback_lines.append(
             f"**📊 Matched:** {stats['count']:,} real items · "
             f"avg favs {stats.get('avg_favs', 0):,} · "
             f"winner bar {stats.get('winner_favs', 0):,}"
-        )
-        fallback_lines.append(
-            f"**💰 Price:** avg **R${stats.get('price_avg', 0)}** · "
-            f"range R${stats.get('price_min', 0)}–{stats.get('price_max', 0)}"
         )
         if top_items:
             fallback_lines.append("\n**🥊 Top competitors:**")
@@ -2515,12 +2621,7 @@ async def brainstorm(ctx, *, description: str = ""):
                 fallback_lines.append(f"• `{name}` — {favs:,} favs · R${price}")
         if allow_list:
             kw_str = ", ".join(f"`{k}`" for k in allow_list[:20])
-            fallback_lines.append(f"\n**🎯 Top real keywords:**\n{kw_str}")
-        fallback_lines.append(
-            "\n**📈 Try this instead:** use `!opportunity <keyword>` for a "
-            "deeper data-driven report without AI."
-        )
-
+            fallback_lines.append(f"\n**🎯 Allow-list:**\n{kw_str}")
         body = "\n".join(fallback_lines)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
@@ -2561,7 +2662,6 @@ async def brainstorm(ctx, *, description: str = ""):
 
 @bot.command(name="rescue")
 async def rescue(ctx, *, description: str = ""):
-    """Diagnose a launched UGC that's underperforming. See usage in-chat."""
     if not description.strip():
         await ctx.send(
             "Usage: `!rescue <describe your launched item + stats>`\n"
@@ -2610,18 +2710,6 @@ async def rescue(ctx, *, description: str = ""):
                  f"**Matched {stats['count']:,} competitors** in this niche.\n\n"
                  f"🧠 **AI is diagnosing your launch and writing new titles...**")
     )
-
-    if stats.get("opportunity_keywords"):
-        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
-        for kw in stats["opportunity_keywords"][:8]:
-            opp_lines.append(
-                f"• `{kw['word']}` — **{kw['count']}** items, "
-                f"avg **{kw['avg_favs']:,}** favs"
-            )
-        try:
-            await ctx.send("\n".join(opp_lines))
-        except Exception:
-            pass
 
     rescue_prompt = f"""You are a Roblox UGC title doctor. A creator launched an item that is NOT SELLING.
 
@@ -2706,7 +2794,7 @@ BAD TITLE EXAMPLES (do NOT do this):
         lines.append(f"**Competitors:** {stats['count']:,} items")
         lines.append(f"**Winner bar:** {stats.get('winner_favs', 0):,} favs to reach top 10%")
         lines.append(f"**Median price:** R${stats.get('price_avg', 0)}")
-        lines.append("\n**🥊 Top 10 competitors (copy their naming pattern):**")
+        lines.append("\n**🥊 Top 10 competitors:**")
         lines.extend(comp_lines)
         lines.append("\n**🎯 Real keywords you could use in your title:**")
         lines.append(", ".join(f"`{k}`" for k in allow_list[:25]))
@@ -2793,10 +2881,6 @@ BAD TITLE EXAMPLES (do NOT do this):
 
 @bot.command(name="analyze_image")
 async def analyze_image(ctx, *, description: str = ""):
-    """
-    Upload 1-4 UGC images + optional notes. Bot analyzes and produces full report.
-    Usage: attach image(s), then: !analyze_image <optional notes>
-    """
     if not is_available():
         await ctx.send("AI is offline. Run `!ai_status`.")
         return
@@ -2851,10 +2935,6 @@ async def analyze_image(ctx, *, description: str = ""):
             pass
 
         lines = ["⚠️ **Vision analysis failed (both Gemini and OpenRouter).**\n"]
-        lines.append(
-            "*(Vision quota exhausted or temporary spike. Retry in 5–10 min.)*\n"
-        )
-        lines.append("**What you can do instead:**")
         lines.append("• `!brainstorm <casual description>` — describe the item in words")
         lines.append("• `!opportunity <keyword>` — market data without AI")
         lines.append("• Retry `!analyze_image` later")
@@ -2915,18 +2995,6 @@ async def analyze_image(ctx, *, description: str = ""):
                  f"🧠 **Pass 2:** Gemini strategist at work...")
     )
 
-    if stats.get("opportunity_keywords"):
-        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
-        for kw in stats["opportunity_keywords"][:8]:
-            opp_lines.append(
-                f"• `{kw['word']}` — **{kw['count']}** items, "
-                f"avg **{kw['avg_favs']:,}** favs"
-            )
-        try:
-            await ctx.send("\n".join(opp_lines))
-        except Exception:
-            pass
-
     full_desc = (
         f"[IMAGE DESCRIPTION] {vision.get('visual_summary', '')}\n"
         f"[DETECTED COLORS] {', '.join(vision.get('visual_colors', []))}\n"
@@ -2965,7 +3033,6 @@ async def analyze_image(ctx, *, description: str = ""):
         pass
 
     vision_lines = ["# 🖼️ IMAGE + CULTURE ANALYSIS\n"]
-
     vision_lines.append("## 👁️ What I See")
     vision_lines.append(vision.get("visual_summary", "—"))
     vision_lines.append("")
@@ -3043,8 +3110,7 @@ async def analyze_image(ctx, *, description: str = ""):
     if not synth:
         await ctx.send(
             "⚠️ **Strategy synthesis failed** (both AI providers rate-limited). "
-            "The vision analysis above is still valid. Try `!brainstorm` with the "
-            "detected keywords, or wait 5 min and retry."
+            "The vision analysis above is still valid."
         )
         return
 
