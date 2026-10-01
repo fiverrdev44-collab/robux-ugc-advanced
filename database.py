@@ -73,6 +73,11 @@ def setup_database():
     ''', "idx_item_history_item_id")
 
     _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_item_history_item_snapshot 
+        ON item_history (item_id, snapshot_at);
+    ''', "idx_item_history_item_snapshot")
+
+    _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS search_suggestions (
             id SERIAL PRIMARY KEY,
             seed_keyword TEXT,
