@@ -1,9 +1,6 @@
 """
-gemini_brain.py — Hybrid AI for Roblox UGC domination.
-Vision chain: Gemini → OpenRouter.
-Text chain:   Gemini → OpenRouter.
+gemini_brain.py — Hybrid AI for Roblox UGC. ALGO-AWARE EDITION.
 """
-
 import os
 import re
 import json
@@ -14,23 +11,18 @@ from google.genai import types
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
-OPENROUTER_MODEL = os.getenv(
-    "OPENROUTER_MODEL",
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
-OPENROUTER_VISION_MODEL = os.getenv(
-    "OPENROUTER_VISION_MODEL",
+OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL",
     "inclusionai/ling-3.0-flash-vl:free")
 
 _client = None
 _openrouter_client = None
 _configured = False
 
-STOPWORDS = {
-    "a", "an", "the", "of", "and", "or", "for", "to", "in", "on", "with",
-    "my", "your", "at", "by", "is", "it", "as",
-}
+STOPWORDS = {"a","an","the","of","and","or","for","to","in","on","with",
+             "my","your","at","by","is","it","as"}
 
 
 def _ensure():
@@ -38,363 +30,233 @@ def _ensure():
     if _configured:
         return _client is not None or _openrouter_client is not None
     _configured = True
-
     if GEMINI_API_KEY:
         try:
             _client = genai.Client(api_key=GEMINI_API_KEY)
-            print(f"[gemini] configured model={MODEL_NAME}")
+            print(f"[gemini] model={MODEL_NAME}")
         except Exception as e:
-            print(f"[gemini] configure failed: {e}")
-            _client = None
-    else:
-        print("[gemini] GEMINI_API_KEY not set")
-
+            print(f"[gemini] fail: {e}"); _client = None
     if OPENROUTER_API_KEY:
         try:
             from openai import OpenAI
-            _openrouter_client = OpenAI(
-                api_key=OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1",
-            )
-            print(f"[openrouter] configured model={OPENROUTER_MODEL}")
-            print(f"[openrouter] vision model={OPENROUTER_VISION_MODEL}")
+            _openrouter_client = OpenAI(api_key=OPENROUTER_API_KEY,
+                                        base_url="https://openrouter.ai/api/v1")
+            print(f"[openrouter] model={OPENROUTER_MODEL}")
         except Exception as e:
-            print(f"[openrouter] configure failed: {e}")
-            _openrouter_client = None
-    else:
-        print("[openrouter] OPENROUTER_API_KEY not set")
-
+            print(f"[openrouter] fail: {e}"); _openrouter_client = None
     return _client is not None or _openrouter_client is not None
 
 
-def is_available() -> bool:
+def is_available():
     return _ensure()
 
 
-def _gemini_generate(prompt: str, json_mode: bool = False,
-                     temperature: float = 0.7, max_tokens: int = 8192,
-                     max_retries: int = 4):
-    if not _client:
-        return None
+def _gemini_generate(prompt, json_mode=False, temperature=0.7,
+                     max_tokens=8192, max_retries=4):
+    if not _client: return None
     for attempt in range(max_retries):
         try:
-            cfg = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-            )
-            if json_mode:
-                cfg.response_mime_type = "application/json"
-            resp = _client.models.generate_content(
-                model=MODEL_NAME, contents=prompt, config=cfg)
+            cfg = types.GenerateContentConfig(temperature=temperature,
+                                              max_output_tokens=max_tokens)
+            if json_mode: cfg.response_mime_type = "application/json"
+            resp = _client.models.generate_content(model=MODEL_NAME,
+                                                    contents=prompt, config=cfg)
             text = (resp.text or "").strip()
-            if text:
-                return text
-            fr = "unknown"
-            if getattr(resp, "candidates", None):
-                fr = getattr(resp.candidates[0], "finish_reason", "unknown")
-            print(f"[gemini] empty response (attempt {attempt+1}), fr={fr}")
+            if text: return text
         except Exception as e:
             err = str(e)
-            hard_fail = any(x in err for x in [
-                "429", "RESOURCE_EXHAUSTED", "quota",
-                "API key not valid", "PERMISSION_DENIED",
-            ])
-            if hard_fail:
-                print(f"[gemini] hard fail, skipping retries: {err[:180]}")
+            if any(x in err for x in ["429","RESOURCE_EXHAUSTED","quota",
+                                       "API key not valid","PERMISSION_DENIED"]):
                 return None
-            retryable = any(x in err for x in [
-                "503", "UNAVAILABLE", "high demand",
-                "overloaded", "500", "INTERNAL",
-                "timeout", "Timeout",
-            ])
-            print(f"[gemini] attempt {attempt+1}/{max_retries} "
-                  f"failed: {type(e).__name__}: {err[:180]}")
-            if not retryable:
+            if not any(x in err for x in ["503","UNAVAILABLE","high demand",
+                                           "overloaded","500","INTERNAL","timeout"]):
                 return None
         if attempt < max_retries - 1:
             time.sleep(2 + attempt * 2)
     return None
 
 
-def _openrouter_generate(prompt: str, json_mode: bool = False,
-                         temperature: float = 0.7, max_tokens: int = 8192,
-                         max_retries: int = 3):
-    if not _openrouter_client:
-        return None
+def _openrouter_generate(prompt, json_mode=False, temperature=0.7,
+                         max_tokens=8192, max_retries=3):
+    if not _openrouter_client: return None
     for attempt in range(max_retries):
         try:
-            kwargs = {
-                "model": OPENROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "timeout": 90,
-            }
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
+            kwargs = {"model": OPENROUTER_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "temperature": temperature, "max_tokens": max_tokens, "timeout": 90}
+            if json_mode: kwargs["response_format"] = {"type": "json_object"}
             resp = _openrouter_client.chat.completions.create(**kwargs)
             text = (resp.choices[0].message.content or "").strip()
-            if text:
-                return text
-            print(f"[openrouter] empty response (attempt {attempt+1})")
+            if text: return text
         except Exception as e:
-            err = str(e)
-            retryable = any(x in err for x in [
-                "503", "UNAVAILABLE", "high demand",
-                "429", "RESOURCE_EXHAUSTED", "overloaded",
-                "500", "timeout", "Timeout",
-            ])
-            print(f"[openrouter] attempt {attempt+1}/{max_retries} "
-                  f"failed: {type(e).__name__}: {err[:180]}")
-            if not retryable:
+            if not any(x in str(e) for x in ["503","UNAVAILABLE","429","overloaded","500","timeout"]):
                 return None
         if attempt < max_retries - 1:
             time.sleep(2 + attempt * 2)
     return None
 
 
-def _generate(prompt: str, json_mode: bool = False,
-              temperature: float = 0.7, max_tokens: int = 8192,
-              prefer: str = "gemini"):
-    if not _ensure():
-        return None
-
+def _generate(prompt, json_mode=False, temperature=0.7,
+              max_tokens=8192, prefer="gemini"):
+    if not _ensure(): return None
     if _client is not None:
         out = _gemini_generate(prompt, json_mode, temperature, max_tokens)
-        if out:
-            return out
-        print("[fallback] Gemini exhausted — switching to OpenRouter")
-
+        if out: return out
     if _openrouter_client is not None:
         out = _openrouter_generate(prompt, json_mode, temperature, max_tokens)
-        if out:
-            return out
-        print("[fallback] OpenRouter also exhausted")
-
+        if out: return out
     return None
 
 
-# =========================================================================
-# PASS 1 — EXTRACTION
-# =========================================================================
 _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 
-The creator describes what they want to make in casual language.
-Extract structured intent for a database search. Return ONLY valid JSON:
+Extract structured intent for a DB search. Return ONLY JSON:
 
 {{
-  "item_type":    "<one of: emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
+  "item_type":    "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
   "primary":      ["..."],
   "synonyms":     ["..."],
   "style":        ["..."],
   "vibe":         ["..."],
   "colors":       ["..."],
   "references":   ["..."],
-  "trend_source": "<one of: tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
-  "search_terms": ["..."]
+  "trend_source": "<tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
+  "search_terms": ["..."],
+  "specific_moves": ["..."]
 }}
 
 RULES:
-- Lowercase. Single words or short 2-word phrases. No punctuation.
-- item_type is CRITICAL — determines which catalog category we search.
-- If description mentions a dance / movement / animation -> item_type = "emote"
-- If it mentions clothing / accessory -> pick the specific category.
-- "references" = memes, songs, characters, celebrities, viral moments.
-- "trend_source" = where the creator saw it (yt -> youtube, etc.).
-- "search_terms" = the 10-15 BEST words to look up in a Roblox item DB.
-- DO NOT invent brand names or Roblox item names.
-- Output ONLY the JSON object.
+- Lowercase. No punctuation.
+- If description mentions a dance / movement -> item_type = "emote"
+- "specific_moves" = exact body movements (e.g. "hip sway", "arm pump"). These MUST appear in title ideas.
+- Output ONLY JSON.
 
 CREATOR'S DESCRIPTION: {desc}
 """
 
 
-def extract_keywords(casual_description: str) -> dict:
-    if not casual_description or not casual_description.strip():
-        return {}
+def extract_keywords(casual_description):
+    if not casual_description or not casual_description.strip(): return {}
     prompt = _EXTRACT_PROMPT.format(desc=casual_description.strip())
-    raw = _generate(prompt, json_mode=True, temperature=0.25,
-                    max_tokens=1024, prefer="gemini")
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+    raw = _generate(prompt, json_mode=True, temperature=0.25, max_tokens=1024)
+    if not raw: return {}
+    try: data = json.loads(raw)
+    except Exception:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            return {}
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            return {}
+        if not m: return {}
+        try: data = json.loads(m.group(0))
+        except Exception: return {}
 
-    keys = ["primary", "synonyms", "style", "vibe",
-            "colors", "references", "search_terms"]
+    keys = ["primary","synonyms","style","vibe","colors","references",
+            "search_terms","specific_moves"]
     clean = {}
     for k in keys:
         val = data.get(k, [])
-        if isinstance(val, str):
-            val = [val]
-        if not isinstance(val, list):
-            val = []
+        if isinstance(val, str): val = [val]
+        if not isinstance(val, list): val = []
         clean[k] = [str(v).lower().strip() for v in val if str(v).strip()]
     clean["item_type"] = str(data.get("item_type", "unknown")).lower().strip()
     clean["trend_source"] = str(data.get("trend_source", "none")).lower().strip()
     return clean
 
 
-def all_terms(intent: dict) -> list:
+def all_terms(intent):
     seen, out = set(), []
-    for k in ("primary", "synonyms", "style", "vibe",
-              "colors", "references", "search_terms"):
+    for k in ("primary","synonyms","style","vibe","colors","references",
+              "search_terms","specific_moves"):
         for t in intent.get(k, []):
             if t and t not in seen:
-                seen.add(t)
-                out.append(t)
+                seen.add(t); out.append(t)
     return out
 
 
-# =========================================================================
-# PASS 1.5 — BRIDGE
-# =========================================================================
-_EXPAND_PROMPT = """You are a Roblox UGC database search expert.
+_EXPAND_PROMPT = """You are a Roblox UGC DB search expert.
 
-The creator's original intent did not return enough results in our catalog.
-Your job: find ALTERNATIVE search terms that WILL match real Roblox items.
+ORIGINAL INTENT: {intent_json}
+FAILED TERMS: {failed_terms}
+DB VOCAB SAMPLE: {db_vocab_sample}
 
-ORIGINAL INTENT:
-{intent_json}
-
-WORDS THAT FAILED (few/no matches in DB):
-{failed_terms}
-
-REAL WORDS THAT EXIST IN OUR DB (sample of the most common {vocab_size} catalog terms):
-{db_vocab_sample}
-
-RULES:
-- Suggest 15-25 alternative search terms SEMANTICALLY SIMILAR to the failed terms,
-  but LIKELY TO EXIST in a Roblox UGC catalog.
-- Prefer words from the DB vocabulary sample whenever they fit the intent.
-- Include: synonyms, related aesthetics, style words, item types, vibe words.
-- Lowercase. Single words or short phrases. No punctuation.
-- DO NOT include the failed terms themselves.
-- Think: what would the items on Roblox ACTUALLY be called?
-
-Return ONLY valid JSON:
-{{"expanded_terms": ["...", "..."], "reasoning": "one-line explanation"}}
-
-OUTPUT ONLY THE JSON.
+Return ONLY JSON:
+{{"expanded_terms": ["..."], "reasoning": "one-line"}}
 """
 
 
-def expand_search_terms(intent: dict, db_vocab_sample: list, failed_terms: list) -> dict:
+def expand_search_terms(intent, db_vocab_sample, failed_terms):
     if not failed_terms:
         return {"expanded_terms": [], "reasoning": "no failed terms"}
-
-    intent_json = json.dumps({k: v for k, v in intent.items()
-                              if k not in ("search_terms",)}, indent=2)
-    vocab_str = ", ".join(db_vocab_sample[:400])
-
+    intent_json = json.dumps({k: v for k, v in intent.items() if k != "search_terms"}, indent=2)
     prompt = _EXPAND_PROMPT.format(
-        intent_json=intent_json,
-        failed_terms=", ".join(failed_terms),
-        vocab_size=len(db_vocab_sample),
-        db_vocab_sample=vocab_str,
-    )
-
-    raw = _generate(prompt, json_mode=True, temperature=0.6,
-                    max_tokens=1024, prefer="gemini")
-    if not raw:
-        return {"expanded_terms": [], "reasoning": "ai returned nothing"}
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+        intent_json=intent_json, failed_terms=", ".join(failed_terms),
+        db_vocab_sample=", ".join(db_vocab_sample[:400]))
+    raw = _generate(prompt, json_mode=True, temperature=0.6, max_tokens=1024)
+    if not raw: return {"expanded_terms": [], "reasoning": "ai returned nothing"}
+    try: data = json.loads(raw)
+    except Exception:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            return {"expanded_terms": [], "reasoning": "parse failed"}
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            return {"expanded_terms": [], "reasoning": "parse failed"}
-
+        data = json.loads(m.group(0)) if m else {}
     terms = data.get("expanded_terms", [])
-    if isinstance(terms, str):
-        terms = [terms]
-    clean = [str(t).lower().strip() for t in terms if str(t).strip()]
-    return {
-        "expanded_terms": clean[:30],
-        "reasoning": str(data.get("reasoning", ""))[:200],
-    }
+    if isinstance(terms, str): terms = [terms]
+    return {"expanded_terms": [str(t).lower().strip() for t in terms if str(t).strip()][:30],
+            "reasoning": str(data.get("reasoning", ""))[:200]}
 
 
-# =========================================================================
-# PASS 2 — SYNTHESIS
-# =========================================================================
-_SYNTH_PROMPT = """You are the world's #1 Roblox UGC strategist. Your launch reports are worth $20,000 because you combine two weapons:
+_SYNTH_PROMPT = """You are the world's #1 Roblox UGC strategist.
 
-WEAPON 1 — HARD DATA (given below, this is the ONLY source of truth for names, prices, stats):
-- ALLOW-LIST of real keywords pulled from millions of live Roblox items
-- TOP COMPETING ITEMS with real favourite counts and prices
-- MARKET STATS (item count, price range, sales, competition density)
-- SEARCH DIAGNOSTICS (direct hits vs AI-bridged terms)
+WEAPONS:
+1. HARD DATA (only source of truth)
+2. ROBLOX ALGORITHM KNOWLEDGE (given below)
+3. YOUR CULTURE BRAIN (TikTok, anime, memes)
+4. USER'S SPECIFIC MOVES (never ignore)
 
-WEAPON 2 — YOUR LETHAL CULTURE BRAIN (use this freely):
-- TikTok / YouTube / Instagram virality mechanics
-- Anime arcs, K-pop comebacks, meme lifecycles, sound trends
-- Roblox algorithm behaviour (Discover, search ranking, homepage curation)
-- Upload timing science, price psychology, aesthetic movements
-- Specific community slang and subculture knowledge
+RULES:
+1. Titles may ONLY use ALLOW-LIST words + glue (a/an/the/of/and/or/for/to/in/on/with/my/your/numbers).
+2. Do NOT invent keywords, brands, or stats.
+3. Be OPINIONATED. Specific recommendations only.
+4. NO thumbnail advice. Roblox sets default thumbnails.
+5. At least 2 of 10 titles MUST include the user's SPECIFIC_MOVES.
+6. Titles max 5 tokens.
+7. Reference SPECIFIC numbers from algo knowledge.
+8. If saturated, say so bluntly and pivot.
+9. Use WINNER vs LOSER diff to justify every recommendation.
 
-RULES — CRITICAL:
-1. Titles may ONLY use words from the ALLOW-LIST (plus glue: a, an, the, of, and, or, for, to, in, on, with, my, your, numbers).
-2. Do NOT invent keywords, brand names, competitor names, or stats.
-3. Only use numbers I give you. Never fabricate.
-4. Be OPINIONATED. Give specific recommendations, not "it depends".
-5. Write like a strategist briefing a paying client. Concrete, tactical, ruthless.
-6. If SEARCH DIAGNOSTICS show "expansion used", it means the user's literal words
-   don't exist in the catalog. EXPLAIN this in market_diagnosis and lean into
-   the bridged terms as the real opportunity.
-7. No filler. No AI disclaimers. No hedging.
-8. You return 10 titles TOTAL, grouped into 4 strategic buckets. Each title in a
-   group must feel DIFFERENT from the others — no repeating the same 3 words.
-   - SAFE = mirror what top competitors already do (highest chance of ranking)
-   - DIFFERENTIATED = same niche keywords but unique angle (beat the crowd)
-   - LONGTAIL = 4+ keywords packed into one title (rank for rare searches)
-   - VIRAL = meme/TikTok/Sound hook (highest CTR potential)
-
-OUTPUT — return ONLY valid JSON with this EXACT schema:
+OUTPUT — ONLY JSON:
 
 {{
   "titles_safe": ["title 1", "title 2", "title 3"],
   "titles_differentiated": ["title 1", "title 2", "title 3"],
   "titles_longtail": ["title 1", "title 2"],
   "titles_viral": ["title 1", "title 2"],
-  "search_diagnosis": "2-3 sentences: which of the user's words actually exist in the catalog vs which had to be bridged, and what that reveals",
-  "positioning": "2-3 sentences: how to position against the competitors you can see",
-  "market_diagnosis": "3-4 sentences: honest read of saturation, winners, losers, and CTR signals (avg favs per item)",
-  "trend_intel": "2-3 sentences: is this trend rising/peaking/dying? Specific launch window",
-  "price_strategy": "2-3 sentences: price recommendation with psychology",
-  "seo_description": "2-3 sentence Roblox item description, keyword-rich, copy-paste ready",
-  "killer_keywords": ["10-15 highest-value keywords from allow-list"],
-  "algo_strategy": "3-4 sentences: specific Roblox algorithm tactics",
-  "social_playbook": "3-4 sentences: TikTok / YouTube / IG promotion plan",
-  "risk_analysis": "2-3 sentences: what could kill this item and how to mitigate",
-  "expected_performance": "2-3 sentences: realistic forecast",
-  "cultural_ammo": "2-3 sentences: cultural context to weaponize",
-  "verdict": "GO / CONDITIONAL GO / NO-GO — one-line reason",
-  "bonus_plays": ["2-3 additional item ideas riding the same trend"]
+  "search_diagnosis": "2-3 sentences",
+  "positioning": "3-4 sentences",
+  "market_diagnosis": "3-4 sentences",
+  "winner_blueprint": "3-4 sentences referencing top 10% patterns",
+  "marketplace_algorithm_playbook": "5-6 sentences with CTR thresholds and velocity targets",
+  "ranking_factor_breakdown": "4-5 sentences on which factors matter most",
+  "sale_velocity_plan": "3-4 sentences with hour 1/6/24 targets",
+  "price_elasticity_call": "2-3 sentences with exact price + why",
+  "saturation_verdict": "2-3 sentences",
+  "launch_window_math": "2-3 sentences with exact day/hour",
+  "trend_intel": "3-4 sentences",
+  "discovery_path": "2-3 sentences buyer journey",
+  "seo_description": "3-4 sentences copy-paste",
+  "killer_keywords": ["10-15 keywords"],
+  "cross_promotion_play": "2-3 sentences",
+  "social_playbook": "3-4 sentences",
+  "risk_analysis": "3-4 sentences",
+  "expected_performance": "3-4 sentences",
+  "cultural_ammo": "3-4 sentences",
+  "verdict": "GO / CONDITIONAL GO / NO-GO — one-line",
+  "bonus_plays": ["2-3 additional ideas"]
 }}
 
 --- INPUT ---
 
-CREATOR'S DESCRIPTION:
-{desc}
-
-DETECTED ITEM TYPE: {item_type}
+DESCRIPTION: {desc}
+ITEM TYPE: {item_type}
 TREND SOURCE: {trend_source}
+SPECIFIC MOVES: {specific_moves}
 
-ALLOW-LIST ({allow_count} real keywords from DB):
+ALLOW-LIST ({allow_count}):
 {allow_list}
 
 TOP COMPETING ITEMS:
@@ -403,16 +265,24 @@ TOP COMPETING ITEMS:
 MARKET STATS:
 {market_stats}
 
+{winner_blueprint}
+
+{algo_context}
+
 SEARCH DIAGNOSTICS:
 {search_diagnostics}
+
+GAP ANALYSIS:
+{gap_analysis}
 """
 
 
 def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
                       item_type="unknown", trend_source="none",
-                      search_diagnostics=None):
-    if not allow_list:
-        return {}
+                      search_diagnostics=None, gap_analysis=None,
+                      specific_moves=None, winner_analysis=None,
+                      algo_context=None):
+    if not allow_list: return {}
 
     top_lines = []
     for it in top_items[:10]:
@@ -427,284 +297,186 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         f"- price min: R${market_stats.get('price_min', 0)}",
         f"- price avg: R${market_stats.get('price_avg', 0)}",
         f"- price max: R${market_stats.get('price_max', 0)}",
-        f"- total sales (matched): {market_stats.get('total_sales', 0):,}",
-        f"- avg favourites/item: {market_stats.get('avg_favs', 0):,}",
+        f"- avg favourites: {market_stats.get('avg_favs', 0):,}",
         f"- median favourites: {market_stats.get('median_favs', 0):,}",
         f"- winner threshold (top 10%): {market_stats.get('winner_favs', 0):,} favs",
-        f"- winners in set (>10k favs): {market_stats.get('winner_count', 0):,}",
     ]
 
     diag = search_diagnostics or {}
     diag_lines = [
-        f"- direct term matches: {diag.get('direct_matches', 0):,}",
-        f"- bridge/expansion used: {'YES' if diag.get('expansion_used') else 'no'}",
+        f"- direct matches: {diag.get('direct_matches', 0):,}",
+        f"- bridge used: {'YES' if diag.get('expansion_used') else 'no'}",
     ]
     if diag.get("expanded_terms"):
         diag_lines.append(f"- bridged terms: {', '.join(diag['expanded_terms'][:15])}")
-    if diag.get("reasoning"):
-        diag_lines.append(f"- bridge reasoning: {diag['reasoning']}")
-    if diag.get("failed_terms"):
-        diag_lines.append(f"- failed user terms: {', '.join(diag['failed_terms'][:10])}")
+
+    gap_lines = []
+    if gap_analysis:
+        if gap_analysis.get("golden"):
+            gap_lines.append("GOLDEN GAPS:")
+            for g in gap_analysis["golden"][:8]:
+                gap_lines.append(f"- {g['word']} | comp={g['comp']} | median_favs={g['median_favs']}")
+
+    sm = ", ".join(specific_moves) if specific_moves else "(none)"
+
+    wb = "(unavailable)"
+    if winner_analysis:
+        try:
+            from winner_analysis import format_winner_blueprint
+            wb = format_winner_blueprint(winner_analysis)
+        except Exception: pass
+
+    ac = algo_context or "(unavailable)"
 
     prompt = _SYNTH_PROMPT.format(
-        desc=casual_description.strip(),
-        item_type=item_type,
-        trend_source=trend_source,
-        allow_count=len(allow_list),
-        allow_list=", ".join(allow_list),
+        desc=casual_description.strip(), item_type=item_type,
+        trend_source=trend_source, specific_moves=sm,
+        allow_count=len(allow_list), allow_list=", ".join(allow_list),
         top_items="\n".join(top_lines) or "(none)",
         market_stats="\n".join(stats_lines),
+        winner_blueprint=wb, algo_context=ac,
         search_diagnostics="\n".join(diag_lines) or "(none)",
-    )
+        gap_analysis="\n".join(gap_lines) or "(none)")
 
-    raw = _generate(prompt, json_mode=True, temperature=0.85,
-                    max_tokens=8192, prefer="gemini")
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+    raw = _generate(prompt, json_mode=True, temperature=0.9, max_tokens=8192)
+    if not raw: return {}
+    try: return json.loads(raw)
+    except Exception:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            return {}
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            return {}
+        if not m: return {}
+        try: return json.loads(m.group(0))
+        except Exception: return {}
 
 
-# =========================================================================
-# VERIFICATION
-# =========================================================================
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _tokens(text: str) -> list:
+def _tokens(text):
     return _TOKEN_RE.findall((text or "").lower())
 
 
-def verify_titles(titles: list, allow_list: list):
+def verify_titles(titles, allow_list):
     allow_set = {t.lower().strip() for t in allow_list if t and t.strip()}
     valid, rejected = [], []
     for title in titles or []:
-        if not isinstance(title, str) or not title.strip():
-            continue
+        if not isinstance(title, str) or not title.strip(): continue
+        toks = _tokens(title)
+        if len(toks) > 7 or len(toks) < 2:
+            rejected.append((title, [f"length={len(toks)}"])); continue
+        if any(toks[i] == toks[i+1] for i in range(len(toks)-1)):
+            rejected.append((title, ["consecutive dup"])); continue
         bad = []
-        for tok in _tokens(title):
-            if tok in STOPWORDS:
-                continue
-            if tok.isdigit():
-                continue
-            if tok in allow_set:
-                continue
+        for tok in toks:
+            if tok in STOPWORDS: continue
+            if tok.isdigit(): continue
+            if tok in allow_set: continue
             if any(tok.startswith(a) or a.startswith(tok)
-                   for a in allow_set if len(a) >= 4):
-                continue
+                   for a in allow_set if len(a) >= 4): continue
             bad.append(tok)
-        if bad:
-            rejected.append((title, bad))
-        else:
-            valid.append(title)
+        if bad: rejected.append((title, bad))
+        else: valid.append(title)
     return valid, rejected
 
 
-# =========================================================================
-# VISION — UGC image analysis (Gemini → OpenRouter)
-# =========================================================================
-_VISION_PROMPT = """You are a Roblox UGC visual analyst AND culture strategist. 
-You will receive 1-4 images of the SAME UGC item from different angles 
-(front, side, back, on-avatar). Analyze ALL images together to build a 
-complete picture. Examine the item using both what you SEE and your 
-knowledge of internet / meme / anime / K-pop / TikTok culture.
-
-Return ONLY valid JSON matching this schema:
+_VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 
 {{
-  "visual_colors": ["green", "black", "pink"],
-  "visual_style": ["plush", "kawaii", "blocky"],
-  "visual_mood": ["playful", "spooky-cute", "grunge"],
+  "visual_colors": ["..."],
+  "visual_style": ["..."],
+  "visual_mood": ["..."],
   "item_type_visual": "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
-  "distinctive_features": ["x eyes", "cat ears", "stripes", "paws", "fuzzy texture"],
-  "search_description": "one casual sentence a creator would type when searching the DB for similar items",
+  "distinctive_features": ["..."],
+  "search_description": "one sentence",
   "title_color_match": "<YES|NO|PARTIAL>",
-  "visual_summary": "2-3 sentences describing exactly what you see",
-
-  "likely_aesthetic": ["y2k", "slimecore", "cursed kawaii"],
+  "visual_summary": "2-3 sentences",
+  "likely_aesthetic": ["..."],
   "likely_trend_source": "<tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
-  "likely_trend_context": "2-3 sentences: what internet/TikTok/meme/anime trend does this aesthetic or creature type relate to RIGHT NOW. Be specific and current.",
-  "vibe_references": ["green slime", "shrek", "zombie cat", "tsum tsum"],
-  "ip_reference_warning": "<NONE or item may resemble copyrighted character/logo — list what it resembles>",
-  "target_audience": "2-3 sentences: who buys this? Age, aesthetic, subculture, what subreddits/Discords they hang out in.",
-  "similar_viral_items": ["examples of similar viral UGC or Roblox items you know exist"],
-  "color_psychology": "1-2 sentences on what this color palette signals to buyers.",
-  "composition_notes": "1-2 sentences on how this item renders at small size."
+  "likely_trend_context": "2-3 sentences",
+  "vibe_references": ["..."],
+  "ip_reference_warning": "<NONE or warning>",
+  "target_audience": "2-3 sentences",
+  "color_psychology": "1-2 sentences",
+  "composition_notes": "1-2 sentences"
 }}
-
-RULES FOR VISUAL FIELDS:
-- Lowercase. Single words or short 2-word phrases.
-- item_type_visual = what the item IS based on what you SEE (not what user says).
-
-RULES FOR item_type_visual (be precise):
-- hair = sculpts the head shape itself (wigs, bangs, ponytails)
-- hat = sits ON TOP of existing hair (beanies, crowns, caps)
-- face = covers eyes/mouth/nose area (glasses, masks)
-- neck = around the neck (chains, chokers)
-- shoulder = sits on the shoulder (shoulder pets)
-- front = hangs on the chest (necklaces)
-- back = hangs on the back (wings, capes, katanas)
-- waist = around the hips/belt
-- 3d_clothing = layered apparel that fits the avatar body
-
-RULES FOR CULTURE FIELDS — USE YOUR EXTERNAL KNOWLEDGE FREELY:
-- Name SPECIFIC current trends, sounds, memes, anime arcs.
-- ip_reference_warning = flag Sanrio, Pokemon, Disney, anime characters, brand logos. Say NONE if original.
-- target_audience = SPECIFIC. Not "kids who like cute things."
 
 CREATOR'S DESCRIPTION: {desc}
 """
 
 
-def _parse_vision_result(raw: str) -> dict:
-    """Parse and normalize vision JSON from any provider."""
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+def _parse_vision_result(raw):
+    if not raw: return {}
+    try: data = json.loads(raw)
+    except Exception:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
-            return {}
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            return {}
-
-    for k in ("visual_colors", "visual_style", "visual_mood",
-              "distinctive_features", "likely_aesthetic",
-              "vibe_references", "similar_viral_items"):
+        if not m: return {}
+        try: data = json.loads(m.group(0))
+        except Exception: return {}
+    for k in ("visual_colors","visual_style","visual_mood","distinctive_features",
+              "likely_aesthetic","vibe_references"):
         val = data.get(k, [])
-        if isinstance(val, str):
-            val = [val]
-        if not isinstance(val, list):
-            val = []
+        if isinstance(val, str): val = [val]
+        if not isinstance(val, list): val = []
         data[k] = [str(v).lower().strip() for v in val if str(v).strip()]
-
-    for k in ("item_type_visual", "search_description", "title_color_match",
-              "visual_summary", "likely_trend_source", "likely_trend_context",
-              "ip_reference_warning", "target_audience",
-              "color_psychology", "composition_notes"):
+    for k in ("item_type_visual","search_description","title_color_match",
+              "visual_summary","likely_trend_source","likely_trend_context",
+              "ip_reference_warning","target_audience","color_psychology",
+              "composition_notes"):
         data[k] = str(data.get(k, "")).strip()
-
     data["item_type_visual"] = data["item_type_visual"].lower() or "unknown"
     data["title_color_match"] = data["title_color_match"].upper() or "?"
-    data["likely_trend_source"] = data["likely_trend_source"].lower() or "none"
-    data["ip_reference_warning"] = data["ip_reference_warning"].upper() or "NONE"
     return data
 
 
-def _build_vision_messages(images, prompt_text):
-    """OpenAI-format multimodal message payload."""
-    content = []
-    for i, img in enumerate(images, 1):
-        content.append({"type": "text", "text": f"Image {i}:"})
-        b64 = base64.b64encode(img["bytes"]).decode("utf-8")
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{img['mime']};base64,{b64}"}
-        })
-    content.append({"type": "text", "text": prompt_text})
-    return [{"role": "user", "content": content}]
-
-
-def analyze_image_for_ugc(images: list, user_description: str = "") -> dict:
-    """
-    Analyze 1-4 images through 2 tiers:
-      Tier 1: Gemini vision
-      Tier 2: OpenRouter vision
-    Returns parsed dict, or {} if both fail.
-    """
-    if not _ensure() or not images:
-        return {}
-
+def analyze_image_for_ugc(images, user_description=""):
+    if not _ensure() or not images: return {}
     images = images[:4]
-    prompt_text = _VISION_PROMPT.format(
-        desc=(user_description or "").strip() or "(none)"
-    )
+    prompt_text = _VISION_PROMPT.format(desc=(user_description or "").strip() or "(none)")
 
-    # --- TIER 1: Gemini vision ---
     if _client is not None:
         try:
             parts = []
             for i, img in enumerate(images, 1):
                 parts.append(f"Image {i}:")
-                parts.append(types.Part.from_bytes(
-                    data=img["bytes"], mime_type=img["mime"]))
+                parts.append(types.Part.from_bytes(data=img["bytes"], mime_type=img["mime"]))
             parts.append(prompt_text)
-
-            cfg = types.GenerateContentConfig(
-                temperature=0.3,
-                max_output_tokens=1500,
-                response_mime_type="application/json",
-            )
-            resp = _client.models.generate_content(
-                model=MODEL_NAME, contents=parts, config=cfg)
+            cfg = types.GenerateContentConfig(temperature=0.3, max_output_tokens=1500,
+                                              response_mime_type="application/json")
+            resp = _client.models.generate_content(model=MODEL_NAME, contents=parts, config=cfg)
             raw = (resp.text or "").strip()
             if raw:
                 result = _parse_vision_result(raw)
-                if result:
-                    print("[vision] gemini succeeded")
-                    return result
-            print("[vision] gemini empty → OpenRouter")
+                if result: return result
         except Exception as e:
-            print(f"[vision] gemini failed: {type(e).__name__}: {str(e)[:180]}")
-            print("[vision] → OpenRouter")
+            print(f"[vision] gemini failed: {e}")
 
-    # --- TIER 2: OpenRouter vision ---
     if _openrouter_client is not None:
         try:
-            messages = _build_vision_messages(images, prompt_text)
+            content = []
+            for i, img in enumerate(images, 1):
+                content.append({"type": "text", "text": f"Image {i}:"})
+                b64 = base64.b64encode(img["bytes"]).decode("utf-8")
+                content.append({"type": "image_url",
+                                "image_url": {"url": f"data:{img['mime']};base64,{b64}"}})
+            content.append({"type": "text", "text": prompt_text})
             resp = _openrouter_client.chat.completions.create(
                 model=OPENROUTER_VISION_MODEL,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=1500,
-                timeout=90,
-            )
+                messages=[{"role": "user", "content": content}],
+                temperature=0.3, max_tokens=1500, timeout=90)
             raw = (resp.choices[0].message.content or "").strip()
-            if raw:
-                result = _parse_vision_result(raw)
-                if result:
-                    print("[vision] OpenRouter succeeded")
-                    return result
-            print("[vision] OpenRouter empty")
+            if raw: return _parse_vision_result(raw)
         except Exception as e:
-            print(f"[vision] OpenRouter failed: {type(e).__name__}: {str(e)[:180]}")
-
+            print(f"[vision] openrouter failed: {e}")
     return {}
 
 
-# =========================================================================
-# FREE-FORM Q&A
-# =========================================================================
 _ASK_PROMPT = """You are a helpful assistant inside a Roblox UGC bot.
+Answer directly. If Roblox UGC related, go deep and tactical. Under 1,800 chars.
 
-Answer the user's question directly. If it's a general knowledge,
-math, or common question, answer it normally in 1-3 sentences.
-If it's specifically about Roblox UGC, market strategy, pricing,
-uploading, trends, or the creator economy — go deep and tactical
-using your full knowledge of the algorithm and internet culture.
-
-No filler. No AI disclaimers. Under 1,800 characters.
-
-QUESTION:
-{q}
+QUESTION: {q}
 """
 
 
-def ask_ai(question: str) -> str:
-    if not question or not question.strip():
-        return ""
-    out = _generate(_ASK_PROMPT.format(q=question.strip()),
-                    json_mode=False, temperature=0.8,
-                    max_tokens=2048, prefer="gemini")
-    return out or ""
+def ask_ai(question):
+    if not question or not question.strip(): return ""
+    return _generate(_ASK_PROMPT.format(q=question.strip()),
+                     json_mode=False, temperature=0.8, max_tokens=2048) or ""
