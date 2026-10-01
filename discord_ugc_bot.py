@@ -1812,27 +1812,26 @@ async def classic(ctx, *, keyword: str):
     view = MultiViewPaginator(data)
     await ctx.send(embed=view.build_embed(), view=view)
 
-
 @bot.command(name="gap")
 async def gap(ctx, *, keyword: str = ""):
     kw = (keyword or "").strip().lower()
     try:
         conn = get_db(); cur = conn.cursor()
 
-        # Pull ALL emotes with real data
+        # Pull ALL items with real data — no keyword restriction on source
         cur.execute("""
             SELECT name, favorite_count 
             FROM items 
-            WHERE asset_type_id = 61
-              AND favorite_count > 50 
+            WHERE favorite_count > 50
+              AND asset_type_id = 61
             LIMIT 5000
         """)
         rows = cur.fetchall()
         if not rows:
-            await ctx.send("⚠️ No emote data in DB yet.")
+            await ctx.send("⚠️ No emote data in DB.")
             cur.close(); conn.close(); return
 
-        # Extract candidate words from ALL emote names
+        # Extract candidate words from all emote names
         stats = defaultdict(lambda: {"favs": 0, "count": 0})
         for name, favs in rows:
             for w in set(extract_words(name)):
@@ -1851,7 +1850,6 @@ async def gap(ctx, *, keyword: str = ""):
             await ctx.send("⚠️ No gaps found.")
             cur.close(); conn.close(); return
 
-        # Competitor counts
         word_list = [c[0] for c in candidates]
         patterns = [f"%{w}%" for w in word_list]
         cur.execute("""
@@ -1870,25 +1868,30 @@ async def gap(ctx, *, keyword: str = ""):
 
         gaps = []
         for w, af in candidates:
-            # If keyword given, filter results to related words
-            if kw and kw not in w.lower():
-                # Skip if user asked for a keyword and this word isn't related
-                # (Optional — remove this block if you want to always see all gaps)
-                pass
             c = comp_map.get(w, 0)
             if c < 1: continue
             if c > 50: continue
             score = af / math.log1p(c)
+            # Filter OUTPUT by keyword if user gave one
+            if kw and kw not in w.lower():
+                continue
             gaps.append((w, af, c, score))
+
+        # If keyword filtered everything out, retry without keyword
+        if not gaps and kw:
+            for w, af in candidates:
+                c = comp_map.get(w, 0)
+                if c < 1 or c > 50: continue
+                score = af / math.log1p(c)
+                gaps.append((w, af, c, score))
 
         gaps.sort(key=lambda x: x[3], reverse=True)
         if not gaps:
             await ctx.send("⚠️ No gaps found."); return
 
-        # Take top 25 (more results = more options)
-        gaps = gaps[:25]
-        title_kw = kw if kw else "all emotes"
-        view = SimplePaginator(title_kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
+        gaps = gaps[:30]
+        title = f"filter: {kw}" if kw else "all emotes"
+        view = SimplePaginator(title, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
         await ctx.send(embed=view.build_embed(), view=view)
     except Exception as e:
         try:
