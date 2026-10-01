@@ -2094,11 +2094,14 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
 
 # ==============================================================
-# SATURATION CHECK + GAP ALTERNATIVES
+# SATURATION CHECK + GAP ALTERNATIVES  (THREAD-SAFE)
 # Analyzes user's keywords. If saturated (200+ real competitors),
 # finds co-occurring low-competition alternatives.
 # ==============================================================
-def _find_gap_alternatives(cur, terms, top_n=5):
+def _find_gap_alternatives(terms, top_n=5):
+    """
+    Thread-safe: opens its own DB connection. Do NOT pass a cursor in.
+    """
     if not terms:
         return [], {}
 
@@ -2107,8 +2110,13 @@ def _find_gap_alternatives(cur, terms, top_n=5):
     if not valid_terms:
         return [], {}
 
+    # ---- Phase 1: term stats ----
     term_stats = {}
+    conn = None
+    cur = None
     try:
+        conn = get_db()
+        cur = conn.cursor()
         patterns = [f"%{t}%" for t in valid_terms]
         cur.execute("""
             SELECT LOWER(name), favorite_count FROM items
@@ -2132,76 +2140,101 @@ def _find_gap_alternatives(cur, terms, top_n=5):
             s["avg_favs"] = int(s["favs_sum"] / s["favs_count"]) if s["favs_count"] else 0
     except Exception as e:
         print(f"[gap-alts] term stats: {e}", flush=True)
-        return [], {}
+        return [], term_stats
+    finally:
+        try:
+            if cur: cur.close()
+        except Exception: pass
+        try:
+            if conn: conn.close()
+        except Exception: pass
 
     saturated = [t for t, s in term_stats.items() if s["comp"] > 200]
     if not saturated:
         return [], term_stats
 
+    # ---- Phase 2: find alternatives ----
     all_candidates = defaultdict(lambda: {"count": 0, "favs": 0})
-    for sat_term in saturated:
-        pattern = word_boundary_pattern(sat_term)
-        try:
-            cur.execute("""
-                SELECT name, favorite_count FROM items
-                WHERE name ~* %s AND favorite_count > 100
-                LIMIT 1000
-            """, (pattern,))
-            rows = cur.fetchall()
-        except Exception:
-            rollback_quietly(cur)
-            continue
-        for name, favs in rows:
-            for w in set(extract_words(name)):
-                if w in valid_terms or w in FILLER_WORDS:
-                    continue
-                all_candidates[w]["count"] += 1
-                all_candidates[w]["favs"] += favs or 0
-
-    filtered = []
-    for w, s in all_candidates.items():
-        if s["count"] < 2 or s["count"] > 50:
-            continue
-        avg = s["favs"] / s["count"]
-        if avg < 500:
-            continue
-        filtered.append((w, avg, s["count"]))
-
-    if not filtered:
-        return [], term_stats
-
-    candidate_words = [w for w, _, _ in filtered[:100]]
-    comp_map = defaultdict(int)
+    conn = None
+    cur = None
     try:
-        cpatterns = [f"%{w}%" for w in candidate_words]
-        cur.execute("""
-            SELECT LOWER(name) FROM items
-            WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
-        """, (cpatterns,))
-        matched = cur.fetchall()
-        for (name,) in matched:
-            for w in candidate_words:
-                if re.search(r'\b' + re.escape(w) + r'\b', name):
-                    comp_map[w] += 1
+        conn = get_db()
+        cur = conn.cursor()
+
+        for sat_term in saturated:
+            pattern = word_boundary_pattern(sat_term)
+            try:
+                cur.execute("""
+                    SELECT name, favorite_count FROM items
+                    WHERE name ~* %s AND favorite_count > 100
+                    LIMIT 1000
+                """, (pattern,))
+                rows = cur.fetchall()
+            except Exception:
+                try: cur.connection.rollback()
+                except Exception: pass
+                continue
+            for name, favs in rows:
+                for w in set(extract_words(name)):
+                    if w in valid_terms or w in FILLER_WORDS:
+                        continue
+                    all_candidates[w]["count"] += 1
+                    all_candidates[w]["favs"] += favs or 0
+
+        filtered = []
+        for w, s in all_candidates.items():
+            if s["count"] < 2 or s["count"] > 50:
+                continue
+            avg = s["favs"] / s["count"]
+            if avg < 500:
+                continue
+            filtered.append((w, avg, s["count"]))
+
+        if not filtered:
+            return [], term_stats
+
+        candidate_words = [w for w, _, _ in filtered[:100]]
+        comp_map = defaultdict(int)
+        try:
+            cpatterns = [f"%{w}%" for w in candidate_words]
+            cur.execute("""
+                SELECT LOWER(name) FROM items
+                WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
+            """, (cpatterns,))
+            matched = cur.fetchall()
+            for (name,) in matched:
+                for w in candidate_words:
+                    if re.search(r'\b' + re.escape(w) + r'\b', name):
+                        comp_map[w] += 1
+        except Exception as e:
+            print(f"[gap-alts] comp check: {e}", flush=True)
+
+        alternatives = []
+        for w, avg, cnt in filtered:
+            comp = comp_map.get(w, 0)
+            if comp < 1 or comp > 100:
+                continue
+            score = avg / math.log1p(comp)
+            alternatives.append({
+                "word": w,
+                "avg_favs": int(avg),
+                "count": cnt,
+                "comp": comp,
+                "score": int(score),
+            })
+
+        alternatives.sort(key=lambda x: x["score"], reverse=True)
+        return alternatives[:top_n], term_stats
     except Exception as e:
-        print(f"[gap-alts] comp check: {e}", flush=True)
-
-    alternatives = []
-    for w, avg, cnt in filtered:
-        comp = comp_map.get(w, 0)
-        if comp < 1 or comp > 100:
-            continue
-        score = avg / math.log1p(comp)
-        alternatives.append({
-            "word": w,
-            "avg_favs": int(avg),
-            "count": cnt,
-            "comp": comp,
-            "score": int(score),
-        })
-
-    alternatives.sort(key=lambda x: x["score"], reverse=True)
-    return alternatives[:top_n], term_stats
+        print(f"[gap-alts] phase 2: {e}", flush=True)
+        return [], term_stats
+    finally:
+        try:
+            if cur: cur.close()
+        except Exception: pass
+        try:
+            if conn: conn.close()
+        except Exception: pass
 
 
 def _build_allow_list(intent, max_keywords=60, gap_words=None):
@@ -2284,7 +2317,6 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
     opportunity_keywords = scored_words[:40]
     unigrams = [w for w, _, _, _ in opportunity_keywords]
 
-    # Force-include user terms at top of allow-list
     force_include = []
     for t in terms:
         t_clean = (t or "").lower().strip()
@@ -2296,7 +2328,6 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
         if w not in unigrams:
             unigrams.insert(0, w)
 
-    # Inject gap words — proven low-competition alternatives
     if gap_words:
         for w in gap_words:
             if w not in unigrams and w not in FILLER_WORDS:
@@ -2504,15 +2535,13 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"🔎 **Analyzing saturation...**")
     )
 
-    # Saturation check + gap alternatives
+    # Saturation check + gap alternatives  (thread-safe)
     gap_alternatives = []
     term_stats = {}
     try:
-        conn_g = get_db(); cur_g = conn_g.cursor()
         gap_alternatives, term_stats = await asyncio.to_thread(
-            _find_gap_alternatives, cur_g, terms, 5
+            _find_gap_alternatives, terms, 5
         )
-        cur_g.close(); conn_g.close()
     except Exception as e:
         print(f"[brainstorm] gap finder failed: {e}", flush=True)
 
