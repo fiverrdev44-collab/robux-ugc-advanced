@@ -82,11 +82,6 @@ ASSET_TYPE_NAMES = {
     70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
 }
 
-# ============================================================
-# FILLER WORDS — blocked from allow-list so titles can't use
-# them. If any word in a title is in this set, verify_titles
-# rejects the whole title.
-# ============================================================
 FILLER_WORDS = {
     "troll", "funny", "meme", "memes", "lol", "sus", "sussy", "cringe",
     "goofy", "silly", "epic", "hype", "viral", "trending", "trend",
@@ -2066,6 +2061,16 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
 
 def _build_allow_list(intent, max_keywords=60):
+    """
+    Builds the allow-list of words for title generation.
+
+    Scoring: opportunity_score = avg_favs / log1p(competition)
+    This surfaces words with high favorites and low competition — the words
+    most likely to be winners.
+
+    Additionally: user's original search terms are force-included at the top
+    of the allow-list, so the AI can't drift into unrelated generic words.
+    """
     terms = all_terms(intent)
     if not terms:
         return [], [], {}
@@ -2108,25 +2113,60 @@ def _build_allow_list(intent, max_keywords=60):
             "reasoning": bridge_reasoning,
         }
 
-    freq = {}
+    # ============================================================
+    # OPPORTUNITY SCORING — for each word, compute:
+    #   count       = how many items contain it
+    #   total_favs  = sum of favorites across those items
+    #   avg_favs    = total_favs / count
+    #   score       = avg_favs / log1p(count)  ← opportunity
+    # ============================================================
+    word_stats = defaultdict(lambda: {"count": 0, "favs": 0})
     bigrams = {}
     token_re = re.compile(r"[a-z0-9]+")
     for r in rows:
         name = (r[1] or "").lower()
+        favs = r[2] or 0
         toks = token_re.findall(name)
+        seen = set()
         for t in toks:
-            if len(t) >= 2:
-                freq[t] = freq.get(t, 0) + 1
+            if len(t) >= 2 and t not in seen:
+                word_stats[t]["count"] += 1
+                word_stats[t]["favs"] += favs
+                seen.add(t)
         for a, b in zip(toks, toks[1:]):
             bg = f"{a} {b}"
             bigrams[bg] = bigrams.get(bg, 0) + 1
 
+    scored_words = []
+    for w, s in word_stats.items():
+        if w in FILLER_WORDS:
+            continue
+        if s["count"] < 2:
+            continue
+        avg = s["favs"] / s["count"]
+        score = avg / math.log1p(s["count"])
+        scored_words.append((w, avg, s["count"], score))
+
+    scored_words.sort(key=lambda x: x[3], reverse=True)
+    opportunity_keywords = scored_words[:40]
+    unigrams = [w for w, _, _, _ in opportunity_keywords]
+
     # ============================================================
-    # ALLOW-LIST — FILLER_WORDS are stripped out so the AI can't
-    # even generate titles using them (verify_titles will reject).
+    # FORCE-INCLUDE USER'S ORIGINAL TERMS
+    # This preserves the creator's unique hook (e.g. "flip", "360")
+    # even if those words have lower opportunity scores.
     # ============================================================
-    unigrams = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])
-                if w not in FILLER_WORDS]
+    force_include = []
+    for t in terms:
+        t_clean = (t or "").lower().strip()
+        if len(t_clean) < 3:
+            continue
+        if t_clean in word_stats and t_clean not in FILLER_WORDS:
+            force_include.append(t_clean)
+    for w in force_include:
+        if w not in unigrams:
+            unigrams.insert(0, w)
+
     top_bigrams = [b for b, _ in sorted(bigrams.items(), key=lambda x: -x[1])[:15]
                    if not any(part in FILLER_WORDS for part in b.split())]
     allow_list = unigrams[:max_keywords]
@@ -2144,22 +2184,39 @@ def _build_allow_list(intent, max_keywords=60):
     } | FILLER_WORDS
     strong_terms = [t for t in terms if len(t) >= 3 and t.lower() not in GENERIC_TERMS]
 
+    # ============================================================
+    # TIERED RELEVANCE FILTER
+    # Prefer items that match the primary (longest) user term.
+    # This stops "Right Back!" from appearing in a Russian niche.
+    # ============================================================
+    primary_terms = sorted(strong_terms, key=len, reverse=True)[:3]
+
+    def _has_primary(r):
+        name = (r[1] or "").lower()
+        return any(t in name for t in primary_terms)
+
     def _match_score(r):
         name = (r[1] or "").lower()
         return sum(1 for t in strong_terms if t in name)
 
-    relevant_rows = [r for r in sane_rows if _match_score(r) >= 2]
+    # Tier 1: has primary term AND at least 1 more match
+    relevant_rows = [r for r in sane_rows if _has_primary(r) and _match_score(r) >= 2]
+    # Tier 2: has primary term only
     if len(relevant_rows) < 5:
-        relevant_rows = [r for r in sane_rows if _match_score(r) >= 1]
+        relevant_rows = [r for r in sane_rows if _has_primary(r)]
+    # Tier 3: general 2+ matches
+    if len(relevant_rows) < 5:
+        relevant_rows = [r for r in sane_rows if _match_score(r) >= 2]
+    # Tier 4: anything
     if len(relevant_rows) < 5:
         relevant_rows = sane_rows
 
     # ============================================================
-    # COMPETITORS — prefer items with REAL favorites. If fewer
-    # than 3 have favs, fall back to whatever we have (new DB case).
+    # COMPETITORS — ALWAYS prefer items with real favorites if any exist.
+    # An honest 2-item list > a fake 10-item list.
     # ============================================================
     items_with_favs = [r for r in relevant_rows if (r[2] or 0) > 0]
-    if len(items_with_favs) >= 3:
+    if items_with_favs:
         top_rows = sorted(items_with_favs, key=lambda r: (r[2] or 0), reverse=True)[:10]
     else:
         top_rows = sorted(relevant_rows, key=lambda r: (r[2] or 0), reverse=True)[:10]
@@ -2198,6 +2255,10 @@ def _build_allow_list(intent, max_keywords=60):
         "expanded_terms": expanded_terms[:15],
         "failed_terms": failed_terms[:10],
         "reasoning": bridge_reasoning,
+        "opportunity_keywords": [
+            {"word": w, "avg_favs": int(avg), "count": c, "score": int(sc)}
+            for w, avg, c, sc in opportunity_keywords[:10]
+        ],
     }
     return allow_list, top_items, stats
 
@@ -2357,6 +2418,18 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"🧠 **Pass 2:** AI strategist at work...")
     )
 
+    if stats.get("opportunity_keywords"):
+        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
+        for kw in stats["opportunity_keywords"][:8]:
+            opp_lines.append(
+                f"• `{kw['word']}` — **{kw['count']}** items, "
+                f"avg **{kw['avg_favs']:,}** favs"
+            )
+        try:
+            await ctx.send("\n".join(opp_lines))
+        except Exception:
+            pass
+
     synth = None
     try:
         synth = await asyncio.to_thread(
@@ -2498,6 +2571,18 @@ async def rescue(ctx, *, description: str = ""):
                  f"🧠 **AI is diagnosing your launch and writing new titles...**")
     )
 
+    if stats.get("opportunity_keywords"):
+        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
+        for kw in stats["opportunity_keywords"][:8]:
+            opp_lines.append(
+                f"• `{kw['word']}` — **{kw['count']}** items, "
+                f"avg **{kw['avg_favs']:,}** favs"
+            )
+        try:
+            await ctx.send("\n".join(opp_lines))
+        except Exception:
+            pass
+
     rescue_prompt = f"""You are a Roblox UGC title doctor. A creator launched an item that is NOT SELLING.
 
 THEIR DESCRIPTION / CURRENT SITUATION:
@@ -2538,7 +2623,7 @@ RULES:
 - Every word in every title MUST exist in the allow-list above (plus glue words).
 - Titles MUST be 3-5 words. NEVER 6+ word keyword stuffing.
 - Each title must READ AS A SENTENCE, not a list of keywords.
-- PREFER SPECIFIC words (e.g. "russian", "rasputin", "soviet") over generic ones.
+- PREFER SPECIFIC words over generic ones (use the user's actual keywords).
 - Titles in each group must feel DIFFERENT.
 - Do NOT invent keywords. Do NOT fabricate stats.
 - Be direct. Assume this person lost money.
@@ -2789,6 +2874,18 @@ async def analyze_image(ctx, *, description: str = ""):
         content=(f"📊 Matched **{stats['count']:,}** real items.\n"
                  f"🧠 **Pass 2:** Gemini strategist at work...")
     )
+
+    if stats.get("opportunity_keywords"):
+        opp_lines = ["**🕳️ Opportunity keywords** — high favs + low competition:"]
+        for kw in stats["opportunity_keywords"][:8]:
+            opp_lines.append(
+                f"• `{kw['word']}` — **{kw['count']}** items, "
+                f"avg **{kw['avg_favs']:,}** favs"
+            )
+        try:
+            await ctx.send("\n".join(opp_lines))
+        except Exception:
+            pass
 
     full_desc = (
         f"[IMAGE DESCRIPTION] {vision.get('visual_summary', '')}\n"
