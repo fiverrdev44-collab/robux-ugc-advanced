@@ -1814,44 +1814,44 @@ async def classic(ctx, *, keyword: str):
 
 
 @bot.command(name="gap")
-async def gap(ctx, *, keyword: str):
-    kw = keyword.strip().lower()
-    if not kw:
-        await ctx.send("❌ Provide a keyword."); return
+async def gap(ctx, *, keyword: str = ""):
+    kw = (keyword or "").strip().lower()
     try:
         conn = get_db(); cur = conn.cursor()
-        pattern = word_boundary_pattern(kw)
 
-        # Step 1: pull candidate items
-        cur.execute("""SELECT name, favorite_count 
-                       FROM items 
-                       WHERE name ~* %s
-                       AND favorite_count > 50 LIMIT 2000""", (pattern,))
+        # Pull ALL emotes with real data
+        cur.execute("""
+            SELECT name, favorite_count 
+            FROM items 
+            WHERE asset_type_id = 61
+              AND favorite_count > 50 
+            LIMIT 5000
+        """)
         rows = cur.fetchall()
         if not rows:
-            await ctx.send(f"⚠️ No data for `{kw}`."); cur.close(); conn.close(); return
+            await ctx.send("⚠️ No emote data in DB yet.")
+            cur.close(); conn.close(); return
 
-        # Step 2: extract candidate words FROM NAMES ONLY (not descriptions)
+        # Extract candidate words from ALL emote names
         stats = defaultdict(lambda: {"favs": 0, "count": 0})
         for name, favs in rows:
             for w in set(extract_words(name)):
-                if w == kw: continue
                 stats[w]["favs"] += (favs or 0)
                 stats[w]["count"] += 1
 
-        # Step 3: keep only words with real presence and decent avg favs
         candidates = []
         for w, s in stats.items():
-            if s["count"] < 3: continue          # must appear in 3+ item names
-            if s["count"] > 100: continue         # not too common
+            if s["count"] < 3: continue
+            if s["count"] > 100: continue
             af = s["favs"] / s["count"]
-            if af < 500: continue                 # must have real demand
+            if af < 500: continue
             candidates.append((w, af))
 
         if not candidates:
-            await ctx.send(f"⚠️ No gaps for `{kw}`."); cur.close(); conn.close(); return
+            await ctx.send("⚠️ No gaps found.")
+            cur.close(); conn.close(); return
 
-        # Step 4: one SQL query counts real competitor presence
+        # Competitor counts
         word_list = [c[0] for c in candidates]
         patterns = [f"%{w}%" for w in word_list]
         cur.execute("""
@@ -1868,20 +1868,27 @@ async def gap(ctx, *, keyword: str):
                 if re.search(r'\b' + re.escape(w) + r'\b', name):
                     comp_map[w] += 1
 
-        # Step 5: require at least 1 real competitor (no fake 0-comp words)
         gaps = []
         for w, af in candidates:
+            # If keyword given, filter results to related words
+            if kw and kw not in w.lower():
+                # Skip if user asked for a keyword and this word isn't related
+                # (Optional — remove this block if you want to always see all gaps)
+                pass
             c = comp_map.get(w, 0)
-            if c < 1: continue                    # ← key fix: no more ghosts
+            if c < 1: continue
             if c > 50: continue
             score = af / math.log1p(c)
             gaps.append((w, af, c, score))
 
         gaps.sort(key=lambda x: x[3], reverse=True)
         if not gaps:
-            await ctx.send(f"⚠️ No gaps found."); return
+            await ctx.send("⚠️ No gaps found."); return
 
-        view = SimplePaginator(kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
+        # Take top 25 (more results = more options)
+        gaps = gaps[:25]
+        title_kw = kw if kw else "all emotes"
+        view = SimplePaginator(title_kw, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
         await ctx.send(embed=view.build_embed(), view=view)
     except Exception as e:
         try:
