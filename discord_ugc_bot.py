@@ -97,8 +97,12 @@ MAX_PRICE = 10000
 
 
 def get_db():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
-
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode='require',
+        connect_timeout=10,
+        options='-c statement_timeout=20000',
+    )
 
 def rollback_quietly(cur):
     try: cur.connection.rollback()
