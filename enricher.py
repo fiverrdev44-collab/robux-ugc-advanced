@@ -236,19 +236,32 @@ def enrich_items():
             if asset_type == 61:
                 emote_count += 1
 
-            cur.execute("""
-                INSERT INTO items (id, name, favorite_count, price, total_sales,
-                                   description, creator_name, asset_type_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    favorite_count = EXCLUDED.favorite_count,
-                    total_sales = EXCLUDED.total_sales,
-                    price = EXCLUDED.price,
-                    description = EXCLUDED.description,
-                    name = EXCLUDED.name,
-                    asset_type_id = EXCLUDED.asset_type_id,
-                    fetched_at = CURRENT_TIMESTAMP
-            """, (item_id, name, favs, price, sales, desc, creator, asset_type))
+         # Parse created date from Roblox response
+created_raw = d.get("Created")
+created_dt = None
+if created_raw and isinstance(created_raw, str):
+    try:
+        # Format: "2012-08-06T22:15:45.993Z"
+        created_dt = datetime.fromisoformat(
+            created_raw.replace("Z", "").split(".")[0]
+        )
+    except Exception:
+        pass
+
+cur.execute("""
+    INSERT INTO items (id, name, favorite_count, price, total_sales,
+                       description, creator_name, asset_type_id, created_at)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO UPDATE SET
+        favorite_count = EXCLUDED.favorite_count,
+        total_sales = EXCLUDED.total_sales,
+        price = EXCLUDED.price,
+        description = EXCLUDED.description,
+        name = EXCLUDED.name,
+        asset_type_id = EXCLUDED.asset_type_id,
+        created_at = COALESCE(items.created_at, EXCLUDED.created_at),
+        fetched_at = CURRENT_TIMESTAMP
+""", (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt))
 
             # NOTE: We deliberately DO NOT write to item_history here.
             # Only snapshot.py writes to item_history — one row per item per
