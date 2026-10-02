@@ -1,30 +1,25 @@
-name: Daily Enricher
+name: Enricher
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '30 2,8,14,20 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: enricher
   cancel-in-progress: false
 
 jobs:
   enrich:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run enricher
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
