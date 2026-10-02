@@ -1,6 +1,7 @@
 import os
 import requests
 import time
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection, setup_database
 
@@ -18,14 +19,6 @@ if not COOKIES:
 if not COOKIES:
     raise ValueError("No ROBLOSECURITY_COOKIE configured!")
 
-# ============================================================
-# ENDPOINTS
-# ------------------------------------------------------------
-# economy endpoint: returns Name, Description, Price, AssetTypeId,
-#   Creator — but NOT FavoriteCount.
-# catalog endpoint: returns favoriteCount — but not price/description.
-# So we hit BOTH per item.
-# ============================================================
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 FAVORITES_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
@@ -37,7 +30,6 @@ PRIORITY = os.getenv("PRIORITY", "newest").lower()
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000
 
-# Two calls per item now, so reduced delay keeps throughput the same.
 SESSION_DELAY = 1.6
 
 MAX_SANE_PRICE = 1_000_000
@@ -80,10 +72,7 @@ def get_csrf_token(session):
 
 
 def fetch_favorites(session, item_id):
-    """
-    Second call: catalog endpoint returns favoriteCount.
-    Returns int or None on failure.
-    """
+    """Second call: catalog endpoint returns favoriteCount."""
     try:
         resp = session.get(FAVORITES_URL.format(item_id), timeout=10)
         if resp.status_code == 200:
@@ -113,7 +102,6 @@ def fetch_worker(session, ids, worker_id):
                 code = resp.status_code
                 if code == 200:
                     data = resp.json()
-                    # Second call for favorites
                     favs = fetch_favorites(session, item_id)
                     if favs is not None:
                         data["FavoriteCount"] = favs
@@ -153,6 +141,16 @@ def _safe_int(val, max_val, default=0):
     if n < 0 or n > max_val:
         return default
     return n
+
+
+def _parse_created(raw):
+    """Parse Roblox Created string like '2012-08-06T22:15:45.993Z'."""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "").split(".")[0])
+    except Exception:
+        return None
 
 
 def enrich_items():
@@ -220,6 +218,8 @@ def enrich_items():
     enriched = 0
     emote_count = 0
     db_errors = 0
+    dates_filled = 0
+
     for item_id, d in results.items():
         try:
             favs = _safe_int(d.get("FavoriteCount"), MAX_SANE_FAVS)
@@ -232,41 +232,28 @@ def enrich_items():
             creator_obj = d.get("Creator") or {}
             creator = (creator_obj.get("Name", "") if isinstance(creator_obj, dict) else "")[:200]
             asset_type = _safe_int(d.get("AssetTypeId"), 1000)
+            created_dt = _parse_created(d.get("Created"))
 
             if asset_type == 61:
                 emote_count += 1
+            if created_dt:
+                dates_filled += 1
 
-         # Parse created date from Roblox response
-created_raw = d.get("Created")
-created_dt = None
-if created_raw and isinstance(created_raw, str):
-    try:
-        # Format: "2012-08-06T22:15:45.993Z"
-        created_dt = datetime.fromisoformat(
-            created_raw.replace("Z", "").split(".")[0]
-        )
-    except Exception:
-        pass
+            cur.execute("""
+                INSERT INTO items (id, name, favorite_count, price, total_sales,
+                                   description, creator_name, asset_type_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    favorite_count = EXCLUDED.favorite_count,
+                    total_sales = EXCLUDED.total_sales,
+                    price = EXCLUDED.price,
+                    description = EXCLUDED.description,
+                    name = EXCLUDED.name,
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    created_at = COALESCE(items.created_at, EXCLUDED.created_at),
+                    fetched_at = CURRENT_TIMESTAMP
+            """, (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt))
 
-cur.execute("""
-    INSERT INTO items (id, name, favorite_count, price, total_sales,
-                       description, creator_name, asset_type_id, created_at)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO UPDATE SET
-        favorite_count = EXCLUDED.favorite_count,
-        total_sales = EXCLUDED.total_sales,
-        price = EXCLUDED.price,
-        description = EXCLUDED.description,
-        name = EXCLUDED.name,
-        asset_type_id = EXCLUDED.asset_type_id,
-        created_at = COALESCE(items.created_at, EXCLUDED.created_at),
-        fetched_at = CURRENT_TIMESTAMP
-""", (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt))
-
-            # NOTE: We deliberately DO NOT write to item_history here.
-            # Only snapshot.py writes to item_history — one row per item per
-            # day. Writing here would pollute the timeline with second-apart
-            # reads, breaking !velocity growth detection.
             enriched += 1
         except Exception as e:
             db_errors += 1
@@ -279,8 +266,8 @@ cur.execute("""
 
     conn.commit()
     cur.close(); conn.close()
-    log(f"✅ Enriched {enriched} items ({emote_count} emotes) "
-        f"in {time.time()-start:.1f}s — {db_errors} DB errors")
+    log(f"✅ Enriched {enriched} items ({emote_count} emotes, "
+        f"{dates_filled} dates) in {time.time()-start:.1f}s — {db_errors} DB errors")
 
 
 if __name__ == "__main__":
