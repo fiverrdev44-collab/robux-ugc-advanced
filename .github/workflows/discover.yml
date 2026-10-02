@@ -1,29 +1,25 @@
-name: Daily Keyword Discovery
+name: Keyword Discovery
 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '30 5 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: discover
   cancel-in-progress: false
 
 jobs:
   discover:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run keyword discovery
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
