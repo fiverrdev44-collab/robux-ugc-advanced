@@ -1,5 +1,5 @@
 """
-recovery_brain.py — Post-launch failure detection + silent sales fetcher.
+recovery_brain.py — Post-launch failure detection + silent sales fetcher + live Roblox fetch.
 """
 import os
 import re
@@ -205,3 +205,112 @@ def enrich_item_stats_with_sales(item_stats, sales_list):
     item_stats["sales"] = count
     item_stats["_has_sales_data"] = True
     return item_stats
+
+
+# ============================================================
+# LIVE ROBLOX FETCH — for items not yet in DB
+# ============================================================
+def fetch_item_from_roblox(item_id, cookie=None):
+    """
+    Fetch a single item's details directly from Roblox.
+    Returns a dict compatible with the items table, or None.
+    """
+    if not item_id:
+        return None
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    if cookie:
+        headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+
+    details_url = f"https://economy.roblox.com/v2/assets/{item_id}/details"
+    fav_url = (f"https://catalog.roblox.com/v1/catalog/items/"
+               f"{item_id}/details?itemType=Asset")
+
+    try:
+        r1 = requests.get(details_url, headers=headers, timeout=10)
+        if r1.status_code != 200:
+            print(f"[live-fetch] details failed: HTTP {r1.status_code}", flush=True)
+            return None
+        d = r1.json()
+    except Exception as e:
+        print(f"[live-fetch] details exception: {e}", flush=True)
+        return None
+
+    # Favorites (second call)
+    favs = 0
+    try:
+        r2 = requests.get(fav_url, headers=headers, timeout=10)
+        if r2.status_code == 200:
+            favs = r2.json().get("favoriteCount") or 0
+    except Exception as e:
+        print(f"[live-fetch] favs exception: {e}", flush=True)
+
+    creator_obj = d.get("Creator") or {}
+    creator_name = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
+
+    return {
+        "id": int(item_id),
+        "name": (d.get("Name") or "")[:500],
+        "description": (d.get("Description") or "")[:5000],
+        "price": d.get("PriceInRobux") or 0,
+        "favorite_count": favs,
+        "total_sales": d.get("Sales") or 0,
+        "creator_name": (creator_name or "")[:200],
+        "asset_type_id": d.get("AssetTypeId") or 0,
+    }
+
+
+def save_item_to_db(cur, item):
+    """Upsert a single fetched item into the items table."""
+    if not item:
+        return False
+    try:
+        cur.execute("""
+            INSERT INTO items (id, name, favorite_count, price, total_sales,
+                               description, creator_name, asset_type_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                total_sales = EXCLUDED.total_sales,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """, (
+            item["id"], item["name"], item["favorite_count"],
+            item["price"], item["total_sales"], item["description"],
+            item["creator_name"], item["asset_type_id"],
+        ))
+        return True
+    except Exception as e:
+        print(f"[save-item] {e}", flush=True)
+        return False
+
+
+def save_item_and_created_at(cur, item, item_id):
+    """
+    After saving, try to fetch created_at from Roblox's productinfo endpoint
+    so age_days works in autopsy.
+    """
+    try:
+        url = f"https://www.roblox.com/marketplace/productinfo?assetId={item_id}"
+        r = requests.get(url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        })
+        if r.status_code == 200:
+            data = r.json()
+            created_str = data.get("Created")
+            if created_str:
+                cur.execute(
+                    "UPDATE items SET created_at = %s WHERE id = %s",
+                    (created_str, item_id)
+                )
+    except Exception as e:
+        print(f"[created-at] {e}", flush=True)
