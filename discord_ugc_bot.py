@@ -1981,8 +1981,9 @@ def _db_search(patterns):
     sql = """
         SELECT id, name, favorite_count, price, total_sales, description
         FROM items
-        WHERE lower(name) LIKE ANY(%s)
-           OR lower(COALESCE(description, '')) LIKE ANY(%s)
+        WHERE (lower(name) LIKE ANY(%s)
+            OR lower(COALESCE(description, '')) LIKE ANY(%s))
+          AND favorite_count > 5
         LIMIT 2500
     """
     try:
@@ -2006,6 +2007,7 @@ def _db_search_emote_only(patterns):
         WHERE (lower(name) LIKE ANY(%s)
             OR lower(COALESCE(description, '')) LIKE ANY(%s))
           AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+          AND favorite_count > 5
         LIMIT 2500
     """
     try:
