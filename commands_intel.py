@@ -6,6 +6,7 @@ import os
 import re
 import json
 import asyncio
+from datetime import datetime
 
 from momentum import find_momentum_keywords, format_momentum_report
 from predictor import predict_success, format_prediction
@@ -20,13 +21,17 @@ from recovery_brain import (
     fetch_item_from_roblox,
     save_item_to_db,
     save_item_and_created_at,
+    fetch_created_date_live,
 )
 
 
 def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
+
+    # =========================================================
+    # !momentum_debug — diagnostic
+    # =========================================================
     @bot.command(name="momentum_debug")
     async def momentum_debug(ctx):
-        """Diagnostic: what's actually in item_history."""
         try:
             conn = get_db(); cur = conn.cursor()
             cur.execute("""
@@ -72,22 +77,39 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(msg)
         except Exception as e:
             await ctx.send(f"❌ Debug failed: `{e}`")
+
+    # =========================================================
+    # !momentum
+    # =========================================================
     @bot.command(name="momentum")
     async def momentum_cmd(ctx, days: int = 7):
         days = max(3, min(days, 30))
+        progress = await ctx.send("🚀 **Scanning momentum...**")
         try:
             conn = get_db(); cur = conn.cursor()
             words = find_momentum_keywords(cur, days=days, min_items=2, top_n=30)
             cur.close(); conn.close()
         except Exception as e:
-            await ctx.send(f"❌ Failed: `{e}`"); return
+            await progress.edit(content=f"❌ Failed: `{e}`"); return
+
         if not words:
-            await ctx.send("📊 No momentum data yet.\nNeed 2+ days of `item_history` snapshots.")
+            await progress.edit(
+                content="📊 No momentum data yet.\n"
+                        "Need 2+ days of `item_history` snapshots.\n"
+                        "Run the snapshot workflow a few more times."
+            )
             return
+
+        try: await progress.delete()
+        except Exception: pass
+
         body = format_momentum_report(words, title=f"🚀 MOMENTUM (last {days}d)")
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+    # =========================================================
+    # !predict
+    # =========================================================
     @bot.command(name="predict")
     async def predict_cmd(ctx, *, idea: str = ""):
         if not idea.strip():
@@ -95,128 +117,177 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         words = re.findall(r"[a-z]{3,}", idea.lower())
         if not words:
             await ctx.send("❌ Need at least one word."); return
-        try:
+
+        progress = await ctx.send("🎯 **Computing success probability...**")
+
+        def _run():
             conn = get_db(); cur = conn.cursor()
-            pred = predict_success(cur, words)
-            cur.close(); conn.close()
+            try:
+                return predict_success(cur, words)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            pred = await asyncio.to_thread(_run)
         except Exception as e:
-            await ctx.send(f"❌ Failed: `{e}`"); return
+            await progress.edit(content=f"❌ Failed: `{e}`"); return
+
         if not pred:
-            await ctx.send("❌ Not enough data."); return
+            await progress.edit(content="❌ Not enough data."); return
+
+        try: await progress.delete()
+        except Exception: pass
+
         body = format_prediction(pred, idea)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+    # =========================================================
+    # !oracle
+    # =========================================================
     @bot.command(name="oracle")
     async def oracle_cmd(ctx, *, keyword: str = ""):
         if not keyword.strip():
             await ctx.send("Usage: `!oracle dance`"); return
         kw = keyword.strip().lower().split()[0]
-        try:
+
+        progress = await ctx.send(f"🔮 **Forecasting `{kw}`...**")
+
+        def _run():
             conn = get_db(); cur = conn.cursor()
-            f = forecast_trend(cur, kw)
-            cur.close(); conn.close()
+            try:
+                return forecast_trend(cur, kw)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            f = await asyncio.to_thread(_run)
         except Exception as e:
-            await ctx.send(f"❌ Failed: `{e}`"); return
+            await progress.edit(content=f"❌ Failed: `{e}`"); return
+
         if not f:
-            await ctx.send(f"❌ Not enough data for `{kw}`."); return
+            await progress.edit(content=f"❌ Not enough data for `{kw}`."); return
+
+        try: await progress.delete()
+        except Exception: pass
+
         body = format_oracle_forecast(f)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+    # =========================================================
+    # !nextwave
+    # =========================================================
     @bot.command(name="nextwave")
     async def nextwave_cmd(ctx):
         progress = await ctx.send("🌊 **Scanning for next-wave keywords...**")
-        try:
+
+        def _run():
             conn = get_db(); cur = conn.cursor()
-            ranked = find_next_wave_opportunities(cur, top_n=10)
-            cur.close(); conn.close()
+            try:
+                return find_next_wave_opportunities(cur, top_n=10)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            ranked = await asyncio.to_thread(_run)
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
+
         try: await progress.delete()
         except Exception: pass
+
         body = format_next_wave(ranked)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+    # =========================================================
+    # !opportunities
+    # =========================================================
     @bot.command(name="opportunities")
     async def opportunities_cmd(ctx):
         progress = await ctx.send("📅 **Scanning today's best plays...**")
-        try:
+
+        def _run():
             conn = get_db(); cur = conn.cursor()
-            plays = build_daily_feed(cur, top_n=5)
             try:
-                next_wave = find_next_wave_opportunities(cur, top_n=5)
-            except Exception:
-                next_wave = []
-            cur.close(); conn.close()
+                plays = build_daily_feed(cur, top_n=5)
+                try:
+                    nw = find_next_wave_opportunities(cur, top_n=5)
+                except Exception:
+                    nw = []
+                return plays, nw
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            plays, next_wave = await asyncio.to_thread(_run)
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
+
         try: await progress.delete()
         except Exception: pass
+
         body = format_daily_feed(plays, next_wave)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+    # =========================================================
+    # !autopsy — 10 titles + 3 descriptions + live date
+    # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
         progress = await ctx.send(f"🔬 **Autopsying item `{item_id}`...**")
         cookie = os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
         user_id = os.getenv("ROBLOX_USER_ID")
 
+        # ── Fetch item + age ─────────────────────────────────
+        age_days = 0.0
         try:
             conn = get_db(); cur = conn.cursor()
             cur.execute("""
                 SELECT id, name, favorite_count, total_sales, price,
-                       asset_type_id, creator_name,
+                       asset_type_id, creator_name, description, created_at,
                        EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, fetched_at)))/86400 AS age_days
                 FROM items WHERE id = %s
             """, (item_id,))
             row = cur.fetchone()
 
-            # If item is not in DB, fetch it live from Roblox
             if not row:
-                await progress.edit(
-                    content=f"🔍 Item `{item_id}` not in DB — fetching live from Roblox..."
-                )
-                live = await asyncio.to_thread(
-                    fetch_item_from_roblox, item_id, cookie
-                )
+                await progress.edit(content=f"🔍 Item `{item_id}` not in DB — fetching live...")
+                live = await asyncio.to_thread(fetch_item_from_roblox, item_id, cookie)
                 if not live:
-                    await progress.edit(
-                        content=(f"❌ Item `{item_id}` not found in DB or Roblox. "
-                                 f"Check the ID is correct.")
-                    )
-                    cur.close(); conn.close()
-                    return
-
+                    await progress.edit(content=f"❌ Item `{item_id}` not found.")
+                    cur.close(); conn.close(); return
                 save_item_to_db(cur, live)
                 conn.commit()
-
                 try:
-                    await asyncio.to_thread(
-                        save_item_and_created_at, cur, live, item_id
-                    )
+                    await asyncio.to_thread(save_item_and_created_at, cur, live, item_id)
                     conn.commit()
-                except Exception as e:
-                    print(f"[autopsy] created_at fetch failed: {e}", flush=True)
-
-                # Re-fetch from DB now that it's inserted
+                except Exception:
+                    pass
                 cur.execute("""
                     SELECT id, name, favorite_count, total_sales, price,
-                           asset_type_id, creator_name,
+                           asset_type_id, creator_name, description, created_at,
                            EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, fetched_at)))/86400 AS age_days
                     FROM items WHERE id = %s
                 """, (item_id,))
                 row = cur.fetchone()
-                if not row:
-                    await progress.edit(
-                        content=f"❌ Failed to save item `{item_id}`."
-                    )
-                    cur.close(); conn.close()
-                    return
 
-            (iid, name, favs, sales_public, price, atype, creator, age) = row
+            (iid, name, favs, sales_public, price, atype,
+             creator, desc, created_at, age_days) = row
+
+            # If age is stale (0 or None), fetch live
+            if not age_days or age_days < 0.01:
+                live_created = await asyncio.to_thread(fetch_created_date_live, item_id, cookie)
+                if live_created:
+                    age_days = (datetime.utcnow() - live_created.replace(tzinfo=None)).total_seconds() / 86400
+                    try:
+                        cur.execute("UPDATE items SET created_at = %s WHERE id = %s",
+                                    (live_created, item_id))
+                        conn.commit()
+                    except Exception:
+                        pass
 
             name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:4]
             if not name_words:
@@ -236,14 +307,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 cutoff = max(1, len(sorted_f) // 10)
                 winner_median_favs = sorted_f[cutoff - 1]
 
-            item_stats = {"id": iid, "favs": favs or 0, "sales": sales_public or 0,
-                          "price": price or 0, "age_days": float(age or 0),
-                          "winner_median_favs": winner_median_favs, "category": atype}
+            item_stats = {
+                "id": iid, "favs": favs or 0, "sales": sales_public or 0,
+                "price": price or 0, "age_days": float(age_days or 0),
+                "winner_median_favs": winner_median_favs, "category": atype,
+            }
         except Exception as e:
             try: await progress.edit(content=f"❌ Autopsy failed: `{e}`")
             except Exception: pass
             return
 
+        # Silent sales
         if cookie and user_id:
             try:
                 sales_list = await asyncio.to_thread(fetch_user_sales, cookie, user_id, 3)
@@ -258,65 +332,199 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         header = (f"# 🩺 AUTOPSY — `{name[:60]}`\n"
                   f"**Creator:** {creator or '?'} · **Item ID:** `{iid}`\n"
-                  f"**Type:** {ASSET_TYPE_NAMES.get(atype, atype)}")
+                  f"**Type:** {ASSET_TYPE_NAMES.get(atype, atype)}\n"
+                  f"**Age:** {item_stats['age_days']:.1f} days")
         await ctx.send(header)
 
         body = format_recovery_report(diagnosis, item_stats, show_sales=False)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
+        # ── 10 recovery titles + 3 descriptions ──────────────
         try:
-            from gemini_brain import is_available, _generate
+            from gemini_brain import is_available, extract_keywords, all_terms, _generate
         except Exception:
             return
 
-        if is_available() and diagnosis.get("fixable"):
-            try:
-                ai_msg = await ctx.send("🧠 **AI is writing recovery titles...**")
-                recovery_prompt = f"""A Roblox UGC creator's item is failing. Write recovery titles.
+        if not is_available():
+            return
 
-ITEM: {name}
-INTERNAL STATS (do NOT echo these to user):
-- favs: {item_stats['favs']}
-- sales: {item_stats['sales']}
-- price: R${item_stats['price']}
-- age: {item_stats['age_days']:.1f} days
+        ai_msg = await ctx.send("🧠 **Generating 10 recovery titles + descriptions...**")
+
+        intent = extract_keywords(name or "dance emote")
+        allow_list, top_items, stats = [], [], {}
+        try:
+            from discord_ugc_bot import _build_allow_list
+            def _run():
+                return _build_allow_list(intent, 60, None)
+            allow_list, top_items, stats = await asyncio.to_thread(_run)
+        except Exception as e:
+            print(f"[autopsy] allow-list failed: {e}", flush=True)
+
+        if not allow_list:
+            allow_list = list(set(
+                [w.lower() for w in re.findall(r"[a-z]{4,}", name or "")]
+                + ["emote", "dance", "sway", "hip", "groove", "flow", "freestyle",
+                   "bounce", "tiktok", "viral", "smooth"]
+            ))
+
+        recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it with new titles.
+
+=== THE FAILING ITEM ===
+Current name: {name}
+Creator description: {desc or '(none)'}
+Current favs: {item_stats['favs']}
+Current sales: {item_stats['sales']}
+Price: R${item_stats['price']}
+Age: {item_stats['age_days']:.1f} days
+Winner median in niche: {item_stats['winner_median_favs']:,} favs
 
 FAILURE MODE: {diagnosis['failure_mode']}
 
-Return ONLY JSON:
-{{
-  "recovery_titles": ["3 new title options"],
-  "recovery_description": "full replacement description",
-  "edit_reasoning": "1-2 sentences — do NOT mention sales numbers"
-}}
+=== WHAT WENT WRONG ===
+The original title has {len((name or '').split())} words and starts with filler adjectives
+like "chill" or "groovy" — weak search tokens. Roblox weights the FIRST TWO words heaviest
+for search. Filler = death.
 
-RULES:
-- Titles 3-5 words.
-- First word = highest-value token.
-- Do NOT mention sales, revenue, or R$ amounts.
-- Output ONLY JSON.
+=== YOUR JOB ===
+Return 10 NEW titles and 3 descriptions as JSON. Every title must FIX the original.
+
+RULES — NON-NEGOTIABLE:
+1. Every title MUST be 3-5 words. NOT 2. NOT 6. Exactly 3-5.
+2. Every title MUST start with a SEARCHABLE noun or verb (Hip, Sway, Dance, Groove, Arm, Pump, Bounce).
+   NEVER start with an adjective (Chill, Groovy, Smooth, Cool, Cute).
+3. Every title MUST end with "Emote", "Dance", or "Freestyle".
+4. Every title MUST use ONLY these allow-list words + glue + item-type words:
+   {', '.join(allow_list[:60])}
+5. Every title MUST be UNIQUE. No word-order shuffles.
+
+=== 10 TITLES — GROUP INTO 4 STRATEGIES ===
+
+titles_safe (3) — clean, search-first, mirror winners:
+- Format: [Move] [Move2] [Type]  OR  [Move] [Type]
+- Example: "Hip Sway Dance Emote"
+
+titles_differentiated (3) — same keywords, unique angle:
+- MUST start with a DIFFERENT first word than any safe title
+- Example: "Sway Arm Pump Dance"
+
+titles_longtail (2) — 4-5 tokens, packed with keywords:
+- Example: "Hip Sway Freestyle Dance Emote"
+
+titles_viral (2) — trend / meme / TikTok hook:
+- Example: "TikTok Hip Sway Dance"
+
+=== 3 DESCRIPTIONS ===
+
+description_seo (recommended) — first 5 words = the primary keyword:
+"<Primary Keyword> Emote — <selling point>. Perfect for <use case>. Fav if you vibe."
+Max 160 characters.
+
+description_hype — TikTok-style urgency:
+"<hook> <benefit> <CTA>" — max 120 chars.
+
+description_short — minimal, clean:
+"<keyword> <what it is>" — max 80 chars.
+
+=== OUTPUT — ONLY JSON ===
+
+{{
+  "titles_safe": ["...", "...", "..."],
+  "titles_differentiated": ["...", "...", "..."],
+  "titles_longtail": ["...", "..."],
+  "titles_viral": ["...", "..."],
+  "description_seo": "...",
+  "description_hype": "...",
+  "description_short": "...",
+  "primary_keyword": "the single best first word to lead with",
+  "edit_reasoning": "2-3 sentences on the strategy behind these titles",
+  "what_was_wrong": "1-2 sentences on what the original title did wrong"
+}}
 """
-                raw = await asyncio.to_thread(_generate, recovery_prompt, True, 0.7, 2048, "gemini")
-                if raw:
-                    try: data = json.loads(raw)
-                    except Exception:
-                        m = re.search(r"\{.*\}", raw, re.DOTALL)
-                        data = json.loads(m.group(0)) if m else {}
-                    if data:
-                        lines = ["## 🧠 AI RECOVERY TITLES\n"]
-                        for i, t in enumerate(data.get("recovery_titles", []), 1):
-                            lines.append(f"**{i}.** `{t}`")
-                        lines.append("")
-                        if data.get("recovery_description"):
-                            lines.append("## 📝 REPLACEMENT DESCRIPTION")
-                            lines.append(data["recovery_description"]); lines.append("")
-                        if data.get("edit_reasoning"):
-                            lines.append(f"**Why:** {data['edit_reasoning']}")
-                        try: await ai_msg.edit(content="\n".join(lines)[:1900])
-                        except Exception: pass
-                    else:
-                        try: await ai_msg.delete()
-                        except Exception: pass
-            except Exception as e:
-                print(f"[autopsy] AI recovery failed: {e}", flush=True)
+
+        try:
+            raw = await asyncio.to_thread(_generate, recovery_prompt, True, 0.9, 6000, "gemini")
+            data = {}
+            if raw:
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    m = re.search(r"\{.*\}", raw, re.DOTALL)
+                    data = json.loads(m.group(0)) if m else {}
+
+            if not data:
+                await ai_msg.edit(content="⚠️ AI returned nothing. Try again in 2 min.")
+                return
+
+            from gemini_brain import verify_titles
+            all_groups = {
+                "🟢 SAFE (search-first)":           data.get("titles_safe") or [],
+                "🎯 DIFFERENTIATED (unique angle)": data.get("titles_differentiated") or [],
+                "🔎 LONG-TAIL SEO (4+ keywords)":   data.get("titles_longtail") or [],
+                "🔥 VIRAL (meme/TikTok hook)":      data.get("titles_viral") or [],
+            }
+
+            verified_groups = {}
+            for gname, gtitles in all_groups.items():
+                v, r = verify_titles(gtitles, allow_list)
+                if v:
+                    verified_groups[gname] = v
+
+            lines = ["# 🧠 10 RECOVERY TITLES\n"]
+
+            if verified_groups:
+                for gname, titles in verified_groups.items():
+                    lines.append(f"**{gname}**")
+                    for t in titles:
+                        lines.append(f"• `{t}`")
+                    lines.append("")
+            else:
+                lines.append("⚠️ Titles failed verification. Falling back to safe picks:")
+                lines.append("• `Hip Sway Dance Emote`")
+                lines.append("• `Hip Sway Freestyle`")
+                lines.append("• `Sway Dance Emote`")
+                lines.append("")
+
+            lines.append("---\n")
+            lines.append("## 📝 3 DESCRIPTIONS\n")
+
+            if data.get("description_seo"):
+                lines.append("**🎯 SEO (recommended)**")
+                lines.append(f"```\n{data['description_seo'][:400]}\n```")
+                lines.append("")
+            if data.get("description_hype"):
+                lines.append("**🔥 Hype (TikTok-style)**")
+                lines.append(f"```\n{data['description_hype'][:300]}\n```")
+                lines.append("")
+            if data.get("description_short"):
+                lines.append("**⚡ Short (minimal)**")
+                lines.append(f"```\n{data['description_short'][:200]}\n```")
+                lines.append("")
+
+            if data.get("primary_keyword"):
+                lines.append(f"## 🎯 LEAD WITH: `{data['primary_keyword']}`")
+                lines.append("")
+            if data.get("what_was_wrong"):
+                lines.append("## ❌ What Was Wrong")
+                lines.append(data["what_was_wrong"])
+                lines.append("")
+            if data.get("edit_reasoning"):
+                lines.append("## ✅ Strategy")
+                lines.append(data["edit_reasoning"])
+
+            body = "\n".join(lines)
+            try:
+                await ai_msg.edit(content=body[:1900])
+            except Exception:
+                pass
+            if len(body) > 1900:
+                for i in range(1900, len(body), 1900):
+                    await ctx.send(body[i:i+1900])
+                    await asyncio.sleep(0.3)
+
+        except Exception as e:
+            print(f"[autopsy] AI recovery failed: {e}", flush=True)
+            try:
+                await ai_msg.edit(content=f"⚠️ Recovery generation failed: `{e}`")
+            except Exception:
+                pass
