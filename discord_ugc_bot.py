@@ -21,6 +21,8 @@ from gemini_brain import (
     expand_search_terms,
     analyze_image_for_ugc,
 )
+from algo_brain import build_algo_context
+from winner_analysis import analyze_winners
 
 TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -1995,6 +1997,29 @@ def _db_search(patterns):
         return []
 
 
+def _db_search_emote_only(patterns):
+    if not patterns:
+        return []
+    sql = """
+        SELECT id, name, favorite_count, price, total_sales, description
+        FROM items
+        WHERE (lower(name) LIKE ANY(%s)
+            OR lower(COALESCE(description, '')) LIKE ANY(%s))
+          AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+        LIMIT 2500
+    """
+    try:
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute(sql, (patterns, patterns))
+            return cur.fetchall()
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        print(f"[db-search-emote] {e}", flush=True)
+        return []
+
+
 def _term_match_count(term):
     if not term or len(term) < 3:
         return 0
@@ -2095,8 +2120,6 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
 # ==============================================================
 # SATURATION CHECK + GAP ALTERNATIVES  (THREAD-SAFE)
-# Analyzes user's keywords. If saturated (200+ real competitors),
-# finds co-occurring low-competition alternatives.
 # ==============================================================
 def _find_gap_alternatives(terms, top_n=5):
     """
@@ -2110,7 +2133,6 @@ def _find_gap_alternatives(terms, top_n=5):
     if not valid_terms:
         return [], {}
 
-    # ---- Phase 1: term stats ----
     term_stats = {}
     conn = None
     cur = None
@@ -2153,7 +2175,6 @@ def _find_gap_alternatives(terms, top_n=5):
     if not saturated:
         return [], term_stats
 
-    # ---- Phase 2: find alternatives ----
     all_candidates = defaultdict(lambda: {"count": 0, "favs": 0})
     conn = None
     cur = None
@@ -2240,19 +2261,23 @@ def _find_gap_alternatives(terms, top_n=5):
 def _build_allow_list(intent, max_keywords=60, gap_words=None):
     """
     Builds the allow-list of words for title generation.
-
-    Scoring: opportunity_score = avg_favs / log1p(competition)
     Force-includes user's original terms AND gap_words at the top.
     """
     terms = all_terms(intent)
     if not terms:
         return [], [], {}
 
+    is_emote = (intent.get("item_type") or "").lower() == "emote"
+
     rows_by_id = {}
     patterns = [f"%{t}%" for t in terms if len(t) >= 2]
     if patterns:
-        for r in _db_search(patterns):
-            rows_by_id[r[0]] = r
+        if is_emote:
+            for r in _db_search_emote_only(patterns):
+                rows_by_id[r[0]] = r
+        else:
+            for r in _db_search(patterns):
+                rows_by_id[r[0]] = r
     direct_count = len(rows_by_id)
 
     expanded_terms = []
@@ -2322,8 +2347,9 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
         t_clean = (t or "").lower().strip()
         if len(t_clean) < 3:
             continue
-        if t_clean in word_stats and t_clean not in FILLER_WORDS:
-            force_include.append(t_clean)
+        if t_clean in FILLER_WORDS:
+            continue
+        force_include.append(t_clean)
     for w in force_include:
         if w not in unigrams:
             unigrams.insert(0, w)
@@ -2440,18 +2466,24 @@ def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
         lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
 
     sections = [
-        ("search_diagnosis",    "## 🔍 Search Diagnosis"),
-        ("positioning",         "## 🎯 Positioning"),
-        ("market_diagnosis",    "## 📊 Market Diagnosis"),
-        ("trend_intel",         "## 🌊 Trend Intelligence"),
-        ("price_strategy",      "## 💰 Price Strategy"),
-        ("seo_description",     "## 📝 SEO Description (copy-paste)"),
-        ("algo_strategy",       "## 🤖 Algorithm Strategy"),
-        ("social_playbook",     "## 📱 Social Playbook"),
-        ("cultural_ammo",       "## 🎬 Cultural Ammo"),
-        ("risk_analysis",       "## ⚠️ Risk Analysis"),
-        ("expected_performance","## 📈 Expected Performance"),
-        ("verdict",             "## ⚖️ Verdict"),
+        ("search_diagnosis",              "## 🔍 Search Diagnosis"),
+        ("positioning",                   "## 🎯 Positioning"),
+        ("market_diagnosis",              "## 📊 Market Diagnosis"),
+        ("winner_blueprint",              "## 🏆 Winner Blueprint (top 10% vs bottom 50%)"),
+        ("marketplace_algorithm_playbook","## 🧠 Marketplace Algorithm Playbook"),
+        ("ranking_factor_breakdown",      "## 📐 Ranking Factor Breakdown"),
+        ("sale_velocity_plan",            "## 📈 Sale Velocity Plan (homepage targets)"),
+        ("price_elasticity_call",         "## 💰 Price Elasticity Call"),
+        ("saturation_verdict",            "## ⚠️ Saturation Verdict"),
+        ("launch_window_math",            "## ⏰ Launch Window Math"),
+        ("trend_intel",                   "## 🌊 Trend Intelligence"),
+        ("discovery_path",                "## 🧭 Discovery Path (buyer journey)"),
+        ("seo_description",               "## 📝 SEO Description (copy-paste)"),
+        ("cross_promotion_play",          "## 🔗 Cross-Promotion Play"),
+        ("social_playbook",               "## 📱 Social Playbook"),
+        ("risk_analysis",                 "## ⚠️ Risk Analysis"),
+        ("expected_performance",          "## 📈 Expected Performance"),
+        ("verdict",                       "## ⚖️ Verdict"),
     ]
     for key, header in sections:
         v = synth.get(key)
@@ -2535,7 +2567,6 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"🔎 **Analyzing saturation...**")
     )
 
-    # Saturation check + gap alternatives  (thread-safe)
     gap_alternatives = []
     term_stats = {}
     try:
@@ -2613,6 +2644,27 @@ async def brainstorm(ctx, *, description: str = ""):
         except Exception:
             pass
 
+    # Winner vs loser analysis + algo context
+    winner_data = {}
+    algo_ctx = ""
+    try:
+        def _run_winner():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                return analyze_winners(cur, terms, top_n=40)
+            finally:
+                cur.close(); conn.close()
+        winner_data = await asyncio.to_thread(_run_winner)
+    except Exception as e:
+        print(f"[brainstorm] winner analysis failed: {e}", flush=True)
+
+    try:
+        algo_ctx = build_algo_context(intent)
+    except Exception as e:
+        print(f"[brainstorm] algo context failed: {e}", flush=True)
+
+    specific_moves = intent.get("specific_moves", [])
+
     synth = None
     try:
         synth = await asyncio.to_thread(
@@ -2622,7 +2674,11 @@ async def brainstorm(ctx, *, description: str = ""):
              "expansion_used": stats.get("expansion_used", False),
              "expanded_terms": stats.get("expanded_terms", []),
              "failed_terms": stats.get("failed_terms", []),
-             "reasoning": stats.get("reasoning", "")}
+             "reasoning": stats.get("reasoning", "")},
+            None,
+            specific_moves,
+            winner_data,
+            algo_ctx,
         )
     except Exception as e:
         print(f"[brainstorm] synth failed: {e}", flush=True)
@@ -2785,16 +2841,6 @@ RULES:
 - Do NOT invent keywords. Do NOT fabricate stats.
 - Be direct. Assume this person lost money.
 - Output ONLY the JSON object.
-
-GOOD TITLE EXAMPLES:
-"Russian Rasputin Dance Emote"
-"Rasputin Meme Dance"
-"Russian Dance (Rasputin)"
-
-BAD TITLE EXAMPLES (do NOT do this):
-"troll dance funny meme lol"
-"meme dance troll funny laugh"
-"funny troll dance meme lol sussy"
 """
 
     synth = None
@@ -3240,6 +3286,17 @@ async def ai_debug(ctx):
     body = "\n".join(lines)
     for i in range(0, len(body), 1900):
         await ctx.send(body[i:i + 1900])
+
+
+# =========================================================================
+# LOAD INTEL COMMANDS
+# =========================================================================
+try:
+    from commands_intel import register_intel_commands
+    register_intel_commands(bot, get_db, ASSET_TYPE_NAMES)
+    print("✅ Intel commands loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Intel commands failed to load: {e}", flush=True)
 
 
 app = Flask(__name__)
