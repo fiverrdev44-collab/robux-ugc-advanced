@@ -57,16 +57,22 @@ def forecast_trend(cur, keyword, days=14):
     else:
         trajectory = "➡️ PEAKING — differentiate"; verdict = "HOLD"
 
-    next_words = []
+   next_words = []
     for w, c in co.most_common(30):
         if len(w) < 4: continue
         cur.execute("""SELECT COUNT(*), COALESCE(AVG(favorite_count),0)
                        FROM items WHERE LOWER(name) LIKE %s AND favorite_count > 0""",
                     (f"%{w}%",))
         wc, wfav = cur.fetchone()
+        wc = int(wc or 0)
+        wfav = float(wfav or 0)  # cast Decimal → float
         if wc and 3 <= wc <= 100 and wfav > 1000:
-            next_words.append({"word": w, "count": wc, "avg_favs": int(wfav),
-                               "score": int(wfav / (1 + wc**0.5))})
+            next_words.append({
+                "word": w,
+                "count": wc,
+                "avg_favs": int(wfav),
+                "score": int(wfav / (1 + wc**0.5)),
+            })
     next_words.sort(key=lambda x: x["score"], reverse=True)
 
     return {"keyword": keyword, "saturation": saturation,
