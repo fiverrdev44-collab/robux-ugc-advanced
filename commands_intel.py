@@ -24,7 +24,54 @@ from recovery_brain import (
 
 
 def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
+    @bot.command(name="momentum_debug")
+    async def momentum_debug(ctx):
+        """Diagnostic: what's actually in item_history."""
+        try:
+            conn = get_db(); cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS total_snaps,
+                    COUNT(DISTINCT item_id) AS unique_items,
+                    MIN(snapshot_at) AS earliest,
+                    MAX(snapshot_at) AS latest,
+                    EXTRACT(EPOCH FROM (MAX(snapshot_at) - MIN(snapshot_at)))/86400 AS days_span,
+                    SUM(CASE WHEN favorite_count > 0 THEN 1 ELSE 0 END) AS with_favs
+                FROM item_history
+            """)
+            r = cur.fetchone()
+            cur.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT item_id FROM item_history
+                    GROUP BY item_id
+                    HAVING COUNT(*) >= 2
+                ) sub
+            """)
+            multi_snap_items = cur.fetchone()[0] or 0
+            cur.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT item_id FROM item_history
+                    GROUP BY item_id
+                    HAVING MAX(favorite_count) - MIN(favorite_count) > 5
+                ) sub
+            """)
+            growing_items = cur.fetchone()[0] or 0
+            cur.close(); conn.close()
 
+            msg = (
+                f"**🔍 MOMENTUM DEBUG**\n"
+                f"- Total snapshots: **{r[0]:,}**\n"
+                f"- Unique items snapshotted: **{r[1]:,}**\n"
+                f"- Items with 2+ snapshots: **{multi_snap_items:,}**\n"
+                f"- Items with fav growth >5: **{growing_items:,}**\n"
+                f"- Earliest snapshot: `{r[2]}`\n"
+                f"- Latest snapshot: `{r[3]}`\n"
+                f"- Time span (days): **{float(r[4] or 0):.2f}**\n"
+                f"- Snapshots with favs > 0: **{r[5]:,}**"
+            )
+            await ctx.send(msg)
+        except Exception as e:
+            await ctx.send(f"❌ Debug failed: `{e}`")
     @bot.command(name="momentum")
     async def momentum_cmd(ctx, days: int = 7):
         days = max(3, min(days, 30))
