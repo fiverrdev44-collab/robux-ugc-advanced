@@ -5,12 +5,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def get_db_connection():
-    """Get a DB connection with a hard 10-second timeout."""
-    return psycopg2.connect(
+    """Get a DB connection with hard timeouts on connect AND statements."""
+    conn = psycopg2.connect(
         DATABASE_URL,
         sslmode='require',
         connect_timeout=10,
     )
+    with conn.cursor() as c:
+        c.execute("SET statement_timeout = '30s'")
+    conn.commit()
+    return conn
 
 
 def _safe_exec(cur, sql, label=""):
