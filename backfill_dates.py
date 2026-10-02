@@ -98,5 +98,6 @@ def backfill(batch_size=2000):
 
 
 if __name__ == "__main__":
-    batch = int(os.getenv("BATCH_SIZE", "2000"))
+    import os
+    batch = int(os.getenv("BATCH_SIZE", "3000"))
     backfill(batch)
