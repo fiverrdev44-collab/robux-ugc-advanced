@@ -314,3 +314,33 @@ def save_item_and_created_at(cur, item, item_id):
                 )
     except Exception as e:
         print(f"[created-at] {e}", flush=True)
+def fetch_created_date_live(item_id, cookie=None):
+    """
+    Fetch the item's Created date directly from Roblox's economy endpoint.
+    Returns a datetime or None.
+    """
+    if not item_id:
+        return None
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    if cookie:
+        headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+    try:
+        url = f"https://economy.roblox.com/v2/assets/{item_id}/details"
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        created_raw = data.get("Created")
+        if not created_raw:
+            return None
+        created_str = created_raw.replace("Z", "").split(".")[0]
+        return datetime.fromisoformat(created_str)
+    except Exception:
+        return None
+        
+       
