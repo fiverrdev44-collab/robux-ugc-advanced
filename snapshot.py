@@ -18,7 +18,7 @@ def log(msg):
 TOP_ITEMS_LIMIT = 5000
 
 # Minimum favs required to be tracked (skip junk)
-MIN_FAVS = 50
+MIN_FAVS = 5
 
 # Delay between DB inserts (not needed for API, only DB)
 BATCH_SIZE = 1000
