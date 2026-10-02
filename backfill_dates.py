@@ -1,6 +1,6 @@
 """
-backfill_dates.py — Fill in missing created_at dates from Roblox productinfo API.
-Run once. Takes ~3-7 hours for 24k items.
+backfill_dates.py — Fill missing created_at dates using the economy details endpoint.
+Run from GitHub Actions. Processes in batches.
 """
 import os
 import time
@@ -13,33 +13,31 @@ def log(msg):
     print(msg, flush=True)
 
 
+DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
+
+
 def fetch_created_date(asset_id, session):
-    """
-    Get the creation date for a single asset via the productinfo endpoint.
-    Returns a datetime or None.
-    """
-    url = f"https://www.roblox.com/marketplace/productinfo?assetId={asset_id}"
+    """Get the creation date via the economy details endpoint (returns Created field)."""
     try:
-        r = session.get(url, timeout=10)
+        r = session.get(DETAILS_URL.format(asset_id), timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
         created_str = data.get("Created")
         if not created_str:
             return None
-        # Roblox returns ISO 8601 like "2015-03-14T18:23:11.407Z"
-        # Strip the Z and milliseconds for psycopg2
+        # Strip milliseconds + Z for psycopg2
+        created_str = created_raw = str(created_str)
         created_str = created_str.replace("Z", "").split(".")[0]
         return datetime.fromisoformat(created_str)
     except Exception:
         return None
 
 
-def backfill(batch_size=500):
+def backfill(batch_size=2000):
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Get items missing created_at
     cur.execute("""
         SELECT id FROM items
         WHERE created_at IS NULL
@@ -48,7 +46,12 @@ def backfill(batch_size=500):
     """, (batch_size,))
     ids = [r[0] for r in cur.fetchall()]
 
-    log(f"📅 Backfilling {len(ids)} items (sorted by popularity — real items first)")
+    if not ids:
+        log("✅ No items need backfilling. All done.")
+        cur.close(); conn.close()
+        return
+
+    log(f"📅 Backfilling {len(ids)} items (popularity-sorted)")
 
     session = requests.Session()
     session.headers.update({
@@ -74,7 +77,10 @@ def backfill(batch_size=500):
                 filled += 1
             except Exception as e:
                 log(f"  DB error for {asset_id}: {e}")
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 failed += 1
         else:
             failed += 1
@@ -84,7 +90,7 @@ def backfill(batch_size=500):
             rate = i / elapsed if elapsed > 0 else 0
             log(f"  [{i}/{len(ids)}] filled={filled} failed={failed} ({rate:.1f}/s)")
 
-        time.sleep(0.3)  # ~3 req/sec — respectful
+        time.sleep(0.35)
 
     cur.close()
     conn.close()
@@ -92,4 +98,5 @@ def backfill(batch_size=500):
 
 
 if __name__ == "__main__":
-    backfill()
+    batch = int(os.getenv("BATCH_SIZE", "2000"))
+    backfill(batch)
