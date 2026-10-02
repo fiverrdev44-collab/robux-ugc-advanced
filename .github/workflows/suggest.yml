@@ -1,32 +1,27 @@
-name: Hourly Suggest Scraper
+name: Suggest Scraper
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '30 4,10,16,22 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: suggest
   cancel-in-progress: false
 
 jobs:
   suggest:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run suggest scraper
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          ROBLOSECURITY_COOKIE: ${{ secrets.ROBLOSECURITY_COOKIE }}
           PYTHONUNBUFFERED: "1"
         run: python -u suggest.py
