@@ -12,8 +12,15 @@ from predictor import predict_success, format_prediction
 from oracle import (forecast_trend, format_oracle_forecast,
                     find_next_wave_opportunities, format_next_wave)
 from opportunity_feed import build_daily_feed, format_daily_feed
-from recovery_brain import (detect_failure_mode, format_recovery_report,
-                             fetch_user_sales, enrich_item_stats_with_sales)
+from recovery_brain import (
+    detect_failure_mode,
+    format_recovery_report,
+    fetch_user_sales,
+    enrich_item_stats_with_sales,
+    fetch_item_from_roblox,
+    save_item_to_db,
+    save_item_and_created_at,
+)
 
 
 def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
@@ -119,9 +126,49 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 FROM items WHERE id = %s
             """, (item_id,))
             row = cur.fetchone()
+
+            # If item is not in DB, fetch it live from Roblox
             if not row:
-                await progress.edit(content=f"❌ Item `{item_id}` not found. Run the enricher first.")
-                cur.close(); conn.close(); return
+                await progress.edit(
+                    content=f"🔍 Item `{item_id}` not in DB — fetching live from Roblox..."
+                )
+                live = await asyncio.to_thread(
+                    fetch_item_from_roblox, item_id, cookie
+                )
+                if not live:
+                    await progress.edit(
+                        content=(f"❌ Item `{item_id}` not found in DB or Roblox. "
+                                 f"Check the ID is correct.")
+                    )
+                    cur.close(); conn.close()
+                    return
+
+                save_item_to_db(cur, live)
+                conn.commit()
+
+                try:
+                    await asyncio.to_thread(
+                        save_item_and_created_at, cur, live, item_id
+                    )
+                    conn.commit()
+                except Exception as e:
+                    print(f"[autopsy] created_at fetch failed: {e}", flush=True)
+
+                # Re-fetch from DB now that it's inserted
+                cur.execute("""
+                    SELECT id, name, favorite_count, total_sales, price,
+                           asset_type_id, creator_name,
+                           EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, fetched_at)))/86400 AS age_days
+                    FROM items WHERE id = %s
+                """, (item_id,))
+                row = cur.fetchone()
+                if not row:
+                    await progress.edit(
+                        content=f"❌ Failed to save item `{item_id}`."
+                    )
+                    cur.close(); conn.close()
+                    return
+
             (iid, name, favs, sales_public, price, atype, creator, age) = row
 
             name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:4]
