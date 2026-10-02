@@ -66,18 +66,35 @@ def forecast_trend(cur, keyword, days=14):
         trajectory = "➡️ PEAKING — differentiate"
         verdict = "HOLD"
 
+      # Filter: only suggest words that co-occur with keyword in EMOJI/EMOTE/AESTHETIC context
+    # Reject generic words that just happen to appear alongside
+    GENERIC_BLOCK = {
+        "money", "potion", "jersey", "club", "game", "play", "item", "asset",
+        "shop", "store", "buy", "sale", "free", "code", "gift", "reward",
+        "user", "player", "group", "join", "follow", "like", "share",
+    }
+
     next_words = []
-    for w, c in co.most_common(30):
+    for w, c in co.most_common(50):
         if len(w) < 4:
             continue
+        if w in GENERIC_BLOCK:
+            continue
+
+        # Only accept if the word itself passes a "relevance" test —
+        # it must appear in at least 3 items that ALSO contain the main keyword
         cur.execute(
             """SELECT COUNT(*), COALESCE(AVG(favorite_count),0)
-               FROM items WHERE LOWER(name) LIKE %s AND favorite_count > 0""",
-            (f"%{w}%",)
+               FROM items WHERE LOWER(name) LIKE %s
+                 AND LOWER(name) LIKE %s
+                 AND favorite_count > 0""",
+            (f"%{keyword}%", f"%{w}%")
         )
         wc, wfav = cur.fetchone()
         wc = int(wc or 0)
         wfav = float(wfav or 0)
+
+        # Stricter: word must appear WITH keyword in 3+ items
         if wc and 3 <= wc <= 100 and wfav > 1000:
             next_words.append({
                 "word": w,
