@@ -252,7 +252,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — COMPLETE FIXED VERSION + PIPELINE
+    # !autopsy — with SMART PIPELINE (live enrich)
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -536,9 +536,9 @@ description_seo, description_hype, description_short
                     await ctx.send(body[i:i+1900])
                     await asyncio.sleep(0.3)
 
-            # ── FULL INTELLIGENCE PIPELINE ──
+            # ── SMART PIPELINE (live enrich + cascade) ──
             try:
-                from title_pipeline import run_full_pipeline
+                from smart_pipeline import run_full_pipeline
                 pipeline_ai_titles = []
                 for k in ("titles_safe", "titles_differentiated",
                           "titles_longtail", "titles_viral"):
@@ -547,8 +547,8 @@ description_seo, description_hype, description_short
                 cat_ids = [atype] if atype else None
 
                 pipeline_msg = await ctx.send(
-                    "🧬 **Running intelligence pipeline...**\n"
-                    "_Mining · brute-forcing · ML scoring · 60-90s_"
+                    "🧬 **Running smart pipeline...**\n"
+                    "_Live-enriching thin data · cascading to alternatives_"
                 )
 
                 def _pipeline_autopsy():
@@ -559,6 +559,7 @@ description_seo, description_hype, description_short
                             intent=None, item_type="emote",
                             category_asset_ids=cat_ids,
                             ai_titles=pipeline_ai_titles,
+                            live_enrich=True,
                         )
                     finally:
                         cur3.close(); conn3.close()
@@ -573,7 +574,7 @@ description_seo, description_hype, description_short
                 try: await pipeline_msg.delete()
                 except Exception: pass
             except Exception as pe:
-                print(f"[autopsy] pipeline failed: {pe}", flush=True)
+                print(f"[autopsy] smart pipeline failed: {pe}", flush=True)
 
         except Exception as e:
             print(f"[autopsy] AI recovery failed: {e}", flush=True)
