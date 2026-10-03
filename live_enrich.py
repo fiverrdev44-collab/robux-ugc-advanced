@@ -46,11 +46,56 @@ DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 FAV_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 
 
+# ─────────────────────────────────────────────────────────────
+# ASSET_TYPE_ID → ROBLOX CATEGORY MAPPING (critical fix)
+# ─────────────────────────────────────────────────────────────
+ASSET_TO_CAT = {
+    61: {"category": 12, "subcategory": 39},   # Emote
+    8:  {"category": 11, "subcategory": 9},    # Hat
+    41: {"category": 11, "subcategory": 19},   # Hair
+    18: {"category": 11, "subcategory": 10},   # Face
+    42: {"category": 11, "subcategory": 10},   # Face Acc
+    43: {"category": 11, "subcategory": 11},   # Neck
+    44: {"category": 11, "subcategory": 12},   # Shoulder
+    45: {"category": 11, "subcategory": 13},   # Front
+    46: {"category": 11, "subcategory": 14},   # Back
+    47: {"category": 11, "subcategory": 15},   # Waist
+    11: {"category": 3},                        # Shirt (classic)
+    12: {"category": 3},                        # Pants (classic)
+    64: {"category": 3},                        # 3D T-Shirt
+    65: {"category": 3},                        # 3D Shirt
+    66: {"category": 3},                        # 3D Pants
+    67: {"category": 3},                        # 3D Jacket
+    68: {"category": 3},                        # 3D Sweater
+    69: {"category": 3},                        # 3D Shorts
+    70: {"category": 3},                        # 3D Shoe L
+    71: {"category": 3},                        # 3D Shoe R
+    72: {"category": 3},                        # 3D Dress
+    19: {"category": 5},                        # Gear
+    17: {"category": 4},                        # Head
+    2:  {"category": 3},                        # T-Shirt
+}
+
+
 def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
+    """
+    Search Roblox catalog by keyword.
+    category_ids = [asset_type_id, ...] from CATEGORY_MAP.
+    """
     ids = set()
     cursor = ""
     pages = 0
     max_pages = (limit // 30) + 2
+
+    # Resolve the category/subcategory from asset_type_id
+    cat_params = {}
+    if category_ids:
+        atype = category_ids[0]
+        mapping = ASSET_TO_CAT.get(atype)
+        if mapping:
+            cat_params["category"] = mapping["category"]
+            if "subcategory" in mapping:
+                cat_params["subcategory"] = mapping["subcategory"]
 
     while pages < max_pages:
         params = {
@@ -59,13 +104,13 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
             "sortType": sort,
             "cursor": cursor,
         }
-        if category_ids:
-            params["category"] = category_ids[0]
+        params.update(cat_params)
 
         session = SESSIONS[pages % len(SESSIONS)]
         try:
             r = session.get(CATALOG_SEARCH, params=params, timeout=10)
             if r.status_code != 200:
+                log(f"search HTTP {r.status_code}")
                 break
             data = r.json()
             for item in data.get("data", []):
@@ -132,7 +177,15 @@ def live_enrich_keyword(keyword, category_ids=None, max_items=100):
     if not keyword or len(keyword) < 3:
         return 0
 
-    log(f"Searching Roblox for '{keyword}'...")
+    cat_label = ""
+    if category_ids:
+        mapping = ASSET_TO_CAT.get(category_ids[0])
+        if mapping:
+            cat_label = f" [cat={mapping['category']}" + (
+                f"/sub={mapping['subcategory']}]" if mapping.get("subcategory") else "]"
+            )
+
+    log(f"Searching Roblox for '{keyword}'{cat_label}...")
     ids = _search_keyword(keyword, category_ids, limit=max_items)
     if not ids:
         log(f"No results for '{keyword}'")
