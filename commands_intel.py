@@ -251,48 +251,43 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                        EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, fetched_at)))/86400 AS age_days
                 FROM items WHERE id = %s
             """, (item_id,))
-            row = cur.fetchone()
+                     row = cur.fetchone()
 
-            if not row:
-                await progress.edit(content=f"🔍 Item `{item_id}` not in DB — fetching live...")
-                live = await asyncio.to_thread(fetch_item_from_roblox, item_id, cookie)
-                if not live:
-                    await progress.edit(content=f"❌ Item `{item_id}` not found.")
-                    cur.close(); conn.close(); return
+            # ALWAYS fetch live from Roblox to get fresh title/description
+            # This catches edits the creator made after the item was first scanned
+            await progress.edit(
+                content=f"🔍 Refreshing `{item_id}` live from Roblox..."
+            )
+            from recovery_brain import (
+                fetch_item_from_roblox, save_item_to_db, save_item_and_created_at,
+            )
+            live = await asyncio.to_thread(fetch_item_from_roblox, item_id, cookie)
+            if live:
                 save_item_to_db(cur, live)
                 conn.commit()
                 try:
                     await asyncio.to_thread(save_item_and_created_at, cur, live, item_id)
                     conn.commit()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[autopsy] created_at fetch failed: {e}", flush=True)
+
+                # Re-fetch fresh row from DB
                 cur.execute("""
                     SELECT id, name, favorite_count, total_sales, price,
-                           asset_type_id, creator_name, description, created_at,
+                           asset_type_id, creator_name,
                            EXTRACT(EPOCH FROM (NOW() - COALESCE(created_at, fetched_at)))/86400 AS age_days
                     FROM items WHERE id = %s
                 """, (item_id,))
-                row = cur.fetchone()
-
-            (iid, name, favs, sales_public, price, atype,
-             creator, desc, created_at, age_days) = row
-
-            # If age is stale (0 or None), fetch live
-            if not age_days or age_days < 0.01:
-                live_created = await asyncio.to_thread(fetch_created_date_live, item_id, cookie)
-                if live_created:
-                    age_days = (datetime.utcnow() - live_created.replace(tzinfo=None)).total_seconds() / 86400
-                    try:
-                        cur.execute("UPDATE items SET created_at = %s WHERE id = %s",
-                                    (live_created, item_id))
-                        conn.commit()
-                    except Exception:
-                        pass
-
-            name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:4]
-            if not name_words:
-                await progress.edit(content="❌ Item name is empty.")
-                cur.close(); conn.close(); return
+                fresh = cur.fetchone()
+                if fresh:
+                    row = fresh
+            elif not row:
+                await progress.edit(
+                    content=f"❌ Item `{item_id}` not found in DB or Roblox. "
+                            f"Check the ID is correct."
+                )
+                cur.close(); conn.close()
+                return
 
             patterns = [f"%{w}%" for w in name_words]
             cur.execute("""SELECT favorite_count FROM items
