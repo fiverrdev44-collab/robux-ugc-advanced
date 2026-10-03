@@ -3303,14 +3303,13 @@ try:
     print("✅ Intel commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Intel commands failed to load: {e}", flush=True)
-    
- try:
+
+try:
     from commands_advanced import register_advanced_commands
     register_advanced_commands(bot, get_db)
     print("✅ Advanced commands loaded.", flush=True)
 except Exception as e:
-    print(f"⚠️ Advanced commands failed to load: {e}", flush=True)   
-
+    print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 
 app = Flask(__name__)
 
