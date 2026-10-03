@@ -1,6 +1,6 @@
 """
-snapshot.py — Snapshot with rate-limit-aware fetching.
-Slower but actually succeeds.
+snapshot.py — Fast snapshot with live refresh.
+Runs from Render (stable IP) → no rate limits.
 """
 import os
 import time
@@ -13,13 +13,12 @@ def log(msg):
     print(msg, flush=True)
 
 
-# ── Balanced settings for GitHub Actions IPs ──
-TOP_ITEMS_LIMIT = 2000      # Lower = finishes in time
-MIN_FAVS = 100
+# ── Lightweight settings (1K items) ──
+TOP_ITEMS_LIMIT = 1000
+MIN_FAVS = 200
 BATCH_SIZE = 500
-WORKERS_PER_SESSION = 2     # ⚡ 2 workers per cookie
-DELAY = 1.2                 # ⚡ More breathing room
-MAX_RETRIES = 3
+WORKERS_PER_SESSION = 3
+DELAY = 0.4
 
 COOKIES = []
 for i in range(1, 6):
@@ -31,7 +30,7 @@ if not COOKIES:
     if single:
         COOKIES.append(single.strip())
 if not COOKIES:
-    log("⚠️ No cookies — anonymous mode (very slow)")
+    log("⚠️ No cookies — anonymous mode")
     COOKIES = [None]
 
 HEADERS = {
@@ -52,49 +51,27 @@ for cookie in COOKIES:
     SESSIONS.append(s)
 
 TOTAL_WORKERS = len(SESSIONS) * WORKERS_PER_SESSION
-log(f"🔐 {len(SESSIONS)} sessions → {TOTAL_WORKERS} workers · {DELAY}s delay")
-
-# Track why fetches fail
-_stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
+log(f"🔐 {len(SESSIONS)} session(s) → {TOTAL_WORKERS} workers")
 
 
 def fetch_fresh_favs(item_id):
-    """Fetch latest favourite count with retry + backoff."""
     for session in SESSIONS:
-        for attempt in range(MAX_RETRIES):
-            try:
-                r = session.get(FAV_URL.format(item_id), timeout=10)
-                if r.status_code == 200:
-                    favs = r.json().get("favoriteCount")
-                    if favs is not None:
-                        _stats["ok"] += 1
-                        return item_id, int(favs)
-                    else:
-                        _stats["other"] += 1
-                        return item_id, None
-                elif r.status_code == 429:
-                    _stats["429"] += 1
-                    wait = int(r.headers.get("Retry-After", 3))
-                    time.sleep(wait + attempt * 2)
-                    continue
-                elif r.status_code == 403:
-                    _stats["403"] += 1
-                    time.sleep(2)
-                    continue
-                elif r.status_code == 404:
-                    _stats["404"] += 1
-                    return item_id, None
-                else:
-                    _stats["other"] += 1
-                    return item_id, None
-            except Exception:
-                _stats["exc"] += 1
+        try:
+            r = session.get(FAV_URL.format(item_id), timeout=8)
+            if r.status_code == 200:
+                favs = r.json().get("favoriteCount")
+                if favs is not None:
+                    return item_id, int(favs)
+            elif r.status_code == 429:
                 time.sleep(1)
+                continue
+        except Exception:
+            continue
     return item_id, None
 
 
 def snapshot_top_items():
-    log("📸 Snapshot job started.")
+    log("📸 Snapshot starting (light mode)...")
     start = time.time()
 
     conn = get_db_connection()
@@ -113,14 +90,13 @@ def snapshot_top_items():
         LIMIT %s
     """, (MIN_FAVS, TOP_ITEMS_LIMIT))
     rows = cur.fetchall()
-    log(f"📊 Found {len(rows)} items to snapshot.")
+    log(f"📊 {len(rows)} items to snapshot.")
 
     if not rows:
-        log("✅ Nothing to snapshot.")
+        log("✅ All done for today.")
         cur.close(); conn.close()
         return
 
-    log(f"🔄 Fetching with {TOTAL_WORKERS} workers, {DELAY}s delay...")
     id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
     ids = list(id_to_data.keys())
 
@@ -135,8 +111,7 @@ def snapshot_top_items():
                 out[iid] = favs
             completed[0] += 1
             if completed[0] % 200 == 0:
-                log(f"   {completed[0]}/{len(ids)} fetched · "
-                    f"ok={_stats['ok']} 429={_stats['429']}")
+                log(f"   {completed[0]}/{len(ids)} fetched")
             time.sleep(DELAY)
         return out
 
@@ -152,10 +127,8 @@ def snapshot_top_items():
             except Exception as e:
                 log(f"   worker error: {e}")
 
-    log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items")
-    log(f"📊 Stats: {_stats}")
+    log(f"✅ Fetched {len(fresh_favs)}/{len(ids)}")
 
-    # Update items table
     for iid, favs in fresh_favs.items():
         try:
             cur.execute("UPDATE items SET favorite_count = %s WHERE id = %s",
@@ -164,7 +137,6 @@ def snapshot_top_items():
             pass
     conn.commit()
 
-    # Insert snapshots
     log("💾 Inserting snapshots...")
     inserted = 0
     batch = []
@@ -192,6 +164,11 @@ def snapshot_top_items():
 
     cur.close(); conn.close()
     log(f"✅ Snapshot complete: {inserted} rows in {time.time()-start:.1f}s")
+
+
+def snapshot_top_items_wrapper():
+    """Wrapper for the scheduler to call."""
+    snapshot_top_items()
 
 
 if __name__ == "__main__":
