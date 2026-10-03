@@ -252,7 +252,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — COMPLETE FIXED VERSION
+    # !autopsy — COMPLETE FIXED VERSION + PIPELINE
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -272,7 +272,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             """, (item_id,))
             row = cur.fetchone()
 
-            # ALWAYS fetch live from Roblox for fresh title/description
             await progress.edit(
                 content=f"🔍 Refreshing `{item_id}` live from Roblox..."
             )
@@ -304,11 +303,9 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 cur.close(); conn.close()
                 return
 
-            # Unpack row
             (iid, name, favs, sales_public, price, atype,
              creator, desc, created_at, age_days) = row
 
-            # Live age fallback if needed
             if not age_days or float(age_days) < 0.01:
                 live_created = await asyncio.to_thread(
                     fetch_created_date_live, item_id, cookie
@@ -322,7 +319,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                     except Exception:
                         pass
 
-            # Winner median in niche
             name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:4]
             if not name_words:
                 await progress.edit(content="❌ Item name is empty.")
@@ -539,6 +535,45 @@ description_seo, description_hype, description_short
                 for i in range(1900, len(body), 1900):
                     await ctx.send(body[i:i+1900])
                     await asyncio.sleep(0.3)
+
+            # ── FULL INTELLIGENCE PIPELINE ──
+            try:
+                from title_pipeline import run_full_pipeline
+                pipeline_ai_titles = []
+                for k in ("titles_safe", "titles_differentiated",
+                          "titles_longtail", "titles_viral"):
+                    pipeline_ai_titles.extend(data.get(k) or [])
+
+                cat_ids = [atype] if atype else None
+
+                pipeline_msg = await ctx.send(
+                    "🧬 **Running intelligence pipeline...**\n"
+                    "_Mining · brute-forcing · ML scoring · 60-90s_"
+                )
+
+                def _pipeline_autopsy():
+                    conn3 = get_db(); cur3 = conn3.cursor()
+                    try:
+                        return run_full_pipeline(
+                            cur3, name or "dance emote",
+                            intent=None, item_type="emote",
+                            category_asset_ids=cat_ids,
+                            ai_titles=pipeline_ai_titles,
+                        )
+                    finally:
+                        cur3.close(); conn3.close()
+
+                pr = await asyncio.to_thread(_pipeline_autopsy)
+                if pr and pr.get("report"):
+                    pbody = pr["report"]
+                    for i in range(0, len(pbody), 1900):
+                        await ctx.send(pbody[i:i+1900])
+                        await asyncio.sleep(0.3)
+
+                try: await pipeline_msg.delete()
+                except Exception: pass
+            except Exception as pe:
+                print(f"[autopsy] pipeline failed: {pe}", flush=True)
 
         except Exception as e:
             print(f"[autopsy] AI recovery failed: {e}", flush=True)
