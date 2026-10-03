@@ -2717,9 +2717,9 @@ async def brainstorm(ctx, *, description: str = ""):
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
         return
-    # ── FULL INTELLIGENCE PIPELINE ──
+        # ── SMART PIPELINE (live enrich + cascade) ──
     try:
-        from title_pipeline import run_full_pipeline
+        from smart_pipeline import run_full_pipeline
         from rising_gaps import CATEGORY_MAP
 
         ai_titles = []
@@ -2732,8 +2732,10 @@ async def brainstorm(ctx, *, description: str = ""):
         if detected_type in CATEGORY_MAP:
             cat_ids = CATEGORY_MAP[detected_type]
 
-        pipeline_msg = await ctx.send("🧬 **Running intelligence pipeline...**\n"
-                                      "_Mining · brute-forcing · ML scoring · 60-90s_")
+        pipeline_msg = await ctx.send(
+            "🧬 **Running smart pipeline...**\n"
+            "_Live-enriching thin data · cascading to alternatives_"
+        )
 
         def _pipeline():
             conn2 = get_db(); cur2 = conn2.cursor()
@@ -2743,6 +2745,7 @@ async def brainstorm(ctx, *, description: str = ""):
                     item_type=detected_type or "emote",
                     category_asset_ids=cat_ids,
                     ai_titles=ai_titles,
+                    live_enrich=True,
                 )
             finally:
                 cur2.close(); conn2.close()
@@ -2758,7 +2761,7 @@ async def brainstorm(ctx, *, description: str = ""):
         try: await pipeline_msg.delete()
         except Exception: pass
     except Exception as e:
-        print(f"[brainstorm] pipeline failed: {e}", flush=True)
+        print(f"[brainstorm] smart pipeline failed: {e}", flush=True)
     all_groups = {
         "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
         "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
