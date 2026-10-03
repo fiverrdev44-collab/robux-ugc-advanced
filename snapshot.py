@@ -1,6 +1,5 @@
 """
-snapshot.py — Snapshot with rate-limit-aware fetching.
-Reduced to 100 items for Render IP test.
+snapshot.py — Fast snapshot from Render's trusted IP.
 """
 import os
 import time
@@ -13,12 +12,12 @@ def log(msg):
     print(msg, flush=True)
 
 
-# ── TEST settings (100 items) ──
-TOP_ITEMS_LIMIT = 100
-MIN_FAVS = 500
+# ── Production settings (1000 items) ──
+TOP_ITEMS_LIMIT = 1000
+MIN_FAVS = 200
 BATCH_SIZE = 500
-WORKERS_PER_SESSION = 2
-DELAY = 0.5
+WORKERS_PER_SESSION = 3
+DELAY = 0.4
 MAX_RETRIES = 3
 
 COOKIES = []
@@ -31,7 +30,7 @@ if not COOKIES:
     if single:
         COOKIES.append(single.strip())
 if not COOKIES:
-    log("⚠️ No cookies — anonymous mode (very slow)")
+    log("⚠️ No cookies — anonymous mode")
     COOKIES = [None]
 
 HEADERS = {
@@ -58,7 +57,6 @@ _stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
 
 
 def fetch_fresh_favs(item_id):
-    """Fetch latest favourite count with retry + backoff."""
     for session in SESSIONS:
         for attempt in range(MAX_RETRIES):
             try:
@@ -133,7 +131,7 @@ def snapshot_top_items():
             if favs is not None:
                 out[iid] = favs
             completed[0] += 1
-            if completed[0] % 20 == 0:
+            if completed[0] % 200 == 0:
                 log(f"   {completed[0]}/{len(ids)} fetched · "
                     f"ok={_stats['ok']} 429={_stats['429']}")
             time.sleep(DELAY)
