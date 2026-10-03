@@ -2717,7 +2717,48 @@ async def brainstorm(ctx, *, description: str = ""):
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
         return
+    # ── FULL INTELLIGENCE PIPELINE ──
+    try:
+        from title_pipeline import run_full_pipeline
+        from rising_gaps import CATEGORY_MAP
 
+        ai_titles = []
+        for k in ("titles_safe", "titles_differentiated",
+                  "titles_longtail", "titles_viral"):
+            ai_titles.extend(synth.get(k) or [])
+
+        cat_ids = None
+        detected_type = (intent.get("item_type") or "").lower()
+        if detected_type in CATEGORY_MAP:
+            cat_ids = CATEGORY_MAP[detected_type]
+
+        pipeline_msg = await ctx.send("🧬 **Running intelligence pipeline...**\n"
+                                      "_Mining · brute-forcing · ML scoring · 60-90s_")
+
+        def _pipeline():
+            conn2 = get_db(); cur2 = conn2.cursor()
+            try:
+                return run_full_pipeline(
+                    cur2, description, intent=intent,
+                    item_type=detected_type or "emote",
+                    category_asset_ids=cat_ids,
+                    ai_titles=ai_titles,
+                )
+            finally:
+                cur2.close(); conn2.close()
+
+        pipeline_result = await asyncio.to_thread(_pipeline)
+
+        if pipeline_result and pipeline_result.get("report"):
+            body = pipeline_result["report"]
+            for i in range(0, len(body), 1900):
+                await ctx.send(body[i:i+1900])
+                await asyncio.sleep(0.3)
+
+        try: await pipeline_msg.delete()
+        except Exception: pass
+    except Exception as e:
+        print(f"[brainstorm] pipeline failed: {e}", flush=True)
     all_groups = {
         "🟢 Safe (mirror winners)":          synth.get("titles_safe") or [],
         "🎯 Differentiated (unique angle)":  synth.get("titles_differentiated") or [],
