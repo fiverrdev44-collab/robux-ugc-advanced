@@ -3303,6 +3303,7 @@ try:
     print("✅ Intel commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Intel commands failed to load: {e}", flush=True)
+    
  try:
     from commands_advanced import register_advanced_commands
     register_advanced_commands(bot, get_db)
