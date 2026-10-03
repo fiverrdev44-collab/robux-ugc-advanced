@@ -18,16 +18,7 @@ def register_advanced_commands(bot, get_db):
     async def rising_gaps_cmd(ctx, *, args: str = ""):
         """
         Find rising-low-competition keywords.
-
         Auto-detects category from your seed keyword.
-
-        Usage:
-          !rising_gaps                      → all categories, 14 days
-          !rising_gaps 30                   → 30-day window
-          !rising_gaps hip sway dance       → auto-detects EMOTE
-          !rising_gaps crown                → auto-detects HAT
-          !rising_gaps necklace             → auto-detects ACCESSORY
-          !rising_gaps emote 30             → explicit category + window
         """
         days = 14
         category = None
@@ -49,7 +40,6 @@ def register_advanced_commands(bot, get_db):
                 else:
                     seed = (seed + " " + t).strip()
 
-        # Auto-detect category from seed if not explicitly set
         if not category and seed:
             detected = detect_category_from_keyword(seed)
             if detected:
@@ -94,7 +84,7 @@ def register_advanced_commands(bot, get_db):
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
             await asyncio.sleep(0.3)
-            
+
     @bot.command(name="momentum_debug")
     async def momentum_debug(ctx):
         """Diagnostic: what's actually in item_history."""
@@ -158,3 +148,31 @@ def register_advanced_commands(bot, get_db):
             f"- Time span (days): **{float(r[4] or 0):.2f}**"
         )
         await ctx.send(msg)
+
+    @bot.command(name="snapshot_now")
+    async def snapshot_now_cmd(ctx):
+        """Manually trigger snapshot from the bot's own IP (Render)."""
+        progress = await ctx.send("📸 **Running snapshot from Render's IP...**\n"
+                                  "_Testing if the bot's own IP avoids rate limits..._")
+
+        def _run():
+            import importlib
+            import snapshot as snap_mod
+            importlib.reload(snap_mod)
+            snap_mod.snapshot_top_items()
+            return True
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ Snapshot failed: `{e}`")
+            return
+
+        try:
+            await progress.edit(
+                content="✅ **Snapshot complete!**\n"
+                        "Check Render logs for the `Fetched X/Y` line.\n"
+                        "If success > 80% → scale back to 1000 items."
+            )
+        except Exception:
+            pass
