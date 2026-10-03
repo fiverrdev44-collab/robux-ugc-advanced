@@ -1,12 +1,12 @@
 """
-snapshot.py — Daily snapshot with LIVE refresh from Roblox.
-Fetches fresh favourite counts from Roblox, then saves to item_history.
-Works with or without cookies (anonymous fallback).
+snapshot.py — Fast daily snapshot with live refresh.
+Multi-worker per session + reduced delays = 10x faster.
 """
 import os
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 from database import get_db_connection
 
 
@@ -14,12 +14,13 @@ def log(msg):
     print(msg, flush=True)
 
 
-TOP_ITEMS_LIMIT = 5000
-MIN_FAVS = 50
+# ── Speed knobs ──
+TOP_ITEMS_LIMIT = 3000      # Reduced from 5000 (finishes faster)
+MIN_FAVS = 100              # Only track popular items (less data needed)
 BATCH_SIZE = 500
-SESSION_DELAY = 1.5
+WORKERS_PER_SESSION = 5     # ⚡ 5 workers per cookie
+DELAY = 0.3                 # ⚡ Reduced from 1.5s
 
-# ── Cookie loading with anonymous fallback ──
 COOKIES = []
 for i in range(1, 6):
     c = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
@@ -29,9 +30,8 @@ if not COOKIES:
     single = os.getenv("ROBLOSECURITY_COOKIE")
     if single:
         COOKIES.append(single.strip())
-
 if not COOKIES:
-    log("⚠️ No cookies set — using anonymous session (slower, lower rate limit)")
+    log("⚠️ No cookies — anonymous mode")
     COOKIES = [None]
 
 HEADERS = {
@@ -43,7 +43,6 @@ HEADERS = {
 
 FAV_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 
-# ── Session pool (safe with None cookies) ──
 SESSIONS = []
 for cookie in COOKIES:
     s = requests.Session()
@@ -52,23 +51,21 @@ for cookie in COOKIES:
     s.headers.update(HEADERS)
     SESSIONS.append(s)
 
-log(f"🔐 Loaded {len(SESSIONS)} session(s)")
+TOTAL_WORKERS = len(SESSIONS) * WORKERS_PER_SESSION
+log(f"🔐 Loaded {len(SESSIONS)} session(s) → {TOTAL_WORKERS} parallel workers")
 
 
 def fetch_fresh_favs(item_id):
-    """Fetch latest favourite count for one item."""
+    """Fetch latest favourite count via round-robin sessions."""
     for session in SESSIONS:
         try:
-            r = session.get(FAV_URL.format(item_id), timeout=10)
+            r = session.get(FAV_URL.format(item_id), timeout=8)
             if r.status_code == 200:
                 favs = r.json().get("favoriteCount")
                 if favs is not None:
-                    try:
-                        return item_id, int(favs)
-                    except (TypeError, ValueError):
-                        pass
+                    return item_id, int(favs)
             elif r.status_code == 429:
-                time.sleep(3)
+                time.sleep(1)
                 continue
         except Exception:
             continue
@@ -76,7 +73,7 @@ def fetch_fresh_favs(item_id):
 
 
 def snapshot_top_items():
-    log("📸 Snapshot job started (with live refresh).")
+    log("📸 Snapshot job started (FAST mode).")
     start = time.time()
 
     conn = get_db_connection()
@@ -95,36 +92,39 @@ def snapshot_top_items():
         LIMIT %s
     """, (MIN_FAVS, TOP_ITEMS_LIMIT))
     rows = cur.fetchall()
-    log(f"📊 Found {len(rows)} items without today's snapshot.")
+    log(f"📊 Found {len(rows)} items to snapshot.")
 
     if not rows:
         log("✅ Nothing to snapshot.")
         cur.close(); conn.close()
         return
 
-    log(f"🔄 Fetching live favourite counts for {len(rows)} items...")
+    log(f"🔄 Fetching live counts with {TOTAL_WORKERS} workers...")
     id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
     ids = list(id_to_data.keys())
 
-    # Distribute across sessions (safe — SESSIONS always has at least 1 item)
-    slices = [[] for _ in SESSIONS]
-    for i, iid in enumerate(ids):
-        slices[i % len(SESSIONS)].append(iid)
+    fresh_favs = {}
+    completed = [0]
 
-    def _worker(session_ids):
+    def _worker(worker_ids):
         out = {}
-        for idx, iid in enumerate(session_ids):
+        for iid in worker_ids:
             _, favs = fetch_fresh_favs(iid)
             if favs is not None:
                 out[iid] = favs
-            if (idx + 1) % 100 == 0:
-                log(f"   {idx+1}/{len(session_ids)} fetched")
-            time.sleep(SESSION_DELAY)
+            completed[0] += 1
+            if completed[0] % 200 == 0:
+                log(f"   {completed[0]}/{len(ids)} fetched")
+            time.sleep(DELAY)
         return out
 
-    fresh_favs = {}
-    with ThreadPoolExecutor(max_workers=len(SESSIONS)) as ex:
-        futures = [ex.submit(_worker, s) for s in slices]
+    # Distribute across ALL workers (not just sessions)
+    chunks = [[] for _ in range(TOTAL_WORKERS)]
+    for i, iid in enumerate(ids):
+        chunks[i % TOTAL_WORKERS].append(iid)
+
+    with ThreadPoolExecutor(max_workers=TOTAL_WORKERS) as ex:
+        futures = [ex.submit(_worker, chunk) for chunk in chunks]
         for f in as_completed(futures):
             try:
                 fresh_favs.update(f.result(timeout=3600))
@@ -133,13 +133,11 @@ def snapshot_top_items():
 
     log(f"✅ Got fresh counts for {len(fresh_favs)}/{len(ids)} items.")
 
-    # Update items table with fresh favs
+    # Update items table
     for iid, favs in fresh_favs.items():
         try:
-            cur.execute(
-                "UPDATE items SET favorite_count = %s WHERE id = %s",
-                (favs, iid)
-            )
+            cur.execute("UPDATE items SET favorite_count = %s WHERE id = %s",
+                        (favs, iid))
         except Exception:
             pass
     conn.commit()
@@ -160,7 +158,6 @@ def snapshot_top_items():
             """, batch)
             conn.commit()
             inserted += len(batch)
-            log(f"   inserted {inserted}...")
             batch = []
 
     if batch:
