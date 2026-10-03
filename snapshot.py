@@ -1,11 +1,11 @@
 """
 snapshot.py — Daily snapshot with LIVE refresh from Roblox.
 Fetches fresh favourite counts from Roblox, then saves to item_history.
+Works with or without cookies (anonymous fallback).
 """
 import os
 import time
 import requests
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
 
@@ -17,9 +17,9 @@ def log(msg):
 TOP_ITEMS_LIMIT = 5000
 MIN_FAVS = 50
 BATCH_SIZE = 500
-WORKERS = 3
 SESSION_DELAY = 1.5
 
+# ── Cookie loading with anonymous fallback ──
 COOKIES = []
 for i in range(1, 6):
     c = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
@@ -30,6 +30,10 @@ if not COOKIES:
     if single:
         COOKIES.append(single.strip())
 
+if not COOKIES:
+    log("⚠️ No cookies set — using anonymous session (slower, lower rate limit)")
+    COOKIES = [None]
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -39,12 +43,16 @@ HEADERS = {
 
 FAV_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 
+# ── Session pool (safe with None cookies) ──
 SESSIONS = []
 for cookie in COOKIES:
     s = requests.Session()
-    s.cookies[".ROBLOSECURITY"] = cookie
+    if cookie:
+        s.cookies[".ROBLOSECURITY"] = cookie
     s.headers.update(HEADERS)
     SESSIONS.append(s)
+
+log(f"🔐 Loaded {len(SESSIONS)} session(s)")
 
 
 def fetch_fresh_favs(item_id):
@@ -74,7 +82,6 @@ def snapshot_top_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Get top items that don't have today's snapshot yet
     cur.execute("""
         SELECT i.id, i.favorite_count, i.total_sales, i.price
         FROM items i
@@ -95,12 +102,11 @@ def snapshot_top_items():
         cur.close(); conn.close()
         return
 
-    # ── Step 1: Refresh favourite counts from Roblox ──
     log(f"🔄 Fetching live favourite counts for {len(rows)} items...")
     id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
     ids = list(id_to_data.keys())
 
-    # Distribute across sessions
+    # Distribute across sessions (safe — SESSIONS always has at least 1 item)
     slices = [[] for _ in SESSIONS]
     for i, iid in enumerate(ids):
         slices[i % len(SESSIONS)].append(iid)
@@ -127,7 +133,7 @@ def snapshot_top_items():
 
     log(f"✅ Got fresh counts for {len(fresh_favs)}/{len(ids)} items.")
 
-    # ── Step 2: Update items table with fresh favs ──
+    # Update items table with fresh favs
     for iid, favs in fresh_favs.items():
         try:
             cur.execute(
@@ -138,7 +144,7 @@ def snapshot_top_items():
             pass
     conn.commit()
 
-    # ── Step 3: Insert snapshots ──
+    # Insert snapshots
     log("💾 Inserting snapshots...")
     inserted = 0
     batch = []
