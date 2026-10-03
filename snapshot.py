@@ -1,12 +1,11 @@
 """
-snapshot.py — Fast daily snapshot with live refresh.
-Multi-worker per session + reduced delays = 10x faster.
+snapshot.py — Snapshot with rate-limit-aware fetching.
+Slower but actually succeeds.
 """
 import os
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
 from database import get_db_connection
 
 
@@ -14,12 +13,13 @@ def log(msg):
     print(msg, flush=True)
 
 
-# ── Speed knobs ──
-TOP_ITEMS_LIMIT = 3000      # Reduced from 5000 (finishes faster)
-MIN_FAVS = 100              # Only track popular items (less data needed)
+# ── Balanced settings for GitHub Actions IPs ──
+TOP_ITEMS_LIMIT = 2000      # Lower = finishes in time
+MIN_FAVS = 100
 BATCH_SIZE = 500
-WORKERS_PER_SESSION = 5     # ⚡ 5 workers per cookie
-DELAY = 0.3                 # ⚡ Reduced from 1.5s
+WORKERS_PER_SESSION = 2     # ⚡ 2 workers per cookie
+DELAY = 1.2                 # ⚡ More breathing room
+MAX_RETRIES = 3
 
 COOKIES = []
 for i in range(1, 6):
@@ -31,7 +31,7 @@ if not COOKIES:
     if single:
         COOKIES.append(single.strip())
 if not COOKIES:
-    log("⚠️ No cookies — anonymous mode")
+    log("⚠️ No cookies — anonymous mode (very slow)")
     COOKIES = [None]
 
 HEADERS = {
@@ -52,28 +52,49 @@ for cookie in COOKIES:
     SESSIONS.append(s)
 
 TOTAL_WORKERS = len(SESSIONS) * WORKERS_PER_SESSION
-log(f"🔐 Loaded {len(SESSIONS)} session(s) → {TOTAL_WORKERS} parallel workers")
+log(f"🔐 {len(SESSIONS)} sessions → {TOTAL_WORKERS} workers · {DELAY}s delay")
+
+# Track why fetches fail
+_stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
 
 
 def fetch_fresh_favs(item_id):
-    """Fetch latest favourite count via round-robin sessions."""
+    """Fetch latest favourite count with retry + backoff."""
     for session in SESSIONS:
-        try:
-            r = session.get(FAV_URL.format(item_id), timeout=8)
-            if r.status_code == 200:
-                favs = r.json().get("favoriteCount")
-                if favs is not None:
-                    return item_id, int(favs)
-            elif r.status_code == 429:
+        for attempt in range(MAX_RETRIES):
+            try:
+                r = session.get(FAV_URL.format(item_id), timeout=10)
+                if r.status_code == 200:
+                    favs = r.json().get("favoriteCount")
+                    if favs is not None:
+                        _stats["ok"] += 1
+                        return item_id, int(favs)
+                    else:
+                        _stats["other"] += 1
+                        return item_id, None
+                elif r.status_code == 429:
+                    _stats["429"] += 1
+                    wait = int(r.headers.get("Retry-After", 3))
+                    time.sleep(wait + attempt * 2)
+                    continue
+                elif r.status_code == 403:
+                    _stats["403"] += 1
+                    time.sleep(2)
+                    continue
+                elif r.status_code == 404:
+                    _stats["404"] += 1
+                    return item_id, None
+                else:
+                    _stats["other"] += 1
+                    return item_id, None
+            except Exception:
+                _stats["exc"] += 1
                 time.sleep(1)
-                continue
-        except Exception:
-            continue
     return item_id, None
 
 
 def snapshot_top_items():
-    log("📸 Snapshot job started (FAST mode).")
+    log("📸 Snapshot job started.")
     start = time.time()
 
     conn = get_db_connection()
@@ -99,7 +120,7 @@ def snapshot_top_items():
         cur.close(); conn.close()
         return
 
-    log(f"🔄 Fetching live counts with {TOTAL_WORKERS} workers...")
+    log(f"🔄 Fetching with {TOTAL_WORKERS} workers, {DELAY}s delay...")
     id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
     ids = list(id_to_data.keys())
 
@@ -114,11 +135,11 @@ def snapshot_top_items():
                 out[iid] = favs
             completed[0] += 1
             if completed[0] % 200 == 0:
-                log(f"   {completed[0]}/{len(ids)} fetched")
+                log(f"   {completed[0]}/{len(ids)} fetched · "
+                    f"ok={_stats['ok']} 429={_stats['429']}")
             time.sleep(DELAY)
         return out
 
-    # Distribute across ALL workers (not just sessions)
     chunks = [[] for _ in range(TOTAL_WORKERS)]
     for i, iid in enumerate(ids):
         chunks[i % TOTAL_WORKERS].append(iid)
@@ -131,7 +152,8 @@ def snapshot_top_items():
             except Exception as e:
                 log(f"   worker error: {e}")
 
-    log(f"✅ Got fresh counts for {len(fresh_favs)}/{len(ids)} items.")
+    log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items")
+    log(f"📊 Stats: {_stats}")
 
     # Update items table
     for iid, favs in fresh_favs.items():
