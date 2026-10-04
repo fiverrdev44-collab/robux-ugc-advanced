@@ -2772,18 +2772,16 @@ async def brainstorm(ctx, *, description: str = ""):
             "_Live-enriching thin data · cascading to alternatives_"
         )
 
-        def _pipeline():
-            conn2 = get_db(); cur2 = conn2.cursor()
-            try:
-                return run_full_pipeline(
-                    cur2, description, intent=intent,
-                    item_type=detected_type or "emote",
-                    category_asset_ids=cat_ids,
-                    ai_titles=ai_titles,
-                    live_enrich=True,
-                )
-            finally:
-                cur2.close(); conn2.close()
+         def _pipeline():
+            return run_full_pipeline(
+                description=description,
+                intent=intent,
+                item_type=detected_type or "emote",
+                category_asset_ids=cat_ids,
+                ai_titles=ai_titles,
+                live_enrich=True,
+                db_factory=get_db,   # ← NEW: enables parallel mode
+            )
 
         pipeline_result = await asyncio.to_thread(_pipeline)
 
