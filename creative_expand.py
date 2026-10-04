@@ -1,5 +1,8 @@
 """
-creative_expand.py — v3: dual-source anchor + diversity-forced prompt.
+creative_expand.py — v4.
+- Movement-shaped prompt (3 flavors: relaxed / energetic / character)
+- Dual-source anchor (search_suggestions + learned_keywords) + fallback
+- Isolated connections per query so one failure doesn't poison the others
 """
 
 import os
@@ -25,55 +28,70 @@ def _conn():
     return psycopg2.connect(DB_URL)
 
 
-# ── Anchor: pull from BOTH tables ─────────────────────────────
+# ── Anchor: pull from BOTH tables, isolated connections ───────
 def _fetch_real_suggestions(seed: str, limit: int = 30) -> list[str]:
     words = [w for w in re.findall(r"\w+", seed.lower()) if w not in STOPWORDS]
     if not words:
         return []
 
     results, seen = [], set()
+    clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
+    params  = [f"%{w}%" for w in words]
 
+    # Query 1 — search_suggestions (raw autocomplete)
+    conn = _conn()
     try:
-        with _conn() as c, c.cursor() as cur:
-            clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-            params  = [f"%{w}%" for w in words]
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT DISTINCT suggestion FROM search_suggestions "
+            f"WHERE {clauses} ORDER BY suggestion LIMIT %s",
+            params + [limit]
+        )
+        for (s,) in cur.fetchall():
+            if s and s.lower() not in seen:
+                seen.add(s.lower()); results.append(s)
+        cur.close()
+    except Exception as e:
+        log.warning("search_suggestions query failed: %s", e)
+    finally:
+        conn.close()
 
-            # 1) search_suggestions — raw autocomplete
+    # Query 2 — learned_keywords (validated top performers)
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT keyword FROM learned_keywords "
+            f"WHERE {clauses} ORDER BY score DESC LIMIT %s",
+            params + [limit]
+        )
+        for (kw,) in cur.fetchall():
+            if kw and kw.lower() not in seen:
+                seen.add(kw.lower()); results.append(kw)
+        cur.close()
+    except Exception as e:
+        log.warning("learned_keywords query failed: %s", e)
+    finally:
+        conn.close()
+
+    # Query 3 — fallback: if too thin, pull top suggestions overall
+    if len(results) < 10:
+        conn = _conn()
+        try:
+            cur = conn.cursor()
             cur.execute(
-                f"SELECT DISTINCT suggestion FROM search_suggestions "
-                f"WHERE {clauses} ORDER BY suggestion LIMIT %s",
-                params + [limit]
+                "SELECT DISTINCT suggestion FROM search_suggestions "
+                "ORDER BY suggestion LIMIT %s",
+                (limit - len(results),)
             )
             for (s,) in cur.fetchall():
                 if s and s.lower() not in seen:
                     seen.add(s.lower()); results.append(s)
-
-            # 2) learned_keywords — validated top performers (score-ranked)
-            try:
-                cur.execute(
-                    f"SELECT keyword FROM learned_keywords "
-                    f"WHERE {clauses} ORDER BY score DESC LIMIT %s",
-                    params + [limit]
-                )
-                for (kw,) in cur.fetchall():
-                    if kw and kw.lower() not in seen:
-                        seen.add(kw.lower()); results.append(kw)
-            except Exception as e:
-                log.warning("learned_keywords query failed: %s", e)
-
-            # 3) Fallback: if too thin, pull top suggestions overall
-            if len(results) < 10:
-                cur.execute(
-                    "SELECT DISTINCT suggestion FROM search_suggestions "
-                    "ORDER BY suggestion LIMIT %s",
-                    (limit - len(results),)
-                )
-                for (s,) in cur.fetchall():
-                    if s and s.lower() not in seen:
-                        seen.add(s.lower()); results.append(s)
-
-    except Exception as e:
-        log.warning("fetch_real_suggestions failed: %s", e)
+            cur.close()
+        except Exception as e:
+            log.warning("fallback query failed: %s", e)
+        finally:
+            conn.close()
 
     return results[:limit]
 
@@ -84,35 +102,45 @@ def _demand_score(concept: str) -> int:
              if w not in STOPWORDS and len(w) >= 3]
     if not words:
         return 0
+    conn = _conn()
     try:
-        with _conn() as c, c.cursor() as cur:
-            clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-            params  = [f"%{w}%" for w in words]
-            cur.execute(
-                f"SELECT COUNT(DISTINCT suggestion) FROM search_suggestions "
-                f"WHERE {clauses}", params
-            )
-            return cur.fetchone()[0] or 0
+        cur = conn.cursor()
+        clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
+        params  = [f"%{w}%" for w in words]
+        cur.execute(
+            f"SELECT COUNT(DISTINCT suggestion) FROM search_suggestions "
+            f"WHERE {clauses}", params
+        )
+        val = cur.fetchone()[0] or 0
+        cur.close()
+        return val
     except Exception as e:
         log.warning("demand check failed for %s: %s", concept, e)
         return 0
+    finally:
+        conn.close()
 
 
 def _supply_score(concept: str) -> int:
+    conn = _conn()
     try:
-        with _conn() as c, c.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM items "
-                "WHERE name ILIKE %s AND favorite_count > 5",
-                (f"%{concept}%",)
-            )
-            return cur.fetchone()[0] or 0
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM items "
+            "WHERE name ILIKE %s AND favorite_count > 5",
+            (f"%{concept}%",)
+        )
+        val = cur.fetchone()[0] or 0
+        cur.close()
+        return val
     except Exception as e:
         log.warning("supply check failed for %s: %s", concept, e)
         return 0
+    finally:
+        conn.close()
 
 
-# ── Diversity-forced prompt ───────────────────────────────────
+# ── Movement-shaped prompt ────────────────────────────────────
 PROMPT = """You are a Roblox UGC emote strategist.
 
 Seed: "{seed}"
@@ -120,23 +148,25 @@ Seed: "{seed}"
 Real Roblox search phrases for reference:
 {examples}
 
-Generate {n} concepts spread EVENLY across these 5 buckets
-(~4 per bucket — do NOT cluster in one bucket):
+Generate {n} concepts for a Roblox EMOTE.
 
-1. MOOD/AESTHETIC — relaxed, hyped, dark, cute, chaotic
-2. MOVEMENT STYLE — bounce, glitch, slide, swing, wave, pop
-3. SUBCULTURE — anime, skating, gaming, mall-core, lo-fi
-4. PERSONALITY/MEME — aura, sigma, NPC, main-character, chill
-5. NAMED-MOVE ENERGY — snappy, poppy, catchy, viral-feeling
+CRITICAL: every concept must describe a MOVEMENT or ACTION.
+Reject anything that is only a vibe, person-type, or aesthetic tag.
+
+Spread across these 3 flavors (~7 each):
+1. RELAXED — chill, mellow, soft, lazy, smooth
+2. ENERGETIC — bouncy, snappy, hyped, poppy, glitchy
+3. CHARACTER — swaggy, confident, sassy, smooth, cool
 
 Rules:
 - 1-3 words each
-- Kid-style, punchy — what a 12yo types into Roblox search
+- Kid-style — what a 12yo types into Roblox search
+- Must be a movement/action phrase, not just a mood tag
 - Do NOT recombine the seed words
-- Each concept must be distinct in FEELING, not just wording
+- Each concept distinct in feel, not just wording
 
-BAD: 20 versions of "chill dance"
-GOOD: chill bounce · aura walk · glitch pop · mall sway · snappy step
+GOOD: chill bounce · snappy step · swag walk · glitch hop · smooth slide
+BAD:  mall goth · sigma glare · viral beat · main character  ← not movements
 
 Return JSON ONLY:
 {{"concepts": ["concept one", "concept two", "..."]}}
@@ -222,7 +252,13 @@ def expand_with_validation(seed: str, n: int = 20) -> dict:
             "examples": examples, "raw": raw or ""}
 
 
-def get_creative_seeds(seed_text: str, max_seeds: int = 8) -> list[str]:
+def get_creative_seeds(seed_text: str, max_seeds: int = 8,
+                       category: str | None = None) -> list[str]:
+    """
+    For smart_pipeline. `category` is accepted for future propagation
+    but not used in v4 — kept so brainstorm integration doesn't need
+    to change signatures later.
+    """
     data = expand_with_validation(seed_text, n=20)
     good = [r["concept"] for r in data["results"]
             if r["verdict"] in ("gold", "opportunity")]
