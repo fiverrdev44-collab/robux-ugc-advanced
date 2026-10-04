@@ -1,8 +1,9 @@
 """
-creative_expand.py — v4.
+creative_expand.py — v4.1 (fixed).
 - Movement-shaped prompt (3 flavors: relaxed / energetic / character)
 - Dual-source anchor (search_suggestions + learned_keywords) + fallback
 - Isolated connections per query so one failure doesn't poison the others
+- FIXED: learned_keywords uses column "keyword", search_suggestions uses "suggestion"
 """
 
 import os
@@ -35,13 +36,13 @@ def _fetch_real_suggestions(seed: str, limit: int = 30) -> list[str]:
         return []
 
     results, seen = [], set()
-    clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-    params  = [f"%{w}%" for w in words]
+    params = [f"%{w}%" for w in words]
 
-    # Query 1 — search_suggestions (raw autocomplete)
+    # Query 1 — search_suggestions uses column "suggestion"
     conn = _conn()
     try:
         cur = conn.cursor()
+        clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
         cur.execute(
             f"SELECT DISTINCT suggestion FROM search_suggestions "
             f"WHERE {clauses} ORDER BY suggestion LIMIT %s",
@@ -56,10 +57,11 @@ def _fetch_real_suggestions(seed: str, limit: int = 30) -> list[str]:
     finally:
         conn.close()
 
-    # Query 2 — learned_keywords (validated top performers)
+    # Query 2 — learned_keywords uses column "keyword"
     conn = _conn()
     try:
         cur = conn.cursor()
+        clauses = " OR ".join(["keyword ILIKE %s"] * len(words))
         cur.execute(
             f"SELECT keyword FROM learned_keywords "
             f"WHERE {clauses} ORDER BY score DESC LIMIT %s",
