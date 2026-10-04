@@ -1,5 +1,6 @@
 """
 smart_pipeline.py — Recursive competition-aware pipeline with live enrichment.
+v2: Creative concepts from intent["search_terms"] now flow through the pipeline.
 """
 import math
 import re
@@ -43,6 +44,11 @@ def _extract_seeds(description, intent=None, top_n=5):
             for t in _tokens(p):
                 if t not in words:
                     words.insert(0, t)
+        # NEW: include creative concepts as full phrases (kept intact)
+        for p in (intent.get("search_terms") or []):
+            p_clean = (p or "").strip().lower()
+            if p_clean and p_clean not in words:
+                words.append(p_clean)
     seen = set()
     out = []
     for w in words:
@@ -158,14 +164,15 @@ def build_titles(seeds, alternatives, item_type="emote"):
     alt_words = [a["word"] for a in alternatives]
     titles = set()
 
+    # Expanded: use up to 6 seeds so creative concepts reach title building
     if len(seeds) >= 2:
-        for i, a in enumerate(seeds[:3]):
-            for b in seeds[i+1:i+3]:
+        for i, a in enumerate(seeds[:6]):
+            for b in seeds[i+1:i+4]:
                 titles.add((a, b, type_variants[0]))
-        for s in seeds[:2]:
+        for s in seeds[:5]:
             titles.add((s, type_variants[0]))
 
-    for orig in seeds[:2]:
+    for orig in seeds[:3]:
         for alt in alt_words[:5]:
             titles.add((orig, alt, type_variants[0]))
             titles.add((alt, orig, type_variants[0]))
@@ -265,7 +272,8 @@ def run_full_pipeline(cur, description, intent=None, item_type="emote",
         "live_enriched": live_enrich, "report": "",
     }
 
-    seeds = _extract_seeds(description, intent)
+    # Bumped top_n from 5 → 12 so creative concepts survive truncation
+    seeds = _extract_seeds(description, intent, top_n=12)
     result["seeds"] = seeds
     if not seeds:
         return result
