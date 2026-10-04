@@ -1,9 +1,9 @@
 """
-commands_market.py — market data commands (dbtest, scan_status, trends,
-analyze, opportunity, emote, classic, gap, velocity, track, etc).
+commands_market.py — market data commands.
 """
 import math
 import re
+import discord
 from collections import Counter, defaultdict
 
 from bot_ui import SimplePaginator, MultiViewPaginator
@@ -43,12 +43,11 @@ def register_market_commands(bot):
             embed.add_field(name="Total in DB", value=f"**{total:,}** items", inline=True)
             if emote_count == 0:
                 embed.add_field(name="⚠️ No emotes detected",
-                                value="Run the Daily Scanner workflow on GitHub. It may take a full scan to fetch emotes.",
+                                value="Run the Daily Scanner workflow on GitHub.",
                                 inline=False)
             else:
                 embed.add_field(name="✅ Emotes Detected",
-                                value=f"You have **{emote_count:,}** emotes in the database. "
-                                      f"Run the enricher to fill details.",
+                                value=f"You have **{emote_count:,}** emotes in the database.",
                                 inline=False)
             await ctx.send(embed=embed)
         except Exception as e:
