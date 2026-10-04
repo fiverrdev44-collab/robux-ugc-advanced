@@ -112,3 +112,109 @@ def register_advanced_commands(bot, get_db):
             )
         except Exception:
             pass
+
+    # ────────────────────────────────────────────────────────
+    # creative_expand — TEST COMMANDS (Step 1)
+    # Remove after wiring into brainstorm/autopsy.
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="creative")
+    async def creative_cmd(ctx, *, seed: str = ""):
+        """
+        Test: AI fan-out + DB demand gate.
+        Usage: !creative rhythm step sway dance
+        """
+        if not seed.strip():
+            await ctx.send("Usage: `!creative <description or seed keywords>`")
+            return
+
+        progress = await ctx.send(f"🧠 **Fanning out on** `{seed}`...")
+
+        def _run():
+            from creative_expand import expand_with_validation
+            return expand_with_validation(seed, n=20)
+
+        try:
+            results = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ Failed: `{e}`")
+            return
+
+        if not results:
+            await progress.edit(
+                content=f"❌ **Nothing passed the demand gate.**\n"
+                        f"Either the AI returned junk, or every concept had 0 demand.\n"
+                        f"Try `!creative_raw {seed}` to inspect raw output."
+            )
+            return
+
+        emoji = {
+            "gold": "🟢",
+            "opportunity": "🔵",
+            "contested": "🟡",
+            "saturated": "🔴",
+        }
+        lines = [f"**Creative expansion for** `{seed}`\n"]
+        for r in results[:15]:
+            lines.append(
+                f"{emoji.get(r['verdict'], '⚪')} **{r['concept']}** "
+                f"— demand `{r['demand']}` / supply `{r['supply']}`"
+            )
+
+        counts = {}
+        for r in results:
+            counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        summary = " · ".join(
+            f"{emoji[k]}{v}" for k, v in counts.items() if k in emoji
+        )
+
+        lines.append(f"\n{summary}")
+        lines.append("🟢 gold · 🔵 opportunity · 🟡 contested · 🔴 saturated")
+        lines.append("_Hallucinated concepts (0 demand) auto-discarded._")
+
+        await progress.edit(content="\n".join(lines))
+
+    @bot.command(name="creative_raw")
+    async def creative_raw_cmd(ctx, *, seed: str = ""):
+        """
+        Debug: show what the AI generated BEFORE the demand gate.
+        Useful when !creative returns nothing or looks narrow.
+        Usage: !creative_raw rhythm step sway dance
+        """
+        if not seed.strip():
+            await ctx.send("Usage: `!creative_raw <description or seed keywords>`")
+            return
+
+        progress = await ctx.send(f"🔬 **Raw AI fan-out on** `{seed}`...")
+
+        def _run():
+            from creative_expand import _call_gemini, _parse, PROMPT
+            raw = _call_gemini(PROMPT.format(seed=seed, n=20))
+            parsed = _parse(raw) if raw else []
+            return raw, parsed
+
+        try:
+            raw, parsed = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ Failed: `{e}`")
+            return
+
+        body = "**RAW Gemini output:**\n```\n"
+        body += (raw or "<empty>")[:1200]
+        body += "\n```\n\n**Parsed concepts (before demand gate):**\n"
+
+        if parsed:
+            body += "\n".join(f"• `{c}`" for c in parsed)
+        else:
+            body += "_nothing parsed — JSON likely malformed, check raw above_"
+
+        body += f"\n\n_(used model: check Render logs or GEMINI_MODEL env)_"
+
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i + 1900])
+            await asyncio.sleep(0.3)
+
+        try:
+            await progress.delete()
+        except Exception:
+            pass
