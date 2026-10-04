@@ -2606,7 +2606,7 @@ async def brainstorm(ctx, *, description: str = ""):
                  f"{creative_line}\n\n"
                  f"🔎 **Analyzing saturation...**")
     )
-    )
+    
 
     gap_alternatives = []
     term_stats = {}
