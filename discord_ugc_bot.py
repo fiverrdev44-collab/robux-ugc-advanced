@@ -2771,8 +2771,27 @@ async def brainstorm(ctx, *, description: str = ""):
             "🧬 **Running smart pipeline...**\n"
             "_Live-enriching thin data · cascading to alternatives_"
         )
+    # ── SMART PIPELINE (live enrich + cascade) ──
+    try:
+        from smart_pipeline import run_full_pipeline
+        from rising_gaps import CATEGORY_MAP
 
-         def _pipeline():
+        ai_titles = []
+        for k in ("titles_safe", "titles_differentiated",
+                  "titles_longtail", "titles_viral"):
+            ai_titles.extend(synth.get(k) or [])
+
+        cat_ids = None
+        detected_type = (intent.get("item_type") or "").lower()
+        if detected_type in CATEGORY_MAP:
+            cat_ids = CATEGORY_MAP[detected_type]
+
+        pipeline_msg = await ctx.send(
+            "🧬 **Running smart pipeline...**\n"
+            "_Live-enriching thin data · cascading to alternatives_"
+        )
+
+        def _pipeline():
             return run_full_pipeline(
                 description=description,
                 intent=intent,
@@ -2780,10 +2799,21 @@ async def brainstorm(ctx, *, description: str = ""):
                 category_asset_ids=cat_ids,
                 ai_titles=ai_titles,
                 live_enrich=True,
-                db_factory=get_db,   # ← NEW: enables parallel mode
+                db_factory=get_db,
             )
 
         pipeline_result = await asyncio.to_thread(_pipeline)
+
+        if pipeline_result and pipeline_result.get("report"):
+            body = pipeline_result["report"]
+            for i in range(0, len(body), 1900):
+                await ctx.send(body[i:i+1900])
+                await asyncio.sleep(0.3)
+
+        try: await pipeline_msg.delete()
+        except Exception: pass
+    except Exception as e:
+        print(f"[brainstorm] smart pipeline failed: {e}", flush=True)
 
         if pipeline_result and pipeline_result.get("report"):
             body = pipeline_result["report"]
