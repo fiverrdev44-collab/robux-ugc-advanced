@@ -22,6 +22,54 @@ from bot_core import (
 )
 
 
+# ── Opportunity keyword filter constants ─────────────────────
+_GENERIC_BLOCK = {
+    "code", "joe", "move", "intro", "guy", "man", "woman", "person",
+    "thing", "stuff", "item", "asset", "made", "version", "edit",
+    "style", "look", "make", "will", "just", "like", "want", "need",
+    "know", "get", "got", "one", "two", "three", "four", "five",
+    "first", "last", "next", "back", "front", "side", "top", "bottom",
+    "left", "right", "here", "there", "where", "when", "what", "who",
+    "which", "yeah", "yea", "nah", "ok", "okay", "guys", "folks",
+    "everyone", "somebody", "anyone", "nobody",
+} | FILLER_WORDS
+
+_EMOTE_VOCAB = {
+    "dance", "emote", "animation", "move", "movement", "groove",
+    "sway", "step", "bounce", "hop", "jump", "slide", "spin", "twirl",
+    "wave", "floss", "glide", "strut", "walk", "run", "pose", "lean",
+    "swing", "shake", "roll", "pop", "lock", "drop", "flip", "kick",
+    "clap", "snap", "tap", "shuffle", "bop", "stomp", "wiggle", "shimmy",
+    "jiggle", "swagger", "swag", "bob", "nod", "twerk", "grind",
+    "chill", "smooth", "mellow", "lazy", "relaxed", "hype", "vibe",
+    "energy", "flow", "rhythm", "beat", "aura",
+    "cool", "snappy", "bouncy", "poppy", "sassy", "boss",
+    "glitch", "cyber", "neon", "viral", "wild", "fast",
+    "slow", "soft", "loose", "tight", "quick", "slick", "fresh",
+    "crazy", "epic", "silly", "goofy", "funny", "troll",
+    "happy", "sad", "angry", "shy", "confident", "humble",
+    "cute", "cozy", "moody", "fancy", "flashy", "subtle",
+    "night", "day", "sun", "moon", "star", "fire", "ice",
+    "party", "club", "disco", "rave", "festival",
+    "kpop", "k-pop", "hiphop", "hip-hop", "rap", "pop", "rock",
+    "edm", "techno", "house", "jazz", "salsa", "ballet",
+    "floss", "griddy", "dab", "moonwalk", "renegade", "dougie",
+}
+
+
+def _is_relevant_keyword(word, seed_set):
+    """Keep only words that are (a) emote-related OR (b) match the seed."""
+    w = word.lower()
+    if w in seed_set:
+        return True
+    if w in _EMOTE_VOCAB:
+        return True
+    for s in seed_set:
+        if len(s) >= 4 and (s in w or w in s):
+            return True
+    return False
+
+
 # ── DB search helpers ────────────────────────────────────────
 def _db_search(patterns):
     if not patterns:
@@ -360,11 +408,21 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
             bg = f"{a} {b}"
             bigrams[bg] = bigrams.get(bg, 0) + 1
 
+    # ── Build seed set for relevance check ───────────────────
+    seed_set = set()
+    for t in terms:
+        for tok in (t or "").lower().split():
+            if len(tok) >= 3:
+                seed_set.add(tok)
+
+    # ── Filtered opportunity keyword scoring ─────────────────
     scored_words = []
     for w, s in word_stats.items():
-        if w in FILLER_WORDS:
+        if w in _GENERIC_BLOCK:
             continue
         if s["count"] < 2:
+            continue
+        if not _is_relevant_keyword(w, seed_set):
             continue
         avg = s["favs"] / s["count"]
         score = avg / math.log1p(s["count"])
