@@ -1,5 +1,5 @@
 """
-creative_expand.py — v2: anchored AI + looser demand gate.
+creative_expand.py — v3: dual-source anchor + diversity-forced prompt.
 """
 
 import os
@@ -25,31 +25,61 @@ def _conn():
     return psycopg2.connect(DB_URL)
 
 
-# ── Ground the AI in real search data ─────────────────────────
+# ── Anchor: pull from BOTH tables ─────────────────────────────
 def _fetch_real_suggestions(seed: str, limit: int = 30) -> list[str]:
-    """Pull real Roblox search phrases matching any seed word."""
     words = [w for w in re.findall(r"\w+", seed.lower()) if w not in STOPWORDS]
     if not words:
         return []
+
+    results, seen = [], set()
+
     try:
         with _conn() as c, c.cursor() as cur:
-            # Match any seed word
             clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-            params = [f"%{w}%" for w in words]
+            params  = [f"%{w}%" for w in words]
+
+            # 1) search_suggestions — raw autocomplete
             cur.execute(
                 f"SELECT DISTINCT suggestion FROM search_suggestions "
                 f"WHERE {clauses} ORDER BY suggestion LIMIT %s",
                 params + [limit]
             )
-            return [r[0] for r in cur.fetchall()]
+            for (s,) in cur.fetchall():
+                if s and s.lower() not in seen:
+                    seen.add(s.lower()); results.append(s)
+
+            # 2) learned_keywords — validated top performers (score-ranked)
+            try:
+                cur.execute(
+                    f"SELECT keyword FROM learned_keywords "
+                    f"WHERE {clauses} ORDER BY score DESC LIMIT %s",
+                    params + [limit]
+                )
+                for (kw,) in cur.fetchall():
+                    if kw and kw.lower() not in seen:
+                        seen.add(kw.lower()); results.append(kw)
+            except Exception as e:
+                log.warning("learned_keywords query failed: %s", e)
+
+            # 3) Fallback: if too thin, pull top suggestions overall
+            if len(results) < 10:
+                cur.execute(
+                    "SELECT DISTINCT suggestion FROM search_suggestions "
+                    "ORDER BY suggestion LIMIT %s",
+                    (limit - len(results),)
+                )
+                for (s,) in cur.fetchall():
+                    if s and s.lower() not in seen:
+                        seen.add(s.lower()); results.append(s)
+
     except Exception as e:
         log.warning("fetch_real_suggestions failed: %s", e)
-        return []
+
+    return results[:limit]
 
 
-# ── Demand gate — word-level matching ─────────────────────────
+# ── Demand + supply scoring ───────────────────────────────────
 def _demand_score(concept: str) -> int:
-    """How many suggestions match ANY meaningful word of the concept."""
     words = [w for w in re.findall(r"\w+", concept.lower())
              if w not in STOPWORDS and len(w) >= 3]
     if not words:
@@ -57,11 +87,10 @@ def _demand_score(concept: str) -> int:
     try:
         with _conn() as c, c.cursor() as cur:
             clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-            params = [f"%{w}%" for w in words]
+            params  = [f"%{w}%" for w in words]
             cur.execute(
                 f"SELECT COUNT(DISTINCT suggestion) FROM search_suggestions "
-                f"WHERE {clauses}",
-                params
+                f"WHERE {clauses}", params
             )
             return cur.fetchone()[0] or 0
     except Exception as e:
@@ -83,24 +112,31 @@ def _supply_score(concept: str) -> int:
         return 0
 
 
-# ── AI fan-out, now anchored ──────────────────────────────────
+# ── Diversity-forced prompt ───────────────────────────────────
 PROMPT = """You are a Roblox UGC emote strategist.
 
 Seed: "{seed}"
 
-Here are 30 REAL Roblox search phrases kids are typing right now
-that relate to the seed:
+Real Roblox search phrases for reference:
 {examples}
 
-Generate {n} NEW concept keywords that:
-- Sound like the real examples above (kid-style, short, punchy)
-- Are 1-3 words
-- Are ADJACENT to the seed (related mood / vibe / movement)
-- Do NOT recombine the seed words
-- No literary phrases, no music-journalist English
+Generate {n} concepts spread EVENLY across these 5 buckets
+(~4 per bucket — do NOT cluster in one bucket):
 
-BAD: "hypnotic groove", "sophisticated sway" — too fancy, kids don't type this
-GOOD: "aura dance", "mellow vibes", "chill bounce", "lazy wave"
+1. MOOD/AESTHETIC — relaxed, hyped, dark, cute, chaotic
+2. MOVEMENT STYLE — bounce, glitch, slide, swing, wave, pop
+3. SUBCULTURE — anime, skating, gaming, mall-core, lo-fi
+4. PERSONALITY/MEME — aura, sigma, NPC, main-character, chill
+5. NAMED-MOVE ENERGY — snappy, poppy, catchy, viral-feeling
+
+Rules:
+- 1-3 words each
+- Kid-style, punchy — what a 12yo types into Roblox search
+- Do NOT recombine the seed words
+- Each concept must be distinct in FEELING, not just wording
+
+BAD: 20 versions of "chill dance"
+GOOD: chill bounce · aura walk · glitch pop · mall sway · snappy step
 
 Return JSON ONLY:
 {{"concepts": ["concept one", "concept two", "..."]}}
@@ -152,27 +188,15 @@ def _parse(raw: str) -> list[str]:
             continue
         c = c.strip().lower()
         if 2 <= len(c) <= 40 and 1 <= len(c.split()) <= 3 and c not in seen:
-            seen.add(c)
-            out.append(c)
+            seen.add(c); out.append(c)
     return out
 
 
 # ── Public API ────────────────────────────────────────────────
 def expand_with_validation(seed: str, n: int = 20) -> dict:
-    """
-    Returns:
-      {
-        "results":    [...passing concepts...],
-        "discarded":  [...hallucinated ones...],
-        "examples":   [...real search phrases used as anchor...],
-        "raw":        "...raw AI response..."
-      }
-    """
     examples = _fetch_real_suggestions(seed, limit=30)
-    example_block = "\n".join(f"- {e}" for e in examples) if examples else "(no examples found — generate best guess)"
-    prompt = PROMPT.format(seed=seed, n=n, examples=example_block)
-
-    raw = _call_gemini(prompt)
+    block = "\n".join(f"- {e}" for e in examples) or "(none found)"
+    raw = _call_gemini(PROMPT.format(seed=seed, n=n, examples=block))
     concepts = _parse(raw) if raw else []
 
     results, discarded = [], []
@@ -180,10 +204,8 @@ def expand_with_validation(seed: str, n: int = 20) -> dict:
         d = _demand_score(c)
         s = _supply_score(c)
         row = {"concept": c, "demand": d, "supply": s}
-
         if d == 0:
-            row["verdict"] = "hallucinated"
-            discarded.append(row)
+            row["verdict"] = "hallucinated"; discarded.append(row)
         elif s == 0:
             row["verdict"] = "gold"; results.append(row)
         elif s < SUPPLY_UNDERSERVED:
@@ -196,16 +218,11 @@ def expand_with_validation(seed: str, n: int = 20) -> dict:
     prio = {"gold": 0, "opportunity": 1, "contested": 2, "saturated": 3}
     results.sort(key=lambda r: (prio[r["verdict"]], -r["demand"], r["supply"]))
 
-    return {
-        "results":   results,
-        "discarded": discarded,
-        "examples":  examples,
-        "raw":       raw or "",
-    }
+    return {"results": results, "discarded": discarded,
+            "examples": examples, "raw": raw or ""}
 
 
 def get_creative_seeds(seed_text: str, max_seeds: int = 8) -> list[str]:
-    """For smart_pipeline: return just the good concept strings."""
     data = expand_with_validation(seed_text, n=20)
     good = [r["concept"] for r in data["results"]
             if r["verdict"] in ("gold", "opportunity")]
