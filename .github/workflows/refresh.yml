@@ -1,8 +1,8 @@
-name: Weekly Refresh
+name: Daily Enrichment
 
 on:
   schedule:
-    - cron: '0 7 * * 0'   # Sundays 7 AM UTC (11 AM GMT+4)
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -25,16 +25,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Verify secrets are present
-        env:
-          HAS_DB: ${{ secrets.DATABASE_URL != '' }}
-          HAS_C1: ${{ secrets.ROBLOSECURITY_COOKIE_1 != '' }}
-          HAS_C2: ${{ secrets.ROBLOSECURITY_COOKIE_2 != '' }}
-        run: |
-          echo "DATABASE_URL set: $HAS_DB"
-          echo "COOKIE_1 set: $HAS_C1"
-          echo "COOKIE_2 set: $HAS_C2"
-
       - name: Refresh top items
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -42,4 +32,4 @@ jobs:
           ROBLOSECURITY_COOKIE_2: ${{ secrets.ROBLOSECURITY_COOKIE_2 }}
           REFRESH_MODE: "true"
           PYTHONUNBUFFERED: "1"
-        run: python -u enricher.py
+        run: python -u enricher.py refresh
