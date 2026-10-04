@@ -2565,12 +2565,47 @@ async def brainstorm(ctx, *, description: str = ""):
     trend_source = intent.get("trend_source", "none")
     terms = all_terms(intent)
 
+    # ─────────────────────────────────────────────────────
+    # Creative expansion (emote-only for v1)
+    # Runs AI fan-out, applies demand gate, merges survivors
+    # into intent["search_terms"] so they flow through the
+    # entire pipeline: gap check → allow-list → AI → titles
+    # ─────────────────────────────────────────────────────
+    creative_added = []
+    if item_type == "emote":
+        try:
+            from creative_expand import get_creative_seeds
+            creative_added = await asyncio.to_thread(
+                get_creative_seeds, description, 8
+            )
+            if creative_added:
+                existing = set(intent.get("search_terms", []))
+                for c in creative_added:
+                    if c and c not in existing:
+                        intent.setdefault("search_terms", []).append(c)
+                        existing.add(c)
+                terms = all_terms(intent)
+        except Exception as e:
+            print(f"[brainstorm] creative_expand failed: {e}", flush=True)
+            creative_added = []
+
+    creative_line = ""
+    if creative_added:
+        creative_line = (
+            f"\n🧬 **Creative expansion:** +{len(creative_added)} concepts "
+            f"(demand-validated)\n"
+            f"`{', '.join(creative_added[:8])}`"
+            + (f" _+{len(creative_added)-8} more_" if len(creative_added) > 8 else "")
+        )
+
     await progress.edit(
         content=(f"🧠 **Pass 1 done.**\n"
                  f"• Item type: **{item_type}**\n"
                  f"• Trend source: **{trend_source}**\n"
-                 f"• Terms: `{', '.join(terms[:15])}`\n\n"
+                 f"• Terms: `{', '.join(terms[:15])}`"
+                 f"{creative_line}\n\n"
                  f"🔎 **Analyzing saturation...**")
+    )
     )
 
     gap_alternatives = []
