@@ -114,14 +114,14 @@ def register_advanced_commands(bot, get_db):
             pass
 
     # ────────────────────────────────────────────────────────
-    # creative_expand — TEST COMMANDS (Step 1)
+    # creative_expand — TEST COMMANDS
     # Remove after wiring into brainstorm/autopsy.
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="creative")
     async def creative_cmd(ctx, *, seed: str = ""):
         """
-        Test: AI fan-out + DB demand gate.
+        AI fan-out + DB demand gate, anchored on real search phrases.
         Usage: !creative rhythm step sway dance
         """
         if not seed.strip():
@@ -135,50 +135,61 @@ def register_advanced_commands(bot, get_db):
             return expand_with_validation(seed, n=20)
 
         try:
-            results = await asyncio.to_thread(_run)
+            data = await asyncio.to_thread(_run)
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`")
             return
 
-        if not results:
-            await progress.edit(
-                content=f"❌ **Nothing passed the demand gate.**\n"
-                        f"Either the AI returned junk, or every concept had 0 demand.\n"
-                        f"Try `!creative_raw {seed}` to inspect raw output."
+        results   = data.get("results", [])
+        discarded = data.get("discarded", [])
+        examples  = data.get("examples", [])
+
+        emoji = {"gold": "🟢", "opportunity": "🔵",
+                 "contested": "🟡", "saturated": "🔴"}
+
+        lines = [f"**Creative expansion for** `{seed}`"]
+        lines.append(f"_anchored on {len(examples)} real search phrases_\n")
+
+        if results:
+            for r in results[:15]:
+                lines.append(
+                    f"{emoji.get(r['verdict'], '⚪')} **{r['concept']}** "
+                    f"— demand `{r['demand']}` / supply `{r['supply']}`"
+                )
+
+            counts = {}
+            for r in results:
+                counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+            summary = " · ".join(
+                f"{emoji[k]}{v}" for k, v in counts.items() if k in emoji
             )
-            return
+            lines.append(f"\n{summary}")
+        else:
+            lines.append("⚠️ **Zero concepts passed the gate.**")
+            lines.append("_All AI concepts had 0 demand in search_suggestions._")
 
-        emoji = {
-            "gold": "🟢",
-            "opportunity": "🔵",
-            "contested": "🟡",
-            "saturated": "🔴",
-        }
-        lines = [f"**Creative expansion for** `{seed}`\n"]
-        for r in results[:15]:
-            lines.append(
-                f"{emoji.get(r['verdict'], '⚪')} **{r['concept']}** "
-                f"— demand `{r['demand']}` / supply `{r['supply']}`"
-            )
+        if discarded:
+            lines.append(f"\n**🚫 Discarded (0 demand) — {len(discarded)}:**")
+            for r in discarded[:8]:
+                lines.append(f"  · `{r['concept']}`")
+            if len(discarded) > 8:
+                lines.append(f"  _...and {len(discarded) - 8} more_")
 
-        counts = {}
-        for r in results:
-            counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-        summary = " · ".join(
-            f"{emoji[k]}{v}" for k, v in counts.items() if k in emoji
-        )
+        lines.append("\n🟢 gold · 🔵 opportunity · 🟡 contested · 🔴 saturated")
 
-        lines.append(f"\n{summary}")
-        lines.append("🟢 gold · 🔵 opportunity · 🟡 contested · 🔴 saturated")
-        lines.append("_Hallucinated concepts (0 demand) auto-discarded._")
-
-        await progress.edit(content="\n".join(lines))
+        body = "\n".join(lines)
+        # discord message limit is 2000; split safely
+        for i in range(0, len(body), 1900):
+            if i == 0:
+                await progress.edit(content=body[i:i + 1900])
+            else:
+                await ctx.send(body[i:i + 1900])
+            await asyncio.sleep(0.2)
 
     @bot.command(name="creative_raw")
     async def creative_raw_cmd(ctx, *, seed: str = ""):
         """
-        Debug: show what the AI generated BEFORE the demand gate.
-        Useful when !creative returns nothing or looks narrow.
+        Debug: show anchor phrases + raw AI output before demand gate.
         Usage: !creative_raw rhythm step sway dance
         """
         if not seed.strip():
@@ -188,33 +199,55 @@ def register_advanced_commands(bot, get_db):
         progress = await ctx.send(f"🔬 **Raw AI fan-out on** `{seed}`...")
 
         def _run():
-            from creative_expand import _call_gemini, _parse, PROMPT
-            raw = _call_gemini(PROMPT.format(seed=seed, n=20))
+            from creative_expand import (
+                _fetch_real_suggestions, _call_gemini, _parse, PROMPT
+            )
+            examples = _fetch_real_suggestions(seed, limit=30)
+            block = "\n".join(f"- {e}" for e in examples) or "(none found)"
+            prompt = PROMPT.format(seed=seed, n=20, examples=block)
+            raw = _call_gemini(prompt)
             parsed = _parse(raw) if raw else []
-            return raw, parsed
+            return examples, raw, parsed
 
         try:
-            raw, parsed = await asyncio.to_thread(_run)
+            examples, raw, parsed = await asyncio.to_thread(_run)
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`")
             return
 
-        body = "**RAW Gemini output:**\n```\n"
-        body += (raw or "<empty>")[:1200]
-        body += "\n```\n\n**Parsed concepts (before demand gate):**\n"
+        # Build response in chunks (Discord limit)
+        chunks = []
 
-        if parsed:
-            body += "\n".join(f"• `{c}`" for c in parsed)
+        anchor = f"**🎯 Anchor examples ({len(examples)}) — real Roblox searches:**\n"
+        if examples:
+            anchor += "\n".join(f"· `{e}`" for e in examples[:15])
+            if len(examples) > 15:
+                anchor += f"\n_...and {len(examples) - 15} more_"
         else:
-            body += "_nothing parsed — JSON likely malformed, check raw above_"
+            anchor += "_none — seed words don't match anything in search_suggestions_"
+        chunks.append(anchor)
 
-        body += f"\n\n_(used model: check Render logs or GEMINI_MODEL env)_"
+        raw_block = "**🤖 Raw Gemini output:**\n```\n"
+        raw_block += (raw or "<empty>")[:900]
+        raw_block += "\n```"
+        chunks.append(raw_block)
 
-        for i in range(0, len(body), 1900):
-            await ctx.send(body[i:i + 1900])
+        parsed_block = f"**📋 Parsed concepts ({len(parsed)}):**\n"
+        if parsed:
+            parsed_block += "\n".join(f"· `{c}`" for c in parsed)
+        else:
+            parsed_block += "_nothing parsed — JSON likely malformed, see raw above_"
+        chunks.append(parsed_block)
+
+        # Send each chunk
+        first = True
+        for chunk in chunks:
+            if first:
+                try:
+                    await progress.edit(content=chunk[:1900])
+                except Exception:
+                    await ctx.send(chunk[:1900])
+                first = False
+            else:
+                await ctx.send(chunk[:1900])
             await asyncio.sleep(0.3)
-
-        try:
-            await progress.delete()
-        except Exception:
-            pass
