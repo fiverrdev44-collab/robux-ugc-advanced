@@ -1,6 +1,13 @@
 """
 commands_intel.py — All intel commands in one file.
 Loaded by discord_ugc_bot.py via register_intel_commands(bot, get_db, ASSET_TYPE_NAMES).
+
+NEW in this version:
+- !autopsy now runs keyword intelligence classification BEFORE generating titles
+- Displays 🧬 KEYWORD INTELLIGENCE section (GOLD / OPPORTUNITY / SATURATED / WEAK / DEAD)
+- Recovery prompt is fed authoritative classification — never calls saturated "weak"
+- Per-word competition data built directly from DB
+- _build_allow_list import fixed (commands_ai first, discord_ugc_bot fallback)
 """
 import os
 import re
@@ -22,9 +29,53 @@ from recovery_brain import (
     save_item_to_db,
     save_item_and_created_at,
     fetch_created_date_live,
+    classify_competition_batch,
+    format_keyword_classifications,
+    find_pivot_keywords,
+    classify_keyword_health,
 )
 
 
+# ============================================================
+# HELPER — build per-word competition data from DB
+# ============================================================
+def _build_per_word_competition(cur, words, cap=6):
+    """
+    For each word, compute:
+      - supply (count of items with word in name, favorite_count > 5)
+      - median favs
+      - median price
+
+    Returns list of dicts suitable for classify_competition_batch().
+    """
+    result = []
+    for w in words[:cap]:
+        try:
+            cur.execute("""
+                SELECT
+                    COUNT(*) AS comp,
+                    COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY favorite_count), 0) AS median_favs,
+                    COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY price), 0) AS median_price
+                FROM items
+                WHERE LOWER(name) LIKE %s AND favorite_count > 5
+            """, (f"%{w}%",))
+            row = cur.fetchone()
+            if row:
+                result.append({
+                    "keyword": w,
+                    "comp": int(row[0] or 0),
+                    "median_favs": int(row[1] or 0),
+                    "median_price": int(row[2] or 0),
+                })
+        except Exception as e:
+            print(f"[autopsy] per-word query failed for '{w}': {e}", flush=True)
+            continue
+    return result
+
+
+# ============================================================
+# REGISTRATION
+# ============================================================
 def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     # =========================================================
@@ -252,7 +303,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — with SMART PIPELINE (live enrich)
+    # !autopsy — SUPERCOMPUTER EDITION
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -262,6 +313,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         # ── Fetch item + age ─────────────────────────────────
         row = None
+        name_words = []
+        competition_data = []
         try:
             conn = get_db(); cur = conn.cursor()
             cur.execute("""
@@ -319,12 +372,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                     except Exception:
                         pass
 
-            name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:4]
+            name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:5]
             if not name_words:
                 await progress.edit(content="❌ Item name is empty.")
                 cur.close(); conn.close()
                 return
 
+            # ── Winner median (combined LIKE ANY) ────────────
             patterns = [f"%{w}%" for w in name_words]
             cur.execute("""
                 SELECT favorite_count FROM items
@@ -332,13 +386,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 ORDER BY favorite_count DESC LIMIT 500
             """, (patterns,))
             favs_list = [r[0] for r in cur.fetchall() if r[0]]
-            cur.close(); conn.close()
 
             winner_median_favs = 0
             if favs_list:
                 sorted_f = sorted(favs_list, reverse=True)
                 cutoff = max(1, len(sorted_f) // 10)
                 winner_median_favs = sorted_f[cutoff - 1]
+
+            # ── 🧠 NEW: Per-word competition data ────────────
+            competition_data = _build_per_word_competition(cur, name_words, cap=6)
+
+            cur.close(); conn.close()
 
             item_stats = {
                 "id": iid,
@@ -369,6 +427,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         try: await progress.delete()
         except Exception: pass
 
+        # ── Header ───────────────────────────────────────────
         header = (
             f"# 🩺 AUTOPSY — `{name[:60]}`\n"
             f"**Creator:** {creator or '?'} · **Item ID:** `{iid}`\n"
@@ -377,11 +436,74 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         )
         await ctx.send(header)
 
+        # ── Failure report ──────────────────────────────────
         body = format_recovery_report(diagnosis, item_stats, show_sales=False)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
-        # ── 10 recovery titles ───────────────────────────────
+        # ── 🧠 KEYWORD INTELLIGENCE ────────────────────────
+        fast_class = None
+        deep_intel = None
+        try:
+            from gemini_brain import (
+                is_available, extract_keywords, _generate, verify_titles,
+                classify_keyword_intelligence, format_keyword_intel_for_prompt,
+            )
+
+            if competition_data:
+                fast_class = classify_competition_batch(competition_data)
+
+                intel_msg = await ctx.send(
+                    "🧬 **Running keyword intelligence — supply × demand × velocity...**"
+                )
+
+                if is_available():
+                    try:
+                        deep_intel = await asyncio.to_thread(
+                            classify_keyword_intelligence,
+                            name_words[0] if name_words else "emote",
+                            competition_data,
+                            "emote",
+                        )
+                    except Exception as ie:
+                        print(f"[autopsy] deep intel failed: {ie}", flush=True)
+                        deep_intel = None
+
+                # Build display
+                intel_lines = ["# 🧬 KEYWORD INTELLIGENCE\n"]
+                if fast_class and fast_class.get("classifications"):
+                    intel_lines.append(format_keyword_classifications(fast_class))
+                    intel_lines.append("")
+
+                if deep_intel and deep_intel.get("diagnosis"):
+                    intel_lines.append("## 🎯 DIAGNOSIS")
+                    intel_lines.append(deep_intel["diagnosis"])
+                    intel_lines.append("")
+
+                    bp = deep_intel.get("best_pivot") or {}
+                    if bp.get("keyword"):
+                        intel_lines.append("## 🚀 BEST PIVOT")
+                        intel_lines.append(
+                            f"**`{bp.get('keyword')}`** — "
+                            f"supply={bp.get('supply',0)}, median_favs={bp.get('median_favs',0)}, "
+                            f"bucket={bp.get('bucket','?')}"
+                        )
+                        if bp.get("why_better"):
+                            intel_lines.append(f"> {bp['why_better']}")
+
+                intel_body = "\n".join(intel_lines)
+                try:
+                    await intel_msg.edit(content=intel_body[:1900])
+                except Exception:
+                    pass
+                if len(intel_body) > 1900:
+                    for i in range(1900, len(intel_body), 1900):
+                        await ctx.send(intel_body[i:i+1900])
+                        await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[autopsy] keyword intelligence block failed: {e}", flush=True)
+
+        # ── Fetch AI helpers ────────────────────────────────
         try:
             from gemini_brain import is_available, extract_keywords, _generate, verify_titles
         except Exception:
@@ -393,14 +515,25 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         ai_msg = await ctx.send("🧠 **Generating 10 recovery titles + descriptions...**")
 
         intent = extract_keywords(name or "dance emote")
+
+        # ── Allow list — try commands_ai first, then discord_ugc_bot, then manual ──
         allow_list, top_items, stats = [], [], {}
+        _build_allow_list = None
         try:
-            from discord_ugc_bot import _build_allow_list
-            def _run_allow():
-                return _build_allow_list(intent, 60, None)
-            allow_list, top_items, stats = await asyncio.to_thread(_run_allow)
-        except Exception as e:
-            print(f"[autopsy] allow-list failed: {e}", flush=True)
+            from commands_ai import _build_allow_list
+        except ImportError:
+            try:
+                from discord_ugc_bot import _build_allow_list
+            except ImportError:
+                _build_allow_list = None
+
+        if _build_allow_list is not None:
+            try:
+                def _run_allow():
+                    return _build_allow_list(intent, 60, None)
+                allow_list, top_items, stats = await asyncio.to_thread(_run_allow)
+            except Exception as e:
+                print(f"[autopsy] allow-list failed: {e}", flush=True)
 
         if not allow_list:
             allow_list = list(set(
@@ -409,7 +542,20 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                    "freestyle", "bounce", "tiktok", "viral", "smooth"]
             ))
 
-        recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it with new titles.
+        # ── 🧠 Inject classification into prompt ────────────
+        intel_block = "(no keyword intelligence available)"
+        pivot_hint = ""
+        try:
+            from gemini_brain import format_keyword_intel_for_prompt
+            if deep_intel:
+                intel_block = format_keyword_intel_for_prompt(deep_intel)
+                bp = (deep_intel.get("best_pivot") or {}).get("keyword")
+                if bp:
+                    pivot_hint = f"\n>>> USE THE PIVOT KEYWORD `{bp}` in at least 3 titles. <<<\n"
+        except Exception:
+            pass
+
+        recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it.
 
 === THE FAILING ITEM ===
 Current name: {name}
@@ -422,17 +568,23 @@ Winner median in niche: {item_stats['winner_median_favs']:,} favs
 
 FAILURE MODE: {diagnosis['failure_mode']}
 
-=== YOUR JOB ===
-Return 10 NEW titles and 3 descriptions as JSON.
-
-RULES — NON-NEGOTIABLE:
-1. Every title MUST be 3-5 words.
-2. Every title MUST start with a SEARCHABLE noun or verb.
-   NEVER start with an adjective (Chill, Groovy, Smooth, Cool, Cute).
-3. Every title MUST end with "Emote", "Dance", or "Freestyle".
-4. Use ONLY these allow-list words + glue + item-type words:
+=== 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE — READ FIRST) ===
+{intel_block}
+{pivot_hint}
+=== CRITICAL RULES (NON-NEGOTIABLE) ===
+1. NEVER call a high-competition keyword "weak" or "non-descriptive".
+   High competition = SATURATED = HIGH DEMAND. That is not weakness.
+   The word "WEAK" is RESERVED ONLY for keywords with median_favs < 50.
+2. When the seed keyword is SATURATED, say so explicitly. Use the word "SATURATED".
+   Then recommend the BEST PIVOT keyword from the intelligence section by name.
+3. Every title MUST be 3-5 words.
+4. Every title MUST start with a SEARCHABLE noun or verb (a real search term).
+   NEVER start with an adjective (Chill, Groovy, Smooth, Cool, Cute, Spice).
+5. Every title MUST end with "Emote", "Dance", or "Freestyle".
+6. Use ONLY these allow-list words + glue + item-type words:
    {', '.join(allow_list[:60])}
-5. Every title MUST be UNIQUE.
+7. Every title MUST be UNIQUE.
+8. At least 3 titles MUST use the BEST PIVOT keyword (if one exists).
 
 === 10 TITLES — GROUP INTO 4 STRATEGIES ===
 titles_safe (3), titles_differentiated (3), titles_longtail (2), titles_viral (2)
@@ -449,9 +601,9 @@ description_seo, description_hype, description_short
   "description_seo": "...",
   "description_hype": "...",
   "description_short": "...",
-  "primary_keyword": "best first word",
-  "edit_reasoning": "2-3 sentences",
-  "what_was_wrong": "1-2 sentences"
+  "primary_keyword": "best first word — MUST be the pivot if seed was saturated",
+  "edit_reasoning": "3-4 sentences. Reference the classification buckets. State the pivot.",
+  "what_was_wrong": "3-4 sentences. If seed is SATURATED, use that word. Do NOT say 'weak'."
 }}
 """
 
