@@ -2,8 +2,8 @@
 commands_ai.py — AI commands: brainstorm, rescue, analyze_image,
 ai_status, ai_debug + all AI helpers.
 
-CATEGORY-AWARE: uses category_configs.py for family detection, relevance
-filtering, and DB asset-type filters. Emote path is unchanged.
+Category-aware. Creative pivot expansion DISABLED — produced garbage
+candidates from unreliable search_suggestions mining.
 """
 import asyncio
 import re
@@ -32,7 +32,6 @@ from category_configs import (
 )
 
 
-# ── Category-aware keyword filter ───────────────────────────
 _GENERIC_BLOCK = {
     "code", "joe", "move", "intro", "guy", "man", "woman", "person",
     "thing", "stuff", "item", "asset", "made", "version", "edit",
@@ -44,7 +43,6 @@ _GENERIC_BLOCK = {
     "everyone", "somebody", "anyone", "nobody",
 } | FILLER_WORDS
 
-# Emote-specific rich vocab (kept for emote regression safety)
 _EMOTE_VOCAB = {
     "dance", "emote", "animation", "move", "movement", "groove",
     "sway", "step", "bounce", "hop", "jump", "slide", "spin", "twirl",
@@ -71,7 +69,6 @@ _RELEVANCE_VOCAB_CACHE = {}
 
 
 def _get_relevance_vocab(family):
-    """Build/return the relevance vocab for a category family (cached)."""
     key = (family or "emote").lower()
     if key in _RELEVANCE_VOCAB_CACHE:
         return _RELEVANCE_VOCAB_CACHE[key]
@@ -96,7 +93,6 @@ def _get_relevance_vocab(family):
 
 
 def _get_category_bridge_seeds(family):
-    """Bridge seeds for the vocab sample builder."""
     seeds = set()
     try:
         cfg = get_category_config(family)
@@ -117,7 +113,6 @@ def _get_category_bridge_seeds(family):
 
 
 def _is_relevant_keyword(word, seed_set, family="emote"):
-    """Keep only words that are (a) category-relevant OR (b) match the seed."""
     w = (word or "").lower()
     if w in seed_set:
         return True
@@ -129,7 +124,6 @@ def _is_relevant_keyword(word, seed_set, family="emote"):
     return False
 
 
-# ── DB search helpers ────────────────────────────────────────
 def _db_search(patterns):
     if not patterns:
         return []
@@ -154,7 +148,6 @@ def _db_search(patterns):
 
 
 def _db_search_by_category(patterns, asset_type_ids):
-    """Category-filtered search. Falls back to unfiltered if no asset ids."""
     if not patterns:
         return []
     if not asset_type_ids:
@@ -181,7 +174,6 @@ def _db_search_by_category(patterns, asset_type_ids):
 
 
 def _db_search_emote_only(patterns):
-    """Backward-compat wrapper."""
     return _db_search_by_category(patterns, [61])
 
 
@@ -229,7 +221,6 @@ _EMOTE_BRIDGE_SEEDS = [
 
 
 def _get_db_vocab_sample(item_type="unknown", limit=800):
-    """Category-aware vocab sample. Uses family's asset_type_ids."""
     family = item_type
     try:
         cfg = get_category_config(family)
@@ -238,7 +229,6 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
         cfg = {}
         asset_ids = []
 
-    # Backward-compat fallback
     if not asset_ids:
         legacy = _VOCAB_TYPE_TO_ASSET_ID.get((item_type or "").lower())
         if legacy:
@@ -283,7 +273,6 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
     vocab = [w for w, _ in counter.most_common(limit)]
 
-    # Category-specific bridge seeds
     bridge = _get_category_bridge_seeds(family)
     existing = set(vocab)
     for w in bridge:
@@ -295,7 +284,6 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
 
 def _find_gap_alternatives(terms, top_n=5):
-    """Thread-safe: opens its own DB connection."""
     if not terms:
         return [], {}
 
@@ -425,9 +413,6 @@ def _find_gap_alternatives(terms, top_n=5):
 
 
 def _build_allow_list(intent, max_keywords=60, gap_words=None, family=None):
-    """
-    Category-aware allow-list builder. If family=None, auto-detects from intent.
-    """
     if family is None:
         family = detect_family_from_intent(intent)
 
@@ -778,65 +763,6 @@ def register_ai_commands(bot):
                      f"🔎 **Analyzing saturation...**")
         )
 
-        # ── 🚀 CREATIVE PIVOT (category-aware) ────────────────
-        creative_pivot_result = None
-        try:
-            from creative_pivot import (
-                find_creative_pivots, format_creative_pivot_report,
-            )
-
-            seed_words = []
-            for k in ("primary", "specific_moves", "search_terms", "title_verbs"):
-                for t in (intent.get(k) or []):
-                    for w in re.findall(r"[a-z]{3,}", str(t).lower()):
-                        if w not in seed_words:
-                            seed_words.append(w)
-            seed_words = seed_words[:6]
-
-            if seed_words:
-                pivot_msg = await ctx.send(
-                    "🚀 **Expanding creatively — AI + search data + learned keywords...**"
-                )
-
-                def _run_cp():
-                    c = get_db(); cur = c.cursor()
-                    try:
-                        return find_creative_pivots(
-                            seed_words=seed_words,
-                            item_type=family,
-                            cur=cur,
-                            cookie=os.getenv("ROBLOSECURITY_COOKIE_1"),
-                            max_candidates=25,
-                            live_verify_top_n=3,
-                        )
-                    finally:
-                        cur.close(); c.close()
-
-                creative_pivot_result = await asyncio.to_thread(_run_cp)
-
-                if creative_pivot_result and creative_pivot_result.get("top_pivots"):
-                    cp_body = format_creative_pivot_report(creative_pivot_result)
-                    try:
-                        await pivot_msg.edit(content=cp_body[:1900])
-                    except Exception:
-                        pass
-                    if len(cp_body) > 1900:
-                        for i in range(1900, len(cp_body), 1900):
-                            await ctx.send(cp_body[i:i+1900])
-                            await asyncio.sleep(0.3)
-
-                    # Inject pivots into search_terms
-                    for p in creative_pivot_result["top_pivots"]:
-                        kw = p.get("keyword")
-                        if kw and kw not in intent.setdefault("search_terms", []):
-                            intent["search_terms"].append(kw)
-                    terms = all_terms(intent)
-                else:
-                    try: await pivot_msg.delete()
-                    except Exception: pass
-        except Exception as e:
-            print(f"[brainstorm] creative pivot failed: {e}", flush=True)
-
         gap_alternatives = []
         term_stats = {}
         try:
@@ -923,7 +849,7 @@ def register_ai_commands(bot):
 
         specific_moves = intent.get("specific_moves", [])
 
-        # ── Keyword intelligence for synthesis prompt ────────
+        # Keyword intelligence for synthesis prompt
         keyword_intel = None
         try:
             from gemini_brain import classify_keyword_intelligence
