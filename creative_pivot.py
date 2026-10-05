@@ -1,16 +1,12 @@
 """
 creative_pivot.py — Category-aware creative expansion + super-computer pivot finder.
 
-Combines:
-  - AI fan-out (category-aware via creative_expand)
-  - Real search data (search_suggestions)
-  - Proven demand (learned_keywords)
-Then cross-references every candidate against DB supply/demand and (optionally)
-live Roblox API.
-
-Public API:
-  find_creative_pivots(seed_words, item_type="emote", ...) -> dict
-  format_creative_pivot_report(result) -> str
+HARD GATES (this version):
+  1. Candidate must NOT be in ABSTRACT_ENGLISH_BLOCK
+  2. Candidate must NOT be in the family's filler_block or type_words
+  3. Candidate MUST be in the family's concept_vocab (hard gate)
+  4. GOLD requires supply >= 3 (rejects statistical noise)
+  5. OPPORTUNITY requires supply >= 2
 """
 import os
 import re
@@ -20,7 +16,13 @@ from category_configs import (
     get_category_config,
     detect_family_from_asset_type,
     get_filler_block,
+    get_concept_vocab,
+    ABSTRACT_ENGLISH_BLOCK,
 )
+
+# Minimum sample sizes to trust classification
+MIN_SUPPLY_FOR_GOLD = 3
+MIN_SUPPLY_FOR_OPPORTUNITY = 2
 
 
 def _normalize(word):
@@ -28,15 +30,25 @@ def _normalize(word):
 
 
 def _looks_like_concept(word, config):
-    """Category-aware filter — rejects filler + type words + stopwords."""
+    """
+    HARD GATE. Returns True only if the word is a valid concept for the
+    given category. Rejects: abstract English, filler, type words, and
+    anything not in the family's concept_vocab.
+    """
     w = _normalize(word)
     if len(w) < 3:
         return False
-    if w in config["filler_block"]:
+    if w.isdigit():
+        return False
+    if w in ABSTRACT_ENGLISH_BLOCK:
+        return False
+    if w in config.get("filler_block", set()):
         return False
     if w in set(config.get("type_words", [])):
         return False
-    if w.isdigit():
+    # The hard gate: must be in the family's concept_vocab
+    vocab = config.get("concept_vocab") or set()
+    if vocab and w not in vocab:
         return False
     return True
 
@@ -80,11 +92,19 @@ def _fetch_db_stats_batch(cur, words):
 
 
 def _classify(supply, median_favs):
+    """
+    Strict classification with sample-size guardrails.
+    supply < MIN_SUPPLY_FOR_GOLD rejects false positives like 'places' (2 items).
+    """
     if median_favs < 15:
         return ("DEAD", "🔴")
-    if supply < 20 and median_favs >= 150:
+    # Reject tiny samples from being classified as GOLD
+    if supply < MIN_SUPPLY_FOR_GOLD and median_favs >= 150:
+        # Treat as NEUTRAL because sample is too small to trust
+        return ("NEUTRAL", "⚪")
+    if supply < 20 and supply >= MIN_SUPPLY_FOR_GOLD and median_favs >= 150:
         return ("GOLD", "🟢")
-    if supply < 50 and median_favs >= 80:
+    if supply < 50 and supply >= MIN_SUPPLY_FOR_OPPORTUNITY and median_favs >= 80:
         return ("OPPORTUNITY", "🔵")
     if supply >= 50 and median_favs >= 80:
         return ("SATURATED", "🟡")
@@ -210,10 +230,6 @@ def _live_verify_batch(candidates, cookie):
 def find_creative_pivots(seed_words, intent=None, item_type="emote",
                           cur=None, cookie=None, max_candidates=25,
                           live_verify_top_n=0):
-    """
-    Fan out from seed words and find GOLD / OPPORTUNITY pivots.
-    Category-aware: uses item_type to pick the right buckets and filters.
-    """
     config = get_category_config(item_type)
     seed_words = [_normalize(w) for w in (seed_words or []) if w]
 
@@ -243,6 +259,7 @@ def find_creative_pivots(seed_words, intent=None, item_type="emote",
     bad = {"SATURATED", "WEAK", "DEAD", "NEUTRAL"}
     result["original_all_bad"] = all(c["bucket"] in bad for c in result["original"])
 
+    # Gather candidates from all sources (each is hard-gated)
     creative_seeds = _seeds_from_creative_expand(seed_words, item_type, config, n=12)
     search_seeds = _seeds_from_search_suggestions(cur, seed_words, config, limit=25)
     learned_seeds = _seeds_from_learned_keywords(cur, seed_words, config, limit=15)
@@ -262,8 +279,8 @@ def find_creative_pivots(seed_words, intent=None, item_type="emote",
 
     if not combined:
         result["recommendation"] = (
-            "No adjacent concepts found. Try a more descriptive seed or wait "
-            "for more search_suggestions to accumulate."
+            "No valid adjacent concepts found for this category. "
+            "Try a different seed description or wait for search_suggestions to grow."
         )
         return result
 
@@ -272,6 +289,9 @@ def find_creative_pivots(seed_words, intent=None, item_type="emote",
     for w in combined:
         s = stats.get(w) or {"supply": 0, "median_favs": 0}
         bucket, emoji = _classify(s["supply"], s["median_favs"])
+        # Drop WEAK/DEAD candidates from the report
+        if bucket in ("WEAK", "DEAD"):
+            continue
         candidates.append({
             "keyword": w,
             "supply": s["supply"],
@@ -282,36 +302,35 @@ def find_creative_pivots(seed_words, intent=None, item_type="emote",
         })
     result["candidates"] = candidates
 
-    bucket_rank = {"GOLD": 0, "OPPORTUNITY": 1, "SATURATED": 2,
-                   "NEUTRAL": 3, "WEAK": 4, "DEAD": 5}
+    # Rank: GOLD > OPPORTUNITY > SATURATED > NEUTRAL
+    bucket_rank = {"GOLD": 0, "OPPORTUNITY": 1, "SATURATED": 2, "NEUTRAL": 3}
     ranked = sorted(candidates,
-                     key=lambda c: (bucket_rank[c["bucket"]], -c["median_favs"],
-                                    c["supply"]))
+                     key=lambda c: (bucket_rank.get(c["bucket"], 9),
+                                    -c["median_favs"], c["supply"]))
     gold_opp = [c for c in ranked if c["bucket"] in ("GOLD", "OPPORTUNITY")]
     if gold_opp:
         top = gold_opp[:5]
     else:
-        top = [c for c in ranked if c["bucket"] == "SATURATED"][:3]
-        if not top:
-            top = ranked[:3]
+        top = []
     result["top_pivots"] = top
 
     if not top:
         result["recommendation"] = (
-            "No strong pivots found. All adjacent concepts are weak or dead."
+            "No GOLD or OPPORTUNITY pivots found in this category. "
+            "All adjacent concepts are saturated. Consider waiting for a "
+            "rising trend or pivoting to a different category."
         )
     else:
         best = top[0]
         orig_desc = ", ".join(
-            f"{c['emoji']} {c['keyword']} ({c['bucket']}, supply={c['supply']})"
+            f"{c['emoji']} {c['keyword']} ({c['bucket']})"
             for c in result["original"]
         )
         result["recommendation"] = (
             f"Original seeds: {orig_desc}. "
             f"Best creative pivot: {best['emoji']} **`{best['keyword']}`** "
             f"({best['bucket']}, supply={best['supply']}, "
-            f"median_favs={best['median_favs']}). "
-            f"Spans out from your seeds while avoiding the saturated tier."
+            f"median_favs={best['median_favs']})."
         )
 
     if live_verify_top_n > 0 and top:
@@ -351,12 +370,12 @@ def format_creative_pivot_report(result):
 
     candidates = result.get("candidates") or []
     if candidates:
-        order = {"GOLD": 0, "OPPORTUNITY": 1, "SATURATED": 2,
-                 "NEUTRAL": 3, "WEAK": 4, "DEAD": 5}
+        order = {"GOLD": 0, "OPPORTUNITY": 1, "SATURATED": 2, "NEUTRAL": 3}
         sc = sorted(candidates,
                      key=lambda c: (order.get(c["bucket"], 9),
                                     -c["median_favs"], c["supply"]))
-        lines.append(f"**All expanded candidates ({len(candidates)} total):**")
+        lines.append(f"**Filtered candidates ({len(candidates)} total, "
+                     f"all category-valid):**")
         for c in sc[:12]:
             lines.append(
                 f"{c['emoji']} `{c['keyword']}` — {c['bucket']} "
