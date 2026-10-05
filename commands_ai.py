@@ -1,6 +1,9 @@
 """
 commands_ai.py — AI commands: brainstorm, rescue, analyze_image,
 ai_status, ai_debug + all AI helpers.
+
+CATEGORY-AWARE: uses category_configs.py for family detection, relevance
+filtering, and DB asset-type filters. Emote path is unchanged.
 """
 import asyncio
 import re
@@ -20,9 +23,16 @@ from bot_core import (
     FILLER_WORDS, MIN_PRICE, MAX_PRICE,
     STOP_WORDS,
 )
+from category_configs import (
+    get_category_config,
+    detect_family_from_intent,
+    detect_family_from_asset_type,
+    get_all_type_words,
+    get_filler_block,
+)
 
 
-# ── Opportunity keyword filter constants ─────────────────────
+# ── Category-aware keyword filter ───────────────────────────
 _GENERIC_BLOCK = {
     "code", "joe", "move", "intro", "guy", "man", "woman", "person",
     "thing", "stuff", "item", "asset", "made", "version", "edit",
@@ -34,6 +44,7 @@ _GENERIC_BLOCK = {
     "everyone", "somebody", "anyone", "nobody",
 } | FILLER_WORDS
 
+# Emote-specific rich vocab (kept for emote regression safety)
 _EMOTE_VOCAB = {
     "dance", "emote", "animation", "move", "movement", "groove",
     "sway", "step", "bounce", "hop", "jump", "slide", "spin", "twirl",
@@ -56,13 +67,61 @@ _EMOTE_VOCAB = {
     "floss", "griddy", "dab", "moonwalk", "renegade", "dougie",
 }
 
+_RELEVANCE_VOCAB_CACHE = {}
 
-def _is_relevant_keyword(word, seed_set):
-    """Keep only words that are (a) emote-related OR (b) match the seed."""
-    w = word.lower()
+
+def _get_relevance_vocab(family):
+    """Build/return the relevance vocab for a category family (cached)."""
+    key = (family or "emote").lower()
+    if key in _RELEVANCE_VOCAB_CACHE:
+        return _RELEVANCE_VOCAB_CACHE[key]
+    vocab = set()
+    if key == "emote":
+        vocab.update(_EMOTE_VOCAB)
+    try:
+        cfg = get_category_config(key)
+        for w in cfg.get("type_words", []):
+            vocab.add(w)
+        for arch in cfg.get("title_archetypes", []):
+            for w in re.findall(r"[a-z]{3,}", str(arch).lower()):
+                vocab.add(w)
+        for b in cfg.get("buckets", []):
+            for w in re.findall(r"[a-z]{3,}", str(b.get("vibe", "")).lower()):
+                if len(w) >= 3:
+                    vocab.add(w)
+    except Exception:
+        pass
+    _RELEVANCE_VOCAB_CACHE[key] = vocab
+    return vocab
+
+
+def _get_category_bridge_seeds(family):
+    """Bridge seeds for the vocab sample builder."""
+    seeds = set()
+    try:
+        cfg = get_category_config(family)
+        for w in cfg.get("type_words", []):
+            seeds.add(w)
+        for arch in cfg.get("title_archetypes", []):
+            for w in re.findall(r"[a-z]{3,}", str(arch).lower()):
+                seeds.add(w)
+        for b in cfg.get("buckets", []):
+            for w in re.findall(r"[a-z]{3,}", str(b.get("vibe", "")).lower()):
+                if len(w) >= 3:
+                    seeds.add(w)
+    except Exception:
+        pass
+    if (family or "").lower() == "emote":
+        seeds.update(_EMOTE_BRIDGE_SEEDS)
+    return list(seeds)
+
+
+def _is_relevant_keyword(word, seed_set, family="emote"):
+    """Keep only words that are (a) category-relevant OR (b) match the seed."""
+    w = (word or "").lower()
     if w in seed_set:
         return True
-    if w in _EMOTE_VOCAB:
+    if w in _get_relevance_vocab(family):
         return True
     for s in seed_set:
         if len(s) >= 4 and (s in w or w in s):
@@ -94,28 +153,36 @@ def _db_search(patterns):
         return []
 
 
-def _db_search_emote_only(patterns):
+def _db_search_by_category(patterns, asset_type_ids):
+    """Category-filtered search. Falls back to unfiltered if no asset ids."""
     if not patterns:
         return []
+    if not asset_type_ids:
+        return _db_search(patterns)
     sql = """
         SELECT id, name, favorite_count, price, total_sales, description
         FROM items
         WHERE (lower(name) LIKE ANY(%s)
             OR lower(COALESCE(description, '')) LIKE ANY(%s))
-          AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+          AND asset_type_id = ANY(%s)
           AND favorite_count > 5
         LIMIT 2500
     """
     try:
         conn = get_db(); cur = conn.cursor()
         try:
-            cur.execute(sql, (patterns, patterns))
+            cur.execute(sql, (patterns, patterns, list(asset_type_ids)))
             return cur.fetchall()
         finally:
             cur.close(); conn.close()
     except Exception as e:
-        print(f"[db-search-emote] {e}", flush=True)
+        print(f"[db-search-cat] {e}", flush=True)
         return []
+
+
+def _db_search_emote_only(patterns):
+    """Backward-compat wrapper."""
+    return _db_search_by_category(patterns, [61])
 
 
 def _term_match_count(term):
@@ -162,17 +229,31 @@ _EMOTE_BRIDGE_SEEDS = [
 
 
 def _get_db_vocab_sample(item_type="unknown", limit=800):
-    asset_filter = _VOCAB_TYPE_TO_ASSET_ID.get((item_type or "").lower())
+    """Category-aware vocab sample. Uses family's asset_type_ids."""
+    family = item_type
+    try:
+        cfg = get_category_config(family)
+        asset_ids = cfg.get("asset_type_ids") or []
+    except Exception:
+        cfg = {}
+        asset_ids = []
+
+    # Backward-compat fallback
+    if not asset_ids:
+        legacy = _VOCAB_TYPE_TO_ASSET_ID.get((item_type or "").lower())
+        if legacy:
+            asset_ids = [legacy]
+
     rows = []
     try:
         conn = get_db(); cur = conn.cursor()
         try:
-            if asset_filter is not None:
+            if asset_ids:
                 cur.execute(
                     "SELECT name FROM items "
-                    "WHERE favorite_count > 50 AND asset_type_id = %s "
+                    "WHERE favorite_count > 50 AND asset_type_id = ANY(%s) "
                     "LIMIT 20000",
-                    (asset_filter,)
+                    (list(asset_ids),)
                 )
                 rows = cur.fetchall()
                 if len(rows) < 500:
@@ -202,12 +283,13 @@ def _get_db_vocab_sample(item_type="unknown", limit=800):
 
     vocab = [w for w, _ in counter.most_common(limit)]
 
-    if (item_type or "").lower() == "emote":
-        existing = set(vocab)
-        for w in _EMOTE_BRIDGE_SEEDS:
-            if w not in existing:
-                vocab.append(w)
-                existing.add(w)
+    # Category-specific bridge seeds
+    bridge = _get_category_bridge_seeds(family)
+    existing = set(vocab)
+    for w in bridge:
+        if w not in existing:
+            vocab.append(w)
+            existing.add(w)
 
     return vocab
 
@@ -342,18 +424,28 @@ def _find_gap_alternatives(terms, top_n=5):
         except Exception: pass
 
 
-def _build_allow_list(intent, max_keywords=60, gap_words=None):
+def _build_allow_list(intent, max_keywords=60, gap_words=None, family=None):
+    """
+    Category-aware allow-list builder. If family=None, auto-detects from intent.
+    """
+    if family is None:
+        family = detect_family_from_intent(intent)
+
     terms = all_terms(intent)
     if not terms:
         return [], [], {}
 
-    is_emote = (intent.get("item_type") or "").lower() == "emote"
+    try:
+        cfg = get_category_config(family)
+        asset_ids = cfg.get("asset_type_ids") or []
+    except Exception:
+        asset_ids = []
 
     rows_by_id = {}
     patterns = [f"%{t}%" for t in terms if len(t) >= 2]
     if patterns:
-        if is_emote:
-            for r in _db_search_emote_only(patterns):
+        if asset_ids:
+            for r in _db_search_by_category(patterns, asset_ids):
                 rows_by_id[r[0]] = r
         else:
             for r in _db_search(patterns):
@@ -367,8 +459,7 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
         try:
             failed_terms = [t for t in terms if len(t) >= 3 and _term_match_count(t) < 3]
             if failed_terms:
-                detected_type = (intent.get("item_type") or "unknown").lower()
-                db_vocab = _get_db_vocab_sample(detected_type, 800)
+                db_vocab = _get_db_vocab_sample(family, 800)
                 if db_vocab:
                     exp = expand_search_terms(intent, db_vocab, failed_terms)
                     expanded_terms = exp.get("expanded_terms", [])
@@ -408,21 +499,19 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
             bg = f"{a} {b}"
             bigrams[bg] = bigrams.get(bg, 0) + 1
 
-    # ── Build seed set for relevance check ───────────────────
     seed_set = set()
     for t in terms:
         for tok in (t or "").lower().split():
             if len(tok) >= 3:
                 seed_set.add(tok)
 
-    # ── Filtered opportunity keyword scoring ─────────────────
     scored_words = []
     for w, s in word_stats.items():
         if w in _GENERIC_BLOCK:
             continue
         if s["count"] < 2:
             continue
-        if not _is_relevant_keyword(w, seed_set):
+        if not _is_relevant_keyword(w, seed_set, family):
             continue
         avg = s["favs"] / s["count"]
         score = avg / math.log1p(s["count"])
@@ -518,6 +607,7 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None):
         "expanded_terms": expanded_terms[:15],
         "failed_terms": failed_terms[:10],
         "reasoning": bridge_reasoning,
+        "family": family,
         "opportunity_keywords": [
             {"word": w, "avg_favs": int(avg), "count": c, "score": int(sc)}
             for w, avg, c, sc in opportunity_keywords[:10]
@@ -530,7 +620,11 @@ def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
                    total_verified=0, total_rejected=0):
     lines = ["# 🧠 UGC STRATEGY REPORT"]
     if item_type and item_type != "unknown":
-        lines.append(f"*Detected item type: **{item_type.upper()}***")
+        try:
+            cfg = get_category_config(item_type)
+            lines.append(f"*Detected category: **{cfg['label']}***")
+        except Exception:
+            lines.append(f"*Detected item type: **{item_type.upper()}***")
     if stats.get("expansion_used"):
         lines.append("*Search tier: **Tier 2** (AI bridged missing terms)*")
     else:
@@ -640,14 +734,20 @@ def register_ai_commands(bot):
 
         item_type = intent.get("item_type", "unknown")
         trend_source = intent.get("trend_source", "none")
+        family = detect_family_from_intent(intent)
+        try:
+            cfg = get_category_config(family)
+            category_label = cfg["label"]
+        except Exception:
+            category_label = family
         terms = all_terms(intent)
 
         creative_added = []
-        if item_type == "emote":
+        if family == "emote":
             try:
                 from creative_expand import get_creative_seeds
                 creative_added = await asyncio.to_thread(
-                    get_creative_seeds, description, 8
+                    get_creative_seeds, description, 8, "emote"
                 )
                 if creative_added:
                     existing = set(intent.get("search_terms", []))
@@ -671,12 +771,71 @@ def register_ai_commands(bot):
 
         await progress.edit(
             content=(f"🧠 **Pass 1 done.**\n"
-                     f"• Item type: **{item_type}**\n"
+                     f"• Category: **{category_label}**\n"
                      f"• Trend source: **{trend_source}**\n"
                      f"• Terms: `{', '.join(terms[:15])}`"
                      f"{creative_line}\n\n"
                      f"🔎 **Analyzing saturation...**")
         )
+
+        # ── 🚀 CREATIVE PIVOT (category-aware) ────────────────
+        creative_pivot_result = None
+        try:
+            from creative_pivot import (
+                find_creative_pivots, format_creative_pivot_report,
+            )
+
+            seed_words = []
+            for k in ("primary", "specific_moves", "search_terms", "title_verbs"):
+                for t in (intent.get(k) or []):
+                    for w in re.findall(r"[a-z]{3,}", str(t).lower()):
+                        if w not in seed_words:
+                            seed_words.append(w)
+            seed_words = seed_words[:6]
+
+            if seed_words:
+                pivot_msg = await ctx.send(
+                    "🚀 **Expanding creatively — AI + search data + learned keywords...**"
+                )
+
+                def _run_cp():
+                    c = get_db(); cur = c.cursor()
+                    try:
+                        return find_creative_pivots(
+                            seed_words=seed_words,
+                            item_type=family,
+                            cur=cur,
+                            cookie=os.getenv("ROBLOSECURITY_COOKIE_1"),
+                            max_candidates=25,
+                            live_verify_top_n=3,
+                        )
+                    finally:
+                        cur.close(); c.close()
+
+                creative_pivot_result = await asyncio.to_thread(_run_cp)
+
+                if creative_pivot_result and creative_pivot_result.get("top_pivots"):
+                    cp_body = format_creative_pivot_report(creative_pivot_result)
+                    try:
+                        await pivot_msg.edit(content=cp_body[:1900])
+                    except Exception:
+                        pass
+                    if len(cp_body) > 1900:
+                        for i in range(1900, len(cp_body), 1900):
+                            await ctx.send(cp_body[i:i+1900])
+                            await asyncio.sleep(0.3)
+
+                    # Inject pivots into search_terms
+                    for p in creative_pivot_result["top_pivots"]:
+                        kw = p.get("keyword")
+                        if kw and kw not in intent.setdefault("search_terms", []):
+                            intent["search_terms"].append(kw)
+                    terms = all_terms(intent)
+                else:
+                    try: await pivot_msg.delete()
+                    except Exception: pass
+        except Exception as e:
+            print(f"[brainstorm] creative pivot failed: {e}", flush=True)
 
         gap_alternatives = []
         term_stats = {}
@@ -711,13 +870,14 @@ def register_ai_commands(bot):
         gap_words = [a["word"] for a in gap_alternatives] if gap_alternatives else None
 
         await progress.edit(
-            content=(f"🔎 **Tier 1:** Direct DB search"
+            content=(f"🔎 **Tier 1:** Direct DB search "
+                     f"({category_label})"
                      f"{' with gap injection' if gap_words else ''}...")
         )
 
         try:
             allow_list, top_items, stats = await asyncio.to_thread(
-                _build_allow_list, intent, 60, gap_words
+                _build_allow_list, intent, 60, gap_words, family
             )
         except Exception as e:
             await progress.edit(content=f"❌ DB search failed: `{e}`")
@@ -763,6 +923,47 @@ def register_ai_commands(bot):
 
         specific_moves = intent.get("specific_moves", [])
 
+        # ── Keyword intelligence for synthesis prompt ────────
+        keyword_intel = None
+        try:
+            from gemini_brain import classify_keyword_intelligence
+
+            comp_data = []
+            for t in terms[:6]:
+                t_clean = (t or "").strip()
+                if len(t_clean) < 3:
+                    continue
+                try:
+                    c2 = get_db(); cur2 = c2.cursor()
+                    try:
+                        cur2.execute("""
+                            SELECT COUNT(*),
+                                   COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP
+                                            (ORDER BY favorite_count), 0)
+                            FROM items
+                            WHERE LOWER(name) LIKE %s AND favorite_count > 5
+                        """, (f"%{t_clean}%",))
+                        r = cur2.fetchone()
+                    finally:
+                        cur2.close(); c2.close()
+                    if r:
+                        comp_data.append({
+                            "keyword": t_clean,
+                            "comp": int(r[0] or 0),
+                            "median_favs": int(r[1] or 0),
+                            "median_price": 0,
+                        })
+                except Exception:
+                    continue
+
+            if comp_data:
+                keyword_intel = await asyncio.to_thread(
+                    classify_keyword_intelligence,
+                    comp_data[0]["keyword"], comp_data, family,
+                )
+        except Exception as e:
+            print(f"[brainstorm] keyword intelligence failed: {e}", flush=True)
+
         synth = None
         try:
             synth = await asyncio.to_thread(
@@ -773,7 +974,7 @@ def register_ai_commands(bot):
                  "expanded_terms": stats.get("expanded_terms", []),
                  "failed_terms": stats.get("failed_terms", []),
                  "reasoning": stats.get("reasoning", "")},
-                None, specific_moves, winner_data, algo_ctx,
+                None, specific_moves, winner_data, algo_ctx, keyword_intel,
             )
         except Exception as e:
             print(f"[brainstorm] synth failed: {e}", flush=True)
@@ -817,9 +1018,13 @@ def register_ai_commands(bot):
                 ai_titles.extend(synth.get(k) or [])
 
             cat_ids = None
-            detected_type = (intent.get("item_type") or "").lower()
-            if detected_type in CATEGORY_MAP:
-                cat_ids = CATEGORY_MAP[detected_type]
+            if family in CATEGORY_MAP:
+                cat_ids = CATEGORY_MAP[family]
+            else:
+                try:
+                    cat_ids = get_category_config(family).get("asset_type_ids") or None
+                except Exception:
+                    cat_ids = None
 
             pipeline_msg = await ctx.send(
                 "🧬 **Running smart pipeline (parallel)...**\n"
@@ -830,7 +1035,7 @@ def register_ai_commands(bot):
                 return run_full_pipeline(
                     description=description,
                     intent=intent,
-                    item_type=detected_type or "emote",
+                    item_type=family,
                     category_asset_ids=cat_ids,
                     ai_titles=ai_titles,
                     live_enrich=True,
@@ -871,7 +1076,7 @@ def register_ai_commands(bot):
                 total_verified += len(v)
             total_rejected += len(r)
 
-        body = _fmt_ai_result(synth, verified_groups, [], stats, item_type,
+        body = _fmt_ai_result(synth, verified_groups, [], stats, family,
                               total_verified=total_verified,
                               total_rejected=total_rejected)
 
@@ -908,10 +1113,13 @@ def register_ai_commands(bot):
             }
 
         item_type = intent.get("item_type", "unknown")
+        family = detect_family_from_intent(intent)
         terms = all_terms(intent)
 
         try:
-            allow_list, top_items, stats = await asyncio.to_thread(_build_allow_list, intent)
+            allow_list, top_items, stats = await asyncio.to_thread(
+                _build_allow_list, intent, 60, None, family
+            )
         except Exception as e:
             await progress.edit(content=f"❌ DB search failed: `{e}`")
             return
@@ -928,7 +1136,7 @@ def register_ai_commands(bot):
             comp_lines.append(f"• `{name}` — {favs:,} favs · R${price}")
 
         await progress.edit(
-            content=(f"🩺 **Item type:** {item_type}\n"
+            content=(f"🩺 **Category:** {family}\n"
                      f"**Matched {stats['count']:,} competitors** in this niche.\n\n"
                      f"🧠 **AI is diagnosing your launch and writing new titles...**")
         )
@@ -938,12 +1146,12 @@ def register_ai_commands(bot):
 THEIR DESCRIPTION / CURRENT SITUATION:
 {description}
 
-ITEM TYPE DETECTED: {item_type}
+CATEGORY: {family}
 
 REAL DB KEYWORDS available (you MUST use these for titles):
 {', '.join(allow_list[:60])}
 
-TOP 10 COMPETITORS in this niche (these are what WINNERS look like):
+TOP 10 COMPETITORS in this niche:
 {chr(10).join(comp_lines)}
 
 MARKET STATS:
@@ -952,31 +1160,27 @@ MARKET STATS:
 - median favs: {stats.get('median_favs', 0):,}
 - winner bar (top 10%): {stats.get('winner_favs', 0):,} favs
 - avg price: R${stats.get('price_avg', 0)}
-- price range: R${stats.get('price_min', 0)}-R${stats.get('price_max', 0)}
 
 YOUR JOB — return ONLY valid JSON:
 
 {{
   "diagnosis": "3-4 sentences: why their item probably isn't selling. Be blunt.",
-  "what_winners_do": "2-3 sentences: the specific naming/styling pattern the top 10 competitors share.",
+  "what_winners_do": "2-3 sentences: the specific naming pattern the top 10 competitors share.",
   "titles_safe": ["3 titles that MIRROR what top competitors already do"],
   "titles_differentiated": ["3 titles that use SAME niche keywords but UNIQUE angle"],
   "titles_longtail": ["2 titles with 4+ keywords packed in"],
   "titles_viral": ["2 titles that hook meme/TikTok/Sound trends"],
-  "new_description": "Full 2-3 sentence SEO description, keyword-rich. Only allow-list words plus glue.",
-  "price_advice": "1-2 sentences: keep, raise, or drop price? Reference real median.",
+  "new_description": "Full 2-3 sentence SEO description, keyword-rich.",
+  "price_advice": "1-2 sentences: keep, raise, or drop price?",
   "relaunch_plan": "2-3 sentences: concrete next action.",
   "kill_or_keep": "KEEP / RESCUE / KILL — one word plus one sentence"
 }}
 
 RULES:
 - Every word in every title MUST exist in the allow-list above (plus glue words).
-- Titles MUST be 3-5 words. NEVER 6+ word keyword stuffing.
+- Titles MUST be 3-5 words.
 - Each title must READ AS A SENTENCE, not a list of keywords.
-- PREFER SPECIFIC words over generic ones (use the user's actual keywords).
-- Titles in each group must feel DIFFERENT.
 - Do NOT invent keywords. Do NOT fabricate stats.
-- Be direct. Assume this person lost money.
 - Output ONLY the JSON object.
 """
 
@@ -984,7 +1188,7 @@ RULES:
         try:
             synth = await asyncio.to_thread(
                 synthesize_hybrid, rescue_prompt, allow_list, top_items, stats,
-                item_type, intent.get("trend_source", "none"),
+                family, intent.get("trend_source", "none"),
                 {"direct_matches": stats.get("direct_matches", 0),
                  "expansion_used": stats.get("expansion_used", False),
                  "expanded_terms": stats.get("expanded_terms", []),
@@ -1164,9 +1368,12 @@ RULES:
                 "trend_source": "none",
             }
         intent["item_type"] = vision.get("item_type_visual", "unknown")
+        family = detect_family_from_intent(intent)
 
         try:
-            allow_list, top_items, stats = await asyncio.to_thread(_build_allow_list, intent)
+            allow_list, top_items, stats = await asyncio.to_thread(
+                _build_allow_list, intent, 60, None, family
+            )
         except Exception as e:
             await progress.edit(content=f"❌ DB search failed: `{e}`")
             return
@@ -1201,7 +1408,7 @@ RULES:
         try:
             synth = await asyncio.to_thread(
                 synthesize_hybrid, full_desc, allow_list, top_items, stats,
-                vision.get("item_type_visual", "unknown"), "none",
+                family, "none",
                 {"direct_matches": stats.get("direct_matches", 0),
                  "expansion_used": stats.get("expansion_used", False),
                  "expanded_terms": stats.get("expanded_terms", []),
@@ -1276,7 +1483,7 @@ RULES:
             total_rejected += len(r)
 
         body = _fmt_ai_result(synth, verified_groups, [], stats,
-                              vision.get("item_type_visual", "unknown"),
+                              family,
                               total_verified=total_verified,
                               total_rejected=total_rejected)
 
