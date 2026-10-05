@@ -1,13 +1,11 @@
 """
 gemini_brain.py — Hybrid AI for Roblox UGC. SUPERCOMPUTER EDITION.
 
-New in this version:
-- classify_keyword_intelligence() — weighs SUPPLY + DEMAND + VELOCITY (not supply alone)
-- NEVER calls a keyword "weak" without checking demand first
-- Forces pivot recommendation when seed is SATURATED
-- Enhanced synthesis prompt cross-references smart_pipeline output
-- verify_titles() unchanged — anti-hallucination gate preserved
-- generate_fallback_titles() unchanged
+Category-aware:
+- synthesis prompt pulls type_words / shape_rule / title_archetypes from configs
+- verify_titles accepts ALL category type words
+- classify_keyword_intelligence already category-aware (item_type param)
+- Emote path unchanged (DEFAULT_FAMILY = "emote")
 """
 import os
 import re
@@ -138,7 +136,7 @@ def _tokens(text):
 
 
 # ============================================================
-# PASS 1 — EXTRACTION (unchanged)
+# PASS 1 — EXTRACTION
 # ============================================================
 _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 
@@ -161,10 +159,19 @@ Extract structured intent for a DB search. Return ONLY JSON:
 RULES:
 - Lowercase. No punctuation. Single words or short 2-word phrases.
 - If description mentions a dance / movement / animation -> item_type = "emote"
+- If description mentions hair/wig -> item_type = "hair"
+- If description mentions hat/cap/beanie/crown/beret -> item_type = "hat"
+- If description mentions face/mask/glasses/eyes -> item_type = "face"
+- If description mentions wings/tail/backpack/chain/necklace/scarf/bag/belt ->
+  item_type = "neck"/"shoulder"/"front"/"back"/"waist" whichever fits
+- If description mentions shirt/pants/jacket/hoodie/shoes/dress/skirt ->
+  item_type = "shirt"/"pants"/"jacket"/"shoes"/"3d_clothing"
+- If description mentions character/bundle/avatar -> item_type = "bundle"
+- If description mentions tool/sword/staff/bow -> item_type = "gear"
 - "specific_moves" = EXACT body movements described (e.g. "hip sway", "arm pump",
-  "side step"). These are the SELLING POINTS. Every move should be 1-2 words.
-- "title_verbs" = action verbs that describe the movement (sway, pump, groove,
-  bounce, flow, glide, twist, wave). These are high-value title tokens.
+  "side step"). Only for emotes; empty list otherwise.
+- "title_verbs" = action verbs for emotes (sway, pump, groove, bounce); empty
+  list for other categories.
 - "search_terms" = 10-15 BEST words to search a Roblox DB.
 - "references" = memes, songs, characters, celebrities, viral moments.
 - DO NOT invent brand names or Roblox item names.
@@ -210,7 +217,7 @@ def all_terms(intent):
 
 
 # ============================================================
-# PASS 1.5 — BRIDGE (unchanged)
+# PASS 1.5 — BRIDGE
 # ============================================================
 _EXPAND_PROMPT = """You are a Roblox UGC DB search expert.
 
@@ -243,7 +250,7 @@ def expand_search_terms(intent, db_vocab_sample, failed_terms):
 
 
 # ============================================================
-# 🧠 NEW — KEYWORD INTELLIGENCE (SUPERCOMPUTER LAYER)
+# 🧠 KEYWORD INTELLIGENCE (supercomputer layer)
 # ============================================================
 _KEYWORD_INTEL_PROMPT = """You are the world's most sophisticated Roblox UGC keyword intelligence analyst.
 
@@ -252,7 +259,7 @@ You do NOT guess. You do NOT call a keyword "weak" without checking demand.
 
 === INPUT ===
 SEED KEYWORD (the one that failed): {seed}
-ITEM TYPE: {item_type}
+CATEGORY FAMILY: {item_type}
 COMPETITION DATA from live Roblox API (per keyword):
 {competition_data}
 
@@ -279,7 +286,6 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
    scan ALL other keywords in the data, pick the one with the LOWEST supply
    that still has median_favs >= 80. That is the pivot.
 4. If age data (velocity) is provided, prioritize keywords with the highest favs/day.
-   A keyword gaining 30 favs/day is better than one that took 6 months to hit 500.
 
 === OUTPUT — ONLY JSON ===
 {{
@@ -289,14 +295,14 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
     "median_favs": <int>,
     "bucket": "<GOLD|OPPORTUNITY|SATURATED|WEAK|DEAD|NEUTRAL>",
     "emoji": "<one of 🟢🔵🟡🟠🔴⚪>",
-    "reasoning": "<1-2 sentences. State supply AND demand. If saturated, say 'HIGH DEMAND but SATURATED' explicitly.>"
+    "reasoning": "<1-2 sentences. State supply AND demand.>"
   }},
   "all_classifications": [
     {{
       "keyword": "<kw>",
       "supply": <int>,
       "median_favs": <int>,
-      "bucket": "<GOLD|OPPORTUNITY|SATURATED|WEAK|DEAD|NEUTRAL>",
+      "bucket": "<bucket>",
       "emoji": "<emoji>",
       "reasoning": "<1 sentence>"
     }}
@@ -306,34 +312,25 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
     "supply": <int>,
     "median_favs": <int>,
     "bucket": "<bucket>",
-    "why_better": "<1-2 sentences comparing to the seed. e.g. 'Same demand tier (100+ median favs) but only 18 competitors instead of 59.'>"
+    "why_better": "<1-2 sentences comparing to the seed.>"
   }},
-  "diagnosis": "<3-4 sentences. State clearly what went wrong with the seed. If seed was saturated, USE THE WORD 'SATURATED' not 'weak'. Then recommend the pivot keyword by name. End with the strategic direction.>"
+  "diagnosis": "<3-4 sentences. If seed was saturated, USE THE WORD 'SATURATED' not 'weak'.>"
 }}
 """
 
 
 def classify_keyword_intelligence(seed_keyword, competition_data,
                                    item_type="emote"):
-    """
-    Deep-classify keywords using supply + demand + (optional) velocity.
-    Returns a dict with seed_classification, all_classifications,
-    best_pivot, and a natural-language diagnosis.
-
-    competition_data: list of dicts like
-      [{"keyword": "spice", "comp": 59, "median_favs": 101, "median_price": 58}, ...]
-    """
     if not competition_data:
         return {}
 
-    # Format for prompt
     lines = []
     for d in competition_data:
         kw = d.get("keyword") or d.get("seed") or "?"
         comp = d.get("comp") or d.get("competitors") or 0
         favs = d.get("median_favs") or d.get("median") or 0
         price = d.get("median_price") or d.get("price") or 0
-        vel = d.get("velocity")  # optional favs/day
+        vel = d.get("velocity")
         vel_str = f" · {vel:.1f} favs/day" if vel else ""
         lines.append(f"- {kw} — {comp} competitors · {favs} median favs · {price} median R${vel_str}")
 
@@ -354,7 +351,6 @@ def classify_keyword_intelligence(seed_keyword, competition_data,
 
 
 def format_keyword_intel_for_prompt(intel):
-    """Format classify_keyword_intelligence() output as text for another prompt."""
     if not intel: return "(no keyword intelligence available)"
     lines = []
     sc = intel.get("seed_classification") or {}
@@ -382,7 +378,7 @@ def format_keyword_intel_for_prompt(intel):
 
 
 # ============================================================
-# TITLE PATTERN MINING (unchanged)
+# TITLE PATTERN MINING
 # ============================================================
 def mine_title_patterns(top_items):
     if not top_items:
@@ -415,7 +411,7 @@ def mine_title_patterns(top_items):
 
 
 # ============================================================
-# PASS 2 — SYNTHESIS (SUPERCOMPUTER EDITION)
+# PASS 2 — SYNTHESIS (category-aware)
 # ============================================================
 _SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your titles have generated millions of favourites.
 
@@ -424,7 +420,10 @@ _SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your tit
 2. KEYWORD INTELLIGENCE — supply/demand/velocity classification (see below)
 3. ROBLOX ALGORITHM KNOWLEDGE — ranking systems, CTR thresholds, velocity targets
 4. CULTURE BRAIN — TikTok, anime, memes, K-pop, viral moments
-5. USER'S SPECIFIC MOVES — the exact description they gave you
+5. USER'S SPECIFIC MOVES / THEMES — the exact description they gave you
+
+=== 🎯 CATEGORY FAMILY ===
+{category_label}
 
 === 🧠 KEYWORD INTELLIGENCE (READ THIS FIRST) ===
 {keyword_intel_text}
@@ -433,23 +432,21 @@ CRITICAL: The classification above is authoritative. If the seed keyword is
 SATURATED, do NOT describe it as "weak". Use the word "SATURATED". Recommend
 the BEST PIVOT keyword explicitly in your diagnosis and titles.
 
+=== SHAPE RULE FOR THIS CATEGORY ===
+{shape_rule}
+
 === TITLE CONSTRUCTION RULES (NON-NEGOTIABLE) ===
 1. Every title MUST be 3-5 tokens. Two-word titles FORBIDDEN. Six+ FORBIDDEN.
-2. Every title MUST end with the item type word (emote, hat, hair, dance, etc.)
-   OR contain it naturally.
+2. Every title MUST end with one of these valid type words for this category:
+   {type_words}
 3. Every title MUST be UNIQUE. No title repeats another title's exact word order.
-4. At least 3 titles MUST include the user's SPECIFIC_MOVES words.
+4. At least 3 titles MUST include the user's SPECIFIC_MOVES / specific themes.
 5. Allow-list bigrams like "hip sway" mean BOTH "hip" and "sway" are usable.
-6. Titles may ONLY use words from the allow-list + glue words + item type words.
+6. Titles may ONLY use words from the allow-list + glue words + type words.
 7. NEVER use stopwords like "a", "the", "and" as fillers to pad length.
 
-=== TITLE ARCHETYPES ===
-- MOVE + TYPE:              "Hip Sway Dance"
-- MOVE + MOVE + TYPE:       "Hip Sway Arm Pump Emote"
-- STYLE + MOVE + TYPE:      "TikTok Hip Sway Dance"
-- TREND + MOVE + TYPE:      "Viral Hip Sway Emote"
-- MOVE + MOVE + MOVE + TYPE:"Hip Sway Arm Pump Dance"
-- EMOTION + MOVE + TYPE:    "Chill Hip Sway Dance"
+=== EXAMPLE TITLE STRUCTURES (inspiration only — do NOT copy) ===
+{title_archetypes}
 
 === WHAT WINNERS DO (from data) ===
 {title_pattern_insights}
@@ -474,7 +471,7 @@ as the FIRST or SECOND token in at least 2 titles.
   "titles_differentiated": ["...", "...", "..."],
   "titles_longtail": ["...", "..."],
   "titles_viral": ["...", "..."],
-  "search_diagnosis": "3-4 sentences. Reference the KEYWORD INTELLIGENCE. If seed was saturated, say so explicitly.",
+  "search_diagnosis": "3-4 sentences. Reference the KEYWORD INTELLIGENCE.",
   "positioning": "3-4 sentences on how to position against competitors.",
   "market_diagnosis": "3-4 sentences on saturation, winners, losers, CTR signals.",
   "winner_blueprint": "3-4 sentences on what top 10% do that bottom 50% don't.",
@@ -500,9 +497,9 @@ as the FIRST or SECOND token in at least 2 titles.
 === INPUT ===
 
 DESCRIPTION: {desc}
-ITEM TYPE: {item_type}
+CATEGORY FAMILY: {item_type}
 TREND SOURCE: {trend_source}
-SPECIFIC MOVES: {specific_moves}
+SPECIFIC MOVES / THEMES: {specific_moves}
 
 ALLOW-LIST ({allow_count} tokens):
 {allow_list}
@@ -530,11 +527,27 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
                       search_diagnostics=None, gap_analysis=None,
                       specific_moves=None, winner_analysis=None,
                       algo_context=None, keyword_intel=None):
-    """
-    keyword_intel: optional output from classify_keyword_intelligence().
-    If provided, it is injected into the prompt as authoritative classification.
-    """
     if not allow_list: return {}
+
+    # ── Category config ────────────────────────────────
+    try:
+        from category_configs import get_category_config
+        cfg = get_category_config(item_type)
+    except Exception:
+        cfg = {
+            "label": item_type or "UGC",
+            "type_words": ["emote", "dance"],
+            "shape_rule": "Every concept must be movement-shaped.",
+            "title_archetypes": [
+                "MOVE + TYPE: \"Hip Sway Dance\"",
+                "STYLE + MOVE + TYPE: \"TikTok Hip Sway Dance\"",
+            ],
+        }
+
+    type_words_str = ", ".join(cfg["type_words"][:6]) or "emote, dance"
+    archetypes_str = "\n".join(f"- {a}" for a in cfg.get("title_archetypes", [])[:6])
+    shape_rule = cfg.get("shape_rule", "Every title must reflect the category.")
+    category_label = cfg.get("label", "UGC")
 
     competitor_titles = []
     top_lines = []
@@ -595,12 +608,12 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
     ac = algo_context or "(unavailable)"
 
-    # 🧠 Keyword intelligence block
     intel_text = format_keyword_intel_for_prompt(keyword_intel)
 
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
         item_type=item_type,
+        category_label=category_label,
         trend_source=trend_source,
         specific_moves=sm,
         allow_count=len(allow_list),
@@ -613,7 +626,11 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         gap_analysis="\n".join(gap_lines) or "(none)",
         title_pattern_insights=title_pattern_insights,
         competitor_titles="\n".join(f"- {t}" for t in competitor_titles) or "(none)",
-        keyword_intel_text=intel_text)
+        keyword_intel_text=intel_text,
+        type_words=type_words_str,
+        shape_rule=shape_rule,
+        title_archetypes=archetypes_str,
+    )
 
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
     if not raw: return {}
@@ -626,7 +643,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
 
 # ============================================================
-# VERIFICATION — unchanged (anti-hallucination gate)
+# VERIFICATION — category-aware
 # ============================================================
 def verify_titles(titles, allow_list):
     allow_set = set()
@@ -641,6 +658,13 @@ def verify_titles(titles, allow_list):
                     allow_set.add(p)
     for w in ITEM_TYPE_WORDS:
         allow_set.add(w)
+    # Add every category's type words so any category passes the gate
+    try:
+        from category_configs import get_all_type_words
+        for w in get_all_type_words():
+            allow_set.add(w)
+    except Exception:
+        pass
 
     valid, rejected = [], []
     seen_lower = set()
@@ -680,25 +704,25 @@ def verify_titles(titles, allow_list):
 
 
 # ============================================================
-# FALLBACK TITLE GENERATOR — unchanged
+# FALLBACK TITLE GENERATOR — category-aware
 # ============================================================
 def generate_fallback_titles(allow_list, specific_moves, item_type,
                               top_items, needed=10):
+    # Pick a type word from the category config
     type_word = "emote"
-    it_lower = (item_type or "").lower()
-    type_candidates = {
-        "emote": ["emote", "dance"],
-        "hair": ["hair"],
-        "hat": ["hat", "beanie", "cap"],
-        "face": ["face", "mask"],
-        "shirt": ["shirt"],
-        "pants": ["pants"],
-        "jacket": ["jacket"],
-    }
-    for candidate in type_candidates.get(it_lower, [it_lower]):
+    try:
+        from category_configs import get_category_config
+        cfg = get_category_config(item_type)
+        type_candidates = cfg.get("type_words") or ["emote", "dance"]
+    except Exception:
+        type_candidates = ["emote", "dance"]
+
+    for candidate in type_candidates:
         if candidate in allow_list or candidate in ITEM_TYPE_WORDS:
             type_word = candidate
             break
+    else:
+        type_word = type_candidates[0] if type_candidates else "emote"
 
     move_tokens = []
     for m in (specific_moves or []):
@@ -790,7 +814,7 @@ def fallback_title_payload(allow_list, specific_moves, item_type, top_items):
 
 
 # ============================================================
-# VISION (unchanged)
+# VISION
 # ============================================================
 _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 
@@ -884,7 +908,7 @@ def analyze_image_for_ugc(images, user_description=""):
 
 
 # ============================================================
-# FREE-FORM Q&A (unchanged)
+# FREE-FORM Q&A
 # ============================================================
 _ASK_PROMPT = """You are a helpful assistant inside a Roblox UGC bot.
 Answer directly. If Roblox UGC related, go deep and tactical. Under 1,800 chars.
