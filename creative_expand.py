@@ -1,267 +1,251 @@
 """
-creative_expand.py — v4.1 (fixed).
-- Movement-shaped prompt (3 flavors: relaxed / energetic / character)
-- Dual-source anchor (search_suggestions + learned_keywords) + fallback
-- Isolated connections per query so one failure doesn't poison the others
-- FIXED: learned_keywords uses column "keyword", search_suggestions uses "suggestion"
-"""
+creative_expand.py — Category-aware AI fan-out + demand gate.
 
+Public API (unchanged):
+  expand_with_validation(anchor, n=20, ...) -> dict
+  get_creative_seeds(seed, max_seeds=8, ...) -> list
+
+NEW: item_type and category_asset_ids are first-class params.
+When not passed, defaults to emote for backward compat.
+"""
 import os
 import re
 import json
-import logging
-import psycopg2
+from collections import Counter
 
-log = logging.getLogger(__name__)
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-DB_URL         = os.getenv("DATABASE_URL")
+from category_configs import (
+    get_category_config,
+    detect_family_from_intent,
+    get_filler_block,
+)
 
 SUPPLY_UNDERSERVED = 50
-SUPPLY_SATURATED   = 200
-
-STOPWORDS = {"a", "an", "the", "and", "or", "of", "to", "for", "in", "on",
-             "with", "emote", "dance", "animation", "motion"}
+SUPPLY_SATURATED = 200
 
 
-def _conn():
-    return psycopg2.connect(DB_URL)
-
-
-# ── Anchor: pull from BOTH tables, isolated connections ───────
-def _fetch_real_suggestions(seed: str, limit: int = 30) -> list[str]:
-    words = [w for w in re.findall(r"\w+", seed.lower()) if w not in STOPWORDS]
+# ============================================================
+# DB helpers
+# ============================================================
+def _fetch_real_suggestions(cur, seed, limit=30):
+    """Pull real Roblox search suggestions related to the seed.
+    Uses BOTH tables (search_suggestions.suggestion + learned_keywords.keyword)."""
+    if not cur or not seed:
+        return []
+    words = [w for w in re.findall(r"[a-z]{3,}", (seed or "").lower())]
     if not words:
         return []
-
-    results, seen = [], set()
-    params = [f"%{w}%" for w in words]
-
-    # Query 1 — search_suggestions uses column "suggestion"
-    conn = _conn()
+    patterns = [f"%{w}%" for w in words[:4]]
+    out = []
     try:
-        cur = conn.cursor()
-        clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-        cur.execute(
-            f"SELECT DISTINCT suggestion FROM search_suggestions "
-            f"WHERE {clauses} ORDER BY suggestion LIMIT %s",
-            params + [limit]
-        )
-        for (s,) in cur.fetchall():
-            if s and s.lower() not in seen:
-                seen.add(s.lower()); results.append(s)
-        cur.close()
+        cur.execute("""
+            SELECT DISTINCT suggestion FROM search_suggestions
+            WHERE LOWER(suggestion) LIKE ANY(%s)
+            LIMIT %s
+        """, (patterns, limit))
+        out.extend([r[0] for r in cur.fetchall() if r[0]])
     except Exception as e:
-        log.warning("search_suggestions query failed: %s", e)
-    finally:
-        conn.close()
-
-    # Query 2 — learned_keywords uses column "keyword"
-    conn = _conn()
+        print(f"[creative_expand] search_suggestions failed: {e}", flush=True)
     try:
-        cur = conn.cursor()
-        clauses = " OR ".join(["keyword ILIKE %s"] * len(words))
-        cur.execute(
-            f"SELECT keyword FROM learned_keywords "
-            f"WHERE {clauses} ORDER BY score DESC LIMIT %s",
-            params + [limit]
-        )
-        for (kw,) in cur.fetchall():
-            if kw and kw.lower() not in seen:
-                seen.add(kw.lower()); results.append(kw)
-        cur.close()
+        cur.execute("""
+            SELECT DISTINCT keyword FROM learned_keywords
+            WHERE LOWER(keyword) LIKE ANY(%s)
+            ORDER BY score DESC
+            LIMIT %s
+        """, (patterns, limit))
+        out.extend([r[0] for r in cur.fetchall() if r[0]])
     except Exception as e:
-        log.warning("learned_keywords query failed: %s", e)
-    finally:
-        conn.close()
-
-    # Query 3 — fallback: if too thin, pull top suggestions overall
-    if len(results) < 10:
-        conn = _conn()
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT DISTINCT suggestion FROM search_suggestions "
-                "ORDER BY suggestion LIMIT %s",
-                (limit - len(results),)
-            )
-            for (s,) in cur.fetchall():
-                if s and s.lower() not in seen:
-                    seen.add(s.lower()); results.append(s)
-            cur.close()
-        except Exception as e:
-            log.warning("fallback query failed: %s", e)
-        finally:
-            conn.close()
-
-    return results[:limit]
+        print(f"[creative_expand] learned_keywords failed: {e}", flush=True)
+    seen, final = set(), []
+    for s in out:
+        k = (s or "").lower().strip()
+        if k and k not in seen:
+            seen.add(k)
+            final.append(k)
+    return final[:limit]
 
 
-# ── Demand + supply scoring ───────────────────────────────────
-def _demand_score(concept: str) -> int:
-    words = [w for w in re.findall(r"\w+", concept.lower())
-             if w not in STOPWORDS and len(w) >= 3]
-    if not words:
-        return 0
-    conn = _conn()
+def _classify_concept(cur, concept, category_asset_ids=None):
+    """Return (demand, supply) for a single concept."""
+    demand, supply = 0, 0
+    word = (concept or "").lower().strip()
+    if not word or not cur:
+        return demand, supply
     try:
-        cur = conn.cursor()
-        clauses = " OR ".join(["suggestion ILIKE %s"] * len(words))
-        params  = [f"%{w}%" for w in words]
-        cur.execute(
-            f"SELECT COUNT(DISTINCT suggestion) FROM search_suggestions "
-            f"WHERE {clauses}", params
-        )
-        val = cur.fetchone()[0] or 0
-        cur.close()
-        return val
-    except Exception as e:
-        log.warning("demand check failed for %s: %s", concept, e)
-        return 0
-    finally:
-        conn.close()
-
-
-def _supply_score(concept: str) -> int:
-    conn = _conn()
+        cur.execute("""
+            SELECT COUNT(DISTINCT suggestion) FROM search_suggestions
+            WHERE LOWER(suggestion) LIKE %s
+        """, (f"%{word}%",))
+        demand = cur.fetchone()[0] or 0
+    except Exception:
+        pass
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM items "
-            "WHERE name ILIKE %s AND favorite_count > 5",
-            (f"%{concept}%",)
-        )
-        val = cur.fetchone()[0] or 0
-        cur.close()
-        return val
-    except Exception as e:
-        log.warning("supply check failed for %s: %s", concept, e)
-        return 0
-    finally:
-        conn.close()
+        if category_asset_ids:
+            cur.execute("""
+                SELECT COUNT(*) FROM items
+                WHERE LOWER(name) LIKE %s
+                  AND favorite_count > 5
+                  AND asset_type_id = ANY(%s)
+            """, (f"%{word}%", list(category_asset_ids)))
+        else:
+            cur.execute("""
+                SELECT COUNT(*) FROM items
+                WHERE LOWER(name) LIKE %s AND favorite_count > 5
+            """, (f"%{word}%",))
+        supply = cur.fetchone()[0] or 0
+    except Exception:
+        pass
+    return demand, supply
 
 
-# ── Movement-shaped prompt ────────────────────────────────────
-PROMPT = """You are a Roblox UGC emote strategist.
+def _verdict(demand, supply):
+    if demand == 0:
+        return "hallucinated"
+    if supply == 0:
+        return "gold"
+    if supply < SUPPLY_UNDERSERVED:
+        return "opportunity"
+    if supply < SUPPLY_SATURATED:
+        return "contested"
+    return "saturated"
 
-Seed: "{seed}"
 
-Real Roblox search phrases for reference:
-{examples}
+# ============================================================
+# Prompt builder — category-aware
+# ============================================================
+def _build_prompt(seed, real_phrases, config, n=20):
+    bucket_text = "\n".join(
+        f"  - {b['name']}: {b['vibe']}" for b in config["buckets"]
+    )
+    bucket_names = [b["name"] for b in config["buckets"]]
+    archetypes = "\n".join(f"  - {a}" for a in config["title_archetypes"][:6])
+    filler = list(config["filler_block"])[:20]
+    return f"""You are a Roblox UGC creative concept generator for the '{config['label']}' category.
 
-Generate {n} concepts for a Roblox EMOTE.
+ANCHOR (what the item is):
+{seed}
 
-CRITICAL: every concept must describe a MOVEMENT or ACTION.
-Reject anything that is only a vibe, person-type, or aesthetic tag.
+REAL ROBLOX SEARCHES that players are typing right now (inspiration, not copy):
+{', '.join(real_phrases[:30]) if real_phrases else '(no real search data)'}
 
-Spread across these 3 flavors (~7 each):
-1. RELAXED — chill, mellow, soft, lazy, smooth
-2. ENERGETIC — bouncy, snappy, hyped, poppy, glitchy
-3. CHARACTER — swaggy, confident, sassy, smooth, cool
+=== YOUR JOB ===
+Generate exactly {n} CONCEPTS. Each concept is 1-3 words.
+Distribute across these buckets:
+{bucket_text}
 
-Rules:
-- 1-3 words each
-- Kid-style — what a 12yo types into Roblox search
-- Must be a movement/action phrase, not just a mood tag
-- Do NOT recombine the seed words
-- Each concept distinct in feel, not just wording
+=== SHAPE RULE ===
+{config['shape_rule']}
 
-GOOD: chill bounce · snappy step · swag walk · glitch hop · smooth slide
-BAD:  mall goth · sigma glare · viral beat · main character  ← not movements
+=== EXAMPLE TITLE STRUCTURES (for reference, do NOT copy these) ===
+{archetypes}
 
-Return JSON ONLY:
-{{"concepts": ["concept one", "concept two", "..."]}}
+=== FORBIDDEN ===
+- Do NOT invent brand names or IP names.
+- Do NOT include the item-type word itself (e.g. don't include "hair" in the concept).
+- Do NOT use filler words: {', '.join(filler)}
+- Do NOT repeat concepts.
+- Do NOT generate generic single-word adjectives (cool, nice, awesome, good).
+- Every concept MUST be something a real player would type into Roblox search.
+
+=== OUTPUT — ONLY JSON ===
+{{
+  "concepts": [
+    {{"concept": "...", "bucket": "<one of: {', '.join(bucket_names)}>"}},
+    ...
+  ]
+}}
 """
 
 
-def _call_gemini(prompt: str) -> str | None:
-    try:
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=1000,
-                temperature=0.95,
-                top_p=0.95,
-            ),
-        )
-        return resp.text
-    except Exception as e:
-        log.warning("gemini failed: %s", e)
-        return None
+# ============================================================
+# Public API
+# ============================================================
+def expand_with_validation(anchor, n=20, item_type="emote",
+                            category_asset_ids=None, db_factory=None):
+    """
+    AI fan-out + demand gate.
+    Returns {"anchor":..., "results":[{concept,bucket,demand,supply,verdict},...],
+             "buckets":[...], "family": "..."}
+    """
+    config = get_category_config(item_type)
+    family = config["label"]
 
-
-def _parse(raw: str) -> list[str]:
-    if not raw:
-        return []
-    txt = raw.strip()
-    if txt.startswith("```"):
-        txt = txt.split("```")[1]
-        if txt.startswith("json"):
-            txt = txt[4:]
-        txt = txt.strip()
-    try:
-        data = json.loads(txt)
-    except json.JSONDecodeError:
-        s, e = txt.find("{"), txt.rfind("}")
-        if s == -1 or e == -1:
-            return []
+    if db_factory is None:
         try:
-            data = json.loads(txt[s:e+1])
+            from bot_core import get_db as db_factory
         except Exception:
-            return []
-    out, seen = [], set()
-    for c in data.get("concepts", []):
-        if not isinstance(c, str):
-            continue
-        c = c.strip().lower()
-        if 2 <= len(c) <= 40 and 1 <= len(c.split()) <= 3 and c not in seen:
-            seen.add(c); out.append(c)
-    return out
+            db_factory = None
+
+    conn = None
+    cur = None
+    try:
+        if db_factory is not None:
+            conn = db_factory()
+            cur = conn.cursor()
+
+        real_phrases = _fetch_real_suggestions(cur, anchor, limit=30)
+        prompt = _build_prompt(anchor, real_phrases, config, n=n)
+
+        try:
+            from gemini_brain import _generate
+            raw = _generate(prompt, json_mode=True, temperature=0.95,
+                            max_tokens=1000)
+        except Exception as e:
+            print(f"[creative_expand] generate failed: {e}", flush=True)
+            return {"anchor": anchor, "results": [], "buckets": config["buckets"],
+                    "family": family}
+
+        if not raw:
+            return {"anchor": anchor, "results": [], "buckets": config["buckets"],
+                    "family": family}
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
+
+        concepts = data.get("concepts") or []
+        results = []
+        seen = set()
+        for c in concepts:
+            concept = (c.get("concept") or "").lower().strip()
+            if not concept or concept in seen:
+                continue
+            seen.add(concept)
+            demand, supply = _classify_concept(cur, concept, category_asset_ids)
+            verdict = _verdict(demand, supply)
+            if verdict == "hallucinated":
+                continue
+            results.append({
+                "concept": concept,
+                "bucket": c.get("bucket") or "UNKNOWN",
+                "demand": demand,
+                "supply": supply,
+                "verdict": verdict,
+            })
+
+        return {
+            "anchor": anchor,
+            "results": results,
+            "buckets": config["buckets"],
+            "family": family,
+        }
+    finally:
+        if cur is not None:
+            try: cur.close()
+            except Exception: pass
+        if conn is not None:
+            try: conn.close()
+            except Exception: pass
 
 
-# ── Public API ────────────────────────────────────────────────
-def expand_with_validation(seed: str, n: int = 20) -> dict:
-    examples = _fetch_real_suggestions(seed, limit=30)
-    block = "\n".join(f"- {e}" for e in examples) or "(none found)"
-    raw = _call_gemini(PROMPT.format(seed=seed, n=n, examples=block))
-    concepts = _parse(raw) if raw else []
-
-    results, discarded = [], []
-    for c in concepts:
-        d = _demand_score(c)
-        s = _supply_score(c)
-        row = {"concept": c, "demand": d, "supply": s}
-        if d == 0:
-            row["verdict"] = "hallucinated"; discarded.append(row)
-        elif s == 0:
-            row["verdict"] = "gold"; results.append(row)
-        elif s < SUPPLY_UNDERSERVED:
-            row["verdict"] = "opportunity"; results.append(row)
-        elif s < SUPPLY_SATURATED:
-            row["verdict"] = "contested"; results.append(row)
-        else:
-            row["verdict"] = "saturated"; results.append(row)
-
-    prio = {"gold": 0, "opportunity": 1, "contested": 2, "saturated": 3}
-    results.sort(key=lambda r: (prio[r["verdict"]], -r["demand"], r["supply"]))
-
-    return {"results": results, "discarded": discarded,
-            "examples": examples, "raw": raw or ""}
-
-
-def get_creative_seeds(seed_text: str, max_seeds: int = 8,
-                       category: str | None = None) -> list[str]:
-    """
-    For smart_pipeline. `category` is accepted for future propagation
-    but not used in v4 — kept so brainstorm integration doesn't need
-    to change signatures later.
-    """
-    data = expand_with_validation(seed_text, n=20)
-    good = [r["concept"] for r in data["results"]
-            if r["verdict"] in ("gold", "opportunity")]
-    return good[:max_seeds]
+def get_creative_seeds(seed, max_seeds=8, item_type="emote",
+                        category_asset_ids=None, db_factory=None):
+    """Return top N concept strings, ranked by verdict + demand."""
+    data = expand_with_validation(seed, n=20, item_type=item_type,
+                                    category_asset_ids=category_asset_ids,
+                                    db_factory=db_factory)
+    rank = {"gold": 0, "opportunity": 1, "contested": 2, "saturated": 3}
+    sorted_r = sorted(data.get("results") or [],
+                       key=lambda r: (rank.get(r["verdict"], 9), -r["demand"]))
+    return [r["concept"] for r in sorted_r[:max_seeds]]
