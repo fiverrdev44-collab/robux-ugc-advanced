@@ -4,6 +4,11 @@ commands_intel.py — All intel commands. Category-aware autopsy.
 Creative pivot expansion DISABLED — it produced garbage candidates
 ("places", "check", "icecream") from unreliable search_suggestions mining.
 The AI's own best_pivot (from classify_keyword_intelligence) is used instead.
+
+HARD RULES NOW ENFORCED:
+- Pivot keyword is MANDATORY as starting token in >=5 of 10 titles.
+- SATURATED/DEAD seed words are FORBIDDEN as the first token of any title.
+- Post-filter rejects any title that starts with a forbidden word.
 """
 import os
 import re
@@ -215,7 +220,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — CATEGORY-AWARE (creative pivot disabled)
+    # !autopsy — CATEGORY-AWARE (hard-ruled pivots)
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -435,15 +440,39 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
-        # Pivot hint drawn from AI's own best_pivot (not creative_pivot)
-        pivot_hint = ""
-        if deep_intel:
-            bp = deep_intel.get("best_pivot") or {}
-            if bp.get("keyword"):
-                pivot_hint = (
-                    f"\n>>> If the seed is SATURATED, prefer `{bp['keyword']}` "
-                    f"as primary token in at least 2 titles. <<<\n"
-                )
+        # ── HARD RULES: pivot mandatory, saturated forbidden as first token ──
+        bp = (deep_intel or {}).get("best_pivot") or {}
+        bp_kw = (bp.get("keyword") or "").strip().lower()
+
+        # Compute which seed words are SATURATED/DEAD — forbid them as first token
+        forbidden_first = []
+        try:
+            for c in (fast_class or {}).get("classifications", []):
+                if c.get("bucket") in ("SATURATED", "DEAD"):
+                    w = (c.get("keyword") or "").strip().lower()
+                    if w and w not in forbidden_first:
+                        forbidden_first.append(w)
+        except Exception:
+            pass
+
+        hint_parts = []
+        if bp_kw:
+            hint_parts.append(
+                f"\n=== MANDATORY STARTING TOKEN ===\n"
+                f"At least 5 of the 10 titles MUST start with `{bp_kw}`.\n"
+                f"`{bp_kw}` is the pivot that avoids the saturated tier.\n"
+                f"Titles that don't start with `{bp_kw}` MUST start with a "
+                f"low-competition word (supply < 50).\n"
+            )
+        if forbidden_first:
+            hint_parts.append(
+                f"\n=== FORBIDDEN AS FIRST TOKEN (NON-NEGOTIABLE) ===\n"
+                f"NEVER start a title with any of: {', '.join(forbidden_first)}\n"
+                f"These words are SATURATED. Using them as first token continues "
+                f"the exact failure the item already has.\n"
+                f"You may use them in positions 3-5 only if absolutely necessary.\n"
+            )
+        pivot_hint = "".join(hint_parts)
 
         recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it.
 
@@ -472,9 +501,10 @@ FAILURE MODE: {diagnosis['failure_mode']}
 1. NEVER call a high-competition keyword "weak". High competition = SATURATED = HIGH DEMAND.
    "WEAK" is RESERVED ONLY for keywords with median_favs < 50.
 2. If any seed is SATURATED, say so explicitly using the word "SATURATED".
-3. If a BEST PIVOT keyword is named in the intelligence block, use it as a primary token in at least 2 titles.
-4. Every title MUST be 3-5 words.
-5. Every title MUST start with a SEARCHABLE noun or verb.
+3. If a MANDATORY STARTING TOKEN is specified above, at least 5 of the 10 titles
+   MUST start with that token.
+4. If FORBIDDEN AS FIRST TOKEN words are listed, no title may start with any of them.
+5. Every title MUST be 3-5 words.
 6. Every title MUST end with one of: {type_words_str}
 7. Use ONLY these allow-list words + glue + type words:
    {', '.join(allow_list[:80])}
@@ -495,7 +525,7 @@ description_seo, description_hype, description_short
   "description_seo": "...",
   "description_hype": "...",
   "description_short": "...",
-  "primary_keyword": "best first word",
+  "primary_keyword": "best first word — MUST be the mandatory starting token",
   "edit_reasoning": "3-4 sentences.",
   "what_was_wrong": "3-4 sentences. Use SATURATED, not weak."
 }}
@@ -523,10 +553,22 @@ description_seo, description_hype, description_short
                 "🔥 VIRAL (meme/TikTok hook)":      data.get("titles_viral") or [],
             }
 
+            # Post-filter: reject titles starting with a SATURATED/DEAD seed word
+            forbidden_first_set = {w.lower() for w in forbidden_first}
+
             verified_groups = {}
+            rejected_count = 0
             for gname, gtitles in all_groups.items():
                 v, r = verify_titles(gtitles, allow_list)
-                if v: verified_groups[gname] = v
+                v_clean = []
+                for t in v:
+                    toks = t.lower().split()
+                    if toks and toks[0] in forbidden_first_set:
+                        rejected_count += 1
+                        continue
+                    v_clean.append(t)
+                if v_clean:
+                    verified_groups[gname] = v_clean
 
             lines = ["# 🧠 10 RECOVERY TITLES\n"]
             if verified_groups:
@@ -535,8 +577,13 @@ description_seo, description_hype, description_short
                     for t in titles:
                         lines.append(f"• `{t}`")
                     lines.append("")
+                if rejected_count:
+                    lines.append(
+                        f"_({rejected_count} title(s) rejected for starting with "
+                        f"a SATURATED keyword.)_\n"
+                    )
             else:
-                lines.append("⚠️ Titles failed verification.")
+                lines.append("⚠️ All titles failed verification (either structure or saturated-start).")
 
             lines.append("---\n")
             lines.append("## 📝 3 DESCRIPTIONS\n")
