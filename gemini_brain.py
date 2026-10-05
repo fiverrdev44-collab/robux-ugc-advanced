@@ -1,12 +1,13 @@
 """
-gemini_brain.py — Hybrid AI for Roblox UGC. SMART EDITION.
+gemini_brain.py — Hybrid AI for Roblox UGC. SUPERCOMPUTER EDITION.
 
 New in this version:
-- verify_titles() correctly handles bigram allow-list entries (fixes "arm pump" rejection)
-- mine_title_patterns() extracts structural patterns from DB winners
-- synthesize_hybrid() receives competitor titles so AI avoids duplicates and finds gaps
-- generate_fallback_titles() — programmatic title generator when AI fails or under-delivers
-- Prompt is 3x more specific about title construction rules
+- classify_keyword_intelligence() — weighs SUPPLY + DEMAND + VELOCITY (not supply alone)
+- NEVER calls a keyword "weak" without checking demand first
+- Forces pivot recommendation when seed is SATURATED
+- Enhanced synthesis prompt cross-references smart_pipeline output
+- verify_titles() unchanged — anti-hallucination gate preserved
+- generate_fallback_titles() unchanged
 """
 import os
 import re
@@ -35,7 +36,6 @@ STOPWORDS = {"a","an","the","of","and","or","for","to","in","on","with",
 GLUE_WORDS = {"a","an","the","of","and","or","for","to","in","on","with",
               "my","your","at","by","is","it","as"}
 
-# Core item type words — always allowed in titles
 ITEM_TYPE_WORDS = {
     "emote","dance","hat","beanie","crown","cap","hair","face","mask","shirt",
     "pants","jacket","shoes","wing","wings","tail","ears","horn","horns",
@@ -138,7 +138,7 @@ def _tokens(text):
 
 
 # ============================================================
-# PASS 1 — EXTRACTION
+# PASS 1 — EXTRACTION (unchanged)
 # ============================================================
 _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 
@@ -210,7 +210,7 @@ def all_terms(intent):
 
 
 # ============================================================
-# PASS 1.5 — BRIDGE
+# PASS 1.5 — BRIDGE (unchanged)
 # ============================================================
 _EXPAND_PROMPT = """You are a Roblox UGC DB search expert.
 
@@ -243,47 +243,169 @@ def expand_search_terms(intent, db_vocab_sample, failed_terms):
 
 
 # ============================================================
-# TITLE PATTERN MINING — new pass
+# 🧠 NEW — KEYWORD INTELLIGENCE (SUPERCOMPUTER LAYER)
+# ============================================================
+_KEYWORD_INTEL_PROMPT = """You are the world's most sophisticated Roblox UGC keyword intelligence analyst.
+
+Your ONLY job: classify keywords based on BOTH supply AND demand AND velocity.
+You do NOT guess. You do NOT call a keyword "weak" without checking demand.
+
+=== INPUT ===
+SEED KEYWORD (the one that failed): {seed}
+ITEM TYPE: {item_type}
+COMPETITION DATA from live Roblox API (per keyword):
+{competition_data}
+
+Each line above shows: <keyword> — <supply> competitors · <median_favs> median favs · <median_price> median R$
+
+=== CLASSIFICATION RULES (NON-NEGOTIABLE) ===
+Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and demand:
+
+- 🟢 GOLD:        supply < 20  AND median_favs >= 150   → rare, low comp, high demand
+- 🔵 OPPORTUNITY: supply < 50  AND median_favs >= 80    → strong entry point
+- 🟡 SATURATED:   supply >= 50 AND median_favs >= 80    → HIGH DEMAND but hard to break in
+- 🟠 WEAK:        supply < 20  AND median_favs < 50     → LOW DEMAND, skip
+- 🔴 DEAD:        median_favs < 15                       → ignore entirely
+- ⚪ NEUTRAL:     everything else
+
+=== CRITICAL RULES ===
+1. The word "weak" is RESERVED for low-demand keywords (median_favs < 50).
+   - 59 competitors + 101 median favs = SATURATED, NOT weak. High demand.
+   - 5 competitors + 10 median favs = WEAK. Low demand.
+   - 3 competitors + 200 median favs = GOLD. Jackpot.
+2. NEVER describe a high-competition keyword as "weak" or "non-descriptive".
+   High competition means the keyword WORKS — too many people know that.
+3. When the SEED is SATURATED, you MUST find a pivot:
+   scan ALL other keywords in the data, pick the one with the LOWEST supply
+   that still has median_favs >= 80. That is the pivot.
+4. If age data (velocity) is provided, prioritize keywords with the highest favs/day.
+   A keyword gaining 30 favs/day is better than one that took 6 months to hit 500.
+
+=== OUTPUT — ONLY JSON ===
+{{
+  "seed_classification": {{
+    "keyword": "<seed>",
+    "supply": <int>,
+    "median_favs": <int>,
+    "bucket": "<GOLD|OPPORTUNITY|SATURATED|WEAK|DEAD|NEUTRAL>",
+    "emoji": "<one of 🟢🔵🟡🟠🔴⚪>",
+    "reasoning": "<1-2 sentences. State supply AND demand. If saturated, say 'HIGH DEMAND but SATURATED' explicitly.>"
+  }},
+  "all_classifications": [
+    {{
+      "keyword": "<kw>",
+      "supply": <int>,
+      "median_favs": <int>,
+      "bucket": "<GOLD|OPPORTUNITY|SATURATED|WEAK|DEAD|NEUTRAL>",
+      "emoji": "<emoji>",
+      "reasoning": "<1 sentence>"
+    }}
+  ],
+  "best_pivot": {{
+    "keyword": "<best alternative to the seed>",
+    "supply": <int>,
+    "median_favs": <int>,
+    "bucket": "<bucket>",
+    "why_better": "<1-2 sentences comparing to the seed. e.g. 'Same demand tier (100+ median favs) but only 18 competitors instead of 59.'>"
+  }},
+  "diagnosis": "<3-4 sentences. State clearly what went wrong with the seed. If seed was saturated, USE THE WORD 'SATURATED' not 'weak'. Then recommend the pivot keyword by name. End with the strategic direction.>"
+}}
+"""
+
+
+def classify_keyword_intelligence(seed_keyword, competition_data,
+                                   item_type="emote"):
+    """
+    Deep-classify keywords using supply + demand + (optional) velocity.
+    Returns a dict with seed_classification, all_classifications,
+    best_pivot, and a natural-language diagnosis.
+
+    competition_data: list of dicts like
+      [{"keyword": "spice", "comp": 59, "median_favs": 101, "median_price": 58}, ...]
+    """
+    if not competition_data:
+        return {}
+
+    # Format for prompt
+    lines = []
+    for d in competition_data:
+        kw = d.get("keyword") or d.get("seed") or "?"
+        comp = d.get("comp") or d.get("competitors") or 0
+        favs = d.get("median_favs") or d.get("median") or 0
+        price = d.get("median_price") or d.get("price") or 0
+        vel = d.get("velocity")  # optional favs/day
+        vel_str = f" · {vel:.1f} favs/day" if vel else ""
+        lines.append(f"- {kw} — {comp} competitors · {favs} median favs · {price} median R${vel_str}")
+
+    prompt = _KEYWORD_INTEL_PROMPT.format(
+        seed=seed_keyword,
+        item_type=item_type,
+        competition_data="\n".join(lines),
+    )
+    raw = _generate(prompt, json_mode=True, temperature=0.35, max_tokens=3000)
+    if not raw: return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m: return {}
+        try: return json.loads(m.group(0))
+        except Exception: return {}
+
+
+def format_keyword_intel_for_prompt(intel):
+    """Format classify_keyword_intelligence() output as text for another prompt."""
+    if not intel: return "(no keyword intelligence available)"
+    lines = []
+    sc = intel.get("seed_classification") or {}
+    if sc:
+        lines.append(f"SEED: {sc.get('keyword','?')} — {sc.get('emoji','')} {sc.get('bucket','?')} "
+                     f"(supply={sc.get('supply',0)}, median_favs={sc.get('median_favs',0)})")
+        lines.append(f"  Reasoning: {sc.get('reasoning','')}")
+    lines.append("")
+    lines.append("ALL KEYWORDS:")
+    for c in (intel.get("all_classifications") or [])[:15]:
+        lines.append(f"  {c.get('emoji','')} {c.get('keyword','?'):<20} "
+                     f"supply={c.get('supply',0):<4} median={c.get('median_favs',0):<5} "
+                     f"{c.get('bucket','?')}")
+    bp = intel.get("best_pivot") or {}
+    if bp:
+        lines.append("")
+        lines.append(f"BEST PIVOT: {bp.get('keyword','?')} "
+                     f"(supply={bp.get('supply',0)}, median={bp.get('median_favs',0)})")
+        lines.append(f"  Why better: {bp.get('why_better','')}")
+    diag = intel.get("diagnosis")
+    if diag:
+        lines.append("")
+        lines.append(f"DIAGNOSIS: {diag}")
+    return "\n".join(lines)
+
+
+# ============================================================
+# TITLE PATTERN MINING (unchanged)
 # ============================================================
 def mine_title_patterns(top_items):
-    """
-    Analyze top competitor titles and extract structural patterns.
-    Returns a dict of {patterns: [...], avoid_words: [...], common_lengths: [...]}
-    """
     if not top_items:
         return {"patterns": [], "avoid_words": [], "common_lengths": []}
-
     patterns = Counter()
     word_counter = Counter()
     lengths = []
-
     for it in top_items:
         name = (it.get("name") or "").strip()
         if not name: continue
         toks = _tokens(name)
         if not toks: continue
         lengths.append(len(toks))
-
-        # Word frequency
         for t in toks:
             if len(t) >= 3:
                 word_counter[t] += 1
-
-        # Pattern = structure of the title (e.g. "noun verb noun")
-        # Simplify: token count signature
-        signature = f"{len(toks)}-word"
-        patterns[signature] += 1
-
-    # Common lengths
+        patterns[f"{len(toks)}-word"] += 1
     common_lengths = []
     if lengths:
         length_counter = Counter(lengths)
         common_lengths = [l for l, _ in length_counter.most_common(3)]
-
-    # Words that appear more than 40% of the time are probably generic — avoid
     total = len(top_items)
     avoid_words = [w for w, c in word_counter.most_common(10) if c / total > 0.4]
-
     return {
         "patterns": [p for p, _ in patterns.most_common(5)],
         "avoid_words": avoid_words,
@@ -293,29 +415,35 @@ def mine_title_patterns(top_items):
 
 
 # ============================================================
-# PASS 2 — SYNTHESIS (SMART EDITION)
+# PASS 2 — SYNTHESIS (SUPERCOMPUTER EDITION)
 # ============================================================
-_SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your titles have generated millions of favourites. You see the market in ways other creators can't.
+_SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your titles have generated millions of favourites.
 
 === YOUR WEAPONS ===
 1. HARD DATA — real competitor titles, favs, prices from the DB (only source of truth)
-2. ROBLOX ALGORITHM KNOWLEDGE — ranking systems, CTR thresholds, velocity targets
-3. CULTURE BRAIN — TikTok, anime, memes, K-pop, viral moments
-4. USER'S SPECIFIC MOVES — the exact description they gave you
+2. KEYWORD INTELLIGENCE — supply/demand/velocity classification (see below)
+3. ROBLOX ALGORITHM KNOWLEDGE — ranking systems, CTR thresholds, velocity targets
+4. CULTURE BRAIN — TikTok, anime, memes, K-pop, viral moments
+5. USER'S SPECIFIC MOVES — the exact description they gave you
+
+=== 🧠 KEYWORD INTELLIGENCE (READ THIS FIRST) ===
+{keyword_intel_text}
+
+CRITICAL: The classification above is authoritative. If the seed keyword is
+SATURATED, do NOT describe it as "weak". Use the word "SATURATED". Recommend
+the BEST PIVOT keyword explicitly in your diagnosis and titles.
 
 === TITLE CONSTRUCTION RULES (NON-NEGOTIABLE) ===
-1. Every title MUST be 3-5 tokens. Two-word titles are FORBIDDEN.
-   Six+ word titles are FORBIDDEN. The verifier rejects both.
+1. Every title MUST be 3-5 tokens. Two-word titles FORBIDDEN. Six+ FORBIDDEN.
 2. Every title MUST end with the item type word (emote, hat, hair, dance, etc.)
-   OR contain it naturally. e.g. "Hip Sway Arm Pump Dance" not "Hip Sway Arm Pump".
+   OR contain it naturally.
 3. Every title MUST be UNIQUE. No title repeats another title's exact word order.
 4. At least 3 titles MUST include the user's SPECIFIC_MOVES words.
-5. Allow-list bigrams like "hip sway" mean BOTH "hip" and "sway" are usable as
-   individual tokens in titles.
+5. Allow-list bigrams like "hip sway" mean BOTH "hip" and "sway" are usable.
 6. Titles may ONLY use words from the allow-list + glue words + item type words.
 7. NEVER use stopwords like "a", "the", "and" as fillers to pad length.
 
-=== TITLE ARCHETYPES (use these structures) ===
+=== TITLE ARCHETYPES ===
 - MOVE + TYPE:              "Hip Sway Dance"
 - MOVE + MOVE + TYPE:       "Hip Sway Arm Pump Emote"
 - STYLE + MOVE + TYPE:      "TikTok Hip Sway Dance"
@@ -332,39 +460,40 @@ _SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your tit
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
 - SAFE (3): mirror what top competitors do, but cleaner
-- DIFFERENTIATED (3): same keywords, unique angle — MUST use a different first word than SAFE
+- DIFFERENTIATED (3): same keywords, unique angle — MUST use a different first word
 - LONGTAIL (2): 4-5 tokens packed with keywords
 - VIRAL (2): meme/trend/sound hook
 
 Each title must feel hand-written, not keyword-stuffed.
+When possible, use the BEST PIVOT keyword from the intelligence section
+as the FIRST or SECOND token in at least 2 titles.
 
 === OUTPUT — ONLY JSON ===
-
 {{
   "titles_safe": ["...", "...", "..."],
   "titles_differentiated": ["...", "...", "..."],
   "titles_longtail": ["...", "..."],
   "titles_viral": ["...", "..."],
-  "search_diagnosis": "2-3 sentences on which of user's words exist in catalog vs bridged",
-  "positioning": "3-4 sentences on how to position against competitors",
-  "market_diagnosis": "3-4 sentences on saturation, winners, losers, CTR signals",
-  "winner_blueprint": "3-4 sentences on what top 10% do that bottom 50% don't",
-  "marketplace_algorithm_playbook": "5-6 sentences with CTR thresholds and velocity targets",
-  "ranking_factor_breakdown": "4-5 sentences on which ranking factors matter most",
-  "sale_velocity_plan": "3-4 sentences with hour 1/6/24 sales targets",
-  "price_elasticity_call": "2-3 sentences with exact price + why",
-  "saturation_verdict": "2-3 sentences on whether to enter, pivot, or wait",
-  "launch_window_math": "2-3 sentences with exact day/hour (Georgia GMT+4)",
-  "trend_intel": "3-4 sentences on trend lifecycle and exit window",
-  "discovery_path": "2-3 sentences on the buyer journey",
-  "seo_description": "3-4 sentences copy-paste ready for Roblox",
+  "search_diagnosis": "3-4 sentences. Reference the KEYWORD INTELLIGENCE. If seed was saturated, say so explicitly.",
+  "positioning": "3-4 sentences on how to position against competitors.",
+  "market_diagnosis": "3-4 sentences on saturation, winners, losers, CTR signals.",
+  "winner_blueprint": "3-4 sentences on what top 10% do that bottom 50% don't.",
+  "marketplace_algorithm_playbook": "5-6 sentences with CTR thresholds and velocity targets.",
+  "ranking_factor_breakdown": "4-5 sentences on which ranking factors matter most.",
+  "sale_velocity_plan": "3-4 sentences with hour 1/6/24 sales targets.",
+  "price_elasticity_call": "2-3 sentences with exact price + why.",
+  "saturation_verdict": "2-3 sentences. Reference the seed's bucket AND the pivot.",
+  "launch_window_math": "2-3 sentences with exact day/hour (Georgia GMT+4).",
+  "trend_intel": "3-4 sentences on trend lifecycle and exit window.",
+  "discovery_path": "2-3 sentences on the buyer journey.",
+  "seo_description": "3-4 sentences copy-paste ready for Roblox.",
   "killer_keywords": ["10-15 highest-value keywords from allow-list"],
-  "cross_promotion_play": "2-3 sentences on related items to launch",
-  "social_playbook": "3-4 sentences on TikTok/YouTube promotion",
-  "risk_analysis": "3-4 sentences on what could kill this item",
-  "expected_performance": "3-4 sentences with realistic numbers",
-  "cultural_ammo": "3-4 sentences on cultural context to weaponize",
-  "verdict": "GO / CONDITIONAL GO / NO-GO — one-line reason",
+  "cross_promotion_play": "2-3 sentences on related items to launch.",
+  "social_playbook": "3-4 sentences on TikTok/YouTube promotion.",
+  "risk_analysis": "3-4 sentences on what could kill this item.",
+  "expected_performance": "3-4 sentences with realistic numbers.",
+  "cultural_ammo": "3-4 sentences on cultural context to weaponize.",
+  "verdict": "GO / CONDITIONAL GO / NO-GO — one-line reason.",
   "bonus_plays": ["2-3 additional item ideas"]
 }}
 
@@ -400,10 +529,13 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
                       item_type="unknown", trend_source="none",
                       search_diagnostics=None, gap_analysis=None,
                       specific_moves=None, winner_analysis=None,
-                      algo_context=None):
+                      algo_context=None, keyword_intel=None):
+    """
+    keyword_intel: optional output from classify_keyword_intelligence().
+    If provided, it is injected into the prompt as authoritative classification.
+    """
     if not allow_list: return {}
 
-    # --- Competitor titles (for duplicate avoidance) ---
     competitor_titles = []
     top_lines = []
     for it in top_items[:10]:
@@ -414,7 +546,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         top_lines.append(f"- {name} | favs={favs:,} | price={price_s}")
         if name: competitor_titles.append(name)
 
-    # --- Title pattern mining ---
     try:
         patterns = mine_title_patterns(top_items)
         insight_lines = []
@@ -464,6 +595,9 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
     ac = algo_context or "(unavailable)"
 
+    # 🧠 Keyword intelligence block
+    intel_text = format_keyword_intel_for_prompt(keyword_intel)
+
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
         item_type=item_type,
@@ -478,7 +612,8 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         search_diagnostics="\n".join(diag_lines) or "(none)",
         gap_analysis="\n".join(gap_lines) or "(none)",
         title_pattern_insights=title_pattern_insights,
-        competitor_titles="\n".join(f"- {t}" for t in competitor_titles) or "(none)")
+        competitor_titles="\n".join(f"- {t}" for t in competitor_titles) or "(none)",
+        keyword_intel_text=intel_text)
 
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
     if not raw: return {}
@@ -491,19 +626,9 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
 
 # ============================================================
-# VERIFICATION — FIXED: handles bigram allow-list entries
+# VERIFICATION — unchanged (anti-hallucination gate)
 # ============================================================
 def verify_titles(titles, allow_list):
-    """
-    Hard gate. Rejects:
-    - words not in allow-list
-    - titles <3 tokens or >6 tokens
-    - titles with duplicate consecutive tokens
-    - duplicate titles (case-insensitive)
-    Bigrams in allow-list are auto-split so individual tokens pass
-    (e.g. "hip sway" allow-list entry means both "hip" and "sway" pass).
-    """
-    # Expand allow-list: split bigrams into singles + keep original
     allow_set = set()
     for t in allow_list or []:
         if not t: continue
@@ -514,7 +639,6 @@ def verify_titles(titles, allow_list):
             for p in parts:
                 if len(p) >= 3:
                     allow_set.add(p)
-    # Item type words always allowed
     for w in ITEM_TYPE_WORDS:
         allow_set.add(w)
 
@@ -524,61 +648,42 @@ def verify_titles(titles, allow_list):
     for title in titles or []:
         if not isinstance(title, str) or not title.strip():
             continue
-
         toks = _tokens(title)
-
-        # Length gate: 3-6 tokens
         if len(toks) < 3:
             rejected.append((title, [f"too short ({len(toks)} words)"]))
             continue
         if len(toks) > 6:
             rejected.append((title, [f"too long ({len(toks)} words)"]))
             continue
-
-        # Duplicate consecutive
         if any(toks[i] == toks[i+1] for i in range(len(toks)-1)):
             rejected.append((title, ["consecutive dup"]))
             continue
-
-        # Cross-group dedup
         t_lower = title.lower().strip()
         if t_lower in seen_lower:
             rejected.append((title, ["duplicate title"]))
             continue
-
-        # Allow-list gate
         bad = []
         for tok in toks:
             if tok in STOPWORDS: continue
             if tok.isdigit(): continue
             if tok in allow_set: continue
-            # Prefix matching only if allow-list word is 4+ chars
             if any(tok.startswith(a) or a.startswith(tok)
                    for a in allow_set if len(a) >= 4):
                 continue
             bad.append(tok)
-
         if bad:
             rejected.append((title, bad))
         else:
             seen_lower.add(t_lower)
             valid.append(title)
-
     return valid, rejected
 
 
 # ============================================================
-# FALLBACK TITLE GENERATOR — programmatic, no AI needed
+# FALLBACK TITLE GENERATOR — unchanged
 # ============================================================
 def generate_fallback_titles(allow_list, specific_moves, item_type,
                               top_items, needed=10):
-    """
-    Generate titles programmatically when AI fails or under-delivers.
-    Uses allow-list + specific_moves + item_type word.
-    Cross-references competitor titles to avoid exact duplicates.
-    Returns list of title dicts (grouped by strategy).
-    """
-    # Type word (defaults to "emote" for emotes)
     type_word = "emote"
     it_lower = (item_type or "").lower()
     type_candidates = {
@@ -595,74 +700,55 @@ def generate_fallback_titles(allow_list, specific_moves, item_type,
             type_word = candidate
             break
 
-    # Move tokens — split bigrams into individual tokens
     move_tokens = []
     for m in (specific_moves or []):
         for t in _tokens(m):
             if len(t) >= 3 and t not in move_tokens:
                 move_tokens.append(t)
 
-    # Allow-list tokens (filter out stopwords)
     allow_tokens = []
     for a in (allow_list or []):
         for t in _tokens(a):
             if len(t) >= 3 and t not in GLUE_WORDS and t not in allow_tokens:
                 allow_tokens.append(t)
 
-    # Prioritize: moves first, then allow-list tokens excluding type word
     move_set = set(move_tokens)
     other_tokens = [t for t in allow_tokens
                     if t not in move_set and t != type_word][:10]
 
-    # If we don't have enough tokens, bail
     if not move_tokens and not other_tokens:
         return []
 
-    # Existing titles to avoid duplicates
     existing = set()
     for it in (top_items or []):
         n = (it.get("name") or "").lower().strip()
         if n: existing.add(n)
 
-    # Build candidates
     candidates = []
-
-    # Safe: move + type
     for m1 in move_tokens[:4]:
         candidates.append(("safe", f"{m1.capitalize()} {type_word.capitalize()}"))
-
-    # Safe: move + move + type
     if len(move_tokens) >= 2:
         for i in range(min(3, len(move_tokens))):
             m1 = move_tokens[i]
             m2 = move_tokens[(i+1) % len(move_tokens)]
             candidates.append(("safe", f"{m1.capitalize()} {m2.capitalize()} {type_word.capitalize()}"))
-
-    # Differentiated: other_token + move + type
     for o in other_tokens[:4]:
         for m in move_tokens[:2]:
             candidates.append(("diff", f"{o.capitalize()} {m.capitalize()} {type_word.capitalize()}"))
-
-    # Differentiated: move + other + type
     for m in move_tokens[:2]:
         for o in other_tokens[:3]:
             candidates.append(("diff", f"{m.capitalize()} {o.capitalize()} {type_word.capitalize()}"))
-
-    # Longtail: style + move + move + type
     if len(move_tokens) >= 2 and other_tokens:
         for o in other_tokens[:2]:
             m1 = move_tokens[0]
             m2 = move_tokens[1]
             candidates.append(("longtail", f"{o.capitalize()} {m1.capitalize()} {m2.capitalize()} {type_word.capitalize()}"))
-
-    # Viral: trendy + move + type
     trendy_words = ["viral", "tiktok", "trend", "hype"]
     for tw in trendy_words:
         if tw in allow_tokens:
             for m in move_tokens[:2]:
                 candidates.append(("viral", f"{tw.capitalize()} {m.capitalize()} {type_word.capitalize()}"))
 
-    # Filter duplicates and existing
     seen = set()
     filtered = []
     for group, title in candidates:
@@ -675,7 +761,6 @@ def generate_fallback_titles(allow_list, specific_moves, item_type,
         seen.add(tl)
         filtered.append((group, title))
 
-    # Group into buckets
     buckets = {"safe": [], "diff": [], "longtail": [], "viral": []}
     for group, title in filtered:
         if len(buckets[group]) < 4:
@@ -690,7 +775,6 @@ def generate_fallback_titles(allow_list, specific_moves, item_type,
 
 
 def fallback_title_payload(allow_list, specific_moves, item_type, top_items):
-    """Generate a fallback-only synthesis payload when AI fails completely."""
     fallback = generate_fallback_titles(allow_list, specific_moves,
                                         item_type, top_items, needed=10)
     return {
@@ -699,14 +783,14 @@ def fallback_title_payload(allow_list, specific_moves, item_type, top_items):
         "titles_longtail": fallback.get("titles_longtail", []),
         "titles_viral": fallback.get("titles_viral", []),
         "search_diagnosis": "(fallback mode — AI unavailable)",
-        "positioning": "Fallback titles generated from DB allow-list. Verify manually before launching.",
+        "positioning": "Fallback titles generated from DB allow-list.",
         "market_diagnosis": "Fallback mode — no AI synthesis available.",
         "verdict": "CONDITIONAL — review titles manually",
     }
 
 
 # ============================================================
-# VISION
+# VISION (unchanged)
 # ============================================================
 _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 
@@ -800,7 +884,7 @@ def analyze_image_for_ugc(images, user_description=""):
 
 
 # ============================================================
-# FREE-FORM Q&A
+# FREE-FORM Q&A (unchanged)
 # ============================================================
 _ASK_PROMPT = """You are a helpful assistant inside a Roblox UGC bot.
 Answer directly. If Roblox UGC related, go deep and tactical. Under 1,800 chars.
