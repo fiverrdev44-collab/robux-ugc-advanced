@@ -1,5 +1,9 @@
 """
 commands_intel.py — All intel commands. Category-aware autopsy.
+
+Creative pivot expansion DISABLED — it produced garbage candidates
+("places", "check", "icecream") from unreliable search_suggestions mining.
+The AI's own best_pivot (from classify_keyword_intelligence) is used instead.
 """
 import os
 import re
@@ -211,7 +215,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — CATEGORY-AWARE SUPERCOMPUTER EDITION
+    # !autopsy — CATEGORY-AWARE (creative pivot disabled)
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -277,7 +281,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 await progress.edit(content="❌ Item name is empty.")
                 cur.close(); conn.close(); return
 
-            # ── Detect category family ──────────────────────
             family = detect_family_from_asset_type(atype)
 
             patterns = [f"%{w}%" for w in name_words]
@@ -366,7 +369,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                     intel_lines.append("")
                     bp = deep_intel.get("best_pivot") or {}
                     if bp.get("keyword"):
-                        intel_lines.append("## 🚀 DB-ONLY PIVOT (may also be saturated)")
+                        intel_lines.append("## 🚀 BEST PIVOT (from DB, may also be saturated)")
                         intel_lines.append(
                             f"**`{bp.get('keyword')}`** — supply={bp.get('supply',0)}, "
                             f"median_favs={bp.get('median_favs',0)}, bucket={bp.get('bucket','?')}"
@@ -382,36 +385,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                         await ctx.send(intel_body[i:i+1900]); await asyncio.sleep(0.3)
         except Exception as e:
             print(f"[autopsy] keyword intelligence block failed: {e}", flush=True)
-
-        # ── CREATIVE PIVOT EXPANSION (category-aware) ───────
-        creative_pivot_result = None
-        try:
-            from creative_pivot import find_creative_pivots, format_creative_pivot_report
-            if name_words:
-                await ctx.send(
-                    "🚀 **Expanding creatively — AI + search data + learned keywords...**"
-                )
-
-                def _run_pivot():
-                    c2 = get_db(); cur2 = c2.cursor()
-                    try:
-                        return find_creative_pivots(
-                            seed_words=name_words,
-                            item_type=family,
-                            cur=cur2,
-                            cookie=cookie,
-                            max_candidates=25,
-                            live_verify_top_n=3,
-                        )
-                    finally:
-                        cur2.close(); c2.close()
-
-                creative_pivot_result = await asyncio.to_thread(_run_pivot)
-                cp_body = format_creative_pivot_report(creative_pivot_result)
-                for i in range(0, len(cp_body), 1900):
-                    await ctx.send(cp_body[i:i+1900]); await asyncio.sleep(0.3)
-        except Exception as cpe:
-            print(f"[autopsy] creative pivot failed: {cpe}", flush=True)
 
         # ── AI helpers ──────────────────────────────────────
         try:
@@ -450,13 +423,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 + ["viral", "trendy", "tiktok"]
             ))
 
-        # Inject creative pivot keywords into allow_list
-        if creative_pivot_result and creative_pivot_result.get("top_pivots"):
-            for p in creative_pivot_result["top_pivots"]:
-                kw = p.get("keyword")
-                if kw and kw not in allow_list:
-                    allow_list.append(kw)
-
         # Build category-aware prompt
         type_words_str = ", ".join(cfg["type_words"][:5])
         archetypes_str = "\n".join(f"  - {a}" for a in cfg["title_archetypes"][:5])
@@ -469,18 +435,15 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
-        creative_block = ""
+        # Pivot hint drawn from AI's own best_pivot (not creative_pivot)
         pivot_hint = ""
-        if creative_pivot_result and creative_pivot_result.get("top_pivots"):
-            creative_block = "\n=== 🚀 CREATIVE PIVOTS (use these!) ===\n"
-            for i, p in enumerate(creative_pivot_result["top_pivots"][:5], 1):
-                live = f" · LIVE {p['live_emoji']} {p['live_bucket']}" if p.get("live_bucket") else ""
-                creative_block += (
-                    f"{i}. {p['emoji']} `{p['keyword']}` — {p['bucket']} "
-                    f"(supply={p['supply']}, median_favs={p['median_favs']}){live}\n"
+        if deep_intel:
+            bp = deep_intel.get("best_pivot") or {}
+            if bp.get("keyword"):
+                pivot_hint = (
+                    f"\n>>> If the seed is SATURATED, prefer `{bp['keyword']}` "
+                    f"as primary token in at least 2 titles. <<<\n"
                 )
-            best = creative_pivot_result["top_pivots"][0]["keyword"]
-            creative_block += f"\n>>> USE `{best}` as primary token in at least 3 titles. <<<\n"
 
         recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it.
 
@@ -498,7 +461,7 @@ FAILURE MODE: {diagnosis['failure_mode']}
 
 === 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {intel_block}
-{pivot_hint}{creative_block}
+{pivot_hint}
 === SHAPE RULE FOR THIS CATEGORY ===
 {cfg['shape_rule']}
 
@@ -509,7 +472,7 @@ FAILURE MODE: {diagnosis['failure_mode']}
 1. NEVER call a high-competition keyword "weak". High competition = SATURATED = HIGH DEMAND.
    "WEAK" is RESERVED ONLY for keywords with median_favs < 50.
 2. If any seed is SATURATED, say so explicitly using the word "SATURATED".
-3. USE THE CREATIVE PIVOT KEYWORD in at least 3 titles.
+3. If a BEST PIVOT keyword is named in the intelligence block, use it as a primary token in at least 2 titles.
 4. Every title MUST be 3-5 words.
 5. Every title MUST start with a SEARCHABLE noun or verb.
 6. Every title MUST end with one of: {type_words_str}
@@ -532,8 +495,8 @@ description_seo, description_hype, description_short
   "description_seo": "...",
   "description_hype": "...",
   "description_short": "...",
-  "primary_keyword": "best first word — MUST be the creative pivot",
-  "edit_reasoning": "3-4 sentences referencing the pivot.",
+  "primary_keyword": "best first word",
+  "edit_reasoning": "3-4 sentences.",
   "what_was_wrong": "3-4 sentences. Use SATURATED, not weak."
 }}
 """
@@ -620,15 +583,9 @@ description_seo, description_hype, description_short
                 def _pipeline_autopsy():
                     c3 = get_db(); cur3 = c3.cursor()
                     try:
-                        pipeline_intent = dict(intent)
-                        if creative_pivot_result and creative_pivot_result.get("top_pivots"):
-                            pipeline_intent["search_terms"] = list(
-                                set(pipeline_intent.get("search_terms", []))
-                                | {p["keyword"] for p in creative_pivot_result["top_pivots"]}
-                            )
                         return run_full_pipeline(
                             cur3, name or "ugc item",
-                            intent=pipeline_intent, item_type=family,
+                            intent=intent, item_type=family,
                             category_asset_ids=cat_ids,
                             ai_titles=pipeline_ai_titles,
                             live_enrich=True,
