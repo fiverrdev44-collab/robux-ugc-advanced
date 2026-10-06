@@ -1,14 +1,13 @@
 """
 commands_intel.py — All intel commands. Category-aware autopsy.
 
-Creative pivot expansion DISABLED — it produced garbage candidates
-("places", "check", "icecream") from unreliable search_suggestions mining.
-The AI's own best_pivot (from classify_keyword_intelligence) is used instead.
+Creative pivot expansion DISABLED.
+Market velocity / trajectory / concentration wired into !autopsy.
 
-HARD RULES NOW ENFORCED:
-- Pivot keyword is MANDATORY as starting token in >=5 of 10 titles.
-- SATURATED/DEAD seed words are FORBIDDEN as the first token of any title.
-- Post-filter rejects any title that starts with a forbidden word.
+HARD RULES:
+- Pivot keyword MANDATORY as starting token in >=5 of 10 titles.
+- SATURATED/DEAD seed words FORBIDDEN as first token.
+- Post-filter rejects any title starting with a forbidden word.
 """
 import os
 import re
@@ -220,7 +219,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — CATEGORY-AWARE (hard-ruled pivots)
+    # !autopsy — CATEGORY-AWARE + MARKET INTEL
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -321,6 +320,34 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 item_stats = enrich_item_stats_with_sales(item_stats, sales_list)
             except Exception as e:
                 print(f"[autopsy] sales fetch failed: {e}", flush=True)
+
+        # ── 🚀 NICHE VELOCITY / TRAJECTORY / CONCENTRATION ────
+        niche_intel = None
+        try:
+            from market_velocity import build_niche_intel, format_niche_intel_for_prompt
+            if name_words:
+                cat_ids = None
+                try:
+                    cat_ids = get_category_config(family).get("asset_type_ids") or None
+                except Exception:
+                    cat_ids = None
+
+                def _run_niche():
+                    conn = get_db(); cur = conn.cursor()
+                    try:
+                        return build_niche_intel(cur, name_words[:4], asset_ids=cat_ids)
+                    finally:
+                        cur.close(); conn.close()
+
+                niche_intel = await asyncio.to_thread(_run_niche)
+
+                if niche_intel:
+                    body = format_niche_intel_for_prompt(niche_intel)
+                    for i in range(0, len(body), 1900):
+                        await ctx.send(body[i:i+1900])
+                        await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[autopsy] niche intel failed: {e}", flush=True)
 
         diagnosis = detect_failure_mode(item_stats)
         try: await progress.delete()
@@ -428,7 +455,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 + ["viral", "trendy", "tiktok"]
             ))
 
-        # Build category-aware prompt
         type_words_str = ", ".join(cfg["type_words"][:5])
         archetypes_str = "\n".join(f"  - {a}" for a in cfg["title_archetypes"][:5])
 
@@ -440,11 +466,21 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
+        # ── Inject niche intel into the recovery prompt ────
+        niche_block = ""
+        try:
+            from market_velocity import format_niche_intel_for_prompt
+            if niche_intel:
+                niche_block = "\n=== 🚀 NICHE INTEL (velocity/trajectory/concentration) ===\n"
+                niche_block += format_niche_intel_for_prompt(niche_intel)
+                niche_block += "\n"
+        except Exception:
+            pass
+
         # ── HARD RULES: pivot mandatory, saturated forbidden as first token ──
         bp = (deep_intel or {}).get("best_pivot") or {}
         bp_kw = (bp.get("keyword") or "").strip().lower()
 
-        # Compute which seed words are SATURATED/DEAD — forbid them as first token
         forbidden_first = []
         try:
             for c in (fast_class or {}).get("classifications", []):
@@ -490,6 +526,7 @@ FAILURE MODE: {diagnosis['failure_mode']}
 
 === 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {intel_block}
+{niche_block}
 {pivot_hint}
 === SHAPE RULE FOR THIS CATEGORY ===
 {cfg['shape_rule']}
@@ -553,7 +590,6 @@ description_seo, description_hype, description_short
                 "🔥 VIRAL (meme/TikTok hook)":      data.get("titles_viral") or [],
             }
 
-            # Post-filter: reject titles starting with a SATURATED/DEAD seed word
             forbidden_first_set = {w.lower() for w in forbidden_first}
 
             verified_groups = {}
@@ -583,7 +619,7 @@ description_seo, description_hype, description_short
                         f"a SATURATED keyword.)_\n"
                     )
             else:
-                lines.append("⚠️ All titles failed verification (either structure or saturated-start).")
+                lines.append("⚠️ All titles failed verification.")
 
             lines.append("---\n")
             lines.append("## 📝 3 DESCRIPTIONS\n")
