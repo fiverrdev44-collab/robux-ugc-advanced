@@ -3,6 +3,7 @@ commands_xray.py — Market introspection commands.
 
 Commands:
     !xray                — full market snapshot dashboard
+    !early [days]        — early winners list only
     !patterns [family]   — top statistical patterns by lift ratio
     !failures [family]   — words that correlate with low-fav items
 
@@ -18,13 +19,13 @@ from pattern_forge import (
     mine_patterns, mine_failure_patterns,
     format_patterns, format_failure_patterns,
 )
+from early_winners import find_early_winners, format_early_winners
 
 
 _ALL_TOKENS = {"all", "*", "every", "any", ""}
 
 
 def _resolve_family(raw):
-    """Return None for cross-catalog, else the family key."""
     f = (raw or "").lower().strip()
     if f in _ALL_TOKENS:
         return None
@@ -54,6 +55,32 @@ def register_xray_commands(bot, get_db):
         except Exception: pass
 
         body = format_xray(data)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i+1900])
+            await asyncio.sleep(0.3)
+
+    @bot.command(name="early")
+    async def early_cmd(ctx, days: int = 14):
+        days = max(3, min(int(days), 30))
+        progress = await ctx.send(f"⚡ **Scanning for early winners (last {days}d)...**")
+
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                return find_early_winners(cur, days=days)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            results = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ Failed: `{e}`")
+            return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        body = format_early_winners(results, days=days)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900])
             await asyncio.sleep(0.3)
