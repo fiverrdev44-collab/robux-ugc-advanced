@@ -6,9 +6,10 @@ Runs in ~5-10 seconds instead of ~10 minutes.
 
 Includes:
 - EARLY WINNERS (top actionable section)
-- Whitespace with garbage filter
+- Whitespace with expanded garbage filter
+- Coldest niches with generic-word filter
 - Hidden Gems with noise + platform filter
-- Top Creators with platform filter
+- Top Creators with label-account + item-name filter
 """
 import re
 from collections import defaultdict
@@ -21,11 +22,30 @@ from category_configs import (
 from early_winners import find_early_winners, _is_noise, PLATFORM_CREATORS
 
 
-# Garbage tokens that appear in search_suggestions but aren't real searches
+# Garbage tokens in search_suggestions that are NOT real niches
 GARBAGE_WORDS = {
     "ads", "ad", "abdomen", "backstage", "skibidi", "ohio",
     "mewing", "rizz", "gyatt", "sigma", "sus", "cap", "goat",
     "ratio", "bruh", "yeet", "bussin",
+    "armpit", "elbow", "knee", "raised",
+}
+
+# Generic words that appear in almost every clothing/hair title
+GENERIC_NICHE_WORDS = {
+    "cute", "black", "white", "pink", "red", "blue", "green", "yellow",
+    "purple", "brown", "gray", "grey", "gold", "silver",
+    "hair", "shirt", "pants", "dress", "skirt", "jacket", "hat",
+    "face", "mask", "glasses", "chain", "necklace",
+    "aesthetic", "y2k", "emo", "grunge", "pastel", "kawaii",
+    "girl", "boy", "man", "woman", "kid", "baby",
+    "shorts", "sweater", "hoodie", "jacket", "coat", "socks", "shoes",
+}
+
+# Label accounts that aren't solo UGC creators
+LABEL_CREATORS = PLATFORM_CREATORS | {
+    "SMTOWN Official", "YG Entertainment", "JYP Entertainment",
+    "HYBE", "Universal Music Group", "Warner Records",
+    "Atlantic Records", "Columbia Records", "Republic Records",
 }
 
 
@@ -141,6 +161,8 @@ def hottest_niches(cur, days=30, limit=10):
         for w in token_re.findall((name or "").lower()):
             if w in seen or w in ABSTRACT_ENGLISH_BLOCK:
                 continue
+            if w in GENERIC_NICHE_WORDS:
+                continue
             seen.add(w)
             word_rates[w]["total_rate"] += rate
             word_rates[w]["count"] += 1
@@ -181,6 +203,8 @@ def coldest_niches(cur, weeks=4, limit=10):
         for w in token_re.findall((name or "").lower()):
             if w in seen or w in ABSTRACT_ENGLISH_BLOCK:
                 continue
+            if w in GENERIC_NICHE_WORDS:
+                continue
             seen.add(w)
             word_counts[w] += 1
 
@@ -196,6 +220,9 @@ def _is_valid_search_term(term):
         return False
     toks = re.findall(r"[a-z]+", t)
     if not toks:
+        return False
+    # Reject if ANY token is garbage
+    if any(w in GARBAGE_WORDS for w in toks):
         return False
     meaningful = [w for w in toks if len(w) >= 4 and w not in GARBAGE_WORDS]
     if not meaningful:
@@ -273,6 +300,8 @@ def arbitrage_signals(cur, limit=6):
         for w in set(token_re.findall(name or "")):
             if w in ABSTRACT_ENGLISH_BLOCK:
                 continue
+            if w in GENERIC_NICHE_WORDS:
+                continue
             family_word_favs[fam][w]["count"] += 1
             family_word_favs[fam][w]["total"] += favs or 0
 
@@ -317,6 +346,19 @@ def arbitrage_signals(cur, limit=6):
 
 
 def concentration_extremes(cur, limit=8):
+    def _looks_like_creator(name):
+        n = (name or "").strip()
+        if not n or len(n) < 4:
+            return False
+        if n.count(" ") > 4:
+            return False
+        if any(ord(c) > 0xFFFF for c in n):  # emoji
+            return False
+        # Reject all-lowercase multi-word (likely item names)
+        if n.islower() and " " in n:
+            return False
+        return True
+
     try:
         cur.execute("""
             SELECT creator_name, COUNT(*) AS items, SUM(favorite_count) AS favs
@@ -324,17 +366,20 @@ def concentration_extremes(cur, limit=8):
             WHERE creator_name IS NOT NULL AND creator_name <> ''
               AND creator_name <> ALL(%s)
               AND favorite_count > 100
+              AND LENGTH(creator_name) < 30
             GROUP BY creator_name
             ORDER BY favs DESC
             LIMIT %s
-        """, (list(PLATFORM_CREATORS), int(limit),))
-        top = [
-            {"creator": r[0][:30], "items": int(r[1]), "favs": int(r[2] or 0)}
-            for r in cur.fetchall()
-        ]
+        """, (list(LABEL_CREATORS), int(limit * 3),))
+        rows = cur.fetchall()
     except Exception as e:
         print(f"[xray] concentration top: {e}", flush=True)
-        top = []
+        return []
+
+    top = [
+        {"creator": r[0][:30], "items": int(r[1]), "favs": int(r[2] or 0)}
+        for r in rows if _looks_like_creator(r[0])
+    ][:limit]
     return top
 
 
@@ -372,7 +417,7 @@ def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
     for item_id, name, creator, favs, age in rows:
         if _is_noise(name):
             continue
-        if creator in PLATFORM_CREATORS:
+        if creator in LABEL_CREATORS:
             continue
         try:
             age_f = float(age or 0)
@@ -383,10 +428,11 @@ def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
             continue
         if rate < min_rate:
             continue
-        tokens = re.findall(r"[a-z]{4,}", (name or "").lower())
+        tokens = [t for t in re.findall(r"[a-z]{4,}", (name or "").lower())
+                  if t not in GENERIC_NICHE_WORDS]
         if not tokens:
             continue
-        # Use the RAREST token, not the first
+        # Rarest token = keyword signal
         keyword = min(tokens, key=lambda t: sum(1 for n in all_names if t in n))
         supply = sum(1 for n in all_names if keyword in n)
         if supply > max_supply:
@@ -444,8 +490,7 @@ def format_xray(x):
     if early:
         lines.append("## ⚡ EARLY WINNERS — THE ACTION LIST")
         lines.append(
-            "_Items gaining ≥15 favs/day in the last 14d with a low-competition keyword. "
-            "This is the actual alpha. Pick one. Study it. Race it._\n"
+            "_Items gaining ≥15 favs/day in the last 14d with a low-competition keyword._\n"
         )
         for i, w in enumerate(early[:8], 1):
             lines.append(
@@ -459,10 +504,7 @@ def format_xray(x):
         lines.append("")
     else:
         lines.append("## ⚡ EARLY WINNERS — THE ACTION LIST")
-        lines.append(
-            "_No items matched the criteria in the last 14 days. "
-            "Try `!early 30` for a wider window._\n"
-        )
+        lines.append("_No items matched. Try `!early 30` for a wider window._\n")
 
     cats = x.get("categories") or []
     if cats:
@@ -525,7 +567,7 @@ def format_xray(x):
 
     conc = x.get("concentration_top") or []
     if conc:
-        lines.append("## 🏛️ TOP SOLO CREATORS (platform accounts filtered)")
+        lines.append("## 🏛️ TOP SOLO CREATORS")
         for i, c in enumerate(conc[:5], 1):
             lines.append(f"{i}. `{c['creator']}` — {c['items']} items · {c['favs']:,} favs")
         lines.append("")
