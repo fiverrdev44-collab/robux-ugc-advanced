@@ -61,6 +61,22 @@ try:
 except Exception as e:
     print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 
+# ── 🩻 X-Ray / Patterns / Failures ───────────────────────────
+try:
+    from commands_xray import register_xray_commands
+    register_xray_commands(bot, get_db)
+    print("✅ X-Ray commands loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ X-Ray commands failed to load: {e}", flush=True)
+
+# ── 🚀 Edge commands (whitespace / velocity / arb) ───────────
+try:
+    from commands_edges import register_edge_commands
+    register_edge_commands(bot, get_db)
+    print("✅ Edge commands loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Edge commands failed to load: {e}", flush=True)
+
 
 # ── Start background scheduler ───────────────────────────────
 try:
@@ -83,13 +99,13 @@ def health():
     try:
         if not bot.is_ready() or bot.is_closed():
             return "Discord disconnected", 503
-        
+
         lat = bot.latency
         if lat != lat:  # NaN check
             return "Latency is NaN", 503
         if lat > 120:
             return f"High latency: {lat:.1f}s", 503
-            
+
         return "OK", 200
     except Exception as e:
         return f"Health check error: {e}", 503
@@ -116,19 +132,19 @@ def watchdog():
             if bot.is_closed():
                 print("🐕 [watchdog] Bot is closed — exiting for Render restart", flush=True)
                 os._exit(1)
-            
+
             if not bot.is_ready():
                 continue
-                
+
             lat = bot.latency
             if lat != lat:  # NaN
                 print("🐕 [watchdog] Latency is NaN — exiting for Render restart", flush=True)
                 os._exit(1)
-                
+
             if lat > 120:
                 print(f"🐕 [watchdog] Latency too high ({lat:.1f}s) — exiting for Render restart", flush=True)
                 os._exit(1)
-                
+
         except Exception as e:
             print(f"🐕 [watchdog] Error: {e}", flush=True)
 
