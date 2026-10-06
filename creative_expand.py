@@ -46,10 +46,13 @@ def _fetch_real_suggestions(cur, seed, limit=30):
     except Exception as e:
         print(f"[creative_expand] search_suggestions failed: {e}", flush=True)
     try:
+        # GROUP BY keyword instead of DISTINCT — allows ORDER BY MAX(score)
         cur.execute("""
-            SELECT DISTINCT keyword FROM learned_keywords
+            SELECT keyword, MAX(score) AS s
+            FROM learned_keywords
             WHERE LOWER(keyword) LIKE ANY(%s)
-            ORDER BY score DESC
+            GROUP BY keyword
+            ORDER BY s DESC
             LIMIT %s
         """, (patterns, limit))
         out.extend([r[0] for r in cur.fetchall() if r[0]])
