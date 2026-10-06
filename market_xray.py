@@ -1,17 +1,5 @@
 """
 market_xray.py — One-shot market state snapshot across the entire UGC catalog.
-
-Produces a single dashboard of the current Roblox UGC market using real data:
-  - Catalog totals + coverage
-  - Category breakdown
-  - Hottest niches (top favs/day last 30 days)
-  - Coldest niches (highest new-item supply, lowest demand)
-  - Whitespace count (search terms with almost no items)
-  - Cross-category arbitrage signals
-  - Concentration extremes (monopolized vs fragmented)
-  - Hidden gems (high favs/day, low competitors)
-
-All pure SQL on data already in the DB. No predictions.
 """
 import re
 from collections import defaultdict
