@@ -1,11 +1,19 @@
 """
-gemini_brain.py — Hybrid AI for Roblox UGC. SUPERCOMPUTER EDITION.
+gemini_brain.py — Hybrid AI for Roblox UGC.
 
-Category-aware:
-- synthesis prompt pulls type_words / shape_rule / title_archetypes from configs
-- verify_titles accepts ALL category type words
-- classify_keyword_intelligence already category-aware (item_type param)
-- Emote path unchanged (DEFAULT_FAMILY = "emote")
+Category-aware. Reports facts about the market. Does NOT predict outcomes.
+
+Removed from synthesis prompt:
+  - marketplace_algorithm_playbook (invented CTR thresholds)
+  - ranking_factor_breakdown (invented algorithm weights)
+  - sale_velocity_plan (invented hour 1/6/24 targets)
+  - price_elasticity_call (invented price recommendations)
+  - launch_window_math (invented day/hour advice)
+  - trend_intel (invented lifecycle projections)
+  - discovery_path (invented buyer journey)
+  - expected_performance (invented numbers)
+  - verdict (GO/CONDITIONAL/NO-GO theater)
+  - risk_analysis (generic AI filler)
 """
 import os
 import re
@@ -125,9 +133,6 @@ def _generate(prompt, json_mode=False, temperature=0.7,
     return None
 
 
-# ============================================================
-# TOKEN HELPERS
-# ============================================================
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -135,9 +140,6 @@ def _tokens(text):
     return _TOKEN_RE.findall((text or "").lower())
 
 
-# ============================================================
-# PASS 1 — EXTRACTION
-# ============================================================
 _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 
 Extract structured intent for a DB search. Return ONLY JSON:
@@ -216,9 +218,6 @@ def all_terms(intent):
     return out
 
 
-# ============================================================
-# PASS 1.5 — BRIDGE
-# ============================================================
 _EXPAND_PROMPT = """You are a Roblox UGC DB search expert.
 
 ORIGINAL INTENT: {intent_json}
@@ -249,9 +248,6 @@ def expand_search_terms(intent, db_vocab_sample, failed_terms):
             "reasoning": str(data.get("reasoning", ""))[:200]}
 
 
-# ============================================================
-# 🧠 KEYWORD INTELLIGENCE (supercomputer layer)
-# ============================================================
 _KEYWORD_INTEL_PROMPT = """You are the world's most sophisticated Roblox UGC keyword intelligence analyst.
 
 Your ONLY job: classify keywords based on BOTH supply AND demand AND velocity.
@@ -277,15 +273,8 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
 
 === CRITICAL RULES ===
 1. The word "weak" is RESERVED for low-demand keywords (median_favs < 50).
-   - 59 competitors + 101 median favs = SATURATED, NOT weak. High demand.
-   - 5 competitors + 10 median favs = WEAK. Low demand.
-   - 3 competitors + 200 median favs = GOLD. Jackpot.
 2. NEVER describe a high-competition keyword as "weak" or "non-descriptive".
-   High competition means the keyword WORKS — too many people know that.
-3. When the SEED is SATURATED, you MUST find a pivot:
-   scan ALL other keywords in the data, pick the one with the LOWEST supply
-   that still has median_favs >= 80. That is the pivot.
-4. If age data (velocity) is provided, prioritize keywords with the highest favs/day.
+3. When the SEED is SATURATED, find a pivot with LOWER supply and median_favs >= 80.
 
 === OUTPUT — ONLY JSON ===
 {{
@@ -377,9 +366,6 @@ def format_keyword_intel_for_prompt(intel):
     return "\n".join(lines)
 
 
-# ============================================================
-# TITLE PATTERN MINING
-# ============================================================
 def mine_title_patterns(top_items):
     if not top_items:
         return {"patterns": [], "avoid_words": [], "common_lengths": []}
@@ -410,40 +396,33 @@ def mine_title_patterns(top_items):
     }
 
 
-# ============================================================
-# PASS 2 — SYNTHESIS (category-aware)
-# ============================================================
-_SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist. Your titles have generated millions of favourites.
+_SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist.
 
-=== YOUR WEAPONS ===
-1. HARD DATA — real competitor titles, favs, prices from the DB (only source of truth)
-2. KEYWORD INTELLIGENCE — supply/demand/velocity classification (see below)
-3. ROBLOX ALGORITHM KNOWLEDGE — ranking systems, CTR thresholds, velocity targets
-4. CULTURE BRAIN — TikTok, anime, memes, K-pop, viral moments
-5. USER'S SPECIFIC MOVES / THEMES — the exact description they gave you
+=== YOUR ROLE ===
+Report what the market data ACTUALLY shows. Do not predict outcomes.
+Do not invent scores, thresholds, targets, or timelines.
+If a fact is not in the data below, do not state it.
 
 === 🎯 CATEGORY FAMILY ===
 {category_label}
 
-=== 🧠 KEYWORD INTELLIGENCE (READ THIS FIRST) ===
+=== 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {keyword_intel_text}
 
 CRITICAL: The classification above is authoritative. If the seed keyword is
-SATURATED, do NOT describe it as "weak". Use the word "SATURATED". Recommend
-the BEST PIVOT keyword explicitly in your diagnosis and titles.
+SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 
 === SHAPE RULE FOR THIS CATEGORY ===
 {shape_rule}
 
 === TITLE CONSTRUCTION RULES (NON-NEGOTIABLE) ===
-1. Every title MUST be 3-5 tokens. Two-word titles FORBIDDEN. Six+ FORBIDDEN.
+1. Every title MUST be 3-5 tokens.
 2. Every title MUST end with one of these valid type words for this category:
    {type_words}
-3. Every title MUST be UNIQUE. No title repeats another title's exact word order.
+3. Every title MUST be UNIQUE.
 4. At least 3 titles MUST include the user's SPECIFIC_MOVES / specific themes.
-5. Allow-list bigrams like "hip sway" mean BOTH "hip" and "sway" are usable.
-6. Titles may ONLY use words from the allow-list + glue words + type words.
-7. NEVER use stopwords like "a", "the", "and" as fillers to pad length.
+5. Titles may ONLY use words from the allow-list + glue words + type words.
+6. NEVER use stopwords as fillers to pad length.
 
 === EXAMPLE TITLE STRUCTURES (inspiration only — do NOT copy) ===
 {title_archetypes}
@@ -457,13 +436,9 @@ the BEST PIVOT keyword explicitly in your diagnosis and titles.
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
 - SAFE (3): mirror what top competitors do, but cleaner
-- DIFFERENTIATED (3): same keywords, unique angle — MUST use a different first word
+- DIFFERENTIATED (3): same keywords, unique angle
 - LONGTAIL (2): 4-5 tokens packed with keywords
 - VIRAL (2): meme/trend/sound hook
-
-Each title must feel hand-written, not keyword-stuffed.
-When possible, use the BEST PIVOT keyword from the intelligence section
-as the FIRST or SECOND token in at least 2 titles.
 
 === OUTPUT — ONLY JSON ===
 {{
@@ -471,27 +446,17 @@ as the FIRST or SECOND token in at least 2 titles.
   "titles_differentiated": ["...", "...", "..."],
   "titles_longtail": ["...", "..."],
   "titles_viral": ["...", "..."],
-  "search_diagnosis": "3-4 sentences. Reference the KEYWORD INTELLIGENCE.",
-  "positioning": "3-4 sentences on how to position against competitors.",
-  "market_diagnosis": "3-4 sentences on saturation, winners, losers, CTR signals.",
-  "winner_blueprint": "3-4 sentences on what top 10% do that bottom 50% don't.",
-  "marketplace_algorithm_playbook": "5-6 sentences with CTR thresholds and velocity targets.",
-  "ranking_factor_breakdown": "4-5 sentences on which ranking factors matter most.",
-  "sale_velocity_plan": "3-4 sentences with hour 1/6/24 sales targets.",
-  "price_elasticity_call": "2-3 sentences with exact price + why.",
-  "saturation_verdict": "2-3 sentences. Reference the seed's bucket AND the pivot.",
-  "launch_window_math": "2-3 sentences with exact day/hour (Georgia GMT+4).",
-  "trend_intel": "3-4 sentences on trend lifecycle and exit window.",
-  "discovery_path": "2-3 sentences on the buyer journey.",
-  "seo_description": "3-4 sentences copy-paste ready for Roblox.",
-  "killer_keywords": ["10-15 highest-value keywords from allow-list"],
-  "cross_promotion_play": "2-3 sentences on related items to launch.",
-  "social_playbook": "3-4 sentences on TikTok/YouTube promotion.",
-  "risk_analysis": "3-4 sentences on what could kill this item.",
-  "expected_performance": "3-4 sentences with realistic numbers.",
-  "cultural_ammo": "3-4 sentences on cultural context to weaponize.",
-  "verdict": "GO / CONDITIONAL GO / NO-GO — one-line reason.",
-  "bonus_plays": ["2-3 additional item ideas"]
+  "search_diagnosis": "3-4 sentences. Reference the KEYWORD INTELLIGENCE. State facts only.",
+  "positioning": "3-4 sentences on how the item sits against real competitors. Facts only.",
+  "market_diagnosis": "3-4 sentences on saturation, winners, losers. Reference real stats.",
+  "winner_blueprint": "3-4 sentences on what top 10% items in this niche do that bottom 50% don't.",
+  "saturation_verdict": "2-3 sentences. Name which seed keywords are SATURATED vs OPPORTUNITY vs GOLD.",
+  "seo_description": "3-4 sentences copy-paste ready for Roblox. Keyword-rich, no fabricated claims.",
+  "killer_keywords": ["10-15 highest-value keywords from the allow-list"],
+  "cross_promotion_play": "2-3 sentences on real related items visible in the data.",
+  "social_playbook": "3-4 sentences on general TikTok/YouTube promotion tactics.",
+  "cultural_ammo": "3-4 sentences on the cultural context of this niche.",
+  "bonus_plays": ["2-3 additional item ideas within the same niche"]
 }}
 
 === INPUT ===
@@ -529,7 +494,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
                       algo_context=None, keyword_intel=None):
     if not allow_list: return {}
 
-    # ── Category config ────────────────────────────────
     try:
         from category_configs import get_category_config
         cfg = get_category_config(item_type)
@@ -642,9 +606,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         except Exception: return {}
 
 
-# ============================================================
-# VERIFICATION — category-aware
-# ============================================================
 def verify_titles(titles, allow_list):
     allow_set = set()
     for t in allow_list or []:
@@ -658,7 +619,6 @@ def verify_titles(titles, allow_list):
                     allow_set.add(p)
     for w in ITEM_TYPE_WORDS:
         allow_set.add(w)
-    # Add every category's type words so any category passes the gate
     try:
         from category_configs import get_all_type_words
         for w in get_all_type_words():
@@ -703,12 +663,8 @@ def verify_titles(titles, allow_list):
     return valid, rejected
 
 
-# ============================================================
-# FALLBACK TITLE GENERATOR — category-aware
-# ============================================================
 def generate_fallback_titles(allow_list, specific_moves, item_type,
                               top_items, needed=10):
-    # Pick a type word from the category config
     type_word = "emote"
     try:
         from category_configs import get_category_config
@@ -809,13 +765,9 @@ def fallback_title_payload(allow_list, specific_moves, item_type, top_items):
         "search_diagnosis": "(fallback mode — AI unavailable)",
         "positioning": "Fallback titles generated from DB allow-list.",
         "market_diagnosis": "Fallback mode — no AI synthesis available.",
-        "verdict": "CONDITIONAL — review titles manually",
     }
 
 
-# ============================================================
-# VISION
-# ============================================================
 _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 
 {{
@@ -907,9 +859,6 @@ def analyze_image_for_ugc(images, user_description=""):
     return {}
 
 
-# ============================================================
-# FREE-FORM Q&A
-# ============================================================
 _ASK_PROMPT = """You are a helpful assistant inside a Roblox UGC bot.
 Answer directly. If Roblox UGC related, go deep and tactical. Under 1,800 chars.
 
