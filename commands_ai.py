@@ -2,19 +2,10 @@
 commands_ai.py — AI commands: brainstorm, rescue, analyze_image,
 ai_status, ai_debug + all AI helpers.
 
-Category-aware.
-Creative pivot expansion DISABLED — produced garbage candidates.
+Category-aware. Creative pivot expansion DISABLED.
 
-FAKE PREDICTIONS REMOVED:
-  - No more marketplace algorithm playbook
-  - No more ranking factor breakdown
-  - No more sale velocity targets
-  - No more price elasticity recommendations
-  - No more launch window math
-  - No more trend intel / discovery path
-  - No more expected performance / verdict / risk analysis
-
-The bot now reports FACTS about the market. It does not predict outcomes.
+FAKE PREDICTIONS REMOVED — only factual sections remain.
+Market velocity / trajectory / concentration wired into !brainstorm.
 """
 import asyncio
 import re
@@ -639,10 +630,6 @@ def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
     if total_verified:
         lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
 
-    # Only factual, market-data-grounded sections.
-    # Removed: marketplace_algorithm_playbook, ranking_factor_breakdown,
-    # sale_velocity_plan, price_elasticity_call, launch_window_math,
-    # trend_intel, discovery_path, expected_performance, verdict, risk_analysis.
     sections = [
         ("search_diagnosis",              "## 🔍 Search Diagnosis"),
         ("positioning",                   "## 🎯 Positioning"),
@@ -895,6 +882,41 @@ def register_ai_commands(bot):
         except Exception as e:
             print(f"[brainstorm] keyword intelligence failed: {e}", flush=True)
 
+        # ── 🚀 MARKET VELOCITY / TRAJECTORY / CONCENTRATION ────
+        niche_intel = None
+        try:
+            from market_velocity import build_niche_intel, format_niche_intel_for_prompt
+            seed_keywords = []
+            for t in terms:
+                t_clean = (t or "").strip().lower()
+                if len(t_clean) >= 3 and t_clean not in seed_keywords:
+                    seed_keywords.append(t_clean)
+                if len(seed_keywords) >= 4:
+                    break
+            if seed_keywords:
+                cat_ids = None
+                try:
+                    cat_ids = get_category_config(family).get("asset_type_ids") or None
+                except Exception:
+                    cat_ids = None
+
+                def _run_niche():
+                    conn = get_db(); cur = conn.cursor()
+                    try:
+                        return build_niche_intel(cur, seed_keywords, asset_ids=cat_ids)
+                    finally:
+                        cur.close(); conn.close()
+
+                niche_intel = await asyncio.to_thread(_run_niche)
+
+                if niche_intel:
+                    body = format_niche_intel_for_prompt(niche_intel)
+                    for i in range(0, len(body), 1900):
+                        await ctx.send(body[i:i+1900])
+                        await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"[brainstorm] niche intel failed: {e}", flush=True)
+
         synth = None
         try:
             synth = await asyncio.to_thread(
@@ -906,6 +928,7 @@ def register_ai_commands(bot):
                  "failed_terms": stats.get("failed_terms", []),
                  "reasoning": stats.get("reasoning", "")},
                 None, specific_moves, winner_data, algo_ctx, keyword_intel,
+                niche_intel,
             )
         except Exception as e:
             print(f"[brainstorm] synth failed: {e}", flush=True)
