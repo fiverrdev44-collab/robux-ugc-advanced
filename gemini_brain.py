@@ -1,19 +1,14 @@
 """
 gemini_brain.py — Hybrid AI for Roblox UGC.
 
-Category-aware. Reports facts about the market. Does NOT predict outcomes.
+Category-aware. Reports facts. Does NOT predict outcomes.
 
-Removed from synthesis prompt:
-  - marketplace_algorithm_playbook (invented CTR thresholds)
-  - ranking_factor_breakdown (invented algorithm weights)
-  - sale_velocity_plan (invented hour 1/6/24 targets)
-  - price_elasticity_call (invented price recommendations)
-  - launch_window_math (invented day/hour advice)
-  - trend_intel (invented lifecycle projections)
-  - discovery_path (invented buyer journey)
-  - expected_performance (invented numbers)
-  - verdict (GO/CONDITIONAL/NO-GO theater)
-  - risk_analysis (generic AI filler)
+Reports the market as it IS. No marketplace algorithm playbook, no ranking
+factor breakdown, no sale velocity targets, no price elasticity calls, no
+launch window math, no trend intel, no discovery path, no expected
+performance, no verdict, no risk analysis.
+
+Niche velocity / trajectory / concentration injected into synthesis.
 """
 import os
 import re
@@ -412,6 +407,9 @@ If a fact is not in the data below, do not state it.
 CRITICAL: The classification above is authoritative. If the seed keyword is
 SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 
+=== 🚀 NICHE INTEL (VELOCITY / TRAJECTORY / CONCENTRATION) ===
+{niche_intel_text}
+
 === SHAPE RULE FOR THIS CATEGORY ===
 {shape_rule}
 
@@ -491,7 +489,8 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
                       item_type="unknown", trend_source="none",
                       search_diagnostics=None, gap_analysis=None,
                       specific_moves=None, winner_analysis=None,
-                      algo_context=None, keyword_intel=None):
+                      algo_context=None, keyword_intel=None,
+                      niche_intel=None):
     if not allow_list: return {}
 
     try:
@@ -574,6 +573,13 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
     intel_text = format_keyword_intel_for_prompt(keyword_intel)
 
+    niche_text = "(no niche intel)"
+    try:
+        from market_velocity import format_niche_intel_for_prompt
+        niche_text = format_niche_intel_for_prompt(niche_intel)
+    except Exception:
+        pass
+
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
         item_type=item_type,
@@ -591,6 +597,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         title_pattern_insights=title_pattern_insights,
         competitor_titles="\n".join(f"- {t}" for t in competitor_titles) or "(none)",
         keyword_intel_text=intel_text,
+        niche_intel_text=niche_text,
         type_words=type_words_str,
         shape_rule=shape_rule,
         title_archetypes=archetypes_str,
