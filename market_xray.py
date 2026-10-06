@@ -1,8 +1,10 @@
 """
 market_xray.py — One-shot market state snapshot across the entire UGC catalog.
 
-OPTIMIZED: batches bulk data into 6 queries total, then processes in Python.
+OPTIMIZED: batches bulk data into ~6 queries total, then processes in Python.
 Runs in ~5-10 seconds instead of ~10 minutes.
+
+Includes EARLY WINNERS — items gaining ≥20 favs/day with keyword supply ≤50.
 """
 import re
 from collections import defaultdict
@@ -12,10 +14,10 @@ from category_configs import (
     ABSTRACT_ENGLISH_BLOCK,
     get_concept_vocab,
 )
+from early_winners import find_early_winners
 
 
 def _bulk_items(cur, asset_ids=None, min_favs=5, limit=60000):
-    """Fetch (name, favs, price, asset_type_id, created_at) in one query."""
     sql = """
         SELECT LOWER(name), favorite_count, price, asset_type_id, created_at
         FROM items
@@ -32,7 +34,6 @@ def _bulk_items(cur, asset_ids=None, min_favs=5, limit=60000):
 
 
 def _bulk_suggestions(cur, limit=30000):
-    """Fetch all search suggestions in one query."""
     try:
         cur.execute("""
             SELECT DISTINCT suggestion FROM search_suggestions
@@ -177,10 +178,6 @@ def coldest_niches(cur, weeks=4, limit=10):
 
 
 def whitespace_count(cur, max_supply=3):
-    """
-    OPTIMIZED: fetch all suggestions + all item names once.
-    Then check matches in Python instead of 3000 SQL queries.
-    """
     suggestions = _bulk_suggestions(cur, limit=3000)
     if not suggestions:
         return {"total_terms": 0, "whitespace_terms": 0, "top": []}
@@ -207,7 +204,6 @@ def whitespace_count(cur, max_supply=3):
             count += 1
             if len(top) < 10:
                 top.append({"term": s, "supply": supply})
-        # early exit if we already have enough top items and count is huge
         if count > 5000 and len(top) >= 10:
             break
 
@@ -215,9 +211,6 @@ def whitespace_count(cur, max_supply=3):
 
 
 def arbitrage_signals(cur, limit=6):
-    """
-    OPTIMIZED: fetch all items for every category once, then group in Python.
-    """
     families = [(k, v) for k, v in CATEGORY_FAMILIES.items() if v.get("asset_type_ids")]
     if not families:
         return []
@@ -237,13 +230,11 @@ def arbitrage_signals(cur, limit=6):
         print(f"[xray] arbitrage fetch: {e}", flush=True)
         return []
 
-    # Map asset_type_id -> family key
     aid_to_family = {}
     for fam_key, cfg in families:
         for aid in cfg.get("asset_type_ids") or []:
             aid_to_family[aid] = fam_key
 
-    # family -> word -> {"count", "total"}
     family_word_favs = defaultdict(lambda: defaultdict(lambda: {"count": 0, "total": 0}))
     token_re = re.compile(r"[a-z]{4,}")
 
@@ -257,7 +248,6 @@ def arbitrage_signals(cur, limit=6):
             family_word_favs[fam][w]["count"] += 1
             family_word_favs[fam][w]["total"] += favs or 0
 
-    # Pre-fetch item names per family for target supply checks
     family_names = {}
     for fam_key, cfg in families:
         try:
@@ -320,9 +310,6 @@ def concentration_extremes(cur, limit=5):
 
 
 def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
-    """
-    OPTIMIZED: fetch recent items once, then bulk check keyword supply.
-    """
     try:
         cur.execute("""
             SELECT id, name, creator_name, favorite_count,
@@ -342,7 +329,6 @@ def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
     if not rows:
         return []
 
-    # Pre-fetch all candidate keyword names in one shot
     try:
         cur.execute("""
             SELECT LOWER(name) FROM items
@@ -386,6 +372,8 @@ def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
 def build_xray(cur):
     return {
         "health": catalog_health(cur),
+        "early": find_early_winners(cur, days=14, min_rate=20.0,
+                                    max_supply=50, min_favs=40, limit=10),
         "categories": category_breakdown(cur),
         "hottest": hottest_niches(cur),
         "coldest": coldest_niches(cur),
@@ -417,6 +405,24 @@ def format_xray(x):
     lines.append(f"• Avg favs per item: **{h.get('avg_favs', 0):,}**")
     lines.append(f"• Max favs any item: **{h.get('max_favs', 0):,}**")
     lines.append("")
+
+    early = x.get("early") or []
+    if early:
+        lines.append("## ⚡ EARLY WINNERS — THE ACTION LIST")
+        lines.append(
+            "_Items gaining ≥20 favs/day in the last 14d with keyword supply ≤50. "
+            "This is the actual alpha. Pick one. Study it. Race it._\n"
+        )
+        for i, w in enumerate(early[:8], 1):
+            lines.append(
+                f"**{i}. `{w['name']}`** — **{w['favs_per_day']}/day** "
+                f"· {w['favs']:,} favs · {w['age_days']}d old · R${w['price']}"
+            )
+            lines.append(
+                f"   keyword `{w['keyword']}` — supply **{w['keyword_supply']}** · "
+                f"by `{w['creator']}`"
+            )
+        lines.append("")
 
     cats = x.get("categories") or []
     if cats:
