@@ -11,9 +11,6 @@ computes:
     without_median = median favorites of items WITHOUT the feature
     lift           = with_median / without_median
 
-A lift of 3.0 means: items with this feature hit 3x the median favs of items
-without it. That is a real statistical signal from real data.
-
 All pure SQL. No AI. No fake scores.
 """
 import re
