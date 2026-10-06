@@ -2,8 +2,19 @@
 commands_ai.py — AI commands: brainstorm, rescue, analyze_image,
 ai_status, ai_debug + all AI helpers.
 
-Category-aware. Creative pivot expansion DISABLED — produced garbage
-candidates from unreliable search_suggestions mining.
+Category-aware.
+Creative pivot expansion DISABLED — produced garbage candidates.
+
+FAKE PREDICTIONS REMOVED:
+  - No more marketplace algorithm playbook
+  - No more ranking factor breakdown
+  - No more sale velocity targets
+  - No more price elasticity recommendations
+  - No more launch window math
+  - No more trend intel / discovery path
+  - No more expected performance / verdict / risk analysis
+
+The bot now reports FACTS about the market. It does not predict outcomes.
 """
 import asyncio
 import re
@@ -628,25 +639,20 @@ def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
     if total_verified:
         lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
 
+    # Only factual, market-data-grounded sections.
+    # Removed: marketplace_algorithm_playbook, ranking_factor_breakdown,
+    # sale_velocity_plan, price_elasticity_call, launch_window_math,
+    # trend_intel, discovery_path, expected_performance, verdict, risk_analysis.
     sections = [
         ("search_diagnosis",              "## 🔍 Search Diagnosis"),
         ("positioning",                   "## 🎯 Positioning"),
         ("market_diagnosis",              "## 📊 Market Diagnosis"),
         ("winner_blueprint",              "## 🏆 Winner Blueprint (top 10% vs bottom 50%)"),
-        ("marketplace_algorithm_playbook","## 🧠 Marketplace Algorithm Playbook"),
-        ("ranking_factor_breakdown",      "## 📐 Ranking Factor Breakdown"),
-        ("sale_velocity_plan",            "## 📈 Sale Velocity Plan (homepage targets)"),
-        ("price_elasticity_call",         "## 💰 Price Elasticity Call"),
-        ("saturation_verdict",            "## ⚠️ Saturation Verdict"),
-        ("launch_window_math",            "## ⏰ Launch Window Math"),
-        ("trend_intel",                   "## 🌊 Trend Intelligence"),
-        ("discovery_path",                "## 🧭 Discovery Path (buyer journey)"),
+        ("saturation_verdict",            "## ⚠️ Saturation Summary"),
         ("seo_description",               "## 📝 SEO Description (copy-paste)"),
         ("cross_promotion_play",          "## 🔗 Cross-Promotion Play"),
         ("social_playbook",               "## 📱 Social Playbook"),
-        ("risk_analysis",                 "## ⚠️ Risk Analysis"),
-        ("expected_performance",          "## 📈 Expected Performance"),
-        ("verdict",                       "## ⚖️ Verdict"),
+        ("cultural_ammo",                 "## 🎭 Cultural Context"),
     ]
     for key, header in sections:
         v = synth.get(key)
@@ -782,7 +788,7 @@ def register_ai_commands(bot):
                 warn.append("")
                 warn.append("**🕳️ Gap alternatives** — lower comp, same demand:")
                 for a in gap_alternatives:
-                    warn.append(f"• `{a['word']}` — **{a['comp']}** competitors, avg **{a['avg_favs']:,}** favs (score {a['score']:,})")
+                    warn.append(f"• `{a['word']}` — **{a['comp']}** competitors, avg **{a['avg_favs']:,}** favs")
                 warn.append("")
                 warn.append("_Titles below mix your keywords with these gap words._")
             else:
@@ -849,7 +855,6 @@ def register_ai_commands(bot):
 
         specific_moves = intent.get("specific_moves", [])
 
-        # Keyword intelligence for synthesis prompt
         keyword_intel = None
         try:
             from gemini_brain import classify_keyword_intelligence
@@ -1090,23 +1095,20 @@ MARKET STATS:
 YOUR JOB — return ONLY valid JSON:
 
 {{
-  "diagnosis": "3-4 sentences: why their item probably isn't selling. Be blunt.",
+  "diagnosis": "3-4 sentences: why their item probably isn't selling. Be blunt. Reference real stats.",
   "what_winners_do": "2-3 sentences: the specific naming pattern the top 10 competitors share.",
   "titles_safe": ["3 titles that MIRROR what top competitors already do"],
   "titles_differentiated": ["3 titles that use SAME niche keywords but UNIQUE angle"],
   "titles_longtail": ["2 titles with 4+ keywords packed in"],
   "titles_viral": ["2 titles that hook meme/TikTok/Sound trends"],
-  "new_description": "Full 2-3 sentence SEO description, keyword-rich.",
-  "price_advice": "1-2 sentences: keep, raise, or drop price?",
-  "relaunch_plan": "2-3 sentences: concrete next action.",
-  "kill_or_keep": "KEEP / RESCUE / KILL — one word plus one sentence"
+  "new_description": "Full 2-3 sentence SEO description, keyword-rich."
 }}
 
 RULES:
 - Every word in every title MUST exist in the allow-list above (plus glue words).
 - Titles MUST be 3-5 words.
 - Each title must READ AS A SENTENCE, not a list of keywords.
-- Do NOT invent keywords. Do NOT fabricate stats.
+- Do NOT invent keywords. Do NOT fabricate stats. Do NOT predict outcomes.
 - Output ONLY the JSON object.
 """
 
@@ -1183,15 +1185,6 @@ RULES:
 
         if synth.get("new_description"):
             lines.append("## 📝 New Description (copy-paste)"); lines.append(synth["new_description"]); lines.append("")
-
-        if synth.get("price_advice"):
-            lines.append("## 💰 Price Advice"); lines.append(synth["price_advice"]); lines.append("")
-
-        if synth.get("relaunch_plan"):
-            lines.append("## 🚀 Relaunch Plan"); lines.append(synth["relaunch_plan"]); lines.append("")
-
-        if synth.get("kill_or_keep"):
-            lines.append("## ⚖️ Verdict"); lines.append(synth["kill_or_keep"]); lines.append("")
 
         lines.append("---")
         lines.append("**🥊 Top 10 competitors in your niche:**")
