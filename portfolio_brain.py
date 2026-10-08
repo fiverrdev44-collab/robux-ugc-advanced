@@ -3,6 +3,29 @@ import re
 from collections import Counter
 
 
+def _ensure_portfolio_table(cur):
+    """Guarantee my_portfolio exists before queries hit it."""
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS my_portfolio (
+                item_id BIGINT PRIMARY KEY,
+                name TEXT,
+                asset_type_id BIGINT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_refresh TIMESTAMP,
+                notes TEXT
+            )
+        """)
+        cur.connection.commit()
+    except Exception as e:
+        print(f"[portfolio_brain] table init: {e}", flush=True)
+
+
+def ensure_brain_tables(cur):
+    """Public entry point — call before any portfolio query."""
+    _ensure_portfolio_table(cur)
+
+
 def _percentile(values, p):
     if not values:
         return 0
