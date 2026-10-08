@@ -1,9 +1,5 @@
 """
 post_monitor.py — Frequent polling for published UGC items (clothing excluded).
-
-Fetches:
-  - Personal sales from ROBLOX_USER_ID
-  - Group sales from all groups in ROBLOX_GROUP_IDS (cookie-auth, cached 15min)
 """
 import os
 import time
@@ -18,10 +14,8 @@ ROBLOX_UA = (
 
 SPIKE_PCT = 25.0
 ALERT_COOLDOWN_MIN = 45
-
-# Group sales cache
 _GROUP_SALES_CACHE = {}
-_GROUP_SALES_TTL = 900  # 15 min
+_GROUP_SALES_TTL = 900
 
 
 def ensure_tables(cur):
@@ -118,8 +112,44 @@ def fetch_public(item_id, cookie=None):
     return out
 
 
-def fetch_group_sales(cookie, group_id, max_pages=2):
-    """Fetch sales for a group you own. Cached 15 min."""
+def _extract_tx_item_id(tx):
+    """
+    Find the item ID inside a transaction record.
+    Group endpoint nests it as item.id; user endpoint uses assetId or id.
+    """
+    # Direct
+    v = tx.get("assetId") or tx.get("itemId")
+    if v:
+        return v
+    # Nested under "item"
+    item = tx.get("item")
+    if isinstance(item, dict):
+        v = item.get("id") or item.get("assetId")
+        if v:
+            return v
+    # Fallback: "id" if it looks like an asset (long number)
+    v = tx.get("id")
+    if v:
+        return v
+    return None
+
+
+def _extract_tx_amount(tx):
+    cur = tx.get("currency")
+    if isinstance(cur, dict):
+        return int(cur.get("amount") or 0)
+    v = tx.get("amount")
+    if v:
+        return int(v)
+    return 0
+
+
+def _extract_tx_created(tx):
+    return tx.get("created") or tx.get("createdAt") or tx.get("createdUtc")
+
+
+def fetch_group_sales(cookie, group_id, max_pages=4):
+    """Fetch sales from group. Cached 15 min. Logs raw response for debugging."""
     if not cookie or not group_id:
         return []
 
@@ -138,7 +168,7 @@ def fetch_group_sales(cookie, group_id, max_pages=2):
     )
 
     all_sales, cursor = [], ""
-    for _ in range(max_pages):
+    for page in range(max_pages):
         u = f"{url}&cursor={cursor}" if cursor else url
         try:
             r = requests.get(u, headers=headers, timeout=12)
@@ -146,13 +176,18 @@ def fetch_group_sales(cookie, group_id, max_pages=2):
                 print(f"[post_monitor] group {group_id} rate limited", flush=True)
                 break
             if r.status_code in (401, 403):
-                print(f"[post_monitor] group {group_id} auth failed", flush=True)
+                print(f"[post_monitor] group {group_id} auth failed (HTTP {r.status_code})", flush=True)
                 break
             if r.status_code != 200:
                 print(f"[post_monitor] group {group_id} HTTP {r.status_code}", flush=True)
                 break
             d = r.json()
-            all_sales.extend(d.get("data") or [])
+            page_data = d.get("data") or []
+            if page == 0:
+                print(f"[post_monitor] group {group_id} page0 keys: {list(d.keys())}", flush=True)
+                if page_data:
+                    print(f"[post_monitor] group {group_id} sample tx: {page_data[0]}", flush=True)
+            all_sales.extend(page_data)
             cursor = d.get("nextPageCursor")
             if not cursor:
                 break
@@ -161,6 +196,7 @@ def fetch_group_sales(cookie, group_id, max_pages=2):
             break
         time.sleep(2.0)
 
+    print(f"[post_monitor] group {group_id} total tx fetched: {len(all_sales)}", flush=True)
     _GROUP_SALES_CACHE[group_id] = (time.time(), all_sales)
     return all_sales
 
@@ -172,7 +208,6 @@ def fetch_my_sales(cookie, user_id, max_pages=4):
 
     all_sales = []
 
-    # Personal
     if user_id:
         headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json",
                    "Cookie": f".ROBLOSECURITY={cookie}"}
@@ -193,12 +228,9 @@ def fetch_my_sales(cookie, user_id, max_pages=4):
                 break
             time.sleep(1.5)
 
-    # Groups
     for gid in _group_ids():
         try:
-            group_sales = fetch_group_sales(cookie, gid, max_pages=2)
-            if group_sales:
-                print(f"[post_monitor] group {gid}: {len(group_sales)} sales fetched", flush=True)
+            group_sales = fetch_group_sales(cookie, gid, max_pages=4)
             all_sales.extend(group_sales)
         except Exception as e:
             print(f"[post_monitor] group {gid} sales failed: {e}", flush=True)
@@ -208,17 +240,19 @@ def fetch_my_sales(cookie, user_id, max_pages=4):
 
 
 def _sales_for_item(sales_list, item_id, hours=24):
-    """Count sales + revenue for one item in window. Handles both user+group shapes."""
+    """Count sales + revenue for one item in window. Robust matching."""
     if not sales_list:
         return 0, 0
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
     count, revenue = 0, 0
     for s in sales_list:
         try:
-            s_id = s.get("id") or s.get("itemId") or s.get("assetId")
-            if str(s_id) != str(item_id):
+            tx_item = _extract_tx_item_id(s)
+            if tx_item is None:
                 continue
-            created = s.get("created") or s.get("createdAt")
+            if str(tx_item) != str(item_id):
+                continue
+            created = _extract_tx_created(s)
             if not created:
                 continue
             created = str(created).replace("Z", "+00:00")
@@ -226,8 +260,7 @@ def _sales_for_item(sales_list, item_id, hours=24):
             if ts < cutoff:
                 continue
             count += 1
-            cur_obj = s.get("currency") or {}
-            revenue += int(cur_obj.get("amount", 0) or 0)
+            revenue += _extract_tx_amount(s)
         except Exception:
             continue
     return count, revenue
@@ -295,6 +328,7 @@ def poll_all(get_db):
                 price = live["price"] or 0
                 name = pname or live.get("name") or f"Item {item_id}"
                 s24, r24 = _sales_for_item(sales_list, item_id, hours=24)
+                s_all, _ = _sales_for_item(sales_list, item_id, hours=24 * 365)
                 last = _last_snapshot(cur, item_id)
 
                 try:
@@ -302,7 +336,7 @@ def poll_all(get_db):
                         INSERT INTO post_snapshots
                             (item_id, favorite_count, price, total_sales, sales_24h, revenue_24h)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (item_id, favs, price, s24, s24, r24))
+                    """, (item_id, favs, price, s_all, s24, r24))
                 except Exception:
                     pass
 
@@ -324,7 +358,7 @@ def poll_all(get_db):
                 if old_s > 0 and s24 > old_s:
                     gained = s24 - old_s
                     pct = (gained / old_s) * 100
-                    if pct >= SPIKE_PCT and gained >= 3 and not _recent_event(cur, item_id, "sales_spike"):
+                    if pct >= SPIKE_PCT and gained >= 2 and not _recent_event(cur, item_id, "sales_spike"):
                         sev = "critical" if pct >= 100 else "warning"
                         msg = f"Sales +{gained} ({pct:+.0f}%)"
                         _record_event(cur, item_id, "sales_spike", sev, old_s, s24, round(pct, 2), msg)
@@ -338,12 +372,6 @@ def poll_all(get_db):
                     _record_event(cur, item_id, "price_change", "info", old_p, price, round(pct, 2), msg)
                     alerts.append({"item_id": item_id, "name": name, "type": "price_change",
                                    "severity": "info", "message": msg, "pct": round(pct, 2)})
-
-                if old_s > 0 and s24 == 0 and not _recent_event(cur, item_id, "stall"):
-                    msg = f"Stalled — 0 in 24h (was {old_s})"
-                    _record_event(cur, item_id, "stall", "warning", old_s, 0, -100.0, msg)
-                    alerts.append({"item_id": item_id, "name": name, "type": "stall",
-                                   "severity": "warning", "message": msg, "pct": -100.0})
             except Exception as e:
                 print(f"[post_monitor] item {item_id}: {e}", flush=True)
 
@@ -377,6 +405,7 @@ def get_pulse(get_db, hours=24):
             s24, r24 = _sales_for_item(sales_list, item_id, hours=24)
             s6, r6 = _sales_for_item(sales_list, item_id, hours=6)
             s1, r1 = _sales_for_item(sales_list, item_id, hours=1)
+            s_all, r_all = _sales_for_item(sales_list, item_id, hours=24 * 365)
 
             try:
                 cur.execute("""
@@ -396,6 +425,7 @@ def get_pulse(get_db, hours=24):
                 "item_id": item_id, "name": name, "favs": favs,
                 "fav_velocity": fav_vel, "price": price,
                 "sales_1h": s1, "sales_6h": s6, "sales_24h": s24,
+                "sales_all": s_all, "revenue_all": r_all,
                 "revenue_1h": r1, "revenue_6h": r6, "revenue_24h": r24,
                 "conversion_pct": round(conv, 2),
             })
