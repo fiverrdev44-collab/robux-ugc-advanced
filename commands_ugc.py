@@ -1,13 +1,14 @@
 """
-commands_ugc.py — Master `!ugc` command + supporting commands.
+commands_ugc.py — Master `!ugc` command + all portfolio commands.
 
-!ugc            — runs EVERYTHING in one shot: sync, monitor, pulse, briefing, jarvis
+!ugc            — runs EVERYTHING: sync, pulse, events, briefing, jarvis
 !ugc sync       — force portfolio sync only
 !ugc brief      — briefing only
 !ugc ai         — jarvis only
-!portfolio      — list tracked items (clothing excluded)
-!pulse          — raw pulse
-!events         — event log
+!portfolio      — list tracked items
+!pulse [hours]  — raw pulse
+!events [hours] — event log
+!mystats        — aggregate stats
 """
 import os
 import asyncio
@@ -49,11 +50,13 @@ def register_ugc_commands(bot, get_db):
             msg += f" · purged {purged} clothing rows"
         return msg
 
+    # ─────────────────────────────────────────────────────────
+    # !ugc  (master)
+    # ─────────────────────────────────────────────────────────
     @bot.command(name="ugc")
     async def ugc_cmd(ctx, sub: str = ""):
         sub = (sub or "").lower().strip()
 
-        # ── !ugc sync ──
         if sub == "sync":
             progress = await ctx.send("📡 **Syncing portfolio...**")
             msg = await _do_sync(ctx)
@@ -62,7 +65,6 @@ def register_ugc_commands(bot, get_db):
             await ctx.send(msg)
             return
 
-        # ── !ugc brief ──
         if sub == "brief":
             from ugc_watchdog import run_watchdog, format_briefing
             progress = await ctx.send("🩺 **Analyzing...**")
@@ -75,7 +77,6 @@ def register_ugc_commands(bot, get_db):
             await _send_long(ctx, format_briefing(data))
             return
 
-        # ── !ugc ai ──
         if sub == "ai":
             from jarvis import run_jarvis, format_jarvis_report
             progress = await ctx.send("🤖 **JARVIS analyzing...**")
@@ -88,13 +89,11 @@ def register_ugc_commands(bot, get_db):
             await _send_long(ctx, format_jarvis_report(data))
             return
 
-        # ── !ugc  (full run) ──
+        # ── Full run ──
         progress = await ctx.send("🩺 **Full portfolio analysis...**")
 
-        # 1. Sync silently
         sync_msg = await _do_sync(ctx)
 
-        # 2. Pulse
         from post_monitor import get_pulse, get_recent_events
         try:
             pulse = await asyncio.to_thread(get_pulse, get_db, 24)
@@ -108,17 +107,16 @@ def register_ugc_commands(bot, get_db):
         await ctx.send(f"**{sync_msg}**")
         await asyncio.sleep(0.5)
 
-        # ── Header ──
-        header = []
-        header.append("```")
-        header.append("╔══════════════════════════════════════════════════════════╗")
-        header.append("║       U G C   C O M M A N D   C E N T E R                ║")
-        header.append("║       Post-Monitor · Briefing · AI Strategist            ║")
-        header.append("╚══════════════════════════════════════════════════════════╝")
-        header.append("```")
+        header = [
+            "```",
+            "╔══════════════════════════════════════════════════════════╗",
+            "║       U G C   C O M M A N D   C E N T E R                ║",
+            "║       Post-Monitor · Briefing · AI Strategist            ║",
+            "╚══════════════════════════════════════════════════════════╝",
+            "```",
+        ]
         await _send_long(ctx, "\n".join(header))
 
-        # ── Live pulse ──
         if pulse:
             items_sorted = sorted(pulse, key=lambda x: -(x["sales_24h"] * 1000 + x["fav_velocity"]))
             tot_s = sum(i["sales_24h"] for i in pulse)
@@ -144,7 +142,6 @@ def register_ugc_commands(bot, get_db):
 
         await asyncio.sleep(0.5)
 
-        # ── Recent events ──
         if events:
             e_lines = ["# 📜 EVENTS — 24h\n"]
             emoji = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
@@ -155,7 +152,6 @@ def register_ugc_commands(bot, get_db):
             await _send_long(ctx, "\n".join(e_lines))
             await asyncio.sleep(0.5)
 
-        # ── Briefing (rule-based decisions) ──
         from ugc_watchdog import run_watchdog, format_briefing
         try:
             bdata = await asyncio.to_thread(run_watchdog, get_db)
@@ -164,7 +160,6 @@ def register_ugc_commands(bot, get_db):
             await ctx.send(f"⚠️ Briefing failed: `{e}`")
         await asyncio.sleep(0.5)
 
-        # ── Jarvis (AI strategist) ──
         from jarvis import run_jarvis, format_jarvis_report
         try:
             jdata = await asyncio.to_thread(run_jarvis, get_db)
@@ -172,9 +167,168 @@ def register_ugc_commands(bot, get_db):
         except Exception as e:
             await ctx.send(f"⚠️ JARVIS failed: `{e}`")
 
+    # ─────────────────────────────────────────────────────────
+    # !portfolio — list tracked items
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="portfolio")
+    async def portfolio_cmd(ctx):
+        progress = await ctx.send("📁 **Loading portfolio...**")
+
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                from portfolio_tracker import get_portfolio
+                return get_portfolio(cur)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            items = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ {e}"); return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        if not items:
+            await ctx.send("# 📁 PORTFOLIO\n\nNo items tracked.\nRun `!ugc sync` first.")
+            return
+
+        lines = [f"# 📁 PORTFOLIO — {len(items)} items\n"]
+        for i, it in enumerate(items[:25], 1):
+            lines.append(f"**{i}. `{it['name'][:50]}`** — `{it['id']}`")
+        if len(items) > 25:
+            lines.append(f"\n_+{len(items) - 25} more_")
+        await _send_long(ctx, "\n".join(lines))
+
+    # ─────────────────────────────────────────────────────────
+    # !pulse — raw pulse
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="pulse")
+    async def pulse_cmd(ctx, hours: int = 24):
+        from post_monitor import get_pulse
+        hours = max(1, min(int(hours), 168))
+        progress = await ctx.send(f"📡 **Pulling pulse (last {hours}h)...**")
+
+        try:
+            items = await asyncio.to_thread(get_pulse, get_db, hours)
+        except Exception as e:
+            await progress.edit(content=f"❌ {e}"); return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        if not items:
+            await ctx.send("# 📡 PULSE\n\nNo items. Run `!ugc sync` first.")
+            return
+
+        items.sort(key=lambda x: -(x["sales_24h"] * 1000 + x["fav_velocity"]))
+        total_s = sum(i["sales_24h"] for i in items)
+        total_r = sum(i["revenue_24h"] for i in items)
+        total_f = sum(i["favs"] for i in items)
+
+        lines = [f"# 📡 PULSE — last {hours}h\n"]
+        lines.append(f"**{len(items)} items** · **{total_s}** sales · **R${total_r:,}** · **{total_f:,}** favs\n")
+
+        for i, it in enumerate(items, 1):
+            tag = "🔥" if it["sales_24h"] > 0 and it["sales_6h"] > 0 else (
+                "⚡" if it["fav_velocity"] >= 20 else (
+                    "💤" if it["sales_24h"] == 0 and it["favs"] > 0 else ""))
+            lines.append(
+                f"**{i}. {tag} `{it['name'][:45]}`**\n"
+                f"   Favs **{it['favs']:,}** (+{it['fav_velocity']}/24h)\n"
+                f"   Sales **{it['sales_24h']}** (1h {it['sales_1h']} · 6h {it['sales_6h']})\n"
+                f"   Revenue **R${it['revenue_24h']:,}** · Conv **{it['conversion_pct']}%**"
+            )
+            lines.append("")
+        await _send_long(ctx, "\n".join(lines))
+
+    # ─────────────────────────────────────────────────────────
+    # !events — event log
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="events")
+    async def events_cmd(ctx, hours: int = 24):
+        from post_monitor import get_recent_events
+        hours = max(1, min(int(hours), 168))
+        progress = await ctx.send("📜 **Loading events...**")
+
+        try:
+            events = await asyncio.to_thread(get_recent_events, get_db, hours)
+        except Exception as e:
+            await progress.edit(content=f"❌ {e}"); return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        if not events:
+            await ctx.send(f"# 📜 EVENTS — {hours}h\n\nNo events.")
+            return
+
+        emoji = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
+        lines = [f"# 📜 EVENT LOG — {hours}h\n"]
+        for e in events:
+            em = emoji.get(e["severity"], "⚪")
+            t = e["at"].strftime("%m-%d %H:%M") if e["at"] else "?"
+            lines.append(f"{em} `{t}` **{e['type'].replace('_', ' ').title()}** — {e['message']}")
+        await _send_long(ctx, "\n".join(lines))
+
+    # ─────────────────────────────────────────────────────────
+    # !mystats — aggregate stats
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="mystats")
+    async def mystats_cmd(ctx):
+        progress = await ctx.send("📈 **Computing stats...**")
+
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                from portfolio_tracker import get_portfolio
+                items = get_portfolio(cur)
+                stats = []
+                for it in items:
+                    cur.execute("SELECT favorite_count, total_sales FROM items WHERE id = %s",
+                                (it["id"],))
+                    r = cur.fetchone()
+                    if r:
+                        stats.append({
+                            "name": it["name"],
+                            "favs": r[0] or 0,
+                            "sales": r[1] or 0,
+                        })
+                return stats
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            stats = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ {e}"); return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        if not stats:
+            await ctx.send("# 📈 STATS\n\nNo items tracked.")
+            return
+
+        favs = [s["favs"] for s in stats]
+        total_f = sum(favs)
+        total_s = sum(s["sales"] for s in stats)
+        stats.sort(key=lambda s: s["favs"], reverse=True)
+
+        lines = ["# 📈 PORTFOLIO STATS\n"]
+        lines.append(f"• Items: **{len(stats)}**")
+        lines.append(f"• Total favs: **{total_f:,}**")
+        lines.append(f"• Avg favs: **{total_f // len(stats):,}**")
+        lines.append(f"• Total sales: **{total_s}**")
+        lines.append("")
+        lines.append(f"**🥇 Best:** `{stats[0]['name'][:50]}` — {stats[0]['favs']:,} favs, {stats[0]['sales']} sales")
+        lines.append(f"**💀 Worst:** `{stats[-1]['name'][:50]}` — {stats[-1]['favs']:,} favs, {stats[-1]['sales']} sales")
+        await _send_long(ctx, "\n".join(lines))
+
 
 # ─────────────────────────────────────────────────────────────
-# Auto-watchdog loop — exposed so discord_ugc_bot.py can start it
+# Auto-watchdog loop — started from discord_ugc_bot.py on_ready
 # ─────────────────────────────────────────────────────────────
 _auto_watchdog_task = None
 
