@@ -15,20 +15,30 @@ def _decide_action(item, snap, diag, comps):
     niche_med = diag.get("niche_median", 0) or 0
     niche_price = diag.get("niche_price_median", 0) or 0
 
+    # Age sanity check — 0 days with favs means data is off
+    if age < 0.5 and favs > 5:
+        return "WAIT", (
+            f"Age shows {age:.1f}d with {favs} favs — data may be stale. "
+            f"Re-run `!ugc sync`."
+        )
+
     if age < 3:
         return "WAIT", f"Age {age:.1f}d — 72h needed."
 
+    # ── SELLING items: don't touch ──
     if s24 >= 3 and s6 >= 1:
         if pct >= 75:
             return "SCALE", f"Top {100-int(pct)}% · {s24}/24h. Make a themed remix."
         return "HOLD", f"Selling {s24}/24h. Do not edit."
 
-    if s24 > 0 and s6 == 0 and age > 7:
-        return "HOLD", f"Sold {s24} in 24h but 0 last 6h. Monitor 48h."
+    if s24 > 0:
+        return "HOLD", f"Selling {s24}/24h. Monitor."
 
+    # ── DEAD: no favs at all ──
     if favs < 5 and age >= 7:
-        return "KILL", f"Only {favs} favs after {age:.0f}d."
+        return "KILL", f"Only {favs} favs after {age:.0f}d. Concept failed."
 
+    # ── PRICE BLOCKER: high favs, no sales ──
     if favs >= 30 and s24 == 0 and niche_price > 0:
         ratio = price / niche_price if niche_price else 1
         if ratio >= 1.3:
@@ -38,7 +48,8 @@ def _decide_action(item, snap, diag, comps):
             )
         return "EDIT", f"{favs} favs, 0 sales, price ok. Title is blocker. One edit."
 
-    if 7 <= age <= 30 and favs >= 5 and s24 == 0:
+    # ── YOUNG item with interest ──
+    if age <= 30 and favs >= 5 and s24 == 0:
         if pct < 30:
             return "EDIT", (
                 f"Bottom {int(pct)}% ({favs} vs median {niche_med}). "
@@ -46,8 +57,19 @@ def _decide_action(item, snap, diag, comps):
             )
         return "WAIT", f"At {int(pct)}%. Give 72h."
 
+    # ── OLD item (30+) ──
     if age > 30 and s24 == 0:
-        return "REMIX", f"Age {age:.0f}d. Past edit window. Remix a winner."
+        # High favs but no sales → concept works, sales pipeline broken
+        if favs >= 30:
+            return "EDIT", (
+                f"Age {age:.0f}d, {favs} favs, 0 sales. "
+                f"Concept is proven. One title edit or price drop "
+                f"to unblock sales."
+            )
+        # Low favs AND old → real dead item
+        if favs < 15:
+            return "KILL", f"Age {age:.0f}d, only {favs} favs. Dead."
+        return "REMIX", f"Age {age:.0f}d, {favs} favs, no sales. Remix a winner."
 
     return "WAIT", "Monitoring."
 
