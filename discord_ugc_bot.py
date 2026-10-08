@@ -5,7 +5,8 @@ All commands live in commands_*.py modules.
 Includes:
 - Discord health check (returns 503 when bot is dead)
 - Watchdog thread (uses bot.latency + os._exit(1) to force Render restart)
-- Background scheduler (daily snapshot)
+- Background scheduler (daily snapshot + 15-min portfolio poll)
+- UGC command center (!ugc)
 """
 import os
 import time
@@ -35,6 +36,14 @@ async def on_ready():
         print("✅ Database tables verified/created.", flush=True)
     except Exception as e:
         print(f"⚠️ Table setup failed: {e}", flush=True)
+
+    # ── Start the !ugc auto-watchdog loop after everything is ready ──
+    try:
+        from commands_ugc import start_ugc_loops
+        start_ugc_loops(bot)
+        print("✅ UGC auto-watchdog started.", flush=True)
+    except Exception as e:
+        print(f"⚠️ UGC auto-watchdog failed to start: {e}", flush=True)
 
 
 # ── Register all command modules ─────────────────────────────
@@ -77,6 +86,14 @@ try:
 except Exception as e:
     print(f"⚠️ Edge commands failed to load: {e}", flush=True)
 
+# ── 🩺 UGC command center (!ugc, !portfolio, !pulse, !events) ─
+try:
+    from commands_ugc import register_ugc_commands
+    register_ugc_commands(bot, get_db)
+    print("✅ UGC command center loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ UGC command center failed to load: {e}", flush=True)
+
 
 # ── Start background scheduler ───────────────────────────────
 try:
@@ -92,10 +109,6 @@ app = Flask(__name__)
 
 @app.route('/')
 def health():
-    """
-    Returns 200 only when Discord client is connected AND latency is sane.
-    Otherwise 503 — Better Stack will go red.
-    """
     try:
         if not bot.is_ready() or bot.is_closed():
             return "Discord disconnected", 503
@@ -118,11 +131,6 @@ def run_flask():
 
 # ── Watchdog thread ──────────────────────────────────────────
 def watchdog():
-    """
-    Every 60s: check if bot is alive via bot.latency.
-    If dead, call os._exit(1) to force Render to spin up a fresh container.
-    DO NOT attempt to restart discord.py in the same process.
-    """
     print("🐕 [watchdog] Started — checking every 60s", flush=True)
     time.sleep(120)  # Startup grace period
 
@@ -137,7 +145,7 @@ def watchdog():
                 continue
 
             lat = bot.latency
-            if lat != lat:  # NaN
+            if lat != lat:
                 print("🐕 [watchdog] Latency is NaN — exiting for Render restart", flush=True)
                 os._exit(1)
 
@@ -151,12 +159,8 @@ def watchdog():
 
 # ── Main entry ───────────────────────────────────────────────
 if __name__ == "__main__":
-    # Flask health check in background
     threading.Thread(target=run_flask, daemon=True).start()
-
-    # Watchdog in background
     threading.Thread(target=watchdog, daemon=True).start()
 
-    # Main bot loop — Render handles restarts, not us
     print("🔌 Starting bot...", flush=True)
     bot.run(TOKEN)
