@@ -12,7 +12,6 @@ commands_ugc.py — Master `!ugc` command + supporting commands.
 import os
 import asyncio
 import discord
-from discord.ext import tasks
 from bot_core import get_db
 
 
@@ -26,9 +25,10 @@ def register_ugc_commands(bot, get_db):
     async def _do_sync(ctx):
         from portfolio_tracker import refresh_portfolio, purge_excluded
         cookie = os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
-        uid = os.getenv("ROBLOX_USER_ID")
-        if not uid:
-            return "❌ `ROBLOX_USER_ID` not set in Render env vars."
+        uid = os.getenv("ROBLOX_USER_ID") or None
+        gids = os.getenv("ROBLOX_GROUP_IDS", "").strip()
+        if not uid and not gids:
+            return "❌ Neither `ROBLOX_USER_ID` nor `ROBLOX_GROUP_IDS` set in Render env vars."
 
         def _run():
             conn = get_db(); cur = conn.cursor()
@@ -172,9 +172,26 @@ def register_ugc_commands(bot, get_db):
         except Exception as e:
             await ctx.send(f"⚠️ JARVIS failed: `{e}`")
 
-    # ── Auto-runners (silent, post to ALERT_CHANNEL_ID on change) ──
+
+# ─────────────────────────────────────────────────────────────
+# Auto-watchdog loop — exposed so discord_ugc_bot.py can start it
+# ─────────────────────────────────────────────────────────────
+_auto_watchdog_task = None
+
+
+def start_ugc_loops(bot):
+    """Called from discord_ugc_bot.on_ready to start the auto-watchdog."""
+    global _auto_watchdog_task
+
+    if _auto_watchdog_task and _auto_watchdog_task.is_running():
+        return
+
+    from discord.ext import tasks
+    from bot_core import get_db
+    import os
+
     @tasks.loop(hours=1)
-    async def auto_watchdog():
+    async def _watchdog_loop():
         try:
             ch_id = int(os.getenv("ALERT_CHANNEL_ID", "0"))
             if not ch_id:
@@ -182,20 +199,23 @@ def register_ugc_commands(bot, get_db):
             channel = bot.get_channel(ch_id)
             if not channel:
                 return
+
             from ugc_watchdog import run_watchdog, format_briefing, should_alert
             data = await asyncio.to_thread(run_watchdog, get_db)
             if not data or data.get("error"):
                 return
-            alert, sig = should_alert(data, auto_watchdog._last_sig)
-            auto_watchdog._last_sig = sig
-            if alert:
-                await channel.send(format_briefing(data))
-        except Exception as e:
-            print(f"[auto_watchdog] {e}", flush=True)
 
-    @bot.event
-    async def on_ready():
-        if not auto_watchdog.is_running():
-            auto_watchdog._last_sig = None
-            auto_watchdog.start()
-            print("🩺 [ugc] auto watchdog started", flush=True)
+            last_sig = getattr(_watchdog_loop, "_last_sig", None)
+            alert, sig = should_alert(data, last_sig)
+            _watchdog_loop._last_sig = sig
+
+            if alert:
+                body = format_briefing(data)
+                for i in range(0, len(body), 1900):
+                    await channel.send(body[i:i+1900])
+        except Exception as e:
+            print(f"[ugc_watchdog_loop] {e}", flush=True)
+
+    _watchdog_loop._last_sig = None
+    _watchdog_loop.start()
+    _auto_watchdog_task = _watchdog_loop
