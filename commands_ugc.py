@@ -5,7 +5,7 @@ commands_ugc.py — Master `!ugc` command + all portfolio commands.
 !ugc sync       — force portfolio sync only
 !ugc brief      — briefing only
 !ugc ai         — jarvis only
-!portfolio      — list tracked items
+!portfolio      — list tracked items grouped by creator
 !pulse [hours]  — raw pulse
 !events [hours] — event log
 !mystats        — aggregate stats
@@ -168,7 +168,7 @@ def register_ugc_commands(bot, get_db):
             await ctx.send(f"⚠️ JARVIS failed: `{e}`")
 
     # ─────────────────────────────────────────────────────────
-    # !portfolio — list tracked items
+    # !portfolio — list tracked items grouped by creator
     # ─────────────────────────────────────────────────────────
     @bot.command(name="portfolio")
     async def portfolio_cmd(ctx):
@@ -178,7 +178,22 @@ def register_ugc_commands(bot, get_db):
             conn = get_db(); cur = conn.cursor()
             try:
                 from portfolio_tracker import get_portfolio
-                return get_portfolio(cur)
+                items = get_portfolio(cur)
+                enriched = []
+                for it in items:
+                    cur.execute("""
+                        SELECT creator_name, asset_type_id, favorite_count, price
+                        FROM items WHERE id = %s
+                    """, (it["id"],))
+                    r = cur.fetchone()
+                    enriched.append({
+                        **it,
+                        "creator": r[0] if r else "?",
+                        "asset_type_id": r[1] if r else it.get("asset_type_id"),
+                        "favs": (r[2] if r else 0) or 0,
+                        "price": (r[3] if r else 0) or 0,
+                    })
+                return enriched
             finally:
                 cur.close(); conn.close()
 
@@ -194,11 +209,21 @@ def register_ugc_commands(bot, get_db):
             await ctx.send("# 📁 PORTFOLIO\n\nNo items tracked.\nRun `!ugc sync` first.")
             return
 
-        lines = [f"# 📁 PORTFOLIO — {len(items)} items\n"]
-        for i, it in enumerate(items[:25], 1):
-            lines.append(f"**{i}. `{it['name'][:50]}`** — `{it['id']}`")
-        if len(items) > 25:
-            lines.append(f"\n_+{len(items) - 25} more_")
+        by_creator = {}
+        for it in items:
+            by_creator.setdefault(it.get("creator") or "?", []).append(it)
+
+        lines = [f"# 📁 PORTFOLIO — {len(items)} items across {len(by_creator)} creators\n"]
+
+        for creator, group in sorted(by_creator.items(), key=lambda x: -len(x[1])):
+            lines.append(f"## 👤 {creator} — {len(group)} items\n")
+            for it in group:
+                lines.append(
+                    f"• **`{it['name'][:50]}`** — `{it['id']}`\n"
+                    f"   {it['favs']:,} favs · R${it['price']}"
+                )
+            lines.append("")
+
         await _send_long(ctx, "\n".join(lines))
 
     # ─────────────────────────────────────────────────────────
