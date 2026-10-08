@@ -17,7 +17,20 @@ ALERT_COOLDOWN_MIN = 45
 
 
 def ensure_tables(cur):
+    """Create all monitoring tables if they don't exist."""
     try:
+        # ── my_portfolio (needed before anything else) ──
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS my_portfolio (
+                item_id BIGINT PRIMARY KEY,
+                name TEXT,
+                asset_type_id BIGINT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_refresh TIMESTAMP,
+                notes TEXT
+            )
+        """)
+        # ── post_snapshots ──
         cur.execute("""
             CREATE TABLE IF NOT EXISTS post_snapshots (
                 id BIGSERIAL PRIMARY KEY,
@@ -29,6 +42,7 @@ def ensure_tables(cur):
         """)
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_post_snap_item_time
                        ON post_snapshots(item_id, fetched_at DESC)""")
+        # ── post_events ──
         cur.execute("""
             CREATE TABLE IF NOT EXISTS post_events (
                 id BIGSERIAL PRIMARY KEY,
@@ -55,7 +69,7 @@ def _user_id():
 
 
 def _filtered_portfolio(cur):
-    """Get portfolio minus clothing."""
+    """Get portfolio minus clothing. Assumes tables already exist."""
     cur.execute("SELECT item_id, name FROM my_portfolio")
     rows = cur.fetchall()
     out = []
