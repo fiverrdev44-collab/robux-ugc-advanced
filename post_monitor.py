@@ -1,5 +1,9 @@
 """
 post_monitor.py — Frequent polling for published UGC items (clothing excluded).
+
+Fetches:
+  - Personal sales from ROBLOX_USER_ID
+  - Group sales from all groups in ROBLOX_GROUP_IDS (cookie-auth, cached 15min)
 """
 import os
 import time
@@ -15,11 +19,13 @@ ROBLOX_UA = (
 SPIKE_PCT = 25.0
 ALERT_COOLDOWN_MIN = 45
 
+# Group sales cache
+_GROUP_SALES_CACHE = {}
+_GROUP_SALES_TTL = 900  # 15 min
+
 
 def ensure_tables(cur):
-    """Create all monitoring tables if they don't exist."""
     try:
-        # ── my_portfolio (needed before anything else) ──
         cur.execute("""
             CREATE TABLE IF NOT EXISTS my_portfolio (
                 item_id BIGINT PRIMARY KEY,
@@ -30,7 +36,6 @@ def ensure_tables(cur):
                 notes TEXT
             )
         """)
-        # ── post_snapshots ──
         cur.execute("""
             CREATE TABLE IF NOT EXISTS post_snapshots (
                 id BIGSERIAL PRIMARY KEY,
@@ -42,7 +47,6 @@ def ensure_tables(cur):
         """)
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_post_snap_item_time
                        ON post_snapshots(item_id, fetched_at DESC)""")
-        # ── post_events ──
         cur.execute("""
             CREATE TABLE IF NOT EXISTS post_events (
                 id BIGSERIAL PRIMARY KEY,
@@ -65,11 +69,15 @@ def _cookie():
 
 
 def _user_id():
-    return os.getenv("ROBLOX_USER_ID")
+    return os.getenv("ROBLOX_USER_ID") or None
+
+
+def _group_ids():
+    raw = os.getenv("ROBLOX_GROUP_IDS", "")
+    return [g.strip() for g in raw.split(",") if g.strip().isdigit()]
 
 
 def _filtered_portfolio(cur):
-    """Get portfolio minus clothing. Assumes tables already exist."""
     cur.execute("SELECT item_id, name FROM my_portfolio")
     rows = cur.fetchall()
     out = []
@@ -110,48 +118,116 @@ def fetch_public(item_id, cookie=None):
     return out
 
 
-def fetch_my_sales(cookie, user_id, max_pages=4):
-    if not cookie or not user_id:
+def fetch_group_sales(cookie, group_id, max_pages=2):
+    """Fetch sales for a group you own. Cached 15 min."""
+    if not cookie or not group_id:
         return []
-    headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json",
-               "Cookie": f".ROBLOSECURITY={cookie}"}
-    url = f"https://economy.roblox.com/v2/users/{user_id}/transactions?transactionType=Sale&limit=100"
+
+    cached = _GROUP_SALES_CACHE.get(group_id)
+    if cached and (time.time() - cached[0]) < _GROUP_SALES_TTL:
+        return cached[1]
+
+    headers = {
+        "User-Agent": ROBLOX_UA,
+        "Accept": "application/json",
+        "Cookie": f".ROBLOSECURITY={cookie}",
+    }
+    url = (
+        f"https://economy.roblox.com/v2/groups/{group_id}/transactions"
+        f"?transactionType=Sale&limit=100"
+    )
+
     all_sales, cursor = [], ""
     for _ in range(max_pages):
         u = f"{url}&cursor={cursor}" if cursor else url
         try:
             r = requests.get(u, headers=headers, timeout=12)
+            if r.status_code == 429:
+                print(f"[post_monitor] group {group_id} rate limited", flush=True)
+                break
+            if r.status_code in (401, 403):
+                print(f"[post_monitor] group {group_id} auth failed", flush=True)
+                break
             if r.status_code != 200:
+                print(f"[post_monitor] group {group_id} HTTP {r.status_code}", flush=True)
                 break
             d = r.json()
             all_sales.extend(d.get("data") or [])
             cursor = d.get("nextPageCursor")
             if not cursor:
                 break
-        except Exception:
+        except Exception as e:
+            print(f"[post_monitor] group {group_id}: {e}", flush=True)
             break
-        time.sleep(1.5)
+        time.sleep(2.0)
+
+    _GROUP_SALES_CACHE[group_id] = (time.time(), all_sales)
+    return all_sales
+
+
+def fetch_my_sales(cookie, user_id, max_pages=4):
+    """Fetch sales from personal account + all configured groups."""
+    if not cookie:
+        return []
+
+    all_sales = []
+
+    # Personal
+    if user_id:
+        headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json",
+                   "Cookie": f".ROBLOSECURITY={cookie}"}
+        url = f"https://economy.roblox.com/v2/users/{user_id}/transactions?transactionType=Sale&limit=100"
+        cursor = ""
+        for _ in range(max_pages):
+            u = f"{url}&cursor={cursor}" if cursor else url
+            try:
+                r = requests.get(u, headers=headers, timeout=12)
+                if r.status_code != 200:
+                    break
+                d = r.json()
+                all_sales.extend(d.get("data") or [])
+                cursor = d.get("nextPageCursor")
+                if not cursor:
+                    break
+            except Exception:
+                break
+            time.sleep(1.5)
+
+    # Groups
+    for gid in _group_ids():
+        try:
+            group_sales = fetch_group_sales(cookie, gid, max_pages=2)
+            if group_sales:
+                print(f"[post_monitor] group {gid}: {len(group_sales)} sales fetched", flush=True)
+            all_sales.extend(group_sales)
+        except Exception as e:
+            print(f"[post_monitor] group {gid} sales failed: {e}", flush=True)
+
+    print(f"[post_monitor] total sales records: {len(all_sales)}", flush=True)
     return all_sales
 
 
 def _sales_for_item(sales_list, item_id, hours=24):
+    """Count sales + revenue for one item in window. Handles both user+group shapes."""
     if not sales_list:
         return 0, 0
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
     count, revenue = 0, 0
     for s in sales_list:
         try:
-            if s.get("id") != item_id:
+            s_id = s.get("id") or s.get("itemId") or s.get("assetId")
+            if str(s_id) != str(item_id):
                 continue
-            created = s.get("created")
+            created = s.get("created") or s.get("createdAt")
             if not created:
                 continue
-            created = created.replace("Z", "+00:00")
+            created = str(created).replace("Z", "+00:00")
             ts = datetime.fromisoformat(created).timestamp()
             if ts < cutoff:
                 continue
             count += 1
-            revenue += int(s.get("currency", {}).get("amount", 0) or 0)
+            cur_obj = s.get("currency") or {}
+            revenue += int(cur_obj.get("amount", 0) or 0)
         except Exception:
             continue
     return count, revenue
@@ -208,7 +284,7 @@ def poll_all(get_db):
 
         cookie = _cookie()
         uid = _user_id()
-        sales_list = fetch_my_sales(cookie, uid, max_pages=4) if (cookie and uid) else []
+        sales_list = fetch_my_sales(cookie, uid) if cookie else []
 
         for item_id, pname in portfolio:
             try:
@@ -290,7 +366,7 @@ def get_pulse(get_db, hours=24):
 
         cookie = _cookie()
         uid = _user_id()
-        sales_list = fetch_my_sales(cookie, uid, max_pages=4) if (cookie and uid) else []
+        sales_list = fetch_my_sales(cookie, uid) if cookie else []
 
         out = []
         for item_id, pname in portfolio:
