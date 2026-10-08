@@ -1,10 +1,17 @@
 """
-post_monitor.py — Frequent polling for published UGC items (clothing excluded).
+post_monitor.py — Group sales fetcher with multi-endpoint fallback.
+
+Endpoints tried in order:
+  1. /v2/groups/{id}/transactions (legacy, may 403 on cloud IPs)
+  2. /v2/groups/{id}/revenue/summary/Day (summary, often works)
+  3. /v2/users/{uid}/transactions (personal fallback)
+
+Rotates between ROBLOX_COOKIE_1 and ROBLOX_COOKIE_2 if available.
 """
 import os
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from monitoring_config import is_excluded
 
 ROBLOX_UA = (
@@ -18,16 +25,58 @@ _GROUP_SALES_CACHE = {}
 _GROUP_SALES_TTL = 900
 
 
+# ──────────────────────────────────────────────────────────
+# Cookie management
+# ──────────────────────────────────────────────────────────
+_COOKIE_INDEX = [0]
+
+
+def _all_cookies():
+    """Return all non-empty cookies from env."""
+    out = []
+    for key in ("ROBLOSECURITY_COOKIE_1", "ROBLOSECURITY_COOKIE_2",
+                "ROBLOSECURITY_COOKIE_3", "ROBLOSECURITY_COOKIE"):
+        v = os.getenv(key, "").strip()
+        if v:
+            out.append(v)
+    return out
+
+
+def _cookie():
+    cookies = _all_cookies()
+    if not cookies:
+        return None
+    return cookies[_COOKIE_INDEX[0] % len(cookies)]
+
+
+def _rotate_cookie():
+    """Try the next cookie on auth failure."""
+    cookies = _all_cookies()
+    if len(cookies) > 1:
+        _COOKIE_INDEX[0] = (_COOKIE_INDEX[0] + 1) % len(cookies)
+        print(f"[post_monitor] rotated to cookie index {_COOKIE_INDEX[0]}", flush=True)
+
+
+def _user_id():
+    return os.getenv("ROBLOX_USER_ID") or None
+
+
+def _group_ids():
+    raw = os.getenv("ROBLOX_GROUP_IDS", "")
+    return [g.strip() for g in raw.split(",") if g.strip().isdigit()]
+
+
+# ──────────────────────────────────────────────────────────
+# Tables
+# ──────────────────────────────────────────────────────────
 def ensure_tables(cur):
     try:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS my_portfolio (
                 item_id BIGINT PRIMARY KEY,
-                name TEXT,
-                asset_type_id BIGINT,
+                name TEXT, asset_type_id BIGINT,
                 first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_refresh TIMESTAMP,
-                notes TEXT
+                last_refresh TIMESTAMP, notes TEXT
             )
         """)
         cur.execute("""
@@ -58,76 +107,213 @@ def ensure_tables(cur):
         print(f"[post_monitor] ensure_tables: {e}", flush=True)
 
 
-def _cookie():
-    return os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
-
-
-def _user_id():
-    return os.getenv("ROBLOX_USER_ID") or None
-
-
-def _group_ids():
-    raw = os.getenv("ROBLOX_GROUP_IDS", "")
-    return [g.strip() for g in raw.split(",") if g.strip().isdigit()]
-
-
-def _filtered_portfolio(cur):
-    cur.execute("SELECT item_id, name FROM my_portfolio")
-    rows = cur.fetchall()
-    out = []
-    for iid, name in rows:
-        try:
-            cur.execute("SELECT asset_type_id FROM items WHERE id = %s", (iid,))
-            r = cur.fetchone()
-            atype = r[0] if r else 0
-        except Exception:
-            atype = 0
-        if not is_excluded(atype):
-            out.append((iid, name))
-    return out
-
-
-def fetch_public(item_id, cookie=None):
-    headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json"}
+# ──────────────────────────────────────────────────────────
+# HTTP helpers
+# ──────────────────────────────────────────────────────────
+def _headers(cookie):
+    h = {
+        "User-Agent": ROBLOX_UA,
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://www.roblox.com",
+        "Referer": "https://www.roblox.com/",
+    }
     if cookie:
-        headers["Cookie"] = f".ROBLOSECURITY={cookie}"
-    out = {"favs": 0, "price": 0, "name": None, "ok": False}
+        h["Cookie"] = f".ROBLOSECURITY={cookie}"
+    return h
+
+
+def _get(url, cookie, timeout=12):
     try:
-        r = requests.get(f"https://economy.roblox.com/v2/assets/{item_id}/details",
-                         headers=headers, timeout=10)
-        if r.status_code == 200:
+        return requests.get(url, headers=_headers(cookie), timeout=timeout)
+    except Exception as e:
+        print(f"[post_monitor] GET {url[:80]}: {e}", flush=True)
+        return None
+
+
+# ──────────────────────────────────────────────────────────
+# Group sales — 3 endpoints
+# ──────────────────────────────────────────────────────────
+def _try_transactions_endpoint(gid, cookie, max_pages=4):
+    """Endpoint 1: /v2/groups/{gid}/transactions"""
+    url = (
+        f"https://economy.roblox.com/v2/groups/{gid}/transactions"
+        f"?transactionType=Sale&limit=100"
+    )
+    all_tx, cursor = [], ""
+    for page in range(max_pages):
+        u = f"{url}&cursor={cursor}" if cursor else url
+        r = _get(u, cookie)
+        if r is None:
+            return None
+        if r.status_code == 401:
+            return None  # cookie dead
+        if r.status_code == 403:
+            return []  # endpoint blocked (not cookie)
+        if r.status_code == 429:
+            print(f"[post_monitor] gid {gid} rate-limited", flush=True)
+            return all_tx
+        if r.status_code != 200:
+            print(f"[post_monitor] gid {gid} tx HTTP {r.status_code}", flush=True)
+            return []
+        try:
             d = r.json()
-            out["name"] = (d.get("Name") or "")[:200]
-            out["price"] = d.get("PriceInRobux") or 0
-            out["ok"] = True
-    except Exception:
-        pass
+        except Exception:
+            return []
+        page_data = d.get("data") or []
+        if page == 0 and page_data:
+            print(f"[post_monitor] gid {gid} tx sample: {str(page_data[0])[:200]}", flush=True)
+        all_tx.extend(page_data)
+        cursor = d.get("nextPageCursor")
+        if not cursor:
+            break
+        time.sleep(2.0)
+    return all_tx
+
+
+def _try_revenue_summary(gid, cookie):
+    """
+    Endpoint 2: revenue summary.
+    Doesn't give individual sales, but confirms the cookie has group access.
+    """
+    url = f"https://economy.roblox.com/v2/groups/{gid}/revenue/summary/Day"
+    r = _get(url, cookie)
+    if r is None:
+        return None
+    if r.status_code in (401, 403):
+        print(f"[post_monitor] gid {gid} revenue HTTP {r.status_code}", flush=True)
+        return None
+    if r.status_code != 200:
+        return None
     try:
-        r = requests.get(f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count",
-                         headers=headers, timeout=10)
-        if r.status_code == 200:
-            out["favs"] = r.json()
+        data = r.json()
+        print(f"[post_monitor] gid {gid} revenue summary: {data}", flush=True)
+        return data
     except Exception:
-        pass
-    return out
+        return None
 
 
+def _try_payouts(gid, cookie):
+    """Endpoint 3: group payouts — alternative auth path."""
+    url = f"https://groups.roblox.com/v1/groups/{gid}/payouts"
+    r = _get(url, cookie)
+    if r is None:
+        return None
+    if r.status_code != 200:
+        print(f"[post_monitor] gid {gid} payouts HTTP {r.status_code}", flush=True)
+        return None
+    try:
+        return r.json()
+    except Exception:
+        return None
+
+
+def fetch_group_sales(group_id, max_pages=4):
+    """
+    Try multiple endpoints + rotate cookies on auth failure.
+    Returns list of sale transactions (may be empty if endpoint blocked).
+    """
+    cached = _GROUP_SALES_CACHE.get(group_id)
+    if cached and (time.time() - cached[0]) < _GROUP_SALES_TTL:
+        return cached[1]
+
+    cookies = _all_cookies()
+    if not cookies:
+        print(f"[post_monitor] gid {group_id}: no cookies available", flush=True)
+        return []
+
+    # Try each cookie, then each endpoint
+    for cookie_idx, cookie in enumerate(cookies):
+        print(f"[post_monitor] gid {group_id}: trying cookie #{cookie_idx}", flush=True)
+
+        # Endpoint 1: transactions
+        tx = _try_transactions_endpoint(group_id, cookie, max_pages=max_pages)
+        if tx is not None and len(tx) > 0:
+            print(f"[post_monitor] gid {group_id} OK via transactions: {len(tx)} records", flush=True)
+            _GROUP_SALES_CACHE[group_id] = (time.time(), tx)
+            return tx
+
+        if tx is not None and len(tx) == 0:
+            # Endpoint worked but group has no sales
+            print(f"[post_monitor] gid {group_id}: 0 tx returned (no sales or empty)", flush=True)
+            _GROUP_SALES_CACHE[group_id] = (time.time(), [])
+            return []
+
+        # Endpoint 2: revenue summary (auth check)
+        summary = _try_revenue_summary(group_id, cookie)
+        if summary is not None:
+            print(f"[post_monitor] gid {group_id}: revenue summary OK, but tx endpoint blocked", flush=True)
+            # Cookie works, but transactions endpoint is blocked. Return empty.
+            _GROUP_SALES_CACHE[group_id] = (time.time(), [])
+            return []
+
+        # Endpoint 3: payouts
+        payouts = _try_payouts(group_id, cookie)
+        if payouts is not None:
+            print(f"[post_monitor] gid {group_id}: payouts OK (alt endpoint)", flush=True)
+            _GROUP_SALES_CACHE[group_id] = (time.time(), [])
+            return []
+
+        # All endpoints failed for this cookie → try next
+        _rotate_cookie()
+
+    print(f"[post_monitor] gid {group_id}: all cookies failed", flush=True)
+    _GROUP_SALES_CACHE[group_id] = (time.time(), [])
+    return []
+
+
+def fetch_my_sales(cookie, user_id, max_pages=4):
+    """Fetch personal + group sales."""
+    cookies = _all_cookies()
+    if not cookies:
+        return []
+
+    all_sales = []
+    cookie = cookies[0]
+
+    # Personal
+    if user_id:
+        url = f"https://economy.roblox.com/v2/users/{user_id}/transactions?transactionType=Sale&limit=100"
+        cursor = ""
+        for _ in range(max_pages):
+            u = f"{url}&cursor={cursor}" if cursor else url
+            r = _get(u, cookie)
+            if r is None or r.status_code != 200:
+                break
+            try:
+                d = r.json()
+            except Exception:
+                break
+            all_sales.extend(d.get("data") or [])
+            cursor = d.get("nextPageCursor")
+            if not cursor:
+                break
+            time.sleep(1.5)
+
+    # Groups
+    for gid in _group_ids():
+        try:
+            group_sales = fetch_group_sales(gid, max_pages=max_pages)
+            all_sales.extend(group_sales)
+        except Exception as e:
+            print(f"[post_monitor] gid {gid} failed: {e}", flush=True)
+
+    print(f"[post_monitor] total sales records: {len(all_sales)}", flush=True)
+    return all_sales
+
+
+# ──────────────────────────────────────────────────────────
+# Transaction parsing
+# ──────────────────────────────────────────────────────────
 def _extract_tx_item_id(tx):
-    """
-    Find the item ID inside a transaction record.
-    Group endpoint nests it as item.id; user endpoint uses assetId or id.
-    """
-    # Direct
     v = tx.get("assetId") or tx.get("itemId")
     if v:
         return v
-    # Nested under "item"
     item = tx.get("item")
     if isinstance(item, dict):
         v = item.get("id") or item.get("assetId")
         if v:
             return v
-    # Fallback: "id" if it looks like an asset (long number)
     v = tx.get("id")
     if v:
         return v
@@ -135,9 +321,9 @@ def _extract_tx_item_id(tx):
 
 
 def _extract_tx_amount(tx):
-    cur = tx.get("currency")
-    if isinstance(cur, dict):
-        return int(cur.get("amount") or 0)
+    c = tx.get("currency")
+    if isinstance(c, dict):
+        return int(c.get("amount") or 0)
     v = tx.get("amount")
     if v:
         return int(v)
@@ -148,99 +334,7 @@ def _extract_tx_created(tx):
     return tx.get("created") or tx.get("createdAt") or tx.get("createdUtc")
 
 
-def fetch_group_sales(cookie, group_id, max_pages=4):
-    """Fetch sales from group. Cached 15 min. Logs raw response for debugging."""
-    if not cookie or not group_id:
-        return []
-
-    cached = _GROUP_SALES_CACHE.get(group_id)
-    if cached and (time.time() - cached[0]) < _GROUP_SALES_TTL:
-        return cached[1]
-
-    headers = {
-        "User-Agent": ROBLOX_UA,
-        "Accept": "application/json",
-        "Cookie": f".ROBLOSECURITY={cookie}",
-    }
-    url = (
-        f"https://economy.roblox.com/v2/groups/{group_id}/transactions"
-        f"?transactionType=Sale&limit=100"
-    )
-
-    all_sales, cursor = [], ""
-    for page in range(max_pages):
-        u = f"{url}&cursor={cursor}" if cursor else url
-        try:
-            r = requests.get(u, headers=headers, timeout=12)
-            if r.status_code == 429:
-                print(f"[post_monitor] group {group_id} rate limited", flush=True)
-                break
-            if r.status_code in (401, 403):
-                print(f"[post_monitor] group {group_id} auth failed (HTTP {r.status_code})", flush=True)
-                break
-            if r.status_code != 200:
-                print(f"[post_monitor] group {group_id} HTTP {r.status_code}", flush=True)
-                break
-            d = r.json()
-            page_data = d.get("data") or []
-            if page == 0:
-                print(f"[post_monitor] group {group_id} page0 keys: {list(d.keys())}", flush=True)
-                if page_data:
-                    print(f"[post_monitor] group {group_id} sample tx: {page_data[0]}", flush=True)
-            all_sales.extend(page_data)
-            cursor = d.get("nextPageCursor")
-            if not cursor:
-                break
-        except Exception as e:
-            print(f"[post_monitor] group {group_id}: {e}", flush=True)
-            break
-        time.sleep(2.0)
-
-    print(f"[post_monitor] group {group_id} total tx fetched: {len(all_sales)}", flush=True)
-    _GROUP_SALES_CACHE[group_id] = (time.time(), all_sales)
-    return all_sales
-
-
-def fetch_my_sales(cookie, user_id, max_pages=4):
-    """Fetch sales from personal account + all configured groups."""
-    if not cookie:
-        return []
-
-    all_sales = []
-
-    if user_id:
-        headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json",
-                   "Cookie": f".ROBLOSECURITY={cookie}"}
-        url = f"https://economy.roblox.com/v2/users/{user_id}/transactions?transactionType=Sale&limit=100"
-        cursor = ""
-        for _ in range(max_pages):
-            u = f"{url}&cursor={cursor}" if cursor else url
-            try:
-                r = requests.get(u, headers=headers, timeout=12)
-                if r.status_code != 200:
-                    break
-                d = r.json()
-                all_sales.extend(d.get("data") or [])
-                cursor = d.get("nextPageCursor")
-                if not cursor:
-                    break
-            except Exception:
-                break
-            time.sleep(1.5)
-
-    for gid in _group_ids():
-        try:
-            group_sales = fetch_group_sales(cookie, gid, max_pages=4)
-            all_sales.extend(group_sales)
-        except Exception as e:
-            print(f"[post_monitor] group {gid} sales failed: {e}", flush=True)
-
-    print(f"[post_monitor] total sales records: {len(all_sales)}", flush=True)
-    return all_sales
-
-
 def _sales_for_item(sales_list, item_id, hours=24):
-    """Count sales + revenue for one item in window. Robust matching."""
     if not sales_list:
         return 0, 0
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
@@ -266,122 +360,44 @@ def _sales_for_item(sales_list, item_id, hours=24):
     return count, revenue
 
 
-def _last_snapshot(cur, item_id):
-    try:
-        cur.execute("""
-            SELECT favorite_count, price, total_sales, sales_24h, revenue_24h
-            FROM post_snapshots WHERE item_id = %s ORDER BY fetched_at DESC LIMIT 1
-        """, (item_id,))
-        r = cur.fetchone()
-        if r:
-            return {"favs": r[0] or 0, "price": r[1] or 0,
-                    "total_sales": r[2] or 0, "sales_24h": r[3] or 0,
-                    "revenue_24h": r[4] or 0}
-    except Exception:
-        pass
-    return None
+# ──────────────────────────────────────────────────────────
+# Public fetchers
+# ──────────────────────────────────────────────────────────
+def _filtered_portfolio(cur):
+    cur.execute("SELECT item_id, name FROM my_portfolio")
+    rows = cur.fetchall()
+    out = []
+    for iid, name in rows:
+        try:
+            cur.execute("SELECT asset_type_id FROM items WHERE id = %s", (iid,))
+            r = cur.fetchone()
+            atype = r[0] if r else 0
+        except Exception:
+            atype = 0
+        if not is_excluded(atype):
+            out.append((iid, name))
+    return out
 
 
-def _recent_event(cur, item_id, etype):
-    try:
-        cur.execute("""
-            SELECT 1 FROM post_events
-            WHERE item_id = %s AND event_type = %s
-              AND detected_at >= NOW() - INTERVAL '%s minutes'
-            LIMIT 1
-        """, (item_id, etype, ALERT_COOLDOWN_MIN))
-        return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
-def _record_event(cur, item_id, etype, sev, old_v, new_v, pct, msg):
-    try:
-        cur.execute("""
-            INSERT INTO post_events
-                (item_id, event_type, severity, old_value, new_value, delta_pct, message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (item_id, etype, sev, old_v, new_v, pct, msg))
-    except Exception as e:
-        print(f"[post_monitor] event: {e}", flush=True)
-
-
-def poll_all(get_db):
-    conn = get_db(); cur = conn.cursor()
-    alerts = []
-    try:
-        ensure_tables(cur)
-        portfolio = _filtered_portfolio(cur)
-        if not portfolio:
-            return []
-
-        cookie = _cookie()
-        uid = _user_id()
-        sales_list = fetch_my_sales(cookie, uid) if cookie else []
-
-        for item_id, pname in portfolio:
-            try:
-                live = fetch_public(item_id, cookie)
-                if not live["ok"]:
-                    continue
-                favs = live["favs"] or 0
-                price = live["price"] or 0
-                name = pname or live.get("name") or f"Item {item_id}"
-                s24, r24 = _sales_for_item(sales_list, item_id, hours=24)
-                s_all, _ = _sales_for_item(sales_list, item_id, hours=24 * 365)
-                last = _last_snapshot(cur, item_id)
-
-                try:
-                    cur.execute("""
-                        INSERT INTO post_snapshots
-                            (item_id, favorite_count, price, total_sales, sales_24h, revenue_24h)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (item_id, favs, price, s_all, s24, r24))
-                except Exception:
-                    pass
-
-                if not last:
-                    continue
-
-                old_f = last["favs"]
-                if old_f > 0 and favs > old_f:
-                    gained = favs - old_f
-                    pct = (gained / old_f) * 100
-                    if pct >= SPIKE_PCT and gained >= 5 and not _recent_event(cur, item_id, "fav_spike"):
-                        sev = "critical" if pct >= 100 else "warning"
-                        msg = f"Favorites +{gained:,} ({pct:+.0f}%) — now {favs:,}"
-                        _record_event(cur, item_id, "fav_spike", sev, old_f, favs, round(pct, 2), msg)
-                        alerts.append({"item_id": item_id, "name": name, "type": "fav_spike",
-                                       "severity": sev, "message": msg, "pct": round(pct, 2)})
-
-                old_s = last["sales_24h"]
-                if old_s > 0 and s24 > old_s:
-                    gained = s24 - old_s
-                    pct = (gained / old_s) * 100
-                    if pct >= SPIKE_PCT and gained >= 2 and not _recent_event(cur, item_id, "sales_spike"):
-                        sev = "critical" if pct >= 100 else "warning"
-                        msg = f"Sales +{gained} ({pct:+.0f}%)"
-                        _record_event(cur, item_id, "sales_spike", sev, old_s, s24, round(pct, 2), msg)
-                        alerts.append({"item_id": item_id, "name": name, "type": "sales_spike",
-                                       "severity": sev, "message": msg, "pct": round(pct, 2)})
-
-                old_p = last["price"]
-                if old_p > 0 and price != old_p and not _recent_event(cur, item_id, "price_change"):
-                    pct = ((price - old_p) / old_p) * 100
-                    msg = f"Price R${old_p} → R${price} ({pct:+.1f}%)"
-                    _record_event(cur, item_id, "price_change", "info", old_p, price, round(pct, 2), msg)
-                    alerts.append({"item_id": item_id, "name": name, "type": "price_change",
-                                   "severity": "info", "message": msg, "pct": round(pct, 2)})
-            except Exception as e:
-                print(f"[post_monitor] item {item_id}: {e}", flush=True)
-
-        conn.commit()
-        return alerts
-    finally:
-        try: cur.close()
-        except Exception: pass
-        try: conn.close()
-        except Exception: pass
+def fetch_public(item_id, cookie=None):
+    headers = _headers(cookie)
+    out = {"favs": 0, "price": 0, "name": None, "ok": False}
+    r = _get(f"https://economy.roblox.com/v2/assets/{item_id}/details", cookie)
+    if r and r.status_code == 200:
+        try:
+            d = r.json()
+            out["name"] = (d.get("Name") or "")[:200]
+            out["price"] = d.get("PriceInRobux") or 0
+            out["ok"] = True
+        except Exception:
+            pass
+    r = _get(f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count", cookie)
+    if r and r.status_code == 200:
+        try:
+            out["favs"] = r.json() or 0
+        except Exception:
+            pass
+    return out
 
 
 def get_pulse(get_db, hours=24):
@@ -453,6 +469,48 @@ def get_recent_events(get_db, hours=24, only_unalerted=False):
         return [{"id": r[0], "item_id": r[1], "type": r[2], "severity": r[3],
                  "old": r[4], "new": r[5], "pct": float(r[6]) if r[6] else 0,
                  "message": r[7], "at": r[8]} for r in cur.fetchall()]
+    finally:
+        try: cur.close()
+        except Exception: pass
+        try: conn.close()
+        except Exception: pass
+
+
+def poll_all(get_db):
+    conn = get_db(); cur = conn.cursor()
+    alerts = []
+    try:
+        ensure_tables(cur)
+        portfolio = _filtered_portfolio(cur)
+        if not portfolio:
+            return []
+
+        cookie = _cookie()
+        uid = _user_id()
+        sales_list = fetch_my_sales(cookie, uid) if cookie else []
+
+        for item_id, pname in portfolio:
+            try:
+                live = fetch_public(item_id, cookie)
+                if not live["ok"]:
+                    continue
+                favs = live["favs"] or 0
+                price = live["price"] or 0
+                s24, r24 = _sales_for_item(sales_list, item_id, hours=24)
+                s_all, _ = _sales_for_item(sales_list, item_id, hours=24 * 365)
+                try:
+                    cur.execute("""
+                        INSERT INTO post_snapshots
+                            (item_id, favorite_count, price, total_sales, sales_24h, revenue_24h)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (item_id, favs, price, s_all, s24, r24))
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[post_monitor] item {item_id}: {e}", flush=True)
+
+        conn.commit()
+        return alerts
     finally:
         try: cur.close()
         except Exception: pass
