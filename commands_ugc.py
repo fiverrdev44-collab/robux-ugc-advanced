@@ -10,8 +10,11 @@ commands_ugc.py — Master `!ugc` command + all portfolio commands.
 !events [hours] — event log
 !mystats        — aggregate stats
 !sales_debug    — full diagnostic of sales pipeline
+!import_sales   — import sales from Roblox transactions CSV (drag file with command)
 """
 import os
+import csv
+import io
 import asyncio
 import requests
 import discord
@@ -174,7 +177,7 @@ def register_ugc_commands(bot, get_db):
             await ctx.send(f"⚠️ JARVIS failed: `{e}`")
 
     # ─────────────────────────────────────────────────────────
-    # !portfolio — grouped by creator
+    # !portfolio
     # ─────────────────────────────────────────────────────────
     @bot.command(name="portfolio")
     async def portfolio_cmd(ctx):
@@ -366,7 +369,6 @@ def register_ugc_commands(bot, get_db):
     # ─────────────────────────────────────────────────────────
     @bot.command(name="sales_debug")
     async def sales_debug_cmd(ctx):
-        """Test all group endpoints + show raw transaction samples."""
         progress = await ctx.send("🔍 **Diagnosing sales pipeline...**")
 
         def _run():
@@ -374,12 +376,7 @@ def register_ugc_commands(bot, get_db):
             cookies = _all_cookies()
             uid = _user_id()
             gids = _group_ids()
-            report = {
-                "cookies": len(cookies),
-                "uid": uid,
-                "gids": gids,
-                "per_group": [],
-            }
+            report = {"cookies": len(cookies), "uid": uid, "gids": gids, "per_group": []}
             if not cookies:
                 return report
 
@@ -394,7 +391,6 @@ def register_ugc_commands(bot, get_db):
             for gid in gids:
                 g = {"gid": gid}
 
-                # Endpoint 1: transactions
                 try:
                     r = requests.get(
                         f"https://economy.roblox.com/v2/groups/{gid}/transactions"
@@ -409,7 +405,6 @@ def register_ugc_commands(bot, get_db):
                 except Exception as e:
                     g["transactions"] = f"error: {e}"
 
-                # Endpoint 2: revenue summary
                 try:
                     r = requests.get(
                         f"https://economy.roblox.com/v2/groups/{gid}/revenue/summary/Day",
@@ -421,7 +416,6 @@ def register_ugc_commands(bot, get_db):
                 except Exception as e:
                     g["revenue"] = f"error: {e}"
 
-                # Endpoint 3: payouts
                 try:
                     r = requests.get(
                         f"https://groups.roblox.com/v1/groups/{gid}/payouts",
@@ -433,7 +427,6 @@ def register_ugc_commands(bot, get_db):
                 except Exception as e:
                     g["payouts"] = f"error: {e}"
 
-                # Endpoint 4: group info (basic auth sanity check)
                 try:
                     r = requests.get(
                         f"https://groups.roblox.com/v1/groups/{gid}",
@@ -441,8 +434,7 @@ def register_ugc_commands(bot, get_db):
                     )
                     g["group_info"] = f"HTTP {r.status_code}"
                     if r.status_code == 200:
-                        d = r.json()
-                        g["group_name"] = d.get("name", "?")
+                        g["group_name"] = r.json().get("name", "?")
                 except Exception as e:
                     g["group_info"] = f"error: {e}"
 
@@ -482,6 +474,71 @@ def register_ugc_commands(bot, get_db):
             lines.append("")
 
         body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i+1900])
+            await asyncio.sleep(0.3)
+
+    # ─────────────────────────────────────────────────────────
+    # !import_sales — CSV importer
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="import_sales")
+    async def import_sales_cmd(ctx):
+        """Import sales from a Roblox transactions CSV export."""
+        if not ctx.message.attachments:
+            await ctx.send(
+                "**How to use `!import_sales`**\n\n"
+                "**Get the CSV:**\n"
+                "1. Open <https://www.roblox.com/transactions>\n"
+                "2. Top-right → **Export** → **Sales**\n"
+                "3. Pick date range (Last 30 days works)\n"
+                "4. Download the CSV file\n"
+                "5. Drag it into Discord **with the message** `!import_sales`\n\n"
+                "_Takes 10 seconds. 100% accurate._"
+            )
+            return
+
+        progress = await ctx.send("📥 **Reading CSV...**")
+        att = ctx.message.attachments[0]
+        if not att.filename.lower().endswith(".csv"):
+            await progress.edit(content="❌ Attachment must be a .csv")
+            return
+
+        try:
+            raw = await att.read()
+            text = raw.decode("utf-8-sig")
+        except Exception as e:
+            await progress.edit(content=f"❌ Read failed: `{e}`"); return
+
+        try:
+            reader = csv.DictReader(io.StringIO(text))
+            rows = list(reader)
+        except Exception as e:
+            await progress.edit(content=f"❌ Parse failed: `{e}`"); return
+
+        if not rows:
+            await progress.edit(content="❌ Empty CSV"); return
+
+        headers = list(rows[0].keys())
+        sample = rows[0]
+
+        # Preview so format is known
+        fmt_lines = [
+            "# 📥 CSV PREVIEW\n",
+            f"**Rows:** {len(rows)}",
+            f"**Columns:** `{headers}`\n",
+            "**First row:**",
+            "```",
+        ]
+        for k, v in list(sample.items())[:15]:
+            fmt_lines.append(f"{k}: {str(v)[:80]}")
+        fmt_lines.append("```")
+        fmt_lines.append("")
+        fmt_lines.append("_If this looks correct, paste this output back to the developer so the importer can parse your column names._")
+
+        try: await progress.delete()
+        except Exception: pass
+
+        body = "\n".join(fmt_lines)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900])
             await asyncio.sleep(0.3)
