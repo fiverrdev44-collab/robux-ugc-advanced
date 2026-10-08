@@ -9,9 +9,11 @@ commands_ugc.py — Master `!ugc` command + all portfolio commands.
 !pulse [hours]  — raw pulse
 !events [hours] — event log
 !mystats        — aggregate stats
+!sales_debug    — full diagnostic of sales pipeline
 """
 import os
 import asyncio
+import requests
 import discord
 from bot_core import get_db
 
@@ -51,7 +53,7 @@ def register_ugc_commands(bot, get_db):
         return msg
 
     # ─────────────────────────────────────────────────────────
-    # !ugc  (master)
+    # !ugc (master)
     # ─────────────────────────────────────────────────────────
     @bot.command(name="ugc")
     async def ugc_cmd(ctx, sub: str = ""):
@@ -89,9 +91,8 @@ def register_ugc_commands(bot, get_db):
             await _send_long(ctx, format_jarvis_report(data))
             return
 
-        # ── Full run ──
+        # Full run
         progress = await ctx.send("🩺 **Full portfolio analysis...**")
-
         sync_msg = await _do_sync(ctx)
 
         from post_monitor import get_pulse, get_recent_events
@@ -122,9 +123,13 @@ def register_ugc_commands(bot, get_db):
             tot_s = sum(i["sales_24h"] for i in pulse)
             tot_r = sum(i["revenue_24h"] for i in pulse)
             tot_f = sum(i["favs"] for i in pulse)
+            tot_all = sum(i.get("sales_all", 0) for i in pulse)
 
             p_lines = ["# 📡 LIVE PULSE — 24h\n"]
-            p_lines.append(f"**{len(pulse)} items** · **{tot_s}** sales · **R${tot_r:,}** revenue · **{tot_f:,}** favs\n")
+            p_lines.append(
+                f"**{len(pulse)} items** · **{tot_s}** sales/24h · "
+                f"**{tot_all}** all-time · **R${tot_r:,}**/24h · **{tot_f:,}** favs\n"
+            )
             for i, it in enumerate(items_sorted, 1):
                 tag = "🔥" if it["sales_24h"] > 0 and it["sales_6h"] > 0 else (
                     "⚡" if it["fav_velocity"] >= 20 else (
@@ -132,7 +137,8 @@ def register_ugc_commands(bot, get_db):
                 p_lines.append(
                     f"**{i}. {tag} `{it['name'][:42]}`**\n"
                     f"   Favs **{it['favs']:,}** (+{it['fav_velocity']}) · "
-                    f"Sales **{it['sales_24h']}** (1h {it['sales_1h']} / 6h {it['sales_6h']})\n"
+                    f"Sales **{it['sales_24h']}** (1h {it['sales_1h']} / 6h {it['sales_6h']} / "
+                    f"all {it.get('sales_all', 0)})\n"
                     f"   Revenue **R${it['revenue_24h']:,}** · Conv **{it['conversion_pct']}%** · R${it['price']}"
                 )
             await _send_long(ctx, "\n".join(p_lines))
@@ -168,7 +174,7 @@ def register_ugc_commands(bot, get_db):
             await ctx.send(f"⚠️ JARVIS failed: `{e}`")
 
     # ─────────────────────────────────────────────────────────
-    # !portfolio — list tracked items grouped by creator
+    # !portfolio — grouped by creator
     # ─────────────────────────────────────────────────────────
     @bot.command(name="portfolio")
     async def portfolio_cmd(ctx):
@@ -214,7 +220,6 @@ def register_ugc_commands(bot, get_db):
             by_creator.setdefault(it.get("creator") or "?", []).append(it)
 
         lines = [f"# 📁 PORTFOLIO — {len(items)} items across {len(by_creator)} creators\n"]
-
         for creator, group in sorted(by_creator.items(), key=lambda x: -len(x[1])):
             lines.append(f"## 👤 {creator} — {len(group)} items\n")
             for it in group:
@@ -227,7 +232,7 @@ def register_ugc_commands(bot, get_db):
         await _send_long(ctx, "\n".join(lines))
 
     # ─────────────────────────────────────────────────────────
-    # !pulse — raw pulse
+    # !pulse
     # ─────────────────────────────────────────────────────────
     @bot.command(name="pulse")
     async def pulse_cmd(ctx, hours: int = 24):
@@ -251,9 +256,13 @@ def register_ugc_commands(bot, get_db):
         total_s = sum(i["sales_24h"] for i in items)
         total_r = sum(i["revenue_24h"] for i in items)
         total_f = sum(i["favs"] for i in items)
+        total_all = sum(i.get("sales_all", 0) for i in items)
 
         lines = [f"# 📡 PULSE — last {hours}h\n"]
-        lines.append(f"**{len(items)} items** · **{total_s}** sales · **R${total_r:,}** · **{total_f:,}** favs\n")
+        lines.append(
+            f"**{len(items)} items** · **{total_s}** sales/24h · "
+            f"**{total_all}** all-time · **R${total_r:,}**/24h · **{total_f:,}** favs\n"
+        )
 
         for i, it in enumerate(items, 1):
             tag = "🔥" if it["sales_24h"] > 0 and it["sales_6h"] > 0 else (
@@ -262,14 +271,15 @@ def register_ugc_commands(bot, get_db):
             lines.append(
                 f"**{i}. {tag} `{it['name'][:45]}`**\n"
                 f"   Favs **{it['favs']:,}** (+{it['fav_velocity']}/24h)\n"
-                f"   Sales **{it['sales_24h']}** (1h {it['sales_1h']} · 6h {it['sales_6h']})\n"
+                f"   Sales **{it['sales_24h']}** (1h {it['sales_1h']} · 6h {it['sales_6h']} · "
+                f"all {it.get('sales_all', 0)})\n"
                 f"   Revenue **R${it['revenue_24h']:,}** · Conv **{it['conversion_pct']}%**"
             )
             lines.append("")
         await _send_long(ctx, "\n".join(lines))
 
     # ─────────────────────────────────────────────────────────
-    # !events — event log
+    # !events
     # ─────────────────────────────────────────────────────────
     @bot.command(name="events")
     async def events_cmd(ctx, hours: int = 24):
@@ -298,7 +308,7 @@ def register_ugc_commands(bot, get_db):
         await _send_long(ctx, "\n".join(lines))
 
     # ─────────────────────────────────────────────────────────
-    # !mystats — aggregate stats
+    # !mystats
     # ─────────────────────────────────────────────────────────
     @bot.command(name="mystats")
     async def mystats_cmd(ctx):
@@ -351,9 +361,134 @@ def register_ugc_commands(bot, get_db):
         lines.append(f"**💀 Worst:** `{stats[-1]['name'][:50]}` — {stats[-1]['favs']:,} favs, {stats[-1]['sales']} sales")
         await _send_long(ctx, "\n".join(lines))
 
+    # ─────────────────────────────────────────────────────────
+    # !sales_debug — full diagnostic
+    # ─────────────────────────────────────────────────────────
+    @bot.command(name="sales_debug")
+    async def sales_debug_cmd(ctx):
+        """Test all group endpoints + show raw transaction samples."""
+        progress = await ctx.send("🔍 **Diagnosing sales pipeline...**")
+
+        def _run():
+            from post_monitor import _all_cookies, _user_id, _group_ids
+            cookies = _all_cookies()
+            uid = _user_id()
+            gids = _group_ids()
+            report = {
+                "cookies": len(cookies),
+                "uid": uid,
+                "gids": gids,
+                "per_group": [],
+            }
+            if not cookies:
+                return report
+
+            ck = cookies[0]
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Cookie": f".ROBLOSECURITY={ck}",
+            }
+
+            for gid in gids:
+                g = {"gid": gid}
+
+                # Endpoint 1: transactions
+                try:
+                    r = requests.get(
+                        f"https://economy.roblox.com/v2/groups/{gid}/transactions"
+                        f"?transactionType=Sale&limit=5",
+                        headers=headers, timeout=10,
+                    )
+                    g["transactions"] = f"HTTP {r.status_code}"
+                    if r.status_code == 200:
+                        data = r.json().get("data") or []
+                        g["tx_count_sample"] = len(data)
+                        g["sample"] = str(data[0])[:400] if data else "(no records)"
+                except Exception as e:
+                    g["transactions"] = f"error: {e}"
+
+                # Endpoint 2: revenue summary
+                try:
+                    r = requests.get(
+                        f"https://economy.roblox.com/v2/groups/{gid}/revenue/summary/Day",
+                        headers=headers, timeout=10,
+                    )
+                    g["revenue"] = f"HTTP {r.status_code}"
+                    if r.status_code == 200:
+                        g["revenue_data"] = str(r.json())[:250]
+                except Exception as e:
+                    g["revenue"] = f"error: {e}"
+
+                # Endpoint 3: payouts
+                try:
+                    r = requests.get(
+                        f"https://groups.roblox.com/v1/groups/{gid}/payouts",
+                        headers=headers, timeout=10,
+                    )
+                    g["payouts"] = f"HTTP {r.status_code}"
+                    if r.status_code == 200:
+                        g["payouts_data"] = str(r.json())[:250]
+                except Exception as e:
+                    g["payouts"] = f"error: {e}"
+
+                # Endpoint 4: group info (basic auth sanity check)
+                try:
+                    r = requests.get(
+                        f"https://groups.roblox.com/v1/groups/{gid}",
+                        headers=headers, timeout=10,
+                    )
+                    g["group_info"] = f"HTTP {r.status_code}"
+                    if r.status_code == 200:
+                        d = r.json()
+                        g["group_name"] = d.get("name", "?")
+                except Exception as e:
+                    g["group_info"] = f"error: {e}"
+
+                report["per_group"].append(g)
+
+            return report
+
+        try:
+            report = await asyncio.to_thread(_run)
+        except Exception as e:
+            await progress.edit(content=f"❌ {e}"); return
+
+        try: await progress.delete()
+        except Exception: pass
+
+        lines = ["# 🔍 SALES PIPELINE DIAGNOSTIC\n"]
+        lines.append(f"• Cookies loaded: **{report['cookies']}**")
+        lines.append(f"• User ID: `{report['uid']}`")
+        lines.append(f"• Groups: `{report['gids']}`\n")
+
+        for g in report["per_group"]:
+            lines.append(f"## Group `{g['gid']}`")
+            if g.get("group_name"):
+                lines.append(f"• Name: **{g['group_name']}**")
+            lines.append(f"• Group info: **{g.get('group_info', '?')}**")
+            lines.append(f"• Transactions: **{g.get('transactions', '?')}**")
+            if g.get("tx_count_sample") is not None:
+                lines.append(f"   Records: **{g['tx_count_sample']}**")
+            if g.get("sample"):
+                lines.append(f"   Sample: ```{g['sample'][:350]}```")
+            lines.append(f"• Revenue summary: **{g.get('revenue', '?')}**")
+            if g.get("revenue_data"):
+                lines.append(f"   Data: `{g['revenue_data'][:200]}`")
+            lines.append(f"• Payouts: **{g.get('payouts', '?')}**")
+            if g.get("payouts_data"):
+                lines.append(f"   Data: `{g['payouts_data'][:200]}`")
+            lines.append("")
+
+        body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i+1900])
+            await asyncio.sleep(0.3)
+
 
 # ─────────────────────────────────────────────────────────────
-# Auto-watchdog loop — started from discord_ugc_bot.py on_ready
+# Auto-watchdog loop
 # ─────────────────────────────────────────────────────────────
 _auto_watchdog_task = None
 
