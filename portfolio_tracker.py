@@ -1,12 +1,4 @@
-"""portfolio_tracker.py — Track YOUR OWN Roblox UGC items (clothing excluded).
-
-Fetches from:
-  - Personal account (ROBLOX_USER_ID)
-  - All groups listed in ROBLOX_GROUP_IDS (comma-separated)
-
-Enriches every fetched item into the `items` table so creator/favs/price
-show up in !portfolio.
-"""
+"""portfolio_tracker.py — Track YOUR OWN Roblox UGC items (clothing excluded)."""
 import os
 import requests
 from monitoring_config import is_excluded, EXCLUDED_ASSET_IDS
@@ -35,7 +27,6 @@ def _ensure_table(cur):
 
 
 def _fetch_catalog_page(creator_id, creator_type, cookie, cursor=""):
-    """Fetch one page of items for a given creator (User or Group)."""
     headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json"}
     if cookie:
         headers["Cookie"] = f".ROBLOSECURITY={cookie}"
@@ -60,7 +51,6 @@ def _fetch_catalog_page(creator_id, creator_type, cookie, cursor=""):
 
 
 def _fetch_items_for_creator(creator_id, creator_type, cookie, limit=200):
-    """Fetch all items for a single creator (user OR group), skipping clothing."""
     out, cursor, skipped = [], "", 0
     for _ in range(10):
         data = _fetch_catalog_page(creator_id, creator_type, cookie, cursor)
@@ -86,14 +76,9 @@ def _fetch_items_for_creator(creator_id, creator_type, cookie, limit=200):
 
 
 def _fetch_my_items_from_roblox(user_id, cookie=None, limit=200):
-    """
-    Fetch items from personal account AND all configured groups.
-    Groups read from ROBLOX_GROUP_IDS env var (comma-separated).
-    """
     all_items = []
     seen_ids = set()
 
-    # ── Personal account ──
     if user_id:
         items = _fetch_items_for_creator(user_id, "User", cookie, limit)
         for it in items:
@@ -101,7 +86,6 @@ def _fetch_my_items_from_roblox(user_id, cookie=None, limit=200):
                 seen_ids.add(it["id"])
                 all_items.append(it)
 
-    # ── Groups ──
     group_ids_raw = os.getenv("ROBLOX_GROUP_IDS", "")
     group_ids = [g.strip() for g in group_ids_raw.split(",") if g.strip().isdigit()]
 
@@ -121,7 +105,7 @@ def _fetch_my_items_from_roblox(user_id, cookie=None, limit=200):
 
 
 def _enrich_item_into_catalog(cur, item_id, cookie):
-    """Fetch full details from Roblox and upsert into items table."""
+    """Fetch full details + created_at from Roblox and upsert into items table."""
     headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json"}
     if cookie:
         headers["Cookie"] = f".ROBLOSECURITY={cookie}"
@@ -140,7 +124,6 @@ def _enrich_item_into_catalog(cur, item_id, cookie):
     if not details:
         return False
 
-    # Fetch favorites
     favs = 0
     try:
         r = requests.get(
@@ -152,32 +135,71 @@ def _enrich_item_into_catalog(cur, item_id, cookie):
     except Exception:
         pass
 
+    # Fetch created_at
+    created_at = None
+    try:
+        r = requests.get(
+            f"https://www.roblox.com/marketplace/productinfo?assetId={item_id}",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            created_at = r.json().get("Created")
+    except Exception:
+        pass
+
     creator_obj = details.get("Creator") or {}
     creator_name = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
 
     try:
-        cur.execute("""
-            INSERT INTO items (id, name, favorite_count, price, total_sales,
-                               description, creator_name, asset_type_id, fetched_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (id) DO UPDATE SET
-                favorite_count = EXCLUDED.favorite_count,
-                price = EXCLUDED.price,
-                description = COALESCE(NULLIF(EXCLUDED.description, ''), items.description),
-                name = EXCLUDED.name,
-                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''), items.creator_name),
-                asset_type_id = EXCLUDED.asset_type_id,
-                fetched_at = NOW()
-        """, (
-            item_id,
-            (details.get("Name") or "")[:500],
-            favs,
-            details.get("PriceInRobux") or 0,
-            details.get("Sales") or 0,
-            (details.get("Description") or "")[:5000],
-            (creator_name or "")[:200],
-            details.get("AssetTypeId") or 0,
-        ))
+        if created_at:
+            cur.execute("""
+                INSERT INTO items (id, name, favorite_count, price, total_sales,
+                                   description, creator_name, asset_type_id,
+                                   created_at, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    favorite_count = EXCLUDED.favorite_count,
+                    price = EXCLUDED.price,
+                    description = COALESCE(NULLIF(EXCLUDED.description, ''), items.description),
+                    name = EXCLUDED.name,
+                    creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''), items.creator_name),
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    created_at = COALESCE(items.created_at, EXCLUDED.created_at),
+                    fetched_at = NOW()
+            """, (
+                item_id,
+                (details.get("Name") or "")[:500],
+                favs,
+                details.get("PriceInRobux") or 0,
+                details.get("Sales") or 0,
+                (details.get("Description") or "")[:5000],
+                (creator_name or "")[:200],
+                details.get("AssetTypeId") or 0,
+                created_at,
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO items (id, name, favorite_count, price, total_sales,
+                                   description, creator_name, asset_type_id, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (id) DO UPDATE SET
+                    favorite_count = EXCLUDED.favorite_count,
+                    price = EXCLUDED.price,
+                    description = COALESCE(NULLIF(EXCLUDED.description, ''), items.description),
+                    name = EXCLUDED.name,
+                    creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''), items.creator_name),
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    fetched_at = NOW()
+            """, (
+                item_id,
+                (details.get("Name") or "")[:500],
+                favs,
+                details.get("PriceInRobux") or 0,
+                details.get("Sales") or 0,
+                (details.get("Description") or "")[:5000],
+                (creator_name or "")[:200],
+                details.get("AssetTypeId") or 0,
+            ))
         return True
     except Exception as e:
         print(f"[portfolio] enrich {item_id}: {e}", flush=True)
@@ -201,7 +223,6 @@ def refresh_portfolio(cur, cookie, user_id):
                     asset_type_id = EXCLUDED.asset_type_id,
                     last_refresh = NOW()
             """, (it["id"], it["name"], it["asset_type_id"]))
-
             if _enrich_item_into_catalog(cur, it["id"], cookie):
                 enriched += 1
         except Exception as e:
@@ -217,7 +238,6 @@ def refresh_portfolio(cur, cookie, user_id):
 
 
 def purge_excluded(cur):
-    """Delete any previously-synced clothing rows."""
     try:
         cur.execute(
             "DELETE FROM my_portfolio WHERE asset_type_id = ANY(%s)",
