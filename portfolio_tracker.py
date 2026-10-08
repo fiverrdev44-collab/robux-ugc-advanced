@@ -3,6 +3,9 @@
 Fetches from:
   - Personal account (ROBLOX_USER_ID)
   - All groups listed in ROBLOX_GROUP_IDS (comma-separated)
+
+Enriches every fetched item into the `items` table so creator/favs/price
+show up in !portfolio.
 """
 import os
 import requests
@@ -117,11 +120,77 @@ def _fetch_my_items_from_roblox(user_id, cookie=None, limit=200):
     return all_items
 
 
+def _enrich_item_into_catalog(cur, item_id, cookie):
+    """Fetch full details from Roblox and upsert into items table."""
+    headers = {"User-Agent": ROBLOX_UA, "Accept": "application/json"}
+    if cookie:
+        headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+
+    details = None
+    try:
+        r = requests.get(
+            f"https://economy.roblox.com/v2/assets/{item_id}/details",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            details = r.json()
+    except Exception:
+        pass
+
+    if not details:
+        return False
+
+    # Fetch favorites
+    favs = 0
+    try:
+        r = requests.get(
+            f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count",
+            headers=headers, timeout=10,
+        )
+        if r.status_code == 200:
+            favs = r.json() or 0
+    except Exception:
+        pass
+
+    creator_obj = details.get("Creator") or {}
+    creator_name = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
+
+    try:
+        cur.execute("""
+            INSERT INTO items (id, name, favorite_count, price, total_sales,
+                               description, creator_name, asset_type_id, fetched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                price = EXCLUDED.price,
+                description = COALESCE(NULLIF(EXCLUDED.description, ''), items.description),
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''), items.creator_name),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = NOW()
+        """, (
+            item_id,
+            (details.get("Name") or "")[:500],
+            favs,
+            details.get("PriceInRobux") or 0,
+            details.get("Sales") or 0,
+            (details.get("Description") or "")[:5000],
+            (creator_name or "")[:200],
+            details.get("AssetTypeId") or 0,
+        ))
+        return True
+    except Exception as e:
+        print(f"[portfolio] enrich {item_id}: {e}", flush=True)
+        return False
+
+
 def refresh_portfolio(cur, cookie, user_id):
     _ensure_table(cur)
     items = _fetch_my_items_from_roblox(user_id, cookie)
     if not items:
         return []
+
+    enriched = 0
     for it in items:
         try:
             cur.execute("""
@@ -132,12 +201,18 @@ def refresh_portfolio(cur, cookie, user_id):
                     asset_type_id = EXCLUDED.asset_type_id,
                     last_refresh = NOW()
             """, (it["id"], it["name"], it["asset_type_id"]))
+
+            if _enrich_item_into_catalog(cur, it["id"], cookie):
+                enriched += 1
         except Exception as e:
             print(f"[portfolio] upsert {it['id']}: {e}", flush=True)
+
     try:
         cur.connection.commit()
     except Exception:
         pass
+
+    print(f"[portfolio] enriched {enriched}/{len(items)} items into catalog", flush=True)
     return items
 
 
