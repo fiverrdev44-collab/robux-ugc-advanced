@@ -2,32 +2,17 @@
 convergence_engine.py — category-aware niche scoring.
 Uses ONLY existing tables. No new columns. No AI calls.
 
-FIXES APPLIED:
-- Uses MEDIAN not MEAN for favs (kills mega-item contamination)
-- Clamps velocity to 30/day (kills snapshot artifact spikes)
-- Requires >= 2 day snapshot span (kills 1-day noise)
-- Rejects monopolies (supply < 5)
-- Rejects saturated zones (supply > 500)
-- Rejects legacy/OG mega-items (median favs > 50k)
-- Rejects dead niches (median favs < 3)
-- Supply sweet spot: 5-50 gets highest score
+FIXES:
+- Word-boundary matching (kills "old" → "gold", "over" → "cover")
+- Rejects monopolies (concentration > 0.65)
+- Rejects zero-demand niches (demand < 3)
+- Velocity clamped to 20/day
+- Requires median >= 5 (real signal)
 """
+import re
 from bot_core import get_db
 
 
-# ── Asset type families — mapped to REAL asset_type_ids in DB ──────
-# Distribution (from actual DB counts):
-#   61    → 11,960  (EmoteAnimation)
-#   8/41  → 13,693  (Hat + HairAccessory)
-#   42    → 3,391   (FaceAccessory)  [+76/77 rare]
-#   43    → 1,794   (NeckAccessory)
-#   44    → 4,295   (ShoulderAccessory)
-#   45/64 → 3,455   (FrontAccessory + TShirtAccessory)
-#   46/67 → 4,893   (BackAccessory + JacketAccessory)
-#   47/69/72 → 3,412 (Waist + Shorts + DressSkirt)
-#   65/66/68 → 4,403 (Shirt + Pants + Sweater layered)
-#   2/11/12  → 12,044 (Classic T-Shirt/Shirt/Pants)
-#   19    → 199     (Gear)
 FAMILIES = {
     "emotes":   [61],
     "hair":     [8, 41],
@@ -58,52 +43,66 @@ def _family_clause(family):
     return f" and asset_type_id in ({placeholders})", list(ids)
 
 
-def _score_keyword(cur, keyword, family=None):
-    like = f'%{keyword}%'
-    fam_sql, fam_params = _family_clause(family)
+def _kw_pattern(keyword):
+    """
+    Word-boundary regex for a keyword.
+    Multi-word phrases still use ilike.
+    Single words use \y (Postgres word boundary).
+    """
+    kw = keyword.strip().lower()
+    if " " in kw:
+        return f"%{kw}%"                     # phrase — ilike is fine
+    return rf"\y{re.escape(kw)}\y"           # single word — boundary match
 
-    # ── SUPPLY + MEDIAN FAVS (not mean!) + p90 distribution ─────
+
+def _score_keyword(cur, keyword, family=None):
+    pat = _kw_pattern(keyword)
+    is_phrase = " " in keyword.strip()
+    use_regex = not is_phrase
+
+    fam_sql, fam_params = _family_clause(family)
+    match_op = "~*" if use_regex else "ilike"
+
+    # ── SUPPLY + MEDIAN + p90 ───────────────────────────────────
     cur.execute(f"""
         select count(*),
                coalesce(percentile_cont(0.5) within group
-                        (order by favorite_count), 0) as median_favs,
+                        (order by favorite_count), 0),
                coalesce(percentile_cont(0.9) within group
-                        (order by favorite_count), 0) as p90_favs
+                        (order by favorite_count), 0)
         from items
-        where name ilike %s and favorite_count > 5
+        where name {match_op} %s and favorite_count > 5
         {fam_sql}
-    """, [like] + fam_params)
+    """, [pat] + fam_params)
     row = cur.fetchone()
     supply = row[0] or 0
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    # ── NICHE GATEKEEPER: must be a real market, not 1-2 OG items ──
-    if supply < 5:
-        return None                              # monopoly, not a niche
-    if supply > 500:
-        return None                              # saturated beyond entry
-    if median_favs > 50_000:
-        return None                              # legacy/OG megaitem
-    if median_favs < 3:
-        return None                              # dead niche
+    # ── GATEKEEPERS ─────────────────────────────────────────────
+    if supply < 5:         return None       # monopoly
+    if supply > 500:       return None       # saturated
+    if median_favs > 50_000: return None     # legacy/OG
+    if median_favs < 5:    return None       # dead
 
-    # ── DEMAND (global) ──────────────────────────────────────────
+    # ── DEMAND ──────────────────────────────────────────────────
     cur.execute(
-        "select count(*) from search_suggestions where suggestion ilike %s",
-        (like,)
+        f"select count(*) from search_suggestions where suggestion {match_op} %s",
+        (pat,)
     )
     demand = cur.fetchone()[0] or 0
 
-    # ── FRESHNESS ────────────────────────────────────────────────
+    if demand < 3:         return None       # no one searches this
+
+    # ── FRESHNESS ───────────────────────────────────────────────
     cur.execute(f"""
         select count(*) from items
-        where name ilike %s and created_at > now() - interval '14 days'
+        where name {match_op} %s and created_at > now() - interval '14 days'
         {fam_sql}
-    """, [like] + fam_params)
+    """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # ── VELOCITY (median, requires 2-day span, clamped) ──────────
+    # ── VELOCITY (median, 2-day span, clamped to 20) ────────────
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -113,7 +112,7 @@ def _score_keyword(cur, keyword, family=None):
                    )/86400.0 as days
             from item_history ih
             join items i on i.id = ih.item_id
-            where i.name ilike %s
+            where i.name {match_op} %s
               and ih.snapshot_at > now() - interval '14 days'
               {fam_sql.replace('asset_type_id', 'i.asset_type_id')}
             group by ih.item_id
@@ -124,33 +123,34 @@ def _score_keyword(cur, keyword, family=None):
         select coalesce(percentile_cont(0.5) within group
                         (order by delta / days), 0)
         from s
-    """, [like] + fam_params)
+    """, [pat] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
+    velocity = min(velocity, 20.0)
 
-    # Clamp — anything over 30/day is snapshot noise, not real growth
-    velocity = min(velocity, 30.0)
-
-    # ── CONCENTRATION ────────────────────────────────────────────
+    # ── CONCENTRATION ───────────────────────────────────────────
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
             from items
-            where name ilike %s and favorite_count > 5
+            where name {match_op} %s and favorite_count > 5
             {fam_sql}
             group by creator_name
         )
         select sum(favs), max(favs) from cf
-    """, [like] + fam_params)
+    """, [pat] + fam_params)
     crow = cur.fetchone()
     total_favs = float(crow[0] or 0)
     top_favs = float(crow[1] or 0)
     concentration = (top_favs / total_favs) if total_favs else 0.0
 
-    # ── SCORE COMPONENTS ─────────────────────────────────────────
+    # ── MONOPOLY GATEKEEPER ─────────────────────────────────────
+    if concentration > 0.65:
+        return None
+
+    # ── SCORE COMPONENTS ────────────────────────────────────────
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
 
-    # Supply sweet spot: 5-50. Less = too thin. More = too crowded.
     if supply <= 5:      supply_score = 0.3
     elif supply <= 15:   supply_score = 1.0
     elif supply <= 50:   supply_score = 0.8
@@ -173,7 +173,7 @@ def _score_keyword(cur, keyword, family=None):
         "velocity": round(velocity, 2),
         "supply": supply,
         "recent": recent,
-        "avg_favs": round(median_favs, 1),  # kept key name for compatibility
+        "avg_favs": round(median_favs, 1),
         "p90_favs": round(p90_favs, 1),
         "concentration": round(concentration, 2),
     }
@@ -228,9 +228,10 @@ def scan_convergence(family=None, limit=15):
     for kw in keywords:
         try:
             r = _score_keyword(cur, kw, family)
-            if r:                       # gatekeeper already filtered
+            if r:
                 results.append(r)
-        except Exception:
+        except Exception as e:
+            print(f"[convergence] {kw}: {e}", flush=True)
             continue
 
     cur.close(); conn.close()
