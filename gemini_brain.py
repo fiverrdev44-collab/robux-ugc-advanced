@@ -8,10 +8,11 @@ factor breakdown, no sale velocity targets, no price elasticity calls, no
 launch window math, no trend intel, no discovery path, no expected
 performance, no verdict, no risk analysis.
 
-Niche velocity / trajectory / concentration injected into synthesis.
-
 STEP 5: Portfolio context injected — brainstorm output is style-anchored on
 this creator's own top performers from my_portfolio.
+
+DESC FORGE: Real top-seller descriptions in the niche are mined and injected
+so the AI style-matches, not hallucinate, the description format.
 """
 import os
 import re
@@ -88,6 +89,40 @@ def _portfolio_prompt_block():
         return "\n".join(lines)
     except Exception as e:
         print(f"⚠️ portfolio prompt block failed: {e}", flush=True)
+        return ""
+# ──────────────────────────────────────────────────────────────────────
+
+
+# ── DESC FORGE: real top-seller description pattern helper ───────────
+def _desc_pattern_prompt_block(casual_description, allow_list,
+                                specific_moves, item_type):
+    """
+    Mine real top-seller descriptions in this niche and return a compact
+    prompt block. Style-anchors the AI so descriptions match real winners.
+    Safe no-op if no data or on any failure.
+    """
+    try:
+        from desc_forge import pattern_prompt_block
+
+        seed_kw = None
+        if specific_moves:
+            seed_kw = specific_moves[0]
+        elif allow_list:
+            seed_kw = allow_list[0]
+        elif casual_description:
+            parts = casual_description.split()
+            seed_kw = parts[0] if parts else None
+
+        if not seed_kw:
+            return ""
+
+        seed_kw = str(seed_kw).strip().split()[0]
+        if len(seed_kw) < 3:
+            return ""
+
+        return pattern_prompt_block(seed_kw, family=item_type)
+    except Exception as e:
+        print(f"⚠️ desc pattern block failed: {e}", flush=True)
         return ""
 # ──────────────────────────────────────────────────────────────────────
 
@@ -478,6 +513,33 @@ SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 === WHAT COMPETITORS ARE NAMING (avoid these exact titles) ===
 {competitor_titles}
 {portfolio_block}
+=== DESCRIPTION STYLE GUIDE (NON-NEGOTIABLE) ===
+Real Roblox sellers write descriptions like this:
+
+GOOD ✅:
+Smooth hip sway dance emote for your Roblox avatar 🎀
+Cute motion animation with lively steps and bouncy energy.
+Perfect for chillin with friends, party fits, or trending.
+
+GOOD ✅:
+✨ kawaii pastel bow 🎀 cute accessory for any avatar
+Matches cottagecore and coquette outfits perfectly.
+
+BAD ❌:
+Enhance your avatar performance with this smooth animation.
+Designed for seamless catalog integration, this movement
+elevates your Roblox experience.
+
+Rules:
+- 2-3 lines. Never 4+.
+- One emoji max per line.
+- First sentence = top keyword + type word. That's it.
+- Keywords appear naturally, not stuffed.
+- FORBIDDEN WORDS: enhance, elevate, seamless, integration,
+  designed for, experience, ultimate, compound, leverage,
+  aligns, optimize, robust, comprehensive
+- If a sentence sounds like a LinkedIn post, rewrite it.
+
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
 - SAFE (3): mirror what top competitors do, but cleaner
@@ -496,10 +558,10 @@ Generate 10 titles TOTAL, grouped into 4 strategic buckets:
   "market_diagnosis": "3-4 sentences on saturation, winners, losers. Reference real stats.",
   "winner_blueprint": "3-4 sentences on what top 10% items in this niche do that bottom 50% don't.",
   "saturation_verdict": "2-3 sentences. Name which seed keywords are SATURATED vs OPPORTUNITY vs GOLD.",
-  "seo_description": "3-4 sentences copy-paste ready for Roblox. Keyword-rich, no fabricated claims.",
+  "seo_description": "Match the pattern + examples from REAL TOP DESCRIPTIONS above. Match their line count, emoji count, and shape EXACTLY. First sentence MUST contain the top keyword + type word. NO corporate words: enhance, elevate, seamless, integration, designed for, experience, ultimate, leverage, compound, optimize. Write like a real creator.",
   "killer_keywords": ["10-15 highest-value keywords from the allow-list"],
-  "cross_promotion_play": "2-3 sentences on real related items visible in the data.",
-  "social_playbook": "3-4 sentences on general TikTok/YouTube promotion tactics.",
+  "cross_promotion_play": "2-3 SHORT sentences. Name 2 specific item types buyers would also want. No filler like 'compound buyer overlap' or 'leverage co-occurrence'.",
+  "social_playbook": "2-3 sentences. Specific TikTok hooks or video angles. NOT generic advice like 'anchor videos to trending audio'. Say WHAT to film.",
   "cultural_ammo": "3-4 sentences on the cultural context of this niche.",
   "bonus_plays": ["2-3 additional item ideas within the same niche"]
 }}
@@ -510,7 +572,7 @@ DESCRIPTION: {desc}
 CATEGORY FAMILY: {item_type}
 TREND SOURCE: {trend_source}
 SPECIFIC MOVES / THEMES: {specific_moves}
-
+{desc_pattern_block}
 ALLOW-LIST ({allow_count} tokens):
 {allow_list}
 
@@ -631,6 +693,12 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     portfolio_block = _portfolio_prompt_block()
     # ───────────────────────────────
 
+    # ── DESC FORGE: real top-seller descriptions in this niche ──
+    desc_pattern_block = _desc_pattern_prompt_block(
+        casual_description, allow_list, specific_moves, item_type
+    )
+    # ────────────────────────────────────────────────────────────
+
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
         item_type=item_type,
@@ -653,6 +721,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         shape_rule=shape_rule,
         title_archetypes=archetypes_str,
         portfolio_block=portfolio_block,
+        desc_pattern_block=desc_pattern_block,
     )
 
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
