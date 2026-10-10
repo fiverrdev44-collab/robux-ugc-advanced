@@ -4,7 +4,6 @@ scheduler.py — Built-in scheduler for the bot.
 Jobs:
   - daily_snapshot   — 03:30 UTC — captures top item favorites
   - daily_ml_train   — 04:00 UTC — retrains title predictor
-  - post_monitor     — every 15 min — polls portfolio items for spikes/stalls
 """
 import os
 import time
@@ -47,20 +46,6 @@ def _run_ml_train():
         _log(f"❌ [scheduler] ML train failed: {type(e).__name__}: {e}")
 
 
-def _run_post_monitor():
-    """Poll portfolio items every 15 min. Alerts are handled inside poll_all."""
-    try:
-        from bot_core import get_db
-        from post_monitor import poll_all
-        alerts = poll_all(get_db)
-        if alerts:
-            _log(f"🩺 [post-monitor] {len(alerts)} alerts detected")
-        else:
-            _log("🩺 [post-monitor] poll complete — no alerts")
-    except Exception as e:
-        _log(f"❌ [post-monitor] failed: {type(e).__name__}: {e}")
-
-
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -85,22 +70,13 @@ def start_scheduler():
         misfire_grace_time=3600,
     )
 
-    # Portfolio monitor every 15 min
-    _scheduler.add_job(
-        _run_post_monitor, "interval",
-        minutes=15,
-        id="post_monitor", replace_existing=True,
-        misfire_grace_time=300,
-    )
-
     _scheduler.start()
 
     for job in _scheduler.get_jobs():
         _log(f"🕐 [scheduler] '{job.id}' next run: {job.next_run_time}")
 
     _log(f"✅ [scheduler] Started — snapshot daily at "
-         f"{SNAPSHOT_HOUR_UTC:02d}:{SNAPSHOT_MINUTE_UTC:02d} UTC, "
-         f"monitor every 15 min")
+         f"{SNAPSHOT_HOUR_UTC:02d}:{SNAPSHOT_MINUTE_UTC:02d} UTC")
 
     return _scheduler
 
