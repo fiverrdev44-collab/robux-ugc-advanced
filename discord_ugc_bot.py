@@ -5,8 +5,7 @@ All commands live in commands_*.py modules.
 Includes:
 - Discord health check (returns 503 when bot is dead)
 - Watchdog thread (uses bot.latency + os._exit(1) to force Render restart)
-- Background scheduler (daily snapshot + 15-min portfolio poll)
-- UGC command center (!ugc)
+- Background scheduler (daily snapshot + ML train)
 """
 import os
 import time
@@ -26,24 +25,25 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+_boot_done = False
+
 
 @bot.event
 async def on_ready():
+    global _boot_done
     print(f"✅ {bot.user} is online", flush=True)
+
+    if _boot_done:
+        print("🔁 on_ready re-fired (reconnect) — skipping setup", flush=True)
+        return
+    _boot_done = True
+
     try:
         from database import setup_database
         setup_database()
         print("✅ Database tables verified/created.", flush=True)
     except Exception as e:
         print(f"⚠️ Table setup failed: {e}", flush=True)
-
-    # ── Start the !ugc auto-watchdog loop after everything is ready ──
-    try:
-        from commands_ugc import start_ugc_loops
-        start_ugc_loops(bot)
-        print("✅ UGC auto-watchdog started.", flush=True)
-    except Exception as e:
-        print(f"⚠️ UGC auto-watchdog failed to start: {e}", flush=True)
 
 
 # ── Register all command modules ─────────────────────────────
@@ -77,22 +77,6 @@ try:
     print("✅ X-Ray commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ X-Ray commands failed to load: {e}", flush=True)
-
-# ── 🚀 Edge commands (whitespace / velocity / arb) ───────────
-try:
-    from commands_edges import register_edge_commands
-    register_edge_commands(bot, get_db)
-    print("✅ Edge commands loaded.", flush=True)
-except Exception as e:
-    print(f"⚠️ Edge commands failed to load: {e}", flush=True)
-
-# ── 🩺 UGC command center (!ugc, !portfolio, !pulse, !events) ─
-try:
-    from commands_ugc import register_ugc_commands
-    register_ugc_commands(bot, get_db)
-    print("✅ UGC command center loaded.", flush=True)
-except Exception as e:
-    print(f"⚠️ UGC command center failed to load: {e}", flush=True)
 
 
 # ── Start background scheduler ───────────────────────────────
