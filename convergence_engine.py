@@ -5,18 +5,31 @@ Uses ONLY existing tables. No new columns. No AI calls.
 from bot_core import get_db
 
 
+# ── Asset type families — mapped to REAL asset_type_ids in DB ──────
+# Distribution (from actual DB counts):
+#   61    → 11,960  (EmoteAnimation)
+#   8/41  → 13,693  (Hat + HairAccessory)
+#   42    → 3,391   (FaceAccessory)  [+76/77 rare]
+#   43    → 1,794   (NeckAccessory)
+#   44    → 4,295   (ShoulderAccessory)
+#   45/64 → 3,455   (FrontAccessory + TShirtAccessory)
+#   46/67 → 4,893   (BackAccessory + JacketAccessory)
+#   47/69/72 → 3,412 (Waist + Shorts + DressSkirt)
+#   65/66/68 → 4,403 (Shirt + Pants + Sweater layered)
+#   2/11/12  → 12,044 (Classic T-Shirt/Shirt/Pants)
+#   19    → 199     (Gear)
 FAMILIES = {
-    "emotes":   [61, 78],
-    "hats":     [8, 41],
+    "emotes":   [61],
+    "hair":     [8, 41],
     "face":     [42, 76, 77],
     "neck":     [43],
     "shoulder": [44],
     "front":    [45, 64],
     "back":     [46, 67],
     "waist":    [47, 69, 72],
-    "shoes":    [70, 71],
+    "tops":     [65, 66, 68],
     "classic":  [2, 11, 12],
-    "bundle":   [79],
+    "gear":     [19],
 }
 
 ASSET_TO_FAMILY = {}
@@ -39,6 +52,7 @@ def _score_keyword(cur, keyword, family=None):
     like = f'%{keyword}%'
     fam_sql, fam_params = _family_clause(family)
 
+    # ── SUPPLY + AVG FAVS ────────────────────────────────────────
     cur.execute(f"""
         select count(*), avg(favorite_count)
         from items
@@ -51,9 +65,14 @@ def _score_keyword(cur, keyword, family=None):
     if supply == 0:
         return None
 
-    cur.execute("select count(*) from search_suggestions where suggestion ilike %s", (like,))
+    # ── DEMAND (global) ──────────────────────────────────────────
+    cur.execute(
+        "select count(*) from search_suggestions where suggestion ilike %s",
+        (like,)
+    )
     demand = cur.fetchone()[0] or 0
 
+    # ── FRESHNESS ────────────────────────────────────────────────
     cur.execute(f"""
         select count(*) from items
         where name ilike %s and created_at > now() - interval '14 days'
@@ -61,23 +80,29 @@ def _score_keyword(cur, keyword, family=None):
     """, [like] + fam_params)
     recent = cur.fetchone()[0] or 0
 
+    # ── VELOCITY ─────────────────────────────────────────────────
     cur.execute(f"""
         with s as (
             select ih.item_id,
                    max(ih.favorite_count) - min(ih.favorite_count) as delta,
-                   extract(epoch from (max(ih.snapshot_at) - min(ih.snapshot_at)))/86400.0 as days
+                   extract(epoch from
+                       (max(ih.snapshot_at) - min(ih.snapshot_at))
+                   )/86400.0 as days
             from item_history ih
             join items i on i.id = ih.item_id
             where i.name ilike %s
               and ih.snapshot_at > now() - interval '14 days'
               {fam_sql.replace('asset_type_id', 'i.asset_type_id')}
             group by ih.item_id
-            having extract(epoch from (max(ih.snapshot_at) - min(ih.snapshot_at)))/86400.0 > 1
+            having extract(epoch from
+                   (max(ih.snapshot_at) - min(ih.snapshot_at))
+                   )/86400.0 > 1
         )
         select avg(delta / days) from s
     """, [like] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
 
+    # ── CONCENTRATION ────────────────────────────────────────────
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
@@ -93,10 +118,15 @@ def _score_keyword(cur, keyword, family=None):
     top_favs = float(crow[1] or 0)
     concentration = (top_favs / total_favs) if total_favs else 0.0
 
+    # ── SCORE COMPONENTS ─────────────────────────────────────────
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
-    supply_score   = 1.0 if supply < 10 else 0.7 if supply < 50 else 0.4 if supply < 150 else 0.15
-    fresh_score    = 1.0 if recent == 0 else 0.7 if recent < 5 else 0.3 if recent < 15 else 0.1
+    supply_score   = (1.0 if supply < 10 else
+                      0.7 if supply < 50 else
+                      0.4 if supply < 150 else 0.15)
+    fresh_score    = (1.0 if recent == 0 else
+                      0.7 if recent < 5 else
+                      0.3 if recent < 15 else 0.1)
     conc_score     = 1.0 - concentration
 
     score = (demand_score * 25 + velocity_score * 25 +
@@ -141,7 +171,8 @@ def format_brief(r):
     elif r["velocity"] < 0.3 and r["demand"] < 5:
         zone = " 🪦 **DEAD**"
 
-    fam = f" · `{r['family']}`" if r.get("family") and r["family"] != "all" else ""
+    fam = (f" · `{r['family']}`"
+           if r.get("family") and r["family"] != "all" else "")
     return (
         f"**🎯 `{r['keyword']}`{fam} — [{r['score']}]**{zone}\n"
         f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d · "
