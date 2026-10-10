@@ -2,6 +2,8 @@
 chain.py — full pipeline in one command.
 Runs: intent → niche → market → descriptions → AI strategy → final verdict.
 Uses at most 2 Gemini calls. Everything else is DB.
+
+Variant mode: pass parent_id to keep winner keywords + add ONE theme word.
 """
 import re
 import asyncio
@@ -9,17 +11,47 @@ from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY
 
 
-def run_chain(concept, family=None):
-    """
-    Runs the full pipeline synchronously (called via asyncio.to_thread).
-    Returns dict with all stages + a final summary block.
-    """
+def run_chain(concept, family=None, parent_id=None):
     from gemini_brain import extract_keywords, all_terms, synthesize_hybrid
     from intel_common import classify_keyword
     from convergence_engine import FAMILIES
     from commands_ai import _build_allow_list
 
-    # ── Stage 1: Intent extraction ──
+    # ── Parent context for variant mode ──
+    parent_context = ""
+    parent_name = None
+    if parent_id:
+        try:
+            conn = get_db(); cur = conn.cursor()
+            try:
+                cur.execute("""
+                    select name, description, favorite_count, price,
+                           asset_type_id
+                    from items where id = %s
+                """, (parent_id,))
+                row = cur.fetchone()
+                if row:
+                    parent_name = row[0]
+                    parent_context = (
+                        f"\n=== PARENT ITEM (this is a VARIANT of this) ===\n"
+                        f"Parent name: {row[0]}\n"
+                        f"Parent favs: {row[2]:,} · price R${row[3]}\n"
+                        f"Parent description: {(row[1] or '')[:200]}\n"
+                        f"\nRULES FOR VARIANT:\n"
+                        f"- KEEP the core keywords from the parent name\n"
+                        f"- Add ONE new theme word (color, vibe, effect)\n"
+                        f"- Don't drop the words that made the parent a winner\n"
+                        f"- Don't use generic words like 'cute' or 'kawaii' "
+                        f"unless the parent already used them\n"
+                    )
+                    if not concept or concept.lower() in ("variant", "remix"):
+                        concept = row[0]
+            finally:
+                cur.close(); conn.close()
+        except Exception as e:
+            print(f"[chain] parent load failed: {e}", flush=True)
+
+    # ── Stage 1: Intent ──
     intent = extract_keywords(concept)
     if not intent:
         return {"error": "Intent extraction failed. Try a clearer description."}
@@ -48,7 +80,7 @@ def run_chain(concept, family=None):
     except Exception as e:
         print(f"[chain] niche pre-check failed: {e}", flush=True)
 
-    # ── Stage 3: Market scan ──
+    # ── Stage 3: Market ──
     try:
         allow_list, top_items, stats = _build_allow_list(intent, 60, None, family)
     except Exception as e:
@@ -57,7 +89,7 @@ def run_chain(concept, family=None):
     if not allow_list:
         return {"error": "No DB matches. Try different keywords."}
 
-    # ── Stage 4: Description mining ──
+    # ── Stage 4: Description examples ──
     desc_examples = []
     try:
         from desc_forge import _fetch_top_descriptions
@@ -78,8 +110,12 @@ def run_chain(concept, family=None):
     # ── Stage 5: AI strategy ──
     synth = None
     try:
+        concept_for_ai = concept
+        if parent_context:
+            concept_for_ai = f"{concept}\n{parent_context}"
+
         synth = synthesize_hybrid(
-            concept, allow_list, top_items, stats,
+            concept_for_ai, allow_list, top_items, stats,
             item_type, intent.get("trend_source", "none"),
             {"direct_matches": stats.get("direct_matches", 0),
              "expansion_used": stats.get("expansion_used", False),
@@ -93,6 +129,8 @@ def run_chain(concept, family=None):
 
     return {
         "concept": concept,
+        "parent_name": parent_name,
+        "is_variant": bool(parent_id),
         "family": family,
         "item_type": item_type,
         "terms": terms,
@@ -114,20 +152,27 @@ def _intent_to_family(intent):
 
 
 def format_chain(result):
-    """Returns list of Discord message chunks, ends with FINAL action block."""
     if result.get("error"):
         return [f"❌ {result['error']}"]
 
     chunks = []
 
     # ── HEADER ──
-    chunks.append(
-        f"# 🔗 CHAIN — `{result['concept'][:60]}`\n"
-        f"_Family: `{result['family']}` · "
-        f"Type: `{result['item_type']}`_"
-    )
+    if result.get("is_variant") and result.get("parent_name"):
+        chunks.append(
+            f"# 🔗 CHAIN — VARIANT\n"
+            f"_Parent: `{result['parent_name'][:60]}`_\n"
+            f"_Family: `{result['family']}` · "
+            f"Type: `{result['item_type']}`_"
+        )
+    else:
+        chunks.append(
+            f"# 🔗 CHAIN — `{result['concept'][:60]}`\n"
+            f"_Family: `{result['family']}` · "
+            f"Type: `{result['item_type']}`_"
+        )
 
-    # ── NICHE CHECK ──
+    # ── NICHE ──
     if result["niche"]:
         emoji_map = {
             "GOLD": "🟢", "OPPORTUNITY": "🔵",
@@ -185,7 +230,7 @@ def format_chain(result):
             kw = ", ".join(f"`{k}`" for k in synth["killer_keywords"][:12])
             chunks.append(f"## 🎯 Killer keywords\n{kw}")
 
-    # ── FINAL ACTION BLOCK ──
+    # ── FINAL BLOCK ──
     final_lines = ["# ✅ FINAL — DO THIS"]
 
     titles = []
