@@ -31,6 +31,14 @@ from category_configs import (
     detect_family_from_asset_type, get_category_config,
 )
 
+# ── Shared intelligence layer (single source of truth) ──
+from intel_common import (
+    item_percentile,
+    decide_verdict,
+    classify_keyword,
+    portfolio_context,
+)
+
 
 def _build_per_word_competition(cur, words, cap=6):
     result = []
@@ -219,7 +227,68 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !autopsy — CATEGORY-AWARE + MARKET INTEL
+    # !verdict — fast, one-line decision. Percentile + 3 actions.
+    # =========================================================
+    @bot.command(name="verdict")
+    async def verdict_cmd(ctx, item_id: int):
+        """One-line verdict: DOUBLE_DOWN / KEEP / RENAME / KILL."""
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                cur.execute("""
+                    select name, favorite_count, price
+                    from items where id = %s
+                """, (item_id,))
+                r = cur.fetchone()
+                if not r:
+                    return None
+                name, favs, price = r
+                pct = item_percentile(cur, item_id)
+                return {"name": name, "favs": favs, "price": price, "pct": pct}
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            data = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await ctx.send(f"❌ {e}")
+        if not data or not data["pct"]:
+            return await ctx.send(f"❌ Item `{item_id}` not found.")
+
+        pct = data["pct"]
+        verdict, emoji = decide_verdict(pct["percentile"])
+
+        if verdict == "DOUBLE_DOWN":
+            actions = ["Launch a variant within 7 days — same motion, new theme.",
+                       "Post 1 TikTok/day for 7 days.",
+                       "Reply to every comment within 1h."]
+        elif verdict == "KEEP":
+            actions = ["Post 3 TikToks this week (cross-post Shorts + Reels).",
+                       f"Test price at R${max((data['price'] or 0) - 5, 45)}.",
+                       f"Re-run `!verdict {item_id}` in 14 days."]
+        elif verdict == "RENAME":
+            actions = [f"Rename using a GOLD keyword from `!converge {pct['family']}`.",
+                       "Change thumbnail first frame — motion, not static.",
+                       "Re-post to TikTok with a 1.5s hook."]
+        else:
+            actions = ["Stop investing in this item.",
+                       f"Run `!converge {pct['family']}` for a snipe zone.",
+                       "Reallocate content to your top-2 performers."]
+
+        lines = [
+            f"{emoji} **{data['name'][:60]}**",
+            f"**{verdict}** — top **{pct['percentile']}%** of "
+            f"`{pct['family']}` by velocity",
+            f"_{pct['velocity']}/day · {pct['age_days']}d · "
+            f"{data['favs']}♥ · {pct['sample_size']} peers_\n",
+            "**3 actions:**",
+        ]
+        for i, a in enumerate(actions, 1):
+            lines.append(f"{i}. {a}")
+        await ctx.send("\n".join(lines)[:1900])
+
+    # =========================================================
+    # !autopsy — CATEGORY-AWARE + MARKET INTEL + DECISION
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -231,6 +300,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         name_words = []
         competition_data = []
         family = "emote"
+        pct_data = None
+        portfolio_data = None
 
         try:
             conn = get_db(); cur = conn.cursor()
@@ -302,6 +373,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 winner_median_favs = sf[cutoff - 1]
 
             competition_data = _build_per_word_competition(cur, name_words, cap=6)
+
+            # ── 🎯 SHARED INTELLIGENCE — percentile + portfolio ──
+            try:
+                pct_data = item_percentile(cur, item_id)
+            except Exception as e:
+                print(f"[autopsy] percentile failed: {e}", flush=True)
+            try:
+                portfolio_data = portfolio_context(cur, top_n=3)
+            except Exception as e:
+                print(f"[autopsy] portfolio failed: {e}", flush=True)
+
             cur.close(); conn.close()
 
             item_stats = {
@@ -320,6 +402,48 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 item_stats = enrich_item_stats_with_sales(item_stats, sales_list)
             except Exception as e:
                 print(f"[autopsy] sales fetch failed: {e}", flush=True)
+
+        # ── 🎯 DECISION LINE — FIRST MESSAGE ─────────────────
+        if pct_data:
+            verdict, v_emoji = decide_verdict(pct_data["percentile"])
+
+            if verdict == "DOUBLE_DOWN":
+                acts = ["Launch a **variant** within 7 days — same motion, new theme.",
+                        "Post 1 TikTok/day for 7 days.",
+                        "Reply to every comment within 1h."]
+            elif verdict == "KEEP":
+                acts = ["Post 3 TikToks this week (cross-post Shorts + Reels).",
+                        f"Test price at R${max((price or 0) - 5, 45)}.",
+                        f"Re-run `!autopsy {item_id}` in 14 days."]
+            elif verdict == "RENAME":
+                acts = [f"Rename using a **GOLD** keyword from `!converge {pct_data['family']}`.",
+                        "Change thumbnail first frame — motion, not static.",
+                        "Re-post to TikTok with a 1.5s hook."]
+            else:
+                acts = ["Stop investing in this item.",
+                        f"Run `!converge {pct_data['family']}` for a snipe zone.",
+                        "Reallocate content to your top-2 performers."]
+
+            dec_lines = [
+                f"{v_emoji} **{name[:60]}** — **{verdict}**",
+                f"Top **{pct_data['percentile']}%** of `{pct_data['family']}` "
+                f"by velocity",
+                f"_{pct_data['velocity']}/day · {pct_data['age_days']}d · "
+                f"{favs}♥ · {pct_data['sample_size']} peers compared_\n",
+                "**3 actions:**",
+            ]
+            for i, a in enumerate(acts, 1):
+                dec_lines.append(f"{i}. {a}")
+
+            if portfolio_data and portfolio_data["winners"]:
+                p = portfolio_data["winners"][0]
+                dec_lines.append(
+                    f"\n📊 **Your top performer:** _{p['name'][:40]}_ "
+                    f"({p['velocity']}/day, `{p['family']}`)"
+                )
+
+            await ctx.send("\n".join(dec_lines)[:1900])
+        # ─────────────────────────────────────────────────────
 
         # ── 🚀 NICHE VELOCITY / TRAJECTORY / CONCENTRATION ────
         niche_intel = None
@@ -477,6 +601,20 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
+        # ── 🎯 PORTFOLIO CONTEXT — what already works for YOU ──
+        portfolio_block = ""
+        if portfolio_data and portfolio_data.get("winners"):
+            portfolio_block = "\n=== CREATOR'S OWN TOP PERFORMERS ===\n"
+            for w in portfolio_data["winners"]:
+                portfolio_block += (
+                    f"  · {w['name'][:45]} — "
+                    f"{w['velocity']}/day, family `{w['family']}`\n"
+                )
+            portfolio_block += (
+                "New titles should match this vibe — proven style for "
+                "this creator, not generic.\n"
+            )
+
         # ── HARD RULES: pivot mandatory, saturated forbidden as first token ──
         bp = (deep_intel or {}).get("best_pivot") or {}
         bp_kw = (bp.get("keyword") or "").strip().lower()
@@ -527,6 +665,7 @@ FAILURE MODE: {diagnosis['failure_mode']}
 === 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {intel_block}
 {niche_block}
+{portfolio_block}
 {pivot_hint}
 === SHAPE RULE FOR THIS CATEGORY ===
 {cfg['shape_rule']}
@@ -546,6 +685,8 @@ FAILURE MODE: {diagnosis['failure_mode']}
 7. Use ONLY these allow-list words + glue + type words:
    {', '.join(allow_list[:80])}
 8. Every title MUST be UNIQUE.
+9. If CREATOR'S OWN TOP PERFORMERS are listed above, style-match them.
+   Don't propose concepts in a style that has never worked for this creator.
 
 === 10 TITLES — GROUP INTO 4 STRATEGIES ===
 titles_safe (3), titles_differentiated (3), titles_longtail (2), titles_viral (2)
