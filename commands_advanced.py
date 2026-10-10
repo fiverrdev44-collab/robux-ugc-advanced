@@ -16,10 +16,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="rising_gaps")
     async def rising_gaps_cmd(ctx, *, args: str = ""):
-        """
-        Find rising-low-competition keywords.
-        Auto-detects category from your seed keyword.
-        """
+        """Find rising-low-competition keywords."""
         days = 14
         category = None
         seed = ""
@@ -115,15 +112,11 @@ def register_advanced_commands(bot, get_db):
 
     # ────────────────────────────────────────────────────────
     # creative_expand — TEST COMMANDS
-    # Remove after wiring into brainstorm/autopsy.
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="creative")
     async def creative_cmd(ctx, *, seed: str = ""):
-        """
-        AI fan-out + DB demand gate, anchored on real search phrases.
-        Usage: !creative rhythm step sway dance
-        """
+        """AI fan-out + DB demand gate. Usage: !creative rhythm step sway"""
         if not seed.strip():
             await ctx.send("Usage: `!creative <description or seed keywords>`")
             return
@@ -156,7 +149,6 @@ def register_advanced_commands(bot, get_db):
                     f"{emoji.get(r['verdict'], '⚪')} **{r['concept']}** "
                     f"— demand `{r['demand']}` / supply `{r['supply']}`"
                 )
-
             counts = {}
             for r in results:
                 counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
@@ -166,7 +158,6 @@ def register_advanced_commands(bot, get_db):
             lines.append(f"\n{summary}")
         else:
             lines.append("⚠️ **Zero concepts passed the gate.**")
-            lines.append("_All AI concepts had 0 demand in search_suggestions._")
 
         if discarded:
             lines.append(f"\n**🚫 Discarded (0 demand) — {len(discarded)}:**")
@@ -187,10 +178,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="creative_raw")
     async def creative_raw_cmd(ctx, *, seed: str = ""):
-        """
-        Debug: show anchor phrases + raw AI output before demand gate.
-        Usage: !creative_raw rhythm step sway dance
-        """
+        """Debug: show anchor phrases + raw AI output."""
         if not seed.strip():
             await ctx.send("Usage: `!creative_raw <description or seed keywords>`")
             return
@@ -222,7 +210,7 @@ def register_advanced_commands(bot, get_db):
             if len(examples) > 15:
                 anchor += f"\n_...and {len(examples) - 15} more_"
         else:
-            anchor += "_none — seed words don't match anything in search_suggestions_"
+            anchor += "_none_"
         chunks.append(anchor)
 
         raw_block = "**🤖 Raw Gemini output:**\n```\n"
@@ -234,7 +222,7 @@ def register_advanced_commands(bot, get_db):
         if parsed:
             parsed_block += "\n".join(f"· `{c}`" for c in parsed)
         else:
-            parsed_block += "_nothing parsed — JSON likely malformed, see raw above_"
+            parsed_block += "_nothing parsed_"
         chunks.append(parsed_block)
 
         first = True
@@ -255,13 +243,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="converge")
     async def converge_cmd(ctx, family: str = "all", limit: int = 10):
-        """
-        🎯 Convergence scan. Optional family filter.
-        !converge
-        !converge emotes
-        !converge hats
-        !converge all_families
-        """
+        """Convergence scan. !converge | !converge emotes | !converge all_families"""
         from convergence_engine import scan_convergence, scan_all_families, FAMILIES
 
         if family == "all_families":
@@ -319,21 +301,15 @@ def register_advanced_commands(bot, get_db):
             await ctx.send(chunk)
 
     # ────────────────────────────────────────────────────────
-    # 🔨 DESC FORGE — mine top descriptions in a niche
+    # 🔨 DESC FORGE
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="desc_forge")
     async def desc_forge_cmd(ctx, *, args: str = ""):
-        """
-        Analyze descriptions of top items in a niche, generate one that fits.
-        !desc_forge hip sway
-        !desc_forge emotes:hip sway
-        """
+        """Mine top descriptions in a niche, generate one that fits."""
         if not args.strip():
             return await ctx.send(
-                "**Usage:**\n"
-                "  `!desc_forge <keyword>` — e.g. `!desc_forge hip sway`\n"
-                "  `!desc_forge <family>:<keyword>` — e.g. `!desc_forge emotes:hip sway`\n"
+                "**Usage:** `!desc_forge <keyword>` or `!desc_forge <family>:<keyword>`"
             )
 
         from convergence_engine import FAMILIES
@@ -358,6 +334,63 @@ def register_advanced_commands(bot, get_db):
             return await progress.edit(content=f"❌ {e}")
 
         chunks = format_forge(result)
+
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        for chunk in chunks:
+            for i in range(0, len(chunk), 1900):
+                await ctx.send(chunk[i:i+1900])
+                await asyncio.sleep(0.2)
+
+    # ────────────────────────────────────────────────────────
+    # 🔗 CHAIN — full pipeline in one command
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="chain")
+    async def chain_cmd(ctx, *, args: str = ""):
+        """
+        Full pipeline: intent → niche → market → desc → titles → final.
+        !chain hip sway dance
+        !chain emotes:purple kawaii cat beanie
+        """
+        if not args.strip():
+            return await ctx.send(
+                "**Usage:** `!chain <concept>`\n"
+                "Example: `!chain purple kawaii cat beanie`\n"
+                "With family: `!chain emotes:hip sway dance`"
+            )
+
+        from convergence_engine import FAMILIES
+        from chain import run_chain, format_chain
+
+        family = None
+        concept = args.strip()
+        if ":" in concept:
+            maybe_fam, _, rest = concept.partition(":")
+            if maybe_fam.strip().lower() in FAMILIES:
+                family = maybe_fam.strip().lower()
+                concept = rest.strip()
+
+        progress = await ctx.send(
+            f"🔗 Running chain on `{concept[:60]}`...\n"
+            f"_intent → niche → market → desc → titles → final (~20s)_"
+        )
+
+        def _run():
+            return run_chain(concept, family=family)
+
+        try:
+            result = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await progress.edit(content=f"❌ Chain failed: `{e}`")
+
+        if result.get("error"):
+            return await progress.edit(content=f"❌ {result['error']}")
+
+        chunks = format_chain(result)
 
         try:
             await progress.delete()
