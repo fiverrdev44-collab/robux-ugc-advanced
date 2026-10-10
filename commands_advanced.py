@@ -251,3 +251,72 @@ def register_advanced_commands(bot, get_db):
             else:
                 await ctx.send(chunk[:1900])
             await asyncio.sleep(0.3)
+
+    # ────────────────────────────────────────────────────────
+    # 🎯 CONVERGENCE ENGINE
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="converge")
+    async def converge_cmd(ctx, family: str = "all", limit: int = 10):
+        """
+        🎯 Convergence scan. Optional family filter.
+        !converge
+        !converge emotes
+        !converge hats
+        !converge all_families
+        """
+        from convergence_engine import scan_convergence, scan_all_families, FAMILIES
+
+        if family == "all_families":
+            await ctx.send("🧠 Scanning all categories...")
+            try:
+                data = await asyncio.to_thread(scan_all_families, 3)
+            except Exception as e:
+                return await ctx.send(f"❌ {e}")
+
+            for fam, rows in data.items():
+                if not rows:
+                    continue
+                lines = [f"**🎯 `{fam}`**"]
+                for i, r in enumerate(rows, 1):
+                    snipe = " 🔥" if r["recent"] == 0 and r["supply"] < 30 else ""
+                    lines.append(
+                        f"`{r['score']}` **{r['keyword']}**{snipe} — "
+                        f"vel {r['velocity']}/d · supply {r['supply']} · recent {r['recent']}"
+                    )
+                await ctx.send("\n".join(lines)[:1900])
+            return
+
+        if family != "all" and family not in FAMILIES:
+            valid = ", ".join(FAMILIES.keys())
+            return await ctx.send(
+                f"❌ Unknown family `{family}`.\n"
+                f"Valid: `all`, `all_families`, {valid}"
+            )
+
+        label = f"`{family}`" if family != "all" else "all categories"
+        await ctx.send(f"🧠 Convergence scan — {label}...")
+
+        try:
+            rows = await asyncio.to_thread(scan_convergence, family, limit)
+        except Exception as e:
+            return await ctx.send(f"❌ {e}")
+
+        if not rows:
+            return await ctx.send(f"No convergence found for {label}.")
+
+        lines = [f"**🎯 CONVERGENCE — {label}**\n"
+                 "_Weighted: demand · velocity · supply · freshness · competition_\n"]
+
+        for i, r in enumerate(rows, 1):
+            snipe = " 🔥 SNIPE ZONE" if r["recent"] == 0 and r["supply"] < 30 else ""
+            lines.append(
+                f"**#{i}  [{r['score']}]**  `{r['keyword']}`{snipe}\n"
+                f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d\n"
+                f"  📦 supply {r['supply']} · 🆕 recent {r['recent']} · "
+                f"🎯 avg {r['avg_favs']}♥ · 👑 top {int(r['concentration']*100)}%"
+            )
+
+        out = "\n".join(lines)
+        for chunk in [out[i:i+1900] for i in range(0, len(out), 1900)]:
+            await ctx.send(chunk)
