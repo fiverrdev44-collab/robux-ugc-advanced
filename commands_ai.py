@@ -6,6 +6,9 @@ Category-aware. Creative pivot expansion DISABLED.
 
 FAKE PREDICTIONS REMOVED — only factual sections remain.
 Market velocity / trajectory / concentration wired into !brainstorm.
+
+STEP 3: Niche pre-check in !brainstorm — aborts on SATURATED/GHOST niches
+to save Gemini quota. Optional "family:concept" prefix supported.
 """
 import asyncio
 import re
@@ -697,6 +700,57 @@ def register_ai_commands(bot):
         if not is_available():
             await ctx.send("AI is offline. Run `!ai_status`.")
             return
+
+        # ── 🎯 STEP 3: Niche pre-check — abort if dead, save Gemini quota ──
+        # Supports optional "family:concept" prefix e.g. "emotes:spooky dance".
+        try:
+            from intel_common import classify_keyword
+            from convergence_engine import FAMILIES
+
+            fam = None
+            concept_clean = description
+            if ":" in description:
+                maybe_fam, _, rest = description.partition(":")
+                if maybe_fam.strip().lower() in FAMILIES:
+                    fam = maybe_fam.strip().lower()
+                    concept_clean = rest.strip()
+
+            def _preflight():
+                conn = get_db(); cur = conn.cursor()
+                try:
+                    words = [w for w in concept_clean.lower().split()
+                             if len(w) > 3]
+                    seed = words[0] if words else concept_clean.lower()[:20]
+                    return classify_keyword(cur, seed, fam)
+                finally:
+                    cur.close(); conn.close()
+
+            kw = await asyncio.to_thread(_preflight)
+
+            bucket_emoji = {
+                "GOLD": "🟢", "OPPORTUNITY": "🔵",
+                "NEUTRAL": "⚪", "SATURATED": "🔴",
+                "VIRGIN": "💎", "GHOST": "🪦",
+            }
+            emoji = bucket_emoji.get(kw["bucket"], "⚪")
+            fam_label = f" in `{fam}`" if fam else ""
+
+            await ctx.send(
+                f"{emoji} **Niche:** `{kw['keyword']}`{fam_label} — "
+                f"**{kw['bucket']}**\n"
+                f"_supply {kw['supply']} · median {kw['median_favs']}♥ · "
+                f"demand {kw['demand']}_"
+            )
+
+            if kw["bucket"] in ("SATURATED", "GHOST"):
+                return await ctx.send(
+                    f"🪦 **Aborting brainstorm.** "
+                    f"_Niche is {kw['bucket'].lower()} — pick a 🔥 "
+                    f"snipe-zone from `!converge` instead._"
+                )
+        except Exception as e:
+            print(f"⚠️ brainstorm preflight failed: {e}", flush=True)
+        # ───────────────────────────────────────────────────────────────
 
         progress = await ctx.send("🧠 **Pass 1:** Extracting intent...")
 
