@@ -9,6 +9,9 @@ launch window math, no trend intel, no discovery path, no expected
 performance, no verdict, no risk analysis.
 
 Niche velocity / trajectory / concentration injected into synthesis.
+
+STEP 5: Portfolio context injected — brainstorm output is style-anchored on
+this creator's own top performers from my_portfolio.
 """
 import os
 import re
@@ -43,6 +46,50 @@ ITEM_TYPE_WORDS = {
     "glasses","necklace","chain","backpack","sword","pet","bag","scarf",
     "bandana","beret","visor","lens","head","snapback","bonnet","balaclava",
 }
+
+
+# ── STEP 5: Portfolio context helper ─────────────────────────────────
+def _portfolio_prompt_block():
+    """
+    Returns a prompt fragment describing this creator's own top performers
+    (from my_portfolio). Used to style-anchor brainstorm output.
+
+    Lazy imports avoid circular dependency issues at module load.
+    Safe no-op if portfolio is empty or DB is unreachable.
+    """
+    try:
+        from bot_core import get_db
+        from intel_common import portfolio_context
+        conn = get_db(); cur = conn.cursor()
+        try:
+            p = portfolio_context(cur, top_n=3)
+        finally:
+            cur.close(); conn.close()
+
+        if not p or not p.get("winners"):
+            return ""
+
+        lines = [
+            "",
+            "=== CREATOR'S OWN TOP PERFORMERS (style-match these) ===",
+        ]
+        for w in p["winners"]:
+            lines.append(
+                f"  · {w['name'][:45]} — {w['velocity']}/day, "
+                f"family `{w['family']}`"
+            )
+        lines.append(
+            "New concepts should feel stylistically consistent with the above — "
+            "this creator's PROVEN style, not generic AI output. "
+            "Do NOT copy these titles verbatim. Match their tone, structure, "
+            "and vocabulary energy."
+        )
+        lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ portfolio prompt block failed: {e}", flush=True)
+        return ""
+# ──────────────────────────────────────────────────────────────────────
 
 
 def _ensure():
@@ -430,7 +477,7 @@ SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 
 === WHAT COMPETITORS ARE NAMING (avoid these exact titles) ===
 {competitor_titles}
-
+{portfolio_block}
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
 - SAFE (3): mirror what top competitors do, but cleaner
@@ -580,6 +627,10 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     except Exception:
         pass
 
+    # ── STEP 5: portfolio context ──
+    portfolio_block = _portfolio_prompt_block()
+    # ───────────────────────────────
+
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
         item_type=item_type,
@@ -601,6 +652,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         type_words=type_words_str,
         shape_rule=shape_rule,
         title_archetypes=archetypes_str,
+        portfolio_block=portfolio_block,
     )
 
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
