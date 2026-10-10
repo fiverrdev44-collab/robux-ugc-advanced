@@ -85,8 +85,7 @@ def register_advanced_commands(bot, get_db):
     @bot.command(name="snapshot_now")
     async def snapshot_now_cmd(ctx):
         """Manually trigger snapshot from the bot's own IP (Render)."""
-        progress = await ctx.send("📸 **Running snapshot from Render's IP...**\n"
-                                  "_Testing if the bot's own IP avoids rate limits..._")
+        progress = await ctx.send("📸 **Running snapshot from Render's IP...**")
 
         def _run():
             import importlib
@@ -103,9 +102,7 @@ def register_advanced_commands(bot, get_db):
 
         try:
             await progress.edit(
-                content="✅ **Snapshot complete!**\n"
-                        "Check Render logs for the `Fetched X/Y` line.\n"
-                        "If success > 80% → scale back to 1000 items."
+                content="✅ **Snapshot complete!** Check Render logs."
             )
         except Exception:
             pass
@@ -116,7 +113,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="creative")
     async def creative_cmd(ctx, *, seed: str = ""):
-        """AI fan-out + DB demand gate. Usage: !creative rhythm step sway"""
+        """AI fan-out + DB demand gate."""
         if not seed.strip():
             await ctx.send("Usage: `!creative <description or seed keywords>`")
             return
@@ -238,12 +235,12 @@ def register_advanced_commands(bot, get_db):
             await asyncio.sleep(0.3)
 
     # ────────────────────────────────────────────────────────
-    # 🎯 CONVERGENCE ENGINE
+    # 🎯 CONVERGENCE
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="converge")
     async def converge_cmd(ctx, family: str = "all", limit: int = 10):
-        """Convergence scan. !converge | !converge emotes | !converge all_families"""
+        """!converge | !converge emotes | !converge all_families"""
         from convergence_engine import scan_convergence, scan_all_families, FAMILIES
 
         if family == "all_families":
@@ -346,41 +343,55 @@ def register_advanced_commands(bot, get_db):
                 await asyncio.sleep(0.2)
 
     # ────────────────────────────────────────────────────────
-    # 🔗 CHAIN — full pipeline in one command
+    # 🔗 CHAIN
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="chain")
     async def chain_cmd(ctx, *, args: str = ""):
         """
-        Full pipeline: intent → niche → market → desc → titles → final.
-        !chain hip sway dance
-        !chain emotes:purple kawaii cat beanie
+        !chain <concept>                     — new item
+        !chain variant <parent_item_id>      — variant of existing winner
+        !chain variant <id> <theme>          — variant with theme
+        !chain emotes:<concept>              — family scoped
         """
         if not args.strip():
             return await ctx.send(
-                "**Usage:** `!chain <concept>`\n"
-                "Example: `!chain purple kawaii cat beanie`\n"
-                "With family: `!chain emotes:hip sway dance`"
+                "**Usage:**\n"
+                "  `!chain <concept>` — new item\n"
+                "  `!chain variant <item_id>` — variant of a winner\n"
+                "  `!chain variant <item_id> <theme>` — variant + theme\n"
+                "  `!chain emotes:<concept>` — family scoped\n"
             )
 
         from convergence_engine import FAMILIES
         from chain import run_chain, format_chain
 
+        tokens = args.strip().split()
+        parent_id = None
+        concept = None
         family = None
-        concept = args.strip()
-        if ":" in concept:
-            maybe_fam, _, rest = concept.partition(":")
-            if maybe_fam.strip().lower() in FAMILIES:
-                family = maybe_fam.strip().lower()
-                concept = rest.strip()
 
-        progress = await ctx.send(
-            f"🔗 Running chain on `{concept[:60]}`...\n"
-            f"_intent → niche → market → desc → titles → final (~20s)_"
-        )
+        if tokens and tokens[0].lower() == "variant":
+            if len(tokens) < 2 or not tokens[1].isdigit():
+                return await ctx.send(
+                    "**Variant syntax:** `!chain variant <item_id> [theme]`\n"
+                    "Example: `!chain variant 121930221694467 neon`"
+                )
+            parent_id = int(tokens[1])
+            concept = " ".join(tokens[2:]) if len(tokens) > 2 else "variant"
+        else:
+            concept = args.strip()
+            if ":" in concept:
+                maybe_fam, _, rest = concept.partition(":")
+                if maybe_fam.strip().lower() in FAMILIES:
+                    family = maybe_fam.strip().lower()
+                    concept = rest.strip()
+
+        mode_label = "VARIANT" if parent_id else "NEW"
+        progress = await ctx.send(f"🔗 Running chain [{mode_label}]... (~20s)")
 
         def _run():
-            return run_chain(concept, family=family)
+            return run_chain(concept, family=family, parent_id=parent_id)
 
         try:
             result = await asyncio.to_thread(_run)
