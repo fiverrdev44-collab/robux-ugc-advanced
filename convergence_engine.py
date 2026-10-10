@@ -1,6 +1,16 @@
 """
 convergence_engine.py — category-aware niche scoring.
 Uses ONLY existing tables. No new columns. No AI calls.
+
+FIXES APPLIED:
+- Uses MEDIAN not MEAN for favs (kills mega-item contamination)
+- Clamps velocity to 30/day (kills snapshot artifact spikes)
+- Requires >= 2 day snapshot span (kills 1-day noise)
+- Rejects monopolies (supply < 5)
+- Rejects saturated zones (supply > 500)
+- Rejects legacy/OG mega-items (median favs > 50k)
+- Rejects dead niches (median favs < 3)
+- Supply sweet spot: 5-50 gets highest score
 """
 from bot_core import get_db
 
@@ -52,18 +62,31 @@ def _score_keyword(cur, keyword, family=None):
     like = f'%{keyword}%'
     fam_sql, fam_params = _family_clause(family)
 
-    # ── SUPPLY + AVG FAVS ────────────────────────────────────────
+    # ── SUPPLY + MEDIAN FAVS (not mean!) + p90 distribution ─────
     cur.execute(f"""
-        select count(*), avg(favorite_count)
+        select count(*),
+               coalesce(percentile_cont(0.5) within group
+                        (order by favorite_count), 0) as median_favs,
+               coalesce(percentile_cont(0.9) within group
+                        (order by favorite_count), 0) as p90_favs
         from items
         where name ilike %s and favorite_count > 5
         {fam_sql}
     """, [like] + fam_params)
     row = cur.fetchone()
     supply = row[0] or 0
-    avg_favs = float(row[1] or 0)
-    if supply == 0:
-        return None
+    median_favs = float(row[1] or 0)
+    p90_favs = float(row[2] or 0)
+
+    # ── NICHE GATEKEEPER: must be a real market, not 1-2 OG items ──
+    if supply < 5:
+        return None                              # monopoly, not a niche
+    if supply > 500:
+        return None                              # saturated beyond entry
+    if median_favs > 50_000:
+        return None                              # legacy/OG megaitem
+    if median_favs < 3:
+        return None                              # dead niche
 
     # ── DEMAND (global) ──────────────────────────────────────────
     cur.execute(
@@ -80,7 +103,7 @@ def _score_keyword(cur, keyword, family=None):
     """, [like] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # ── VELOCITY ─────────────────────────────────────────────────
+    # ── VELOCITY (median, requires 2-day span, clamped) ──────────
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -96,11 +119,16 @@ def _score_keyword(cur, keyword, family=None):
             group by ih.item_id
             having extract(epoch from
                    (max(ih.snapshot_at) - min(ih.snapshot_at))
-                   )/86400.0 > 1
+                   )/86400.0 >= 2
         )
-        select avg(delta / days) from s
+        select coalesce(percentile_cont(0.5) within group
+                        (order by delta / days), 0)
+        from s
     """, [like] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
+
+    # Clamp — anything over 30/day is snapshot noise, not real growth
+    velocity = min(velocity, 30.0)
 
     # ── CONCENTRATION ────────────────────────────────────────────
     cur.execute(f"""
@@ -121,9 +149,14 @@ def _score_keyword(cur, keyword, family=None):
     # ── SCORE COMPONENTS ─────────────────────────────────────────
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
-    supply_score   = (1.0 if supply < 10 else
-                      0.7 if supply < 50 else
-                      0.4 if supply < 150 else 0.15)
+
+    # Supply sweet spot: 5-50. Less = too thin. More = too crowded.
+    if supply <= 5:      supply_score = 0.3
+    elif supply <= 15:   supply_score = 1.0
+    elif supply <= 50:   supply_score = 0.8
+    elif supply <= 150:  supply_score = 0.4
+    else:                supply_score = 0.15
+
     fresh_score    = (1.0 if recent == 0 else
                       0.7 if recent < 5 else
                       0.3 if recent < 15 else 0.1)
@@ -140,7 +173,8 @@ def _score_keyword(cur, keyword, family=None):
         "velocity": round(velocity, 2),
         "supply": supply,
         "recent": recent,
-        "avg_favs": round(avg_favs, 1),
+        "avg_favs": round(median_favs, 1),  # kept key name for compatibility
+        "p90_favs": round(p90_favs, 1),
         "concentration": round(concentration, 2),
     }
 
@@ -162,7 +196,7 @@ def format_brief(r):
         return "⚠️ *No items found in this category — no signal.*"
 
     zone = ""
-    if r["recent"] == 0 and r["supply"] < 30 and r["velocity"] > 1:
+    if r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1:
         zone = " 🔥 **SNIPE ZONE**"
     elif r["velocity"] > 3 and r["recent"] < 5:
         zone = " ⚡ **RISING**"
@@ -177,6 +211,7 @@ def format_brief(r):
         f"**🎯 `{r['keyword']}`{fam} — [{r['score']}]**{zone}\n"
         f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d · "
         f"📦 supply {r['supply']} · 🆕 recent {r['recent']} · "
+        f"🎯 median {r['avg_favs']}♥ · "
         f"👑 top {int(r['concentration']*100)}%"
     )
 
@@ -193,7 +228,7 @@ def scan_convergence(family=None, limit=15):
     for kw in keywords:
         try:
             r = _score_keyword(cur, kw, family)
-            if r and r["supply"] <= 500:
+            if r:                       # gatekeeper already filtered
                 results.append(r)
         except Exception:
             continue
