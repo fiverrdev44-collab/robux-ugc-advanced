@@ -178,7 +178,6 @@ def register_advanced_commands(bot, get_db):
         lines.append("\n🟢 gold · 🔵 opportunity · 🟡 contested · 🔴 saturated")
 
         body = "\n".join(lines)
-        # discord message limit is 2000; split safely
         for i in range(0, len(body), 1900):
             if i == 0:
                 await progress.edit(content=body[i:i + 1900])
@@ -215,7 +214,6 @@ def register_advanced_commands(bot, get_db):
             await progress.edit(content=f"❌ Failed: `{e}`")
             return
 
-        # Build response in chunks (Discord limit)
         chunks = []
 
         anchor = f"**🎯 Anchor examples ({len(examples)}) — real Roblox searches:**\n"
@@ -239,7 +237,6 @@ def register_advanced_commands(bot, get_db):
             parsed_block += "_nothing parsed — JSON likely malformed, see raw above_"
         chunks.append(parsed_block)
 
-        # Send each chunk
         first = True
         for chunk in chunks:
             if first:
@@ -279,7 +276,7 @@ def register_advanced_commands(bot, get_db):
                     continue
                 lines = [f"**🎯 `{fam}`**"]
                 for i, r in enumerate(rows, 1):
-                    snipe = " 🔥" if r["recent"] == 0 and r["supply"] < 30 else ""
+                    snipe = " 🔥" if (r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1) else ""
                     lines.append(
                         f"`{r['score']}` **{r['keyword']}**{snipe} — "
                         f"vel {r['velocity']}/d · supply {r['supply']} · recent {r['recent']}"
@@ -309,7 +306,7 @@ def register_advanced_commands(bot, get_db):
                  "_Weighted: demand · velocity · supply · freshness · competition_\n"]
 
         for i, r in enumerate(rows, 1):
-            snipe = " 🔥 SNIPE ZONE" if r["recent"] == 0 and r["supply"] < 30 else ""
+            snipe = " 🔥 SNIPE ZONE" if (r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1) else ""
             lines.append(
                 f"**#{i}  [{r['score']}]**  `{r['keyword']}`{snipe}\n"
                 f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d\n"
@@ -320,3 +317,54 @@ def register_advanced_commands(bot, get_db):
         out = "\n".join(lines)
         for chunk in [out[i:i+1900] for i in range(0, len(out), 1900)]:
             await ctx.send(chunk)
+
+    # ────────────────────────────────────────────────────────
+    # 🔨 DESC FORGE — mine top descriptions in a niche
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="desc_forge")
+    async def desc_forge_cmd(ctx, *, args: str = ""):
+        """
+        Analyze descriptions of top items in a niche, generate one that fits.
+        !desc_forge hip sway
+        !desc_forge emotes:hip sway
+        """
+        if not args.strip():
+            return await ctx.send(
+                "**Usage:**\n"
+                "  `!desc_forge <keyword>` — e.g. `!desc_forge hip sway`\n"
+                "  `!desc_forge <family>:<keyword>` — e.g. `!desc_forge emotes:hip sway`\n"
+            )
+
+        from convergence_engine import FAMILIES
+        from desc_forge import forge_description, format_forge
+
+        family = None
+        keyword = args.strip()
+        if ":" in keyword:
+            maybe_fam, _, rest = keyword.partition(":")
+            if maybe_fam.strip().lower() in FAMILIES:
+                family = maybe_fam.strip().lower()
+                keyword = rest.strip()
+
+        progress = await ctx.send(f"🔨 Mining top descriptions for `{keyword}`...")
+
+        def _run():
+            return forge_description(keyword, family=family)
+
+        try:
+            result = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await progress.edit(content=f"❌ {e}")
+
+        chunks = format_forge(result)
+
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        for chunk in chunks:
+            for i in range(0, len(chunk), 1900):
+                await ctx.send(chunk[i:i+1900])
+                await asyncio.sleep(0.2)
