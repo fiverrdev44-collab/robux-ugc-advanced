@@ -70,6 +70,14 @@ try:
 except Exception as e:
     print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 
+# ── 🎯 Interactive workflow menu (!start) ────────────────────
+try:
+    from menu import register_menu_commands
+    register_menu_commands(bot, get_db)
+    print("✅ Menu command loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Menu command failed to load: {e}", flush=True)
+
 # ── 🩻 X-Ray / Patterns / Failures ───────────────────────────
 try:
     from commands_xray import register_xray_commands
