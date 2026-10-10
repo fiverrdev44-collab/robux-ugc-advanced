@@ -8,6 +8,8 @@ FIXES:
 - Rejects zero-demand niches (demand < 3)
 - Velocity clamped to 20/day
 - Requires median >= 5 (real signal)
+- VELOCITY: avg of GROWING items only (delta >= 3) — stagnant items
+  no longer drag the median to zero.
 """
 import re
 from bot_core import get_db
@@ -51,8 +53,8 @@ def _kw_pattern(keyword):
     """
     kw = keyword.strip().lower()
     if " " in kw:
-        return f"%{kw}%"                     # phrase — ilike is fine
-    return rf"\y{re.escape(kw)}\y"           # single word — boundary match
+        return f"%{kw}%"
+    return rf"\y{re.escape(kw)}\y"
 
 
 def _score_keyword(cur, keyword, family=None):
@@ -102,7 +104,9 @@ def _score_keyword(cur, keyword, family=None):
     """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # ── VELOCITY (median, 2-day span, clamped to 20) ────────────
+    # ── VELOCITY: avg of GROWING items only (delta >= 3) ────────
+    # Stagnant items (delta < 3) are excluded — they don't tell us
+    # about demand, only that nobody's buying THAT item.
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -119,10 +123,9 @@ def _score_keyword(cur, keyword, family=None):
             having extract(epoch from
                    (max(ih.snapshot_at) - min(ih.snapshot_at))
                    )/86400.0 >= 2
+               and max(ih.favorite_count) - min(ih.favorite_count) >= 3
         )
-        select coalesce(percentile_cont(0.5) within group
-                        (order by delta / days), 0)
-        from s
+        select avg(delta / days) from s
     """, [pat] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
