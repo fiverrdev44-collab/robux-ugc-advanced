@@ -3,6 +3,7 @@ sales_listener.py — reads Roblox sale webhook embeds from Discord,
 saves to my_sales, and provides summary functions.
 
 All DB writes batch or run via asyncio.to_thread — no event loop blocking.
+Verbose logging so we can trace exactly what happens.
 """
 import re
 import asyncio
@@ -23,15 +24,23 @@ def _strip_emoji(s):
     return re.sub(r"^[^\w]+", "", str(s)).strip()
 
 
+def _safe_str(v):
+    """Convert any value to a stripped string, or '' for None."""
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
 def _extract_sale_from_embed(embed, message):
     if not embed:
         return None
 
-    title = (embed.title or "").strip()
-    desc = (embed.description or "").strip()
+    title = _safe_str(embed.title)
+    desc = _safe_str(embed.description)
     tl = title.lower()
     dl = desc.lower()
 
+    # Match on title OR description
     is_sale = (
         "new sale" in tl
         or "thank you for your purchase" in tl
@@ -46,27 +55,40 @@ def _extract_sale_from_embed(embed, message):
     buyer = ""
     group_name = ""
 
+    # Group from title: "💰 New Sale — Eroseris UGC Group"
     if "—" in title:
         group_name = title.split("—", 1)[1].strip()
     elif "-" in title and "new sale" in tl:
         group_name = title.split("-", 1)[1].strip()
 
+    # Parse fields
     for field in (embed.fields or []):
-        name = (field.name or "").strip().lower()
-        value = (field.value or "").strip()
+        name = _safe_str(field.name).lower()
+        value = _safe_str(field.value)
         if not value:
             continue
-        if "item" in name:
+        if "item" in name and not item_name:
             item_name = _strip_emoji(value)
-        elif "revenue" in name or "amount" in name:
+        elif ("revenue" in name or "amount" in name) and revenue == 0:
             revenue = _parse_revenue(value)
-        elif "buyer" in name or "user" in name or "source" in name:
+        elif ("buyer" in name or "user" in name or "source" in name) and not buyer:
             buyer = _strip_emoji(value)
-        elif "group" in name or "seller" in name:
-            if not group_name:
-                group_name = _strip_emoji(value)
+        elif ("group" in name or "seller" in name) and not group_name:
+            group_name = _strip_emoji(value)
+
+    # Fallback: try to extract item name from title/description
+    if not item_name:
+        # Try "Item: X" pattern
+        m = re.search(r"item[:\s]+(.+?)(?:\n|$)", desc, re.IGNORECASE)
+        if m:
+            item_name = _strip_emoji(m.group(1))
 
     if not item_name:
+        # Last resort: log the embed so we can see what we missed
+        print(f"[sales_listener] SKIP — no item name found. "
+              f"title={title[:60]!r} fields="
+              f"{[(f.name, f.value[:30]) for f in (embed.fields or [])]}",
+              flush=True)
         return None
 
     sale_time = message.created_at
@@ -91,10 +113,17 @@ def _save_sales_batch(sales_list):
     """
     if not sales_list:
         return 0, 0
-    conn = get_db(); cur = conn.cursor()
+
+    print(f"[sales_listener] batch starting — {len(sales_list)} rows",
+          flush=True)
+
+    conn = None
+    cur = None
     inserted = 0
     skipped = 0
     try:
+        conn = get_db()
+        cur = conn.cursor()
         for sale in sales_list:
             try:
                 cur.execute("""
@@ -118,15 +147,25 @@ def _save_sales_batch(sales_list):
                       f"{type(e).__name__}: {e}", flush=True)
                 skipped += 1
         conn.commit()
+        print(f"[sales_listener] batch done — inserted {inserted} · "
+              f"skipped {skipped}", flush=True)
     except Exception as e:
-        print(f"[sales_listener] batch commit failed: "
+        print(f"[sales_listener] batch COMMIT failed: "
               f"{type(e).__name__}: {e}", flush=True)
         try:
-            conn.rollback()
+            if conn:
+                conn.rollback()
         except Exception:
             pass
     finally:
-        cur.close(); conn.close()
+        try:
+            if cur: cur.close()
+        except Exception:
+            pass
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
     return inserted, skipped
 
 
@@ -134,8 +173,11 @@ def _save_sale_single(sale):
     """Single-sale save (used by live listener). Runs in thread."""
     if not sale:
         return False
-    conn = get_db(); cur = conn.cursor()
+    conn = None
+    cur = None
     try:
+        conn = get_db()
+        cur = conn.cursor()
         cur.execute("""
             insert into my_sales
               (sale_date, sale_time, item_name, buyer, amount_robux, status)
@@ -153,12 +195,20 @@ def _save_sale_single(sale):
               f"'{sale.get('item_name', '?')[:40]}': "
               f"{type(e).__name__}: {e}", flush=True)
         try:
-            conn.rollback()
+            if conn:
+                conn.rollback()
         except Exception:
             pass
         return False
     finally:
-        cur.close(); conn.close()
+        try:
+            if cur: cur.close()
+        except Exception:
+            pass
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
 
 
 async def handle_sale_message(message):
@@ -171,7 +221,6 @@ async def handle_sale_message(message):
             sale = _extract_sale_from_embed(embed, message)
             if not sale:
                 continue
-            # Off-loop DB write
             is_new = await asyncio.to_thread(_save_sale_single, sale)
             if is_new:
                 print(
@@ -195,12 +244,17 @@ async def backfill_channel(bot, channel_id, limit=200):
     Read past messages, extract sales, batch-insert.
     Uses ONE DB connection for the whole batch.
     """
+    print(f"[backfill] starting — channel={channel_id} limit={limit}",
+          flush=True)
+
     try:
         ch = bot.get_channel(int(channel_id))
         if not ch:
+            print(f"[backfill] channel {channel_id} not found", flush=True)
             return 0, 0
+        print(f"[backfill] found channel #{ch.name}", flush=True)
     except Exception as e:
-        print(f"[sales_listener] channel lookup failed: {e}", flush=True)
+        print(f"[backfill] channel lookup failed: {e}", flush=True)
         return 0, 0
 
     scanned = 0
@@ -213,16 +267,20 @@ async def backfill_channel(bot, channel_id, limit=200):
                     sale = _extract_sale_from_embed(embed, msg)
                     if sale:
                         sales_batch.append(sale)
-                except Exception:
+                except Exception as e:
+                    print(f"[backfill] parse err on msg {msg.id}: {e}",
+                          flush=True)
                     continue
     except Exception as e:
-        print(f"[sales_listener] history read failed: {e}", flush=True)
+        print(f"[backfill] history read failed: {e}", flush=True)
         return scanned, 0
+
+    print(f"[backfill] scanned {scanned} messages · "
+          f"found {len(sales_batch)} sales", flush=True)
 
     if not sales_batch:
         return scanned, 0
 
-    # One connection for the whole batch
     inserted, skipped = await asyncio.to_thread(
         _save_sales_batch, sales_batch
     )
@@ -234,8 +292,11 @@ async def backfill_channel(bot, channel_id, limit=200):
 # ════════════════════════════════════════════════════════════════════
 
 def sales_summary(days=30):
-    conn = get_db(); cur = conn.cursor()
+    conn = None; cur = None
     try:
+        conn = get_db()
+        cur = conn.cursor()
+
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
             from my_sales
@@ -272,14 +333,23 @@ def sales_summary(days=30):
             "daily": daily,
         }
     finally:
-        cur.close(); conn.close()
+        try:
+            if cur: cur.close()
+        except Exception:
+            pass
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
 
 
 def item_sales_summary(item_name, days=30):
     if not item_name:
         return None
-    conn = get_db(); cur = conn.cursor()
+    conn = None; cur = None
     try:
+        conn = get_db()
+        cur = conn.cursor()
         like = f"%{item_name[:20]}%"
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0), max(sale_time)
@@ -295,4 +365,11 @@ def item_sales_summary(item_name, days=30):
             "last_sale": last, "days": days,
         }
     finally:
-        cur.close(); conn.close()
+        try:
+            if cur: cur.close()
+        except Exception:
+            pass
+        try:
+            if conn: conn.close()
+        except Exception:
+            pass
