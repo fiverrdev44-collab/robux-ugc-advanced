@@ -5,6 +5,7 @@ Single source of truth for:
   - keyword classification (SATURATED / GOLD / etc.)
   - percentile ranking vs category peers
   - portfolio context (your winners, your losers)
+  - multi-signal verdict logic
 """
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
@@ -36,11 +37,10 @@ def classify_keyword(cur, keyword, family=None):
     )
     demand = cur.fetchone()[0] or 0
 
-    # ── SHARED CLASSIFICATION — no disagreement ──
     if supply == 0 and demand == 0:
         bucket = "GHOST"
     elif supply == 0:
-        bucket = "VIRGIN"        # demand but no items — pure gold
+        bucket = "VIRGIN"
     elif supply < 20 and demand >= 10:
         bucket = "GOLD"
     elif supply < 60 and median_favs >= 50:
@@ -73,8 +73,7 @@ def _family_clause(family):
 # ── Percentile rank — how good is THIS item vs peers? ──
 def item_percentile(cur, item_id):
     """
-    Returns (percentile, sample_size, velocity, family, age_days).
-    percentile: 0-100, higher = better. Real benchmark, not vibes.
+    Returns dict with percentile, sample_size, velocity, family, age_days.
     """
     cur.execute("""
         select i.asset_type_id,
@@ -129,10 +128,6 @@ def item_percentile(cur, item_id):
 
 # ── Portfolio context — your winners shape every recommendation ──
 def portfolio_context(cur, top_n=5):
-    """
-    Returns your top-N items by velocity. Injected into brainstorm prompts
-    so AI output is stylistically consistent with what already works for you.
-    """
     cur.execute("""
         select i.id, i.name, i.favorite_count, i.asset_type_id,
                extract(epoch from (now() - i.created_at))/86400.0 as age_days
@@ -163,12 +158,71 @@ def portfolio_context(cur, top_n=5):
     }
 
 
-def decide_verdict(percentile):
-    """Map percentile → decision. Used by !verdict and !autopsy."""
-    if percentile >= 90:
-        return "DOUBLE_DOWN", "🔥"
-    if percentile >= 60:
-        return "KEEP", "✅"
-    if percentile >= 30:
-        return "RENAME", "🔧"
-    return "KILL", "🪦"
+# ── Multi-signal verdict — the lethal version ──
+def decide_verdict(percentile, age_days=None, favs=None, velocity=None):
+    """
+    Multi-signal verdict. Hard-kill rules beat percentile.
+    Returns (verdict, emoji, reason).
+
+    Verdicts:
+      TOO_NEW      — <7 days old, not enough data
+      DOUBLE_DOWN  — clear winner, ship a variant
+      KEEP         — doing fine, post content
+      RENAME       — has signal but title/pitch is failing
+      KILL         — stop investing
+    """
+    p = percentile if percentile is not None else 0
+    age = float(age_days) if age_days is not None else None
+    f = int(favs) if favs is not None else None
+    v = float(velocity) if velocity is not None else 0.0
+
+    # ── HARD KILL RULES (override percentile) ──
+    if age is not None and f is not None:
+        if age >= 60 and f < 20:
+            return ("KILL", "🪦",
+                    f"{age:.0f}d old · only {f}♥. Roblox algorithm has "
+                    f"already shelved it. Not recoverable.")
+        if age >= 30 and f < 10:
+            return ("KILL", "🪦",
+                    f"{age:.0f}d old · {f}♥. Peer median is higher. Move on.")
+        if age >= 14 and f < 5:
+            return ("KILL", "🪦",
+                    f"{age:.0f}d old · {f}♥. Not being discovered. Kill it.")
+        if age >= 7 and f < 3:
+            return ("KILL", "🪦",
+                    f"{age:.0f}d · {f}♥. Zero traction after a week.")
+
+    # ── TOO NEW TO JUDGE ──
+    if age is not None and age < 3:
+        return ("TOO_NEW", "⏳",
+                f"Only {age:.1f}d old. Need 7 days of data before verdict.")
+
+    if age is not None and age < 7 and (f is None or f < 30):
+        return ("TOO_NEW", "⏳",
+                f"{age:.1f}d old · {f}♥. Re-run in {max(1, int(7 - age))} days.")
+
+    # ── WINNER ──
+    if p >= 90:
+        return ("DOUBLE_DOWN", "🔥",
+                f"Top {100 - int(p)}% of peers. Absolute favs confirm demand.")
+    if p >= 75 and f is not None and f >= 50:
+        return ("DOUBLE_DOWN", "🔥",
+                f"Top {100 - int(p)}% · {f}♥. Strong traction.")
+
+    # ── KEEP ──
+    if p >= 60:
+        return ("KEEP", "✅",
+                f"Top {100 - int(p)}% of peers. Above median.")
+    if p >= 45 and f is not None and f >= 20:
+        return ("KEEP", "✅",
+                f"Top {100 - int(p)}% · {f}♥. Steady but not standout.")
+
+    # ── RENAME ──
+    if p >= 25:
+        return ("RENAME", "🔧",
+                f"Top {100 - int(p)}% — item has demand, title/thumbnail is "
+                f"blocking conversion.")
+
+    # ── KILL ──
+    return ("KILL", "🪦",
+            f"Bottom {int(p)}% of peers. No signal to salvage.")
