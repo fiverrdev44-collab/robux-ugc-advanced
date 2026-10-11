@@ -412,3 +412,57 @@ def register_advanced_commands(bot, get_db):
             for i in range(0, len(chunk), 1900):
                 await ctx.send(chunk[i:i+1900])
                 await asyncio.sleep(0.2)
+
+    # ────────────────────────────────────────────────────────
+    # 🏷️ TAGS — sales-weighted SEO tag generator
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="tags")
+    async def tags_cmd(ctx, *, args: str = ""):
+        """
+        Generate 45 sales-triggering tags for an item name.
+        !tags Cute Kawaii Kitty Beanie
+        !tags emotes:Smooth Hip Sway Dance
+        """
+        if not args.strip():
+            return await ctx.send(
+                "**Usage:** `!tags <item name>`\n"
+                "Example: `!tags Cute Kawaii Kitty Beanie`\n"
+                "With category: `!tags emotes:Smooth Hip Sway Dance`"
+            )
+
+        from convergence_engine import FAMILIES
+        from tag_generator import generate_tags, format_tags
+
+        family = None
+        item_name = args.strip()
+        if ":" in item_name:
+            maybe_fam, _, rest = item_name.partition(":")
+            if maybe_fam.strip().lower() in FAMILIES:
+                family = maybe_fam.strip().lower()
+                item_name = rest.strip()
+
+        progress = await ctx.send(f"🏷️ Generating tags for `{item_name[:60]}`...")
+
+        def _run():
+            return generate_tags(item_name, family=family, max_tags=45)
+
+        try:
+            result = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await progress.edit(content=f"❌ {e}")
+
+        if result.get("error"):
+            return await progress.edit(content=f"❌ {result['error']}")
+
+        chunks = format_tags(result)
+
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+
+        for chunk in chunks:
+            for i in range(0, len(chunk), 1900):
+                await ctx.send(chunk[i:i+1900])
+                await asyncio.sleep(0.2)
