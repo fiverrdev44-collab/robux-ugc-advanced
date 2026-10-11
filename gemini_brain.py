@@ -99,19 +99,29 @@ def _desc_pattern_prompt_block(casual_description, allow_list,
     """
     Mine real top-seller descriptions in this niche and return a compact
     prompt block. Style-anchors the AI so descriptions match real winners.
+
+    Seed priority: concept's first word > specific_moves > allow_list.
+    Keeps description on-topic with what the user asked for.
     Safe no-op if no data or on any failure.
     """
     try:
         from desc_forge import pattern_prompt_block
 
         seed_kw = None
-        if specific_moves:
+        # 1) Concept's first word — what user actually asked for
+        if casual_description:
+            parts = str(casual_description).strip().split()
+            if parts:
+                first = parts[0]
+                if ":" in first:
+                    first = first.split(":", 1)[1]
+                seed_kw = first
+        # 2) Fallback: first specific move
+        if not seed_kw and specific_moves:
             seed_kw = specific_moves[0]
-        elif allow_list:
+        # 3) Fallback: first allow-list word
+        if not seed_kw and allow_list:
             seed_kw = allow_list[0]
-        elif casual_description:
-            parts = casual_description.split()
-            seed_kw = parts[0] if parts else None
 
         if not seed_kw:
             return ""
@@ -500,7 +510,9 @@ SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 2. Every title MUST end with one of these valid type words for this category:
    {type_words}
 3. Every title MUST be UNIQUE.
-4. At least 3 titles MUST include the user's SPECIFIC_MOVES / specific themes.
+4. At least 3 titles MUST include the strongest niche keyword from the NICHE
+   section above. If a keyword is marked GOLD or OPPORTUNITY, that exact word
+   MUST appear in at least 3 titles (as the FIRST token if possible).
 5. Titles may ONLY use words from the allow-list + glue words + type words.
 6. NEVER use stopwords as fillers to pad length.
 
