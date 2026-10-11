@@ -7,6 +7,7 @@ Includes:
 - Watchdog thread (uses bot.latency + os._exit(1) to force Render restart)
 - Background scheduler (daily snapshot + ML train + daily report)
 - Sales listener (reads Roblox sale webhook embeds from SALES_CHANNEL_ID)
+- Login backoff — prevents Discord rate limit on crash-restart loops
 """
 import os
 import time
@@ -175,10 +176,30 @@ def watchdog():
             print(f"🐕 [watchdog] Error: {e}", flush=True)
 
 
-# ── Main entry ───────────────────────────────────────────────
+# ── Main entry with login backoff ────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
     print("🔌 Starting bot...", flush=True)
-    bot.run(TOKEN)
+
+    # Login backoff — prevents Discord rate limit on crash loops
+    attempt = 0
+    while True:
+        try:
+            bot.run(TOKEN)
+            break  # clean shutdown
+        except discord.errors.HTTPException as e:
+            # Rate limit → long backoff
+            attempt += 1
+            wait = min(120 * (2 ** min(attempt, 4)), 1800)  # 120s, 240s, 480s, 960s, 1800s cap
+            print(f"❌ Discord HTTPException (attempt {attempt}): {e}", flush=True)
+            print(f"⏳ Waiting {wait}s before retry (rate limit backoff)", flush=True)
+            time.sleep(wait)
+        except Exception as e:
+            # Other crash → shorter backoff
+            attempt += 1
+            wait = min(60 * (2 ** min(attempt, 4)), 900)
+            print(f"❌ Bot crashed (attempt {attempt}): {type(e).__name__}: {e}", flush=True)
+            print(f"⏳ Waiting {wait}s before retry", flush=True)
+            time.sleep(wait)
