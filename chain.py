@@ -1,21 +1,31 @@
 """
 chain.py — full pipeline in one command.
-Runs: intent → niche → market → descriptions → AI strategy → final verdict.
-Uses at most 2 Gemini calls. Everything else is DB.
+Runs: intent → niche → market → descriptions → focused title pass → FINAL.
+
+Uses at most 2 Gemini calls:
+  1. Big synthesize_hybrid prompt (market analysis + description)
+  2. Focused title pass (brainstorm-quality titles)
+
+The focused pass OVERWRITES the titles from the big prompt because small
+models dilute titles when asked to do 15 things at once.
 
 Variant mode: pass parent_id to keep winner keywords + add ONE theme word.
 """
 import re
+import json
 import asyncio
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY
 
 
 def run_chain(concept, family=None, parent_id=None):
-    from gemini_brain import extract_keywords, all_terms, synthesize_hybrid
+    from gemini_brain import (
+        extract_keywords, all_terms, synthesize_hybrid, _generate
+    )
     from intel_common import classify_keyword
     from convergence_engine import FAMILIES
     from commands_ai import _build_allow_list
+    from category_configs import get_category_config
 
     # ── Parent context for variant mode ──
     parent_context = ""
@@ -94,7 +104,6 @@ def run_chain(concept, family=None, parent_id=None):
     try:
         from desc_forge import _fetch_top_descriptions
         seed_kw = None
-        # Prefer concept's first word
         if concept:
             parts = str(concept).strip().split()
             if parts:
@@ -115,8 +124,21 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] desc mining failed: {e}", flush=True)
 
-    # ── Stage 5: AI strategy ──
-    synth = None
+    # ── Best niche keyword for title pass ──
+    best_niche_kw = None
+    best_niche_bucket = None
+    if niche_data:
+        best_obj = min(niche_data, key=lambda x: (
+            1 if x["bucket"] == "GOLD" else
+            2 if x["bucket"] == "OPPORTUNITY" else
+            3 if x["bucket"] == "VIRGIN" else
+            4 if x["bucket"] == "NEUTRAL" else 5
+        ))
+        best_niche_kw = best_obj["keyword"]
+        best_niche_bucket = best_obj["bucket"]
+
+    # ── Stage 5a: Big strategy prompt ──
+    synth = {}
     try:
         concept_for_ai = concept
         if parent_context:
@@ -131,9 +153,100 @@ def run_chain(concept, family=None, parent_id=None):
              "failed_terms": stats.get("failed_terms", []),
              "reasoning": stats.get("reasoning", "")},
             None, intent.get("specific_moves", []), None, None, None, None,
-        )
+        ) or {}
     except Exception as e:
         print(f"[chain] synth failed: {e}", flush=True)
+
+    # ── Stage 5b: FOCUSED TITLE PASS — brainstorm-quality ──
+    try:
+        cfg = get_category_config(family)
+        type_words = ", ".join(cfg.get("type_words", [])[:6]) or "emote, dance"
+        archetypes = "\n".join(
+            f"- {a}" for a in cfg.get("title_archetypes", [])[:5]
+        )
+
+        top_comp_lines = "\n".join(
+            f"- {it.get('name', '')[:60]} ({it.get('favourite_count', 0):,}♥)"
+            for it in top_items[:8]
+        ) or "(none)"
+
+        # Mandatory keyword rule — only if niche is GOLD/OPPORTUNITY/VIRGIN
+        keyword_rule = ""
+        if best_niche_kw and best_niche_bucket in ("GOLD", "OPPORTUNITY", "VIRGIN"):
+            keyword_rule = (
+                f"\n=== MANDATORY KEYWORD ===\n"
+                f"At least 4 of the 10 titles MUST contain the word "
+                f"`{best_niche_kw}` as the FIRST or SECOND token.\n"
+            )
+
+        # Parent override for variant mode
+        parent_rule = ""
+        if parent_name:
+            parent_rule = (
+                f"\n=== VARIANT RULE ===\n"
+                f"This is a variant of: `{parent_name}`\n"
+                f"KEEP the core keywords from that name. Add ONE new "
+                f"theme word (color/vibe/effect). At least 3 titles must "
+                f"share 2+ words with the parent name.\n"
+            )
+
+        focused_prompt = f"""You are the #1 Roblox UGC naming strategist.
+
+Generate EXACTLY 10 titles for a Roblox {family} item.
+
+=== CONCEPT ===
+{concept}
+
+=== REAL COMPETITORS (study their naming, do NOT copy) ===
+{top_comp_lines}
+
+=== CATEGORY TYPE WORDS (every title must end with one of these) ===
+{type_words}
+
+=== EXAMPLE STRUCTURES ===
+{archetypes}
+
+=== ALLOW-LIST (only use words from this + type words + glue) ===
+{', '.join(allow_list[:80])}
+{keyword_rule}{parent_rule}
+=== RULES (NON-NEGOTIABLE) ===
+1. Every title = 3 to 5 tokens
+2. Every title ends with a type word above
+3. Every title is UNIQUE
+4. NO generic fluff unless it's in the allow-list: cute, kawaii, aesthetic, adorable
+5. NO stopword padding
+6. Titles must READ as real product names, not keyword dumps
+7. Follow MANDATORY KEYWORD rule if given (do NOT ignore it)
+
+=== OUTPUT — ONLY JSON ===
+{{
+  "titles_safe": ["...", "...", "..."],
+  "titles_differentiated": ["...", "...", "..."],
+  "titles_longtail": ["...", "..."],
+  "titles_viral": ["...", "..."]
+}}
+"""
+
+        focused_raw = _generate(
+            focused_prompt, json_mode=True,
+            temperature=0.85, max_tokens=1500
+        )
+        if focused_raw:
+            try:
+                focused_data = json.loads(focused_raw)
+            except Exception:
+                m = re.search(r"\{.*\}", focused_raw, re.DOTALL)
+                focused_data = json.loads(m.group(0)) if m else {}
+
+            if focused_data:
+                # Override weak titles from the big prompt
+                for key in ("titles_safe", "titles_differentiated",
+                            "titles_longtail", "titles_viral"):
+                    if focused_data.get(key):
+                        synth[key] = focused_data[key]
+                synth["_focused_title_pass"] = True
+    except Exception as e:
+        print(f"[chain] focused title pass failed: {e}", flush=True)
 
     return {
         "concept": concept,
@@ -143,11 +256,13 @@ def run_chain(concept, family=None, parent_id=None):
         "item_type": item_type,
         "terms": terms,
         "niche": niche_data,
+        "best_niche_kw": best_niche_kw,
+        "best_niche_bucket": best_niche_bucket,
         "stats": stats,
         "top_items": top_items[:5],
         "allow_list": allow_list[:20],
         "desc_examples": desc_examples,
-        "synth": synth or {},
+        "synth": synth,
     }
 
 
@@ -244,27 +359,21 @@ def format_chain(result):
     titles = []
     for key in ("titles_differentiated", "titles_safe", "titles_viral"):
         titles.extend(synth.get(key) or [])
+
     if titles:
         final_lines.append(f"**1. Name:** `{titles[0]}`")
         if len(titles) > 1:
             final_lines.append(f"**2. Backup name:** `{titles[1]}`")
     else:
-        final_lines.append("**1. Name:** (no titles generated — try `!brainstorm` again)")
+        final_lines.append("**1. Name:** (no titles generated — try again)")
 
     if synth.get("seo_description"):
         final_lines.append("**3. Paste description** (from above block)")
 
-    if result["niche"]:
-        # FIX: min() picks BEST bucket (GOLD=1 is lowest number)
-        best = min(result["niche"], key=lambda x: (
-            1 if x["bucket"] == "GOLD" else
-            2 if x["bucket"] == "OPPORTUNITY" else
-            3 if x["bucket"] == "VIRGIN" else
-            4 if x["bucket"] == "NEUTRAL" else 5
-        ))
+    if result.get("best_niche_kw"):
         final_lines.append(
-            f"**4. Niche:** `{best['keyword']}` = {best['bucket']} "
-            f"(start title with this word)"
+            f"**4. Niche:** `{result['best_niche_kw']}` = "
+            f"{result['best_niche_bucket']}"
         )
 
     if s.get("price_avg"):
