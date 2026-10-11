@@ -5,7 +5,8 @@ All commands live in commands_*.py modules.
 Includes:
 - Discord health check (returns 503 when bot is dead)
 - Watchdog thread (uses bot.latency + os._exit(1) to force Render restart)
-- Background scheduler (daily snapshot + ML train)
+- Background scheduler (daily snapshot + ML train + daily report)
+- Sales listener (reads Roblox sale webhook embeds from SALES_CHANNEL_ID)
 """
 import os
 import time
@@ -46,6 +47,23 @@ async def on_ready():
         print(f"⚠️ Table setup failed: {e}", flush=True)
 
 
+@bot.event
+async def on_message(message):
+    """Listen for sale embeds + process commands."""
+    if message.author.id == bot.user.id:
+        return
+
+    sales_ch_id = os.getenv("SALES_CHANNEL_ID", "").strip()
+    if sales_ch_id and str(message.channel.id) == sales_ch_id:
+        try:
+            from sales_listener import handle_sale_message
+            await handle_sale_message(message)
+        except Exception as e:
+            print(f"[on_message] sales handler failed: {e}", flush=True)
+
+    await bot.process_commands(message)
+
+
 # ── Register all command modules ─────────────────────────────
 register_guide_commands(bot)
 print("✅ Guide commands loaded.", flush=True)
@@ -77,6 +95,14 @@ try:
     print("✅ Menu command loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Menu command failed to load: {e}", flush=True)
+
+# ── 💰 Sales commands + listener ─────────────────────────────
+try:
+    from commands_sales import register_sales_commands
+    register_sales_commands(bot, get_db)
+    print("✅ Sales commands loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Sales commands failed to load: {e}", flush=True)
 
 # ── 🩻 X-Ray / Patterns / Failures ───────────────────────────
 try:
