@@ -1,8 +1,11 @@
 """
 sales_listener.py — reads Roblox sale webhook embeds from Discord,
 saves to my_sales, and provides summary functions.
+
+All DB writes batch or run via asyncio.to_thread — no event loop blocking.
 """
 import re
+import asyncio
 from datetime import datetime, timezone
 from bot_core import get_db
 
@@ -81,7 +84,54 @@ def _extract_sale_from_embed(embed, message):
     }
 
 
-def save_sale(sale):
+def _save_sales_batch(sales_list):
+    """
+    Insert many sales with ONE connection. Used by backfill.
+    Returns (inserted, skipped).
+    """
+    if not sales_list:
+        return 0, 0
+    conn = get_db(); cur = conn.cursor()
+    inserted = 0
+    skipped = 0
+    try:
+        for sale in sales_list:
+            try:
+                cur.execute("""
+                    insert into my_sales
+                      (sale_date, sale_time, item_name, buyer,
+                       amount_robux, status)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on conflict (sale_time, item_name, buyer, amount_robux)
+                    do nothing
+                """, (
+                    sale["sale_date"], sale["sale_time"], sale["item_name"],
+                    sale["buyer"], sale["amount_robux"], sale["status"],
+                ))
+                if cur.rowcount > 0:
+                    inserted += 1
+                else:
+                    skipped += 1
+            except Exception as e:
+                print(f"[sales_listener] row failed for "
+                      f"'{sale.get('item_name', '?')[:40]}': "
+                      f"{type(e).__name__}: {e}", flush=True)
+                skipped += 1
+        conn.commit()
+    except Exception as e:
+        print(f"[sales_listener] batch commit failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        cur.close(); conn.close()
+    return inserted, skipped
+
+
+def _save_sale_single(sale):
+    """Single-sale save (used by live listener). Runs in thread."""
     if not sale:
         return False
     conn = get_db(); cur = conn.cursor()
@@ -99,13 +149,20 @@ def save_sale(sale):
         conn.commit()
         return cur.rowcount > 0
     except Exception as e:
-        print(f"[sales_listener] save failed: {e}", flush=True)
+        print(f"[sales_listener] save failed for "
+              f"'{sale.get('item_name', '?')[:40]}': "
+              f"{type(e).__name__}: {e}", flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return False
     finally:
         cur.close(); conn.close()
 
 
 async def handle_sale_message(message):
+    """Called from on_message — runs DB write off the event loop."""
     if not message.embeds:
         return False
     saved_any = False
@@ -114,42 +171,62 @@ async def handle_sale_message(message):
             sale = _extract_sale_from_embed(embed, message)
             if not sale:
                 continue
-            is_new = save_sale(sale)
+            # Off-loop DB write
+            is_new = await asyncio.to_thread(_save_sale_single, sale)
             if is_new:
                 print(
                     f"[sales_listener] OK {sale['item_name'][:40]} "
-                    f"R${sale['amount_robux']} ({sale.get('group_name', '?')})",
+                    f"R${sale['amount_robux']} "
+                    f"({sale.get('group_name', '?')})",
                     flush=True,
                 )
                 saved_any = True
             else:
-                print(f"[sales_listener] dup: {sale['item_name'][:40]}", flush=True)
+                print(f"[sales_listener] dup: "
+                      f"{sale['item_name'][:40]}", flush=True)
         except Exception as e:
-            print(f"[sales_listener] embed parse failed: {e}", flush=True)
+            print(f"[sales_listener] embed parse failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
     return saved_any
 
 
-async def backfill_channel(bot, channel_id, limit=500):
-    """Read past messages from sales channel, parse and save all sales."""
+async def backfill_channel(bot, channel_id, limit=200):
+    """
+    Read past messages, extract sales, batch-insert.
+    Uses ONE DB connection for the whole batch.
+    """
     try:
         ch = bot.get_channel(int(channel_id))
         if not ch:
             return 0, 0
-        scanned = 0
-        saved = 0
+    except Exception as e:
+        print(f"[sales_listener] channel lookup failed: {e}", flush=True)
+        return 0, 0
+
+    scanned = 0
+    sales_batch = []
+    try:
         async for msg in ch.history(limit=limit):
             scanned += 1
             for embed in (msg.embeds or []):
                 try:
                     sale = _extract_sale_from_embed(embed, msg)
-                    if sale and save_sale(sale):
-                        saved += 1
+                    if sale:
+                        sales_batch.append(sale)
                 except Exception:
                     continue
-        return scanned, saved
     except Exception as e:
-        print(f"[sales_listener] backfill failed: {e}", flush=True)
-        return 0, 0
+        print(f"[sales_listener] history read failed: {e}", flush=True)
+        return scanned, 0
+
+    if not sales_batch:
+        return scanned, 0
+
+    # One connection for the whole batch
+    inserted, skipped = await asyncio.to_thread(
+        _save_sales_batch, sales_batch
+    )
+    return scanned, inserted
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -157,7 +234,6 @@ async def backfill_channel(bot, channel_id, limit=500):
 # ════════════════════════════════════════════════════════════════════
 
 def sales_summary(days=30):
-    """Returns dict with totals + top items + daily trend."""
     conn = get_db(); cur = conn.cursor()
     try:
         cur.execute("""
@@ -200,7 +276,6 @@ def sales_summary(days=30):
 
 
 def item_sales_summary(item_name, days=30):
-    """Sales for a specific item by name (fuzzy match)."""
     if not item_name:
         return None
     conn = get_db(); cur = conn.cursor()
