@@ -12,12 +12,11 @@ Weights tags by:
 Returns up to 45 tags ranked by sales trigger strength.
 """
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 
-# ── Category auto-detect keywords ──
 CATEGORY_HINTS = {
     "emotes":   ["emote", "dance", "sway", "flip", "bounce", "groove", "spin",
                  "idle", "pose", "wave", "step", "jiggle", "wiggle", "shuffle",
@@ -31,8 +30,7 @@ CATEGORY_HINTS = {
     "neck":     ["necklace", "chain", "scarf", "choker", "pendant", "collar"],
     "shoulder": ["shoulder", "pet", "parrot", "shoulder buddy"],
     "front":    ["front", "chest", "apron", "sash", "front accessory"],
-    "back":     ["back", "backpack", "wings", "cape", "tail", "quiver",
-                 "backpack", "satchel"],
+    "back":     ["back", "backpack", "wings", "cape", "tail", "quiver", "satchel"],
     "waist":    ["waist", "belt", "tail", "skirt", "shorts"],
     "classic":  ["shirt", "tshirt", "t-shirt", "pants", "jacket", "hoodie",
                  "sweater", "sweatshirt", "classic"],
@@ -40,7 +38,7 @@ CATEGORY_HINTS = {
     "gear":     ["sword", "staff", "wand", "bow", "shield", "gear"],
 }
 
-# ── Aesthetic families (used to cluster similar words) ──
+
 AESTHETIC_FAMILIES = {
     "kawaii":     {"cute", "kawaii", "soft", "chibi", "coquette", "dolly",
                    "kawaiicore", "yume", "dreamy", "sweet", "adorable",
@@ -73,12 +71,31 @@ AESTHETIC_FAMILIES = {
 }
 
 
+COLOR_SIBLINGS = {
+    "black": ["dark", "noir", "shadow", "midnight", "onyx", "void"],
+    "white": ["cream", "ivory", "snow", "pearl", "angelic", "pure"],
+    "red":   ["crimson", "cherry", "ruby", "scarlet", "wine", "berry"],
+    "pink":  ["rose", "hot pink", "blush", "magenta", "fuchsia",
+              "bubblegum", "flamingo", "sakura"],
+    "purple": ["lavender", "violet", "lilac", "mauve", "plum", "grape"],
+    "blue":  ["cyan", "sky", "ocean", "sapphire", "ice", "aqua",
+              "denim", "baby blue"],
+    "green": ["mint", "emerald", "sage", "lime", "forest", "olive", "matcha"],
+    "yellow": ["gold", "lemon", "butter", "mustard", "honey", "sunshine"],
+    "orange": ["peach", "coral", "tangerine", "apricot", "rust", "amber"],
+    "brown": ["chocolate", "caramel", "mocha", "tan", "coffee", "earth"],
+    "silver": ["chrome", "metallic", "platinum", "steel", "gray", "grey"],
+    "gold": ["yellow", "golden", "amber", "gilded", "luxury", "royal"],
+    "gray": ["grey", "silver", "smoke", "ash", "storm", "fog"],
+    "grey": ["gray", "silver", "smoke", "ash", "storm", "fog"],
+}
+
+
 # ════════════════════════════════════════════════════════════════════
 # CATEGORY DETECTION
 # ════════════════════════════════════════════════════════════════════
 
 def _detect_category(name, explicit_family=None):
-    """Auto-detect category from name. Explicit wins."""
     if explicit_family and explicit_family in FAMILIES:
         return explicit_family
 
@@ -94,7 +111,7 @@ def _detect_category(name, explicit_family=None):
 
 
 # ════════════════════════════════════════════════════════════════════
-# DB MINING — sales-weighted
+# DB MINING
 # ════════════════════════════════════════════════════════════════════
 
 def _family_sql(family):
@@ -105,14 +122,48 @@ def _family_sql(family):
     return f" and asset_type_id in ({ph})", list(ids)
 
 
+def _extract_tags_from_description(desc, min_len=3, max_len=25):
+    """Extract tag-like tokens from a description."""
+    d = (desc or "").lower()
+    if not d:
+        return []
+
+    # Look for explicit tag block
+    tag_section = ""
+    for marker in ["tags:", "tag:", "keywords:", "search:", "tag -"]:
+        if marker in d:
+            idx = d.index(marker) + len(marker)
+            tag_section = d[idx:idx + 3000]
+            break
+    source = tag_section or d
+
+    tokens = re.findall(r"[a-z][a-z0-9'’\-]{2,25}", source)
+    seen = set()
+    out = []
+    for tok in tokens:
+        tok = tok.strip().strip("'’-,.")
+        if not tok:
+            continue
+        if not (min_len <= len(tok) <= max_len):
+            continue
+        if any(x in tok for x in ["http", "www", ".com", "roblox", "catalog"]):
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
 def _mine_top_seller_tags(cur, name_words, family):
-    """Top sellers in this niche + family. Mine tags weighted by favs."""
+    """Top sellers in niche + family. Weight by favs."""
     if not name_words:
         return Counter()
 
     fam_sql, fam_params = _family_sql(family)
     patterns = [f"%{w}%" for w in name_words[:4]]
 
+    # CORRECT PARAM PASSING: patterns is ONE param (list), fam_params is spread
     cur.execute(f"""
         select description, favorite_count
         from items
@@ -123,40 +174,21 @@ def _mine_top_seller_tags(cur, name_words, family):
           {fam_sql}
         order by favorite_count desc
         limit 40
-    """, patterns + fam_params)
+    """, [patterns] + fam_params)
+
     rows = cur.fetchall()
 
     tag_weight = Counter()
     for desc, favs in rows:
-        d = (desc or "").lower()
-        tag_section = ""
-        for marker in ["tags:", "tag:", "keywords:", "search:", "tag -"]:
-            if marker in d:
-                idx = d.index(marker) + len(marker)
-                tag_section = d[idx:idx + 3000]
-                break
-        source = tag_section or d
-
-        tokens = re.findall(r"[a-z][a-z0-9'’\-]{2,25}", source)
-        weight = 1 + (favs / 1000.0)
-        seen_this_item = set()
-        for tok in tokens:
-            tok = tok.strip().strip("'’-,.")
-            if (3 <= len(tok) <= 25
-                and "http" not in tok
-                and "www" not in tok
-                and ".com" not in tok
-                and "roblox" not in tok
-                and "catalog" not in tok):
-                if tok not in seen_this_item:
-                    tag_weight[tok] += weight
-                    seen_this_item.add(tok)
+        weight = 1 + ((favs or 0) / 1000.0)
+        for tok in _extract_tags_from_description(desc):
+            tag_weight[tok] += weight
 
     return tag_weight
 
 
 def _mine_recent_winners(cur, name_words, family):
-    """Recently launched high-performers. Reflects current trend."""
+    """Recently launched high-performers."""
     if not name_words:
         return Counter()
 
@@ -174,37 +206,21 @@ def _mine_recent_winners(cur, name_words, family):
           {fam_sql}
         order by favorite_count desc
         limit 30
-    """, patterns + fam_params)
+    """, [patterns] + fam_params)
+
     rows = cur.fetchall()
 
     tag_weight = Counter()
     for desc, favs in rows:
-        d = (desc or "").lower()
-        tag_section = ""
-        for marker in ["tags:", "tag:", "keywords:", "search:"]:
-            if marker in d:
-                idx = d.index(marker) + len(marker)
-                tag_section = d[idx:idx + 3000]
-                break
-        source = tag_section or d
-
-        tokens = re.findall(r"[a-z][a-z0-9'’\-]{2,25}", source)
-        weight = (1 + (favs / 500.0)) * 1.5
-        seen = set()
-        for tok in tokens:
-            tok = tok.strip().strip("'’-,.")
-            if (3 <= len(tok) <= 25
-                and "http" not in tok
-                and "www" not in tok):
-                if tok not in seen:
-                    tag_weight[tok] += weight
-                    seen.add(tok)
+        weight = (1 + ((favs or 0) / 500.0)) * 1.5
+        for tok in _extract_tags_from_description(desc):
+            tag_weight[tok] += weight
 
     return tag_weight
 
 
 def _mine_search_demand(cur, name_words):
-    """Real queries from search_suggestions. Highest signal."""
+    """Real queries from search_suggestions."""
     if not name_words:
         return Counter()
 
@@ -216,23 +232,24 @@ def _mine_search_demand(cur, name_words):
         where suggestion ilike any(%s)
         limit 200
     """, (patterns,))
+
     rows = cur.fetchall()
 
     tag_weight = Counter()
-    for (suggestion,) in rows:
-        s = (suggestion or "").lower().strip()
+    for row in rows:
+        s = (row[0] or "").lower().strip()
         if not s or len(s) > 30:
             continue
-        if not any(x in s for x in ["http", "www", ".com"]):
-            tag_weight[s] += 3.0
-            for w in re.findall(r"[a-z]{3,}", s):
-                tag_weight[w] += 0.5
+        if any(x in s for x in ["http", "www", ".com"]):
+            continue
+        tag_weight[s] += 3.0
+        for w in re.findall(r"[a-z]{3,}", s):
+            tag_weight[w] += 0.5
 
     return tag_weight
 
 
 def _find_aesthetic_matches(name_words):
-    """Find aesthetic families matching any name word."""
     matched_families = []
     for word in name_words:
         for fam_name, members in AESTHETIC_FAMILIES.items():
@@ -251,29 +268,9 @@ def _find_aesthetic_matches(name_words):
 
 
 def _color_matches(name_words):
-    """Color sibling expansion."""
-    COLORS = {
-        "black": ["dark", "noir", "shadow", "midnight", "onyx", "void"],
-        "white": ["cream", "ivory", "snow", "pearl", "angelic", "pure"],
-        "red":   ["crimson", "cherry", "ruby", "scarlet", "wine", "berry"],
-        "pink":  ["rose", "hot pink", "blush", "magenta", "fuchsia",
-                  "bubblegum", "flamingo", "sakura"],
-        "purple": ["lavender", "violet", "lilac", "mauve", "plum", "grape"],
-        "blue":  ["cyan", "sky", "ocean", "sapphire", "ice", "aqua",
-                  "denim", "baby blue"],
-        "green": ["mint", "emerald", "sage", "lime", "forest", "olive",
-                  "matcha"],
-        "yellow": ["gold", "lemon", "butter", "mustard", "honey", "sunshine"],
-        "orange": ["peach", "coral", "tangerine", "apricot", "rust", "amber"],
-        "brown": ["chocolate", "caramel", "mocha", "tan", "coffee", "earth"],
-        "silver": ["chrome", "metallic", "platinum", "steel", "gray", "grey"],
-        "gold": ["yellow", "golden", "amber", "gilded", "luxury", "royal"],
-        "gray": ["grey", "silver", "smoke", "ash", "storm", "fog"],
-        "grey": ["gray", "silver", "smoke", "ash", "storm", "fog"],
-    }
     tags = Counter()
     for w in name_words:
-        for sib in COLORS.get(w, []):
+        for sib in COLOR_SIBLINGS.get(w, []):
             tags[sib] += 1.5
     return tags
 
@@ -283,7 +280,6 @@ def _color_matches(name_words):
 # ════════════════════════════════════════════════════════════════════
 
 def generate_tags(item_name, family=None, max_tags=45):
-    """Generate 45 sales-triggering tags for an item."""
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
@@ -299,22 +295,35 @@ def generate_tags(item_name, family=None, max_tags=45):
 
     detected_family = _detect_category(item_name, explicit_family=family)
 
-    conn = get_db(); cur = conn.cursor()
+    # Each DB call isolated — one failure doesn't kill the rest
+    top_sellers = Counter()
+    recent_winners = Counter()
+    search_demand = Counter()
+
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        top_sellers    = _mine_top_seller_tags(cur, name_words, detected_family)
-        recent_winners = _mine_recent_winners(cur, name_words, detected_family)
-        search_demand  = _mine_search_demand(cur, name_words)
-    except Exception as e:
-        print(f"[tag_generator] DB mining failed: {e}", flush=True)
-        top_sellers = Counter()
-        recent_winners = Counter()
-        search_demand = Counter()
+        try:
+            top_sellers = _mine_top_seller_tags(cur, name_words, detected_family)
+        except Exception as e:
+            print(f"[tag_generator] top_seller failed: {e}", flush=True)
+
+        try:
+            recent_winners = _mine_recent_winners(cur, name_words, detected_family)
+        except Exception as e:
+            print(f"[tag_generator] recent_winners failed: {e}", flush=True)
+
+        try:
+            search_demand = _mine_search_demand(cur, name_words)
+        except Exception as e:
+            print(f"[tag_generator] search_demand failed: {e}", flush=True)
     finally:
         cur.close(); conn.close()
 
     aesthetic = _find_aesthetic_matches(name_words)
-    colors    = _color_matches(name_words)
+    colors = _color_matches(name_words)
 
+    # Combine with weights
     combined = Counter()
     for d, mult in [
         (search_demand, 1.0),
