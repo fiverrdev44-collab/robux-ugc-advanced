@@ -94,9 +94,17 @@ def run_chain(concept, family=None, parent_id=None):
     try:
         from desc_forge import _fetch_top_descriptions
         seed_kw = None
-        if intent.get("specific_moves"):
+        # Prefer concept's first word
+        if concept:
+            parts = str(concept).strip().split()
+            if parts:
+                first = parts[0]
+                if ":" in first:
+                    first = first.split(":", 1)[1]
+                seed_kw = first
+        if not seed_kw and intent.get("specific_moves"):
             seed_kw = intent["specific_moves"][0]
-        elif allow_list:
+        if not seed_kw and allow_list:
             seed_kw = allow_list[0]
         if seed_kw:
             seed_kw = str(seed_kw).strip().split()[0]
@@ -247,7 +255,8 @@ def format_chain(result):
         final_lines.append("**3. Paste description** (from above block)")
 
     if result["niche"]:
-        best = max(result["niche"], key=lambda x: (
+        # FIX: min() picks the BEST bucket (GOLD=1 is lowest number)
+        best = min(result["niche"], key=lambda x: (
             1 if x["bucket"] == "GOLD" else
             2 if x["bucket"] == "OPPORTUNITY" else
             3 if x["bucket"] == "VIRGIN" else
