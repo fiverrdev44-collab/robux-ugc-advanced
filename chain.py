@@ -1,10 +1,12 @@
 """
 chain.py — full pipeline in one command.
-Runs: intent → niche → market → descriptions → focused title pass → FINAL.
+Runs: intent → niche → market → descriptions → focused title pass →
+      smart pipeline (brainstorm depth) → FINAL.
 
-Uses at most 2 Gemini calls:
+Uses at most 2-3 Gemini calls:
   1. Big synthesize_hybrid prompt (market analysis + description)
   2. Focused title pass (brainstorm-quality titles)
+  3. Smart pipeline (parallel live enrichment + ranked titles)
 
 The focused pass OVERWRITES the titles from the big prompt because small
 models dilute titles when asked to do 15 things at once.
@@ -170,7 +172,6 @@ def run_chain(concept, family=None, parent_id=None):
             for it in top_items[:8]
         ) or "(none)"
 
-        # Mandatory keyword rule — only if niche is GOLD/OPPORTUNITY/VIRGIN
         keyword_rule = ""
         if best_niche_kw and best_niche_bucket in ("GOLD", "OPPORTUNITY", "VIRGIN"):
             keyword_rule = (
@@ -179,7 +180,6 @@ def run_chain(concept, family=None, parent_id=None):
                 f"`{best_niche_kw}` as the FIRST or SECOND token.\n"
             )
 
-        # Parent override for variant mode
         parent_rule = ""
         if parent_name:
             parent_rule = (
@@ -239,7 +239,6 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
                 focused_data = json.loads(m.group(0)) if m else {}
 
             if focused_data:
-                # Override weak titles from the big prompt
                 for key in ("titles_safe", "titles_differentiated",
                             "titles_longtail", "titles_viral"):
                     if focused_data.get(key):
@@ -247,6 +246,45 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
                 synth["_focused_title_pass"] = True
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
+
+    # ── Stage 6: SMART PIPELINE — brainstorm depth ──
+    pipeline_report = None
+    try:
+        from smart_pipeline import run_full_pipeline
+        from rising_gaps import CATEGORY_MAP
+
+        cfg = get_category_config(family)
+
+        ai_titles = []
+        for k in ("titles_safe", "titles_differentiated",
+                  "titles_longtail", "titles_viral"):
+            ai_titles.extend(synth.get(k) or [])
+
+        cat_ids = None
+        try:
+            if family in CATEGORY_MAP:
+                cat_ids = CATEGORY_MAP[family]
+            else:
+                cat_ids = cfg.get("asset_type_ids") or None
+        except Exception:
+            cat_ids = None
+
+        def _pipeline():
+            return run_full_pipeline(
+                description=concept,
+                intent=intent,
+                item_type=family,
+                category_asset_ids=cat_ids,
+                ai_titles=ai_titles,
+                live_enrich=True,
+                db_factory=get_db,
+            )
+
+        pr = _pipeline()
+        if pr and pr.get("report"):
+            pipeline_report = pr["report"]
+    except Exception as e:
+        print(f"[chain] smart pipeline failed: {e}", flush=True)
 
     return {
         "concept": concept,
@@ -263,6 +301,7 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
         "allow_list": allow_list[:20],
         "desc_examples": desc_examples,
         "synth": synth,
+        "pipeline_report": pipeline_report,
     }
 
 
@@ -352,6 +391,31 @@ def format_chain(result):
         if synth.get("killer_keywords"):
             kw = ", ".join(f"`{k}`" for k in synth["killer_keywords"][:12])
             chunks.append(f"## 🎯 Killer keywords\n{kw}")
+
+    # ── 10 TITLES — grouped like brainstorm ──
+    if synth:
+        title_groups = [
+            ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
+            ("🎯 DIFFERENTIATED (unique angle)", synth.get("titles_differentiated") or []),
+            ("🔎 LONG-TAIL SEO (4+ keywords)",   synth.get("titles_longtail") or []),
+            ("🔥 VIRAL (meme/TikTok hook)",      synth.get("titles_viral") or []),
+        ]
+        if any(group_titles for _, group_titles in title_groups):
+            lines = ["# 📝 10 TITLES\n"]
+            for gname, group_titles in title_groups:
+                if not group_titles:
+                    continue
+                lines.append(f"**{gname}**")
+                for t in group_titles:
+                    lines.append(f"• `{t}`")
+                lines.append("")
+            chunks.append("\n".join(lines))
+
+    # ── SMART PIPELINE — brainstorm depth ──
+    if result.get("pipeline_report"):
+        rep = result["pipeline_report"]
+        for i in range(0, len(rep), 1900):
+            chunks.append(rep[i:i+1900])
 
     # ── FINAL BLOCK ──
     final_lines = ["# ✅ FINAL — DO THIS"]
