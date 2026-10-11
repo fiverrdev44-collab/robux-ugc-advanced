@@ -255,7 +255,7 @@ def format_chain(result):
         final_lines.append("**3. Paste description** (from above block)")
 
     if result["niche"]:
-        # FIX: min() picks the BEST bucket (GOLD=1 is lowest number)
+        # FIX: min() picks BEST bucket (GOLD=1 is lowest number)
         best = min(result["niche"], key=lambda x: (
             1 if x["bucket"] == "GOLD" else
             2 if x["bucket"] == "OPPORTUNITY" else
