@@ -86,7 +86,7 @@ def register_sales_commands(bot, get_db):
         )
 
     @bot.command(name="sales_backfill")
-    async def sales_backfill_cmd(ctx, limit: int = 500):
+    async def sales_backfill_cmd(ctx, limit: int = 200):
         """
         Read past sale notifications from SALES_CHANNEL_ID and import them.
         !sales_backfill          → last 500 messages
