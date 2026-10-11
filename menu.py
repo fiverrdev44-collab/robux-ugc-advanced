@@ -77,6 +77,23 @@ class MenuView(discord.ui.View):
             "Example: `!chain variant 121930221694467 neon`"
         )
 
+    @discord.ui.button(label="🏷️ Generate tags", style=discord.ButtonStyle.success)
+    async def tags_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "**Step 1 of 2 — Pick your item name**\n"
+            "Use the name you're launching with, or the winning name from "
+            "`!chain`'s FINAL block.\n\n"
+            "**Step 2 of 2 — Run:**\n"
+            "`!tags <your item name>`\n\n"
+            "**With category:**\n"
+            "`!tags emotes:Smooth Hip Sway Dance`\n"
+            "`!tags hair:Fluffy Cat Beanie`\n\n"
+            "**What you get:** 45 tags weighted by what actually appears "
+            "in top-selling items in that niche + real Roblox search queries.\n\n"
+            "Copy the tag line into your Roblox description — every tag "
+            "traces to real data, no hallucination."
+        )
+
     @discord.ui.button(label="ℹ️ Full workflow", style=discord.ButtonStyle.secondary)
     async def workflow(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
@@ -88,6 +105,10 @@ class MenuView(discord.ui.View):
             "`!verdict <item_id>` → do what it says\n\n"
             "**3. Need ideas?**\n"
             "`!converge emotes` → pick top 🔥 or 🟢\n\n"
+            "**Bonus commands:**\n"
+            "`!tags <name>` → 45 sales-weighted SEO tags\n"
+            "`!desc_forge <kw>` → style-matched description\n"
+            "`!autopsy <id>` → deep dive when verdict says RENAME\n\n"
             "**That's it. No other commands needed.**\n\n"
             "**Daily:** `!verdict` on your live items\n"
             "**Weekly:** `!converge` + launch one variant\n"
