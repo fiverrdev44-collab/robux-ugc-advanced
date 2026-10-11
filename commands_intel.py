@@ -8,6 +8,8 @@ HARD RULES:
 - Pivot keyword MANDATORY as starting token in >=5 of 10 titles.
 - SATURATED/DEAD seed words FORBIDDEN as first token.
 - Post-filter rejects any title starting with a forbidden word.
+
+VERDICT: multi-signal (percentile + age + favs + velocity).
 """
 import os
 import re
@@ -227,24 +229,28 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !verdict — fast, one-line decision. Percentile + 3 actions.
+    # !verdict — multi-signal: age · favs · velocity · percentile
     # =========================================================
     @bot.command(name="verdict")
     async def verdict_cmd(ctx, item_id: int):
-        """One-line verdict: DOUBLE_DOWN / KEEP / RENAME / KILL."""
+        """Multi-signal verdict: age · favs · velocity · percentile."""
         def _run():
             conn = get_db(); cur = conn.cursor()
             try:
                 cur.execute("""
-                    select name, favorite_count, price
+                    select name, favorite_count, price,
+                           extract(epoch from (now() - coalesce(created_at, fetched_at)))/86400.0
                     from items where id = %s
                 """, (item_id,))
                 r = cur.fetchone()
                 if not r:
                     return None
-                name, favs, price = r
+                name, favs, price, age_days = r
                 pct = item_percentile(cur, item_id)
-                return {"name": name, "favs": favs, "price": price, "pct": pct}
+                return {
+                    "name": name, "favs": favs or 0, "price": price or 0,
+                    "age_days": float(age_days or 0), "pct": pct,
+                }
             finally:
                 cur.close(); conn.close()
 
@@ -256,35 +262,56 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             return await ctx.send(f"❌ Item `{item_id}` not found.")
 
         pct = data["pct"]
-        verdict, emoji = decide_verdict(pct["percentile"])
+        verdict, emoji, reason = decide_verdict(
+            pct["percentile"],
+            age_days=data["age_days"],
+            favs=data["favs"],
+            velocity=pct["velocity"],
+        )
 
-        if verdict == "DOUBLE_DOWN":
-            actions = ["Launch a variant within 7 days — same motion, new theme.",
-                       "Post 1 TikTok/day for 7 days.",
-                       "Reply to every comment within 1h."]
+        if verdict == "TOO_NEW":
+            actions = [
+                f"Wait {max(1, int(7 - data['age_days']))} more days",
+                "Post 1 TikTok per day while you wait",
+                f"Re-run `!verdict {item_id}` on day 7",
+            ]
+        elif verdict == "DOUBLE_DOWN":
+            actions = [
+                f"Launch a variant within 7 days: `!chain variant {item_id} neon`",
+                "Post 1 TikTok/day for 7 days",
+                "Reply to every comment within 1h",
+            ]
         elif verdict == "KEEP":
-            actions = ["Post 3 TikToks this week (cross-post Shorts + Reels).",
-                       f"Test price at R${max((data['price'] or 0) - 5, 45)}.",
-                       f"Re-run `!verdict {item_id}` in 14 days."]
+            actions = [
+                "Post 3 TikToks this week (cross-post Shorts + Reels)",
+                f"Test price at R${max((data['price'] or 0) - 5, 45)}",
+                f"Re-run `!verdict {item_id}` in 14 days",
+            ]
         elif verdict == "RENAME":
-            actions = [f"Rename using a GOLD keyword from `!converge {pct['family']}`.",
-                       "Change thumbnail first frame — motion, not static.",
-                       "Re-post to TikTok with a 1.5s hook."]
-        else:
-            actions = ["Stop investing in this item.",
-                       f"Run `!converge {pct['family']}` for a snipe zone.",
-                       "Reallocate content to your top-2 performers."]
+            actions = [
+                f"Rename using a GOLD keyword from `!converge {pct['family']}`",
+                "Change thumbnail first frame — motion, not static",
+                "Re-post to TikTok with a 1.5s hook",
+            ]
+        else:  # KILL
+            actions = [
+                "Stop investing in this item",
+                f"Run `!converge {pct['family']}` for a fresh niche",
+                "Reallocate content time to your top 2 performers",
+            ]
 
         lines = [
             f"{emoji} **{data['name'][:60]}**",
-            f"**{verdict}** — top **{pct['percentile']}%** of "
-            f"`{pct['family']}` by velocity",
-            f"_{pct['velocity']}/day · {pct['age_days']}d · "
-            f"{data['favs']}♥ · {pct['sample_size']} peers_\n",
+            f"**{verdict.replace('_', ' ')}** — top **{pct['percentile']}%** "
+            f"of `{pct['family']}`",
+            f"_{data['age_days']:.1f}d old · {data['favs']}♥ · "
+            f"{pct['velocity']}/day · {pct['sample_size']} peers_\n",
+            f"**Why:** {reason}\n",
             "**3 actions:**",
         ]
         for i, a in enumerate(actions, 1):
             lines.append(f"{i}. {a}")
+
         await ctx.send("\n".join(lines)[:1900])
 
     # =========================================================
@@ -374,7 +401,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
             competition_data = _build_per_word_competition(cur, name_words, cap=6)
 
-            # ── 🎯 SHARED INTELLIGENCE — percentile + portfolio ──
             try:
                 pct_data = item_percentile(cur, item_id)
             except Exception as e:
@@ -405,9 +431,20 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         # ── 🎯 DECISION LINE — FIRST MESSAGE ─────────────────
         if pct_data:
-            verdict, v_emoji = decide_verdict(pct_data["percentile"])
+            verdict, v_emoji, v_reason = decide_verdict(
+                pct_data["percentile"],
+                age_days=item_stats["age_days"],
+                favs=item_stats["favs"],
+                velocity=pct_data["velocity"],
+            )
 
-            if verdict == "DOUBLE_DOWN":
+            if verdict == "TOO_NEW":
+                acts = [
+                    f"Wait {max(1, int(7 - item_stats['age_days']))} more days",
+                    "Post 1 TikTok per day while you wait",
+                    f"Re-run `!autopsy {item_id}` on day 7",
+                ]
+            elif verdict == "DOUBLE_DOWN":
                 acts = ["Launch a **variant** within 7 days — same motion, new theme.",
                         "Post 1 TikTok/day for 7 days.",
                         "Reply to every comment within 1h."]
@@ -425,11 +462,11 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                         "Reallocate content to your top-2 performers."]
 
             dec_lines = [
-                f"{v_emoji} **{name[:60]}** — **{verdict}**",
-                f"Top **{pct_data['percentile']}%** of `{pct_data['family']}` "
-                f"by velocity",
-                f"_{pct_data['velocity']}/day · {pct_data['age_days']}d · "
-                f"{favs}♥ · {pct_data['sample_size']} peers compared_\n",
+                f"{v_emoji} **{name[:60]}** — **{verdict.replace('_', ' ')}**",
+                f"Top **{pct_data['percentile']}%** of `{pct_data['family']}`",
+                f"_{pct_data['age_days']}d old · {favs}♥ · "
+                f"{pct_data['velocity']}/day · {pct_data['sample_size']} peers_\n",
+                f"**Why:** {v_reason}\n",
                 "**3 actions:**",
             ]
             for i, a in enumerate(acts, 1):
@@ -590,7 +627,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
-        # ── Inject niche intel into the recovery prompt ────
         niche_block = ""
         try:
             from market_velocity import format_niche_intel_for_prompt
@@ -601,7 +637,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception:
             pass
 
-        # ── 🎯 PORTFOLIO CONTEXT — what already works for YOU ──
         portfolio_block = ""
         if portfolio_data and portfolio_data.get("winners"):
             portfolio_block = "\n=== CREATOR'S OWN TOP PERFORMERS ===\n"
@@ -615,7 +650,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 "this creator, not generic.\n"
             )
 
-        # ── HARD RULES: pivot mandatory, saturated forbidden as first token ──
         bp = (deep_intel or {}).get("best_pivot") or {}
         bp_kw = (bp.get("keyword") or "").strip().lower()
 
