@@ -6,6 +6,7 @@ Single source of truth for:
   - percentile ranking vs category peers
   - portfolio context (your winners, your losers)
   - multi-signal verdict logic
+  - deterministic pivot picker (no AI flip-flop)
 
 VERDICT PRIORITY ORDER:
   1. Sales data (strongest signal — real money)
@@ -187,22 +188,17 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
     sales = int(total_sales) if total_sales is not None else None
     sample = int(sample_size) if sample_size is not None else None
 
-    # Low-confidence warning appended to reasons
     low_conf = ""
     if sample is not None and sample < 20:
         low_conf = f" (⚠️ only {sample} peers — low confidence)"
 
-    # ══════════════════════════════════════════════════════════
-    # PRIORITY 1: SALES DATA (strongest signal)
-    # ══════════════════════════════════════════════════════════
+    # PRIORITY 1: SALES
     if sales is not None and sales >= 10:
         return ("DOUBLE_DOWN", "🔥",
                 f"{sales} sales in 30d. Real money. Ship a variant.{low_conf}")
-
     if sales is not None and sales >= 3:
         return ("KEEP", "✅",
                 f"{sales} sales in 30d. Steady revenue.{low_conf}")
-
     if (sales is not None and sales == 0
             and age is not None and age >= 30
             and f is not None and f >= 5):
@@ -210,16 +206,12 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
                 f"{age:.0f}d · {f}♥ · 0 sales in 30d. "
                 f"Favorites don't convert.{low_conf}")
 
-    # ══════════════════════════════════════════════════════════
-    # PRIORITY 2: FAST RISER (velocity override)
-    # ══════════════════════════════════════════════════════════
+    # PRIORITY 2: FAST RISER
     if v >= 10 and age is not None and age >= 3:
         return ("DOUBLE_DOWN", "🔥",
                 f"{v}/day at {age:.0f}d. Velocity alone wins.{low_conf}")
 
-    # ══════════════════════════════════════════════════════════
-    # PRIORITY 3: HARD KILL RULES
-    # ══════════════════════════════════════════════════════════
+    # PRIORITY 3: HARD KILL
     if age is not None and f is not None:
         if age >= 60 and f < 20:
             return ("KILL", "🪦",
@@ -236,18 +228,14 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
             return ("KILL", "🪦",
                     f"{age:.0f}d · {f}♥. Zero traction after a week.{low_conf}")
 
-    # ══════════════════════════════════════════════════════════
     # PRIORITY 4: FREEFALLER
-    # ══════════════════════════════════════════════════════════
     if (v < 0.3 and age is not None and age >= 14
             and f is not None and f < 50):
         return ("KILL", "🪦",
                 f"{v}/day at {age:.0f}d · {f}♥. Trajectory has "
                 f"flatlined.{low_conf}")
 
-    # ══════════════════════════════════════════════════════════
-    # PRIORITY 5: TOO_NEW (with velocity exception)
-    # ══════════════════════════════════════════════════════════
+    # PRIORITY 5: TOO_NEW
     if age is not None and age < 7:
         if f is None:
             return ("TOO_NEW", "⏳",
@@ -261,9 +249,7 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
                     f"{age:.1f}d old · {f}♥. "
                     f"Re-run in {days_left} days.")
 
-    # ══════════════════════════════════════════════════════════
-    # PRIORITY 6: PERCENTILE BUCKETS
-    # ══════════════════════════════════════════════════════════
+    # PRIORITY 6: PERCENTILE
     if p >= 90:
         return ("DOUBLE_DOWN", "🔥",
                 f"Top {100 - int(p)}% of peers. Strong.{low_conf}")
@@ -283,3 +269,61 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
 
     return ("KILL", "🪦",
             f"Bottom {int(p)}% of peers. No signal to salvage.{low_conf}")
+
+
+# ── DETERMINISTIC PIVOT PICKER ───────────────────────────────────────
+def pick_pivot_from_data(niche_data, keyword_intel=None):
+    """
+    Deterministic pivot picker. Uses real DB data, not AI opinion.
+    Same input → same output. Returns (keyword, confidence, reason).
+    """
+    if not niche_data:
+        return (None, 0.0, "no niche data")
+
+    scored = []
+    for k in niche_data:
+        bucket = k.get("bucket", "NEUTRAL")
+        median = k.get("median_favs", 0)
+        supply = k.get("supply", 0)
+        demand = k.get("demand", 0)
+
+        bmap = {"GOLD": 100, "OPPORTUNITY": 80, "VIRGIN": 70,
+                "NEUTRAL": 40, "SATURATED": 20, "GHOST": 5}
+        b = bmap.get(bucket, 40)
+
+        m = min(median / 50.0, 3.0) * 15
+        d = min(demand / 100.0, 2.0) * 10
+
+        if supply < 5:
+            s = -20
+        elif supply <= 50:
+            s = 20
+        elif supply <= 150:
+            s = 5
+        else:
+            s = -10
+
+        total = b + m + d + s
+        scored.append({
+            "keyword": k["keyword"],
+            "score": total,
+            "bucket": bucket,
+            "median": median,
+            "supply": supply,
+            "demand": demand,
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    best = scored[0]
+
+    if len(scored) > 1:
+        margin = best["score"] - scored[1]["score"]
+        confidence = min(margin / 30.0, 1.0)
+    else:
+        confidence = 0.5
+
+    reason = (
+        f"bucket={best['bucket']} · supply={best['supply']} · "
+        f"median={best['median']} · demand={best['demand']}"
+    )
+    return (best["keyword"], round(confidence, 2), reason)
