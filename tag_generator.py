@@ -1,20 +1,12 @@
 """
 tag_generator.py — sales-weighted SEO tag generator.
 
-Sources (weighted by sales signal):
-  1. Live Roblox top sellers in the niche (fetched if DB is thin)
-  2. Your DB top sellers in the niche
-  3. Real search_suggestions queries
-  4. Aesthetic family siblings
-  5. Color siblings
-  6. Name words (base boost)
-
-Every tag must appear in 2+ top sellers OR be a real search query.
-Nothing hallucinated.
-
-FIX: generate_tags() translates category_configs family names
-     (emote, accessory, clothing...) to convergence_engine family
-     names (emotes, neck, tops...) before FAMILIES.get() lookup.
+FIXES in this version:
+  - Translates category_configs family names → convergence_engine
+    family names before FAMILIES.get()
+  - Relevance gate rejects tags that don't share a root with the item
+    name and aren't in the aesthetic/color sibling lists.
+    (Kills "whipped cream" leaking into a "hip sway" tag block.)
 """
 import os
 import re
@@ -25,7 +17,7 @@ from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 
 ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
-MIN_DB_TAGS = 12  # If DB produces fewer than this, hit Roblox live
+MIN_DB_TAGS = 12
 
 
 CATEGORY_HINTS = {
@@ -102,7 +94,6 @@ COLOR_SIBLINGS = {
 }
 
 
-# Common English + promo words that are NOT tags
 _ENGLISH_BLOCK = {
     "the","and","for","with","you","your","from","that","this","into",
     "over","will","can","are","has","how","its","our","all","have","had",
@@ -141,7 +132,6 @@ def _is_tag_shaped(tok):
 
 
 def _extract_tags_from_description(desc):
-    """Only mine explicit tag blocks. Skip prose and promo."""
     d = (desc or "").lower()
     if not d:
         return []
@@ -176,10 +166,6 @@ def _extract_tags_from_description(desc):
     return out
 
 
-# ════════════════════════════════════════════════════════════════════
-# LIVE ROBLOX FALLBACK
-# ════════════════════════════════════════════════════════════════════
-
 def _family_to_roblox_category(family):
     if not family:
         return None
@@ -190,10 +176,6 @@ def _family_to_roblox_category(family):
 
 
 def _fetch_live_items(keyword, family=None, limit=30):
-    """
-    Hit Roblox catalog search live, extract descriptions, save to DB.
-    Returns list of (name, description, favs).
-    """
     try:
         cookie = (os.getenv("ROBLOSECURITY_COOKIE_1")
                   or os.getenv("ROBLOSECURITY_COOKIE"))
@@ -260,7 +242,6 @@ def _fetch_live_items(keyword, family=None, limit=30):
 
 
 def _mine_live_tags(keyword, family):
-    """Fetch live items, mine their tag blocks, weight by favs."""
     rows = _fetch_live_items(keyword, family=family, limit=30)
     if not rows:
         return Counter()
@@ -276,16 +257,11 @@ def _mine_live_tags(keyword, family):
             tag_weight[tag] += weight
             tag_appearances[tag] += 1
 
-    # Only keep tags appearing in 2+ live items
     return Counter({
         tag: score for tag, score in tag_weight.items()
         if tag_appearances[tag] >= 2
     })
 
-
-# ════════════════════════════════════════════════════════════════════
-# CATEGORY DETECTION
-# ════════════════════════════════════════════════════════════════════
 
 def _detect_category(name, explicit_family=None):
     if explicit_family and explicit_family in FAMILIES:
@@ -300,10 +276,6 @@ def _detect_category(name, explicit_family=None):
         return scores.most_common(1)[0][0]
     return "other"
 
-
-# ════════════════════════════════════════════════════════════════════
-# DB MINING
-# ════════════════════════════════════════════════════════════════════
 
 def _family_sql(family):
     ids = FAMILIES.get(family)
@@ -438,17 +410,11 @@ def _color_matches(name_words):
     return tags
 
 
-# ════════════════════════════════════════════════════════════════════
-# MAIN GENERATOR
-# ════════════════════════════════════════════════════════════════════
-
 def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
-    # FIX: translate category_configs family names → convergence_engine
-    # family names. Otherwise FAMILIES.get("emote") returns None and the
-    # category filter silently drops.
+    # FIX 1: translate category_configs → convergence_engine family
     if family:
         try:
             from category_configs import to_convergence_family
@@ -509,13 +475,12 @@ def generate_tags(item_name, family=None, max_tags=45):
     aesthetic = _find_aesthetic_matches(name_words)
     colors = _color_matches(name_words)
 
-    # ── Combine with source weights ──
     combined = Counter()
     for source, mult in [
-        (live_tags, 1.5),       # live winners = highest signal
-        (search_demand, 1.2),   # real queries = strong
-        (recent_winners, 1.0),  # recent winners
-        (top_sellers, 0.7),     # all-time sellers
+        (live_tags, 1.5),
+        (search_demand, 1.2),
+        (recent_winners, 1.0),
+        (top_sellers, 0.7),
         (aesthetic, 1.2),
         (colors, 1.0),
     ]:
@@ -535,6 +500,42 @@ def generate_tags(item_name, family=None, max_tags=45):
         and 3 <= len(tag) <= 25
         and not any(c in tag for c in "0123456789@#")
     }
+
+    # ── FIX 2: RELEVANCE GATE ──────────────────────────────────
+    # Reject tags that don't share a root with the item name and aren't
+    # in the aesthetic/color sibling lists. This kills "whipped cream"
+    # leaking into a "hip sway" tag block.
+    name_roots = set()
+    for w in name_words:
+        name_roots.add(w)
+        if len(w) >= 5:
+            name_roots.add(w[:4])
+        if len(w) >= 4:
+            name_roots.add(w[:3])
+
+    aesthetic_set = set(aesthetic.keys())
+    color_set = set(colors.keys())
+
+    def _is_relevant(tag):
+        if tag in name_roots:
+            return True
+        if tag in aesthetic_set or tag in color_set:
+            return True
+        # Multi-word tags: accept if ANY word shares a root
+        for part in tag.split():
+            if part in name_roots:
+                return True
+            for r in name_roots:
+                if len(r) >= 4 and (r in part or part in r):
+                    return True
+        # Single-word: substring check
+        for r in name_roots:
+            if len(r) >= 4 and (r in tag or tag in r):
+                return True
+        return False
+
+    filtered = {t: s for t, s in filtered.items() if _is_relevant(t)}
+    # ────────────────────────────────────────────────────────────
 
     ranked = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
     final_tags = [tag for tag, _ in ranked[:max_tags]]
