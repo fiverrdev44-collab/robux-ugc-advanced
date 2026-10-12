@@ -7,14 +7,19 @@ Includes:
 - Watchdog thread (uses bot.latency + os._exit(1) to force Render restart)
 - Background scheduler (daily snapshot + ML train + daily report)
 - Sales listener (reads Roblox sale webhook embeds from SALES_CHANNEL_ID)
-- Login backoff — prevents Discord rate limit on crash-restart loops
+- Main event loop captured in on_ready → exposed as _main_loop for scheduler
+
+FIXES:
+- Captures bot's running loop in on_ready (bot.loop doesn't exist in d.py 2.x)
+- Removed bot.run() retry loop — single attempt + os._exit(1) for clean restart
 """
 import os
 import time
+import asyncio
 import threading
 import discord
 from discord.ext import commands
-from flask import Flask
+from flask import Flask, request
 
 from bot_core import get_db, ASSET_TYPE_NAMES
 from commands_guide import register_guide_commands
@@ -28,11 +33,21 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 _boot_done = False
+_main_loop = None   # captured in on_ready — scheduler uses this
 
 
 @bot.event
 async def on_ready():
-    global _boot_done
+    global _boot_done, _main_loop
+
+    # Capture the bot's running event loop for the scheduler
+    if _main_loop is None:
+        try:
+            _main_loop = asyncio.get_running_loop()
+            print("🔗 Main event loop captured for scheduler.", flush=True)
+        except Exception as e:
+            print(f"⚠️ Failed to capture main loop: {e}", flush=True)
+
     print(f"✅ {bot.user} is online", flush=True)
 
     if _boot_done:
@@ -122,7 +137,7 @@ except Exception as e:
     print(f"⚠️ [scheduler] Failed to start: {e}", flush=True)
 
 
-# ── Flask health check for Render ────────────────────────────
+# ── Flask health check + report trigger for Render ───────────
 app = Flask(__name__)
 
 
@@ -141,6 +156,29 @@ def health():
         return "OK", 200
     except Exception as e:
         return f"Health check error: {e}", 503
+
+
+@app.route('/trigger-report', methods=['POST'])
+def trigger_report():
+    """
+    External trigger for the daily sales report.
+    Auth via X-Trigger-Token header.
+    Used by GitHub Actions backup cron so the report fires even
+    if Render restarts near 18:00 UTC.
+    """
+    expected = os.getenv("TRIGGER_TOKEN", "").strip()
+    if not expected:
+        return "TRIGGER_TOKEN not set", 500
+    provided = request.headers.get("X-Trigger-Token", "").strip()
+    if provided != expected:
+        return "Unauthorized", 401
+
+    try:
+        from scheduler import _run_post_monitor
+        _run_post_monitor()
+        return "OK", 200
+    except Exception as e:
+        return f"Error: {e}", 500
 
 
 def run_flask():
@@ -176,30 +214,16 @@ def watchdog():
             print(f"🐕 [watchdog] Error: {e}", flush=True)
 
 
-# ── Main entry with login backoff ────────────────────────────
+# ── Main entry ───────────────────────────────────────────────
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
     print("🔌 Starting bot...", flush=True)
-
-    # Login backoff — prevents Discord rate limit on crash loops
-    attempt = 0
-    while True:
-        try:
-            bot.run(TOKEN)
-            break  # clean shutdown
-        except discord.errors.HTTPException as e:
-            # Rate limit → long backoff
-            attempt += 1
-            wait = min(120 * (2 ** min(attempt, 4)), 1800)  # 120s, 240s, 480s, 960s, 1800s cap
-            print(f"❌ Discord HTTPException (attempt {attempt}): {e}", flush=True)
-            print(f"⏳ Waiting {wait}s before retry (rate limit backoff)", flush=True)
-            time.sleep(wait)
-        except Exception as e:
-            # Other crash → shorter backoff
-            attempt += 1
-            wait = min(60 * (2 ** min(attempt, 4)), 900)
-            print(f"❌ Bot crashed (attempt {attempt}): {type(e).__name__}: {e}", flush=True)
-            print(f"⏳ Waiting {wait}s before retry", flush=True)
-            time.sleep(wait)
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        print(f"❌ bot.run() failed: {type(e).__name__}: {e}", flush=True)
+        print("⏳ Exiting for Render restart in 30s...", flush=True)
+        time.sleep(30)
+        os._exit(1)
