@@ -2,8 +2,11 @@
 tag_generator.py — sales-weighted SEO tag generator.
 
 FIXES in this version:
-  - ACCESSORY UMBRELLA: "accessory" family matches all 5 sub-types
-    (43 neck, 44 shoulder, 45 front, 46 back, 47 waist).
+  - ACCESSORY UMBRELLA + SUB-TYPE:
+      * "accessory:" without a hint → all 5 sub-types (43-47)
+      * "accessory:kawaii backpack" → detects "backpack" → back only [46]
+      * "accessory:gold chain" → detects "chain" → neck only [43]
+      * Falls back to umbrella if no sub-type hint in name.
   - Translates category_configs family names → convergence_engine
     family names before FAMILIES.get() (skips "accessory").
   - Relevance gate rejects tags that don't share a root with the item.
@@ -21,6 +24,37 @@ MIN_DB_TAGS = 12
 
 # Accessory umbrella — all 5 Roblox accessory sub-types
 ACCESSORY_IDS = [43, 44, 45, 46, 47]
+
+# Sub-type labels for display
+SUBTYPE_LABELS = {
+    43: "neck",
+    44: "shoulder",
+    45: "front",
+    46: "back",
+    47: "waist",
+}
+
+# Name hints → specific accessory sub-type ID
+_ACCESSORY_SUBTYPE_HINTS = {
+    # BACK (46)
+    "back": 46, "backpack": 46, "bookbag": 46,
+    "wing": 46, "wings": 46, "cape": 46, "cloak": 46,
+    "tail": 46, "tails": 46, "quiver": 46, "satchel": 46,
+    "antenna": 46, "antennae": 46, "jetpack": 46,
+    # NECK (43)
+    "neck": 43, "necklace": 43, "chain": 43, "choker": 43,
+    "pendant": 43, "collar": 43, "scarf": 43, "bandana": 43,
+    "bowtie": 43, "lanyard": 43, "medallion": 43,
+    # SHOULDER (44)
+    "shoulder": 44, "parrot": 44, "buddy": 44, "companion": 44,
+    "mouse": 44, "rat": 44,
+    # FRONT (45)
+    "front": 45, "chest": 45, "apron": 45, "sash": 45,
+    "brooch": 45, "chestplate": 45, "bib": 45,
+    # WAIST (47)
+    "waist": 47, "belt": 47, "hip": 47, "fanny": 47,
+    "pouch": 47, "sash": 47, "kimono": 47,
+}
 
 
 CATEGORY_HINTS = {
@@ -118,6 +152,24 @@ _ENGLISH_BLOCK = {
 }
 
 
+# ── Sub-type detection ──────────────────────────────────────────
+
+def _detect_accessory_subtype(name):
+    """
+    Return specific accessory asset_type_id (43-47) based on
+    hints in the item name. Returns None if no hint found.
+    """
+    if not name:
+        return None
+    n = (name or "").lower()
+    # Longer hints first (so "backpack" wins over "back" — same result
+    # here, but safer ordering for overlapping hints)
+    for hint in sorted(_ACCESSORY_SUBTYPE_HINTS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(hint)}\b", n):
+            return _ACCESSORY_SUBTYPE_HINTS[hint]
+    return None
+
+
 def _is_tag_shaped(tok):
     if not tok:
         return False
@@ -169,19 +221,28 @@ def _extract_tags_from_description(desc):
     return out
 
 
-def _family_to_roblox_category(family):
+def _family_to_roblox_category(family, subtype=None):
+    """Roblox catalog category ID (best-effort). Accessory = None."""
+    if subtype:
+        # Map our asset_type_id → Roblox catalog Category
+        return {
+            43: 5,   # Neck
+            44: 9,   # Shoulder
+            45: 7,   # Front
+            46: 8,   # Back
+            47: 6,   # Waist
+        }.get(subtype)
     if not family:
         return None
-    # Accessory umbrella — no single Roblox category ID works
     if family == "accessory":
-        return None
+        return None  # umbrella — no single Roblox category
     return {
         "hair":     12, "face": 13, "neck": 5, "shoulder": 9,
         "front":    7,  "back": 8,  "waist": 6,
     }.get(family)
 
 
-def _fetch_live_items(keyword, family=None, limit=30):
+def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
     try:
         cookie = (os.getenv("ROBLOSECURITY_COOKIE_1")
                   or os.getenv("ROBLOSECURITY_COOKIE"))
@@ -193,7 +254,7 @@ def _fetch_live_items(keyword, family=None, limit=30):
             headers["Cookie"] = f".ROBLOSECURITY={cookie}"
 
         params = {"Keyword": keyword, "Limit": min(limit, 30), "SortType": 3}
-        cat = _family_to_roblox_category(family)
+        cat = _family_to_roblox_category(family, subtype)
         if cat:
             params["Category"] = cat
 
@@ -221,10 +282,12 @@ def _fetch_live_items(keyword, family=None, limit=30):
                 atype = item.get("assetType") or 0
                 creator = item.get("creatorName") or ""
 
-                # Accessory umbrella filter — keep only accessory sub-types
-                if family == "accessory" and atype not in ACCESSORY_IDS:
+                # Accessory sub-type or umbrella filter
+                if subtype and atype != subtype:
                     continue
-                # Regular family filter
+                elif family == "accessory" and not subtype:
+                    if atype not in ACCESSORY_IDS:
+                        continue
                 elif family and family != "accessory":
                     if ASSET_TO_FAMILY.get(atype) != family:
                         continue
@@ -255,8 +318,8 @@ def _fetch_live_items(keyword, family=None, limit=30):
         return []
 
 
-def _mine_live_tags(keyword, family):
-    rows = _fetch_live_items(keyword, family=family, limit=30)
+def _mine_live_tags(keyword, family, subtype=None):
+    rows = _fetch_live_items(keyword, family=family, subtype=subtype, limit=30)
     if not rows:
         return Counter()
 
@@ -278,7 +341,6 @@ def _mine_live_tags(keyword, family):
 
 
 def _detect_category(name, explicit_family=None):
-    # Accessory umbrella — valid but not a FAMILIES key
     if explicit_family == "accessory":
         return "accessory"
     if explicit_family and explicit_family in FAMILIES:
@@ -294,9 +356,15 @@ def _detect_category(name, explicit_family=None):
     return "other"
 
 
-def _family_sql(family):
-    # Accessory umbrella — matches all 5 sub-types
+def _family_sql(family, subtype=None):
+    """
+    Accessory handling:
+      * subtype set → narrow to that exact asset_type_id
+      * family=accessory, no subtype → umbrella (all 5)
+    """
     if family == "accessory":
+        if subtype:
+            return " and asset_type_id = %s", [subtype]
         return " and asset_type_id in (43, 44, 45, 46, 47)", []
     ids = FAMILIES.get(family)
     if not ids:
@@ -305,10 +373,10 @@ def _family_sql(family):
     return f" and asset_type_id in ({ph})", list(ids)
 
 
-def _mine_top_seller_tags(cur, name_words, family):
+def _mine_top_seller_tags(cur, name_words, family, subtype=None):
     if not name_words:
         return Counter()
-    fam_sql, fam_params = _family_sql(family)
+    fam_sql, fam_params = _family_sql(family, subtype)
     patterns = [f"%{w}%" for w in name_words[:4]]
 
     cur.execute(f"""
@@ -342,10 +410,10 @@ def _mine_top_seller_tags(cur, name_words, family):
     })
 
 
-def _mine_recent_winners(cur, name_words, family):
+def _mine_recent_winners(cur, name_words, family, subtype=None):
     if not name_words:
         return Counter()
-    fam_sql, fam_params = _family_sql(family)
+    fam_sql, fam_params = _family_sql(family, subtype)
     patterns = [f"%{w}%" for w in name_words[:4]]
 
     cur.execute(f"""
@@ -434,8 +502,7 @@ def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
-    # FIX 1: translate category_configs → convergence_engine family,
-    # BUT keep "accessory" as-is (umbrella family)
+    # Translate category_configs → convergence_engine family (skip accessory)
     if family and family != "accessory":
         try:
             from category_configs import to_convergence_family
@@ -455,6 +522,12 @@ def generate_tags(item_name, family=None, max_tags=45):
 
     detected_family = _detect_category(item_name, explicit_family=family)
 
+    # ── SUB-TYPE DETECTION for accessory ────────────────────────
+    accessory_subtype = None
+    if detected_family == "accessory":
+        accessory_subtype = _detect_accessory_subtype(item_name)
+    # ────────────────────────────────────────────────────────────
+
     # ── DB mining ──
     top_sellers = Counter()
     recent_winners = Counter()
@@ -463,11 +536,13 @@ def generate_tags(item_name, family=None, max_tags=45):
     conn = get_db(); cur = conn.cursor()
     try:
         try:
-            top_sellers = _mine_top_seller_tags(cur, name_words, detected_family)
+            top_sellers = _mine_top_seller_tags(
+                cur, name_words, detected_family, accessory_subtype)
         except Exception as e:
             print(f"[tag_generator] top_seller failed: {e}", flush=True)
         try:
-            recent_winners = _mine_recent_winners(cur, name_words, detected_family)
+            recent_winners = _mine_recent_winners(
+                cur, name_words, detected_family, accessory_subtype)
         except Exception as e:
             print(f"[tag_generator] recent failed: {e}", flush=True)
         try:
@@ -489,7 +564,8 @@ def generate_tags(item_name, family=None, max_tags=45):
 
         if live_kw and len(live_kw) >= 3:
             try:
-                live_tags = _mine_live_tags(live_kw, detected_family)
+                live_tags = _mine_live_tags(
+                    live_kw, detected_family, accessory_subtype)
             except Exception as e:
                 print(f"[tag_generator] live mining failed: {e}", flush=True)
 
@@ -591,6 +667,8 @@ def generate_tags(item_name, family=None, max_tags=45):
     return {
         "item_name": item_name,
         "family": detected_family,
+        "subtype": accessory_subtype,
+        "subtype_label": SUBTYPE_LABELS.get(accessory_subtype),
         "tags": final_tags,
         "sources": {
             "live_roblox":     len(live_tags),
@@ -615,9 +693,14 @@ def format_tags(result):
 
     chunks = []
 
+    # Sub-type label (back / neck / shoulder / front / waist) if known
+    subtype_str = ""
+    if result.get("subtype_label"):
+        subtype_str = f" · `{result['subtype_label']}`"
+
     chunks.append(
         f"# 🏷️ TAGS — `{result['item_name'][:60]}`\n"
-        f"_Category detected: `{result['family']}` · "
+        f"_Category detected: `{result['family']}`{subtype_str} · "
         f"{len(tags)} tags generated_"
     )
 
