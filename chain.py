@@ -14,7 +14,7 @@ Runs:
   10. Focused title pass
   11. Smart pipeline
   12. Statistical title scoring
-  13. Description engine merge (AI body + data-driven tag block + audit)
+  13. Description + tags merge (AI body + tag_generator)
   14. FINAL block
 """
 import re
@@ -415,39 +415,58 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] title scoring failed: {e}", flush=True)
 
-    # ── Stage 13: Description engine merge ──
+    # ── Stage 13: Description + tags merge ──
+    # Uses tag_generator (description_engine was removed).
+    # Builds: AI body (seo_description) + 45 mined tags + audit.
     merged_description = None
     description_audit = None
-    description_engine_raw = None
     try:
-        from description_engine import generate_description
-        eng = generate_description(concept, family=family)
-        if eng and not eng.get("error"):
-            description_engine_raw = eng.get("description")
-            description_audit = eng.get("audit") or {}
+        from tag_generator import generate_tags
 
-            # Extract tag block from engine output
-            eng_tag_block = ""
-            for line in (description_engine_raw or "").split("\n"):
-                if line.strip().lower().startswith("tags:"):
-                    eng_tag_block = line.strip()
-                    break
+        # Pick the champion title as the tag seed
+        tag_seed = None
+        if scored_titles:
+            tag_seed = scored_titles[0]["title"]
+        if not tag_seed:
+            tag_seed = concept
 
-            # AI-generated body — strip any tags/promo AI may have added
-            ai_body = (synth.get("seo_description") or "").strip()
-            ai_body_lines = [
-                ln for ln in ai_body.split("\n")
-                if not ln.strip().lower().startswith("tags:")
-            ]
-            ai_body = "\n".join(ai_body_lines).strip()
+        # Generate 45 sales-weighted tags
+        tag_result = generate_tags(tag_seed, family=family, max_tags=45)
+        tags = (tag_result or {}).get("tags") or []
 
-            # Merge: AI body + engine tags
-            if ai_body and eng_tag_block:
-                merged_description = f"{ai_body}\n\n{eng_tag_block}"
-            elif ai_body:
-                merged_description = ai_body
-            else:
-                merged_description = description_engine_raw
+        # AI body — strip any stray tags the AI added
+        ai_body = (synth.get("seo_description") or "").strip()
+        ai_body_lines = [
+            ln for ln in ai_body.split("\n")
+            if not ln.strip().lower().startswith("tags:")
+        ]
+        ai_body = "\n".join(ai_body_lines).strip()
+
+        # Merge: AI body + tag block
+        if ai_body and tags:
+            tag_line = ", ".join(tags)
+            merged_description = f"{ai_body}\n\ntags: {tag_line}"
+        elif ai_body:
+            merged_description = ai_body
+        elif tags:
+            merged_description = f"tags: {', '.join(tags)}"
+
+        # Build audit from tag_generator result
+        description_audit = {
+            "primary_keyword": (
+                scored_titles[0]["breakdown"][0]["word"]
+                if scored_titles and scored_titles[0].get("breakdown")
+                else None
+            ),
+            "primary_demand": (
+                scored_titles[0]["breakdown"][0]["demand"]
+                if scored_titles and scored_titles[0].get("breakdown")
+                else 0
+            ),
+            "mined_tag_count": len(tags),
+            "top_10_tags": tags[:10],
+            "family": family,
+        }
     except Exception as e:
         print(f"[chain] description merge failed: {e}", flush=True)
 
@@ -603,8 +622,6 @@ def format_chain(result):
                 "**🔍 Description audit — every word traceable:**",
                 f"• Primary keyword: `{audit.get('primary_keyword', '?')}` "
                 f"({audit.get('primary_demand', 0)} searches)",
-                f"• Aesthetic words: "
-                f"`{', '.join(audit.get('aesthetic_words', []) or []) or 'none'}`",
                 f"• Tags mined: **{audit.get('mined_tag_count', 0)}**",
             ]
             top10 = audit.get("top_10_tags", [])
