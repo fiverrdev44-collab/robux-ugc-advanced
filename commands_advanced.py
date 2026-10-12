@@ -1,6 +1,9 @@
 """
 commands_advanced.py — Advanced analytics commands.
 Loaded by discord_ugc_bot.py via register_advanced_commands(bot, get_db).
+
+FIX: family parser accepts BOTH convergence_engine AND category_configs
+     family names (headwear, accessory, clothing now work).
 """
 import asyncio
 
@@ -10,6 +13,24 @@ from rising_gaps import (
     format_rising_gaps,
     detect_category_from_keyword,
 )
+
+
+def _resolve_family_prefix(text):
+    """
+    Parse optional "family:keyword" prefix. Returns (family, keyword).
+    Accepts both convergence_engine names (emotes, hair, tops) and
+    category_configs names (emote, headwear, accessory, clothing).
+    """
+    from convergence_engine import FAMILIES as _CONV
+    from category_configs import CATEGORY_FAMILIES as _CAT
+
+    if not text or ":" not in text:
+        return None, text
+    maybe_fam, _, rest = text.partition(":")
+    fm = maybe_fam.strip().lower()
+    if fm in _CONV or fm in _CAT:
+        return fm, rest.strip()
+    return None, text
 
 
 def register_advanced_commands(bot, get_db):
@@ -306,19 +327,15 @@ def register_advanced_commands(bot, get_db):
         """Mine top descriptions in a niche, generate one that fits."""
         if not args.strip():
             return await ctx.send(
-                "**Usage:** `!desc_forge <keyword>` or `!desc_forge <family>:<keyword>`"
+                "**Usage:** `!desc_forge <keyword>` or `!desc_forge <family>:<keyword>`\n"
+                "Families: `emote`, `emotes`, `hair`, `headwear`, `hat`, "
+                "`face`, `accessory`, `clothing`, `gear`"
             )
 
-        from convergence_engine import FAMILIES
         from desc_forge import forge_description, format_forge
 
-        family = None
-        keyword = args.strip()
-        if ":" in keyword:
-            maybe_fam, _, rest = keyword.partition(":")
-            if maybe_fam.strip().lower() in FAMILIES:
-                family = maybe_fam.strip().lower()
-                keyword = rest.strip()
+        # FIX: accept both naming schemes
+        family, keyword = _resolve_family_prefix(args.strip())
 
         progress = await ctx.send(f"🔨 Mining top descriptions for `{keyword}`...")
 
@@ -363,7 +380,6 @@ def register_advanced_commands(bot, get_db):
                 "  `!chain emotes:<concept>` — family scoped\n"
             )
 
-        from convergence_engine import FAMILIES
         from chain import run_chain, format_chain
 
         tokens = args.strip().split()
@@ -381,11 +397,8 @@ def register_advanced_commands(bot, get_db):
             concept = " ".join(tokens[2:]) if len(tokens) > 2 else "variant"
         else:
             concept = args.strip()
-            if ":" in concept:
-                maybe_fam, _, rest = concept.partition(":")
-                if maybe_fam.strip().lower() in FAMILIES:
-                    family = maybe_fam.strip().lower()
-                    concept = rest.strip()
+            # FIX: accept both naming schemes
+            family, concept = _resolve_family_prefix(concept)
 
         mode_label = "VARIANT" if parent_id else "NEW"
         progress = await ctx.send(f"🔗 Running chain [{mode_label}]... (~20s)")
@@ -431,16 +444,10 @@ def register_advanced_commands(bot, get_db):
                 "With category: `!tags emotes:Smooth Hip Sway Dance`"
             )
 
-        from convergence_engine import FAMILIES
         from tag_generator import generate_tags, format_tags
 
-        family = None
-        item_name = args.strip()
-        if ":" in item_name:
-            maybe_fam, _, rest = item_name.partition(":")
-            if maybe_fam.strip().lower() in FAMILIES:
-                family = maybe_fam.strip().lower()
-                item_name = rest.strip()
+        # FIX: accept both naming schemes
+        family, item_name = _resolve_family_prefix(args.strip())
 
         progress = await ctx.send(f"🏷️ Generating tags for `{item_name[:60]}`...")
 
