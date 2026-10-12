@@ -2,14 +2,14 @@
 convergence_engine.py — category-aware niche scoring.
 Uses ONLY existing tables. No new columns. No AI calls.
 
-FIXES:
-- Word-boundary matching (kills "old" → "gold", "over" → "cover")
-- Rejects monopolies (concentration > 0.65)
-- Rejects zero-demand niches (demand < 3)
-- Velocity clamped to 20/day
-- Requires median >= 5 (real signal)
-- VELOCITY: avg of GROWING items only (delta >= 3) — stagnant items
-  no longer drag the median to zero.
+FIXES in this version:
+- Generic-word blocklist (point, cute, item, etc. rejected before scoring)
+- median_favs gate raised from 5 → 100 (kills weak-demand niches)
+- supply floor lowered from 5 → 3 (allows real micro-niches)
+- Family translation: accepts BOTH category_configs names (emote,
+  headwear, accessory) AND convergence_engine names (emotes, hair, tops)
+- scan_convergence filters blocklist before scoring (faster + cleaner)
+- Deleted bad keywords never surface (item_count >= 3 required)
 """
 import re
 from bot_core import get_db
@@ -35,10 +35,53 @@ for fam, ids in FAMILIES.items():
         ASSET_TO_FAMILY[aid] = fam
 
 
+# ── Generic words that should NEVER be niche keywords ──────────
+# These pass item_count but carry zero niche signal.
+_GENERIC_BLOCK = {
+    # Articles / glue
+    "the", "and", "for", "with", "you", "your", "from", "that", "this",
+    "into", "over", "under", "onto", "upon", "than", "then", "them",
+    "they", "there", "here", "when", "what", "where", "which", "while",
+    "who", "why", "how", "all", "any", "some", "each", "every", "both",
+    "other", "another", "such", "only", "very", "just", "also", "even",
+    "still", "more", "most", "less", "few", "many", "much",
+    # Generic adjectives
+    "new", "old", "best", "top", "good", "great", "cool", "nice", "cute",
+    "big", "small", "hot", "cold", "fast", "slow", "high", "low",
+    "bad", "hard", "easy", "free", "open", "real", "fake", "true",
+    "happy", "sad", "love", "hate",
+    # Generic nouns
+    "point", "place", "thing", "stuff", "item", "items", "asset",
+    "roblox", "ugc", "shop", "store", "buy", "sell", "sale", "price",
+    "got", "get", "make", "made", "use", "used", "has", "have", "had",
+    "one", "two", "three", "four", "five",
+    # Editing / meta
+    "style", "design", "designs", "version", "edit", "edited", "update",
+    "updated", "original", "reupload", "reuploaded", "upload", "uploaded",
+    "credit", "credits", "made", "created",
+    # Promo
+    "free", "cheap", "expensive", "discount", "promo", "deal",
+    # Popularity markers
+    "popular", "trending", "trend", "trendy", "viral", "hot", "new",
+    "iconic", "classic", "famous",
+}
+
+
 def _family_clause(family):
+    """
+    Family SQL clause. Accepts BOTH naming schemes:
+      - convergence_engine names: emotes, hair, face, neck, tops
+      - category_configs names:   emote, headwear, accessory, clothing
+    """
     if not family or family == "all":
         return "", []
-    ids = FAMILIES.get(family)
+    # Translate category_configs name → convergence_engine name
+    try:
+        from category_configs import to_convergence_family
+        fam = to_convergence_family(family)
+    except Exception:
+        fam = family
+    ids = FAMILIES.get(fam)
     if not ids:
         return " and false", []
     placeholders = ",".join(["%s"] * len(ids))
@@ -48,7 +91,7 @@ def _family_clause(family):
 def _kw_pattern(keyword):
     """
     Word-boundary regex for a keyword.
-    Multi-word phrases still use ilike.
+    Multi-word phrases use ilike.
     Single words use \y (Postgres word boundary).
     """
     kw = keyword.strip().lower()
@@ -58,6 +101,19 @@ def _kw_pattern(keyword):
 
 
 def _score_keyword(cur, keyword, family=None):
+    # ── BLOCKLIST GATE ──────────────────────────────────────────
+    kw_clean = (keyword or "").strip().lower()
+    if not kw_clean or len(kw_clean) < 3:
+        return None
+    if kw_clean in _GENERIC_BLOCK:
+        return None
+    # Reject if every token is generic (e.g. "best new item")
+    if " " in kw_clean:
+        tokens = kw_clean.split()
+        if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
+            return None
+    # ────────────────────────────────────────────────────────────
+
     pat = _kw_pattern(keyword)
     is_phrase = " " in keyword.strip()
     use_regex = not is_phrase
@@ -82,10 +138,12 @@ def _score_keyword(cur, keyword, family=None):
     p90_favs = float(row[2] or 0)
 
     # ── GATEKEEPERS ─────────────────────────────────────────────
-    if supply < 5:         return None       # monopoly
-    if supply > 500:       return None       # saturated
-    if median_favs > 50_000: return None     # legacy/OG
-    if median_favs < 5:    return None       # dead
+    # TIGHTENED: median_favs floor raised from 5 → 100. Kills generic
+    # words like "point" (median 29) that pass supply but have no demand.
+    if supply < 3:              return None    # noise / monopoly
+    if supply > 500:            return None    # saturated
+    if median_favs > 50_000:    return None    # legacy/OG
+    if median_favs < 100:       return None    # weak demand — BIG FIX
 
     # ── DEMAND ──────────────────────────────────────────────────
     cur.execute(
@@ -94,7 +152,7 @@ def _score_keyword(cur, keyword, family=None):
     )
     demand = cur.fetchone()[0] or 0
 
-    if demand < 3:         return None       # no one searches this
+    if demand < 3:              return None    # no one searches this
 
     # ── FRESHNESS ───────────────────────────────────────────────
     cur.execute(f"""
@@ -105,8 +163,6 @@ def _score_keyword(cur, keyword, family=None):
     recent = cur.fetchone()[0] or 0
 
     # ── VELOCITY: avg of GROWING items only (delta >= 3) ────────
-    # Stagnant items (delta < 3) are excluded — they don't tell us
-    # about demand, only that nobody's buying THAT item.
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -129,6 +185,14 @@ def _score_keyword(cur, keyword, family=None):
     """, [pat] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
+
+    # ── TRACTION GATE ───────────────────────────────────────────
+    # A keyword with median_favs >= 100 but NO velocity AND NO recent
+    # launches is likely a legacy cluster — only accept if p90 is very
+    # high (a few breakout items rescue it).
+    if velocity == 0 and recent == 0 and p90_favs < 500:
+        return None
+    # ────────────────────────────────────────────────────────────
 
     # ── CONCENTRATION ───────────────────────────────────────────
     cur.execute(f"""
@@ -225,7 +289,13 @@ def scan_convergence(family=None, limit=15):
         select keyword from learned_keywords
         where item_count >= 3 order by score desc limit 200
     """)
-    keywords = [r[0] for r in cur.fetchall()]
+    # Filter blocklist BEFORE scoring (faster + cleaner)
+    keywords = [
+        r[0] for r in cur.fetchall()
+        if r[0]
+        and r[0].lower().strip() not in _GENERIC_BLOCK
+        and len(r[0].strip()) >= 3
+    ]
 
     results = []
     for kw in keywords:
