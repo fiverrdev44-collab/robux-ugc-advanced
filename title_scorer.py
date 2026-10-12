@@ -1,15 +1,10 @@
 """
 title_scorer.py — statistical title scoring from real DB data.
 
-Signals:
-  1. word_lift       — median favs of items containing word / category median
-  2. search_demand   — search_suggestions rows containing word
-  3. bigram_lift     — median favs of items matching two words together
-  4. freshness       — words that appear more in recent winners
-  5. confidence      — sample size guard (small sample = unreliable)
-  6. uniqueness      — 0 exact matches = bonus
-
-Every score traceable to data. No AI. No fake numbers.
+FIXES:
+  - cat_med floored at 25 (prevents 499× lift explosions)
+  - word lift clamped to [0.1, 5.0]
+  - bigram lift clamped to [0, 5.0]
 """
 import re
 import math
@@ -23,6 +18,10 @@ STOPWORDS = {"a", "an", "the", "of", "and", "or", "for", "to", "in", "on",
 
 MIN_SAMPLE = 5
 CONFIDENCE_CAP = 30
+CAT_MED_FLOOR = 25.0     # FIX — any median below this is untrustworthy
+LIFT_MIN = 0.1
+LIFT_MAX = 5.0           # FIX — cap so no single word dominates
+BIGRAM_MAX = 5.0
 
 
 def _words(title):
@@ -30,10 +29,14 @@ def _words(title):
             if w not in STOPWORDS]
 
 
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
 def _cat_median(cur, family):
     ids = FAMILIES.get(family)
     if not ids:
-        return 1.0
+        return CAT_MED_FLOOR
     ph = ",".join(["%s"] * len(ids))
     cur.execute(f"""
         select percentile_cont(0.5) within group (order by favorite_count)
@@ -41,7 +44,11 @@ def _cat_median(cur, family):
         where asset_type_id in ({ph}) and favorite_count > 5
     """, ids)
     r = cur.fetchone()
-    return float(r[0] or 1) or 1.0
+    val = float(r[0] or 0)
+    # FIX: floor at CAT_MED_FLOOR so lift can't explode
+    if val < CAT_MED_FLOOR:
+        return CAT_MED_FLOOR
+    return val
 
 
 def _fam_clause(family):
@@ -84,7 +91,8 @@ def compute_word_stats(family=None):
                 continue
             favs.sort()
             med = favs[len(favs) // 2]
-            lift = med / cat_med if cat_med else 0
+            # FIX: clamp lift
+            lift = _clamp(med / cat_med, LIFT_MIN, LIFT_MAX)
 
             recent_share = (len(recent_buckets[w]) / max(total_recent, 1))
             overall_share = (len(favs) / max(len(rows), 1))
@@ -139,7 +147,9 @@ def _bigram_lift(cur, w1, w2, family):
     cnt, med = cur.fetchone()
     if not cnt or cnt < 5:
         return 0.0
-    return float(med or 0) / _cat_median(cur, family)
+    raw = float(med or 0) / _cat_median(cur, family)
+    # FIX: clamp so bigram can't dominate score
+    return _clamp(raw, 0.0, BIGRAM_MAX)
 
 
 def score_title(title, family=None, word_stats=None):
@@ -157,6 +167,15 @@ def score_title(title, family=None, word_stats=None):
     breakdown = []
     for w in words:
         st = word_stats.get(w, {})
+        if not st:
+            # word not in stats — mark as no data, contribute 0
+            breakdown.append({
+                "word": w, "lift": 1.0, "sample": 0,
+                "demand": demand.get(w, 0), "freshness": 1.0,
+                "contribution": 0.0, "no_data": True,
+            })
+            continue
+
         lift = st.get("lift", 1.0)
         cnt = st.get("count", 0)
         fresh = st.get("freshness", 1.0)
@@ -233,11 +252,15 @@ def score_titles_batch(titles, family=None):
 def format_report(s, show_all_words=False):
     lines = [
         f"**`{s['title']}`** — score **{s['score']}**"
-        + (f" · unique ({s['exact_matches']} matches)" if s['exact_matches'] == 0
+        + (f" · unique" if s['exact_matches'] == 0
            else f" · {s['exact_matches']} exact matches")
     ]
     ranked = sorted(s["breakdown"], key=lambda x: x["contribution"], reverse=True)
     for b in ranked:
+        if b.get("no_data"):
+            lines.append(f"  ⚫ `{b['word']}` — no data in DB "
+                         f"({b['demand']} searches) → +0.0")
+            continue
         lift = b["lift"]
         if lift >= 2.5: emoji = "🟢"
         elif lift >= 1.5: emoji = "🔵"
