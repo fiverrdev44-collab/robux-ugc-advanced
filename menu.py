@@ -2,30 +2,50 @@
 menu.py — VANTA 73 Battleship Control Room.
 !start opens the tactical console.
 
-Label format: [BATTLE WORD] — [what it does]
+Each button opens its own embed with a themed GIF banner.
 
 GIF SETUP:
-  1. Download a .gif from giphy.com or tenor.com
-  2. Upload it to https://catbox.moe (no signup needed)
-  3. Copy the resulting URL (ends in .gif)
-  4. Paste it below in MENU_GIF_URL
+  1. Download .gif from giphy.com or tenor.com
+  2. Upload to https://catbox.moe (no signup)
+  3. Copy URL (ends in .gif)
+  4. Paste below in the GIF_* constants
 """
 import discord
 
 
 # ─────────────────────────────────────────────────────────────
-# GIF URL — paste your direct .gif link here
+# GIF URLs — paste direct .gif links (must end in .gif)
 # ─────────────────────────────────────────────────────────────
-# OPTIONS:
-#   catbox.moe  → https://files.catbox.moe/abc123.gif
-#   imgur.com   → https://i.imgur.com/AbCdEfG.gif
-#   Discord CDN → https://cdn.discordapp.com/attachments/.../x.gif
-#
-# MUST end in .gif (not a webpage link)
-MENU_GIF_URL = "https://i.imgur.com/H0WsJzz.gif"
+GIF_MAIN     = "https://i.imgur.com/H0WsJzz.gif"   # Main menu hero banner
+GIF_FIRE     = "https://i.imgur.com/2Zu329H.gif"   # Launch new item
+GIF_STRIKE   = "https://i.imgur.com/arpiHbp.gif"   # Variant of winner
+GIF_INSPECT  = "https://i.imgur.com/mBEDVN0.gif"   # Check live item
+GIF_SCAN     = "https://i.imgur.com/xRANWve.gif"   # Find trending niche
+GIF_RECON    = "https://i.imgur.com/TaFRZCs.gif"   # Analyze image
+GIF_LOAD     = "https://i.imgur.com/pM5i95K.gif"   # Generate tags
+GIF_MANUAL   = "https://i.imgur.com/kQsJTZ1.gif"   # Full guide
 
 
 COLOR_STEALTH = 0x000000
+
+
+def _gif_ok(url):
+    """Check URL looks like a usable direct-image link."""
+    if not url or not isinstance(url, str):
+        return False
+    url = url.strip()
+    if "REPLACE_ME" in url or "example" in url:
+        return False
+    return bool(url.lower().endswith((".gif", ".gifv", ".png", ".jpg", ".jpeg", ".webp")))
+
+
+def _apply_gif(embed, gif_url):
+    """Set the embed image if the URL is valid."""
+    if _gif_ok(gif_url):
+        try:
+            embed.set_image(url=gif_url.strip())
+        except Exception as e:
+            print(f"[menu] GIF embed failed: {e}", flush=True)
 
 
 class MenuView(discord.ui.View):
@@ -36,163 +56,193 @@ class MenuView(discord.ui.View):
 
     @discord.ui.button(label="🚀 FIRE — Launch New Item", style=discord.ButtonStyle.primary)
     async def launch_new(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**🚀 FIRE — LAUNCH NEW ITEM**\n"
-            "_Builds a full launch kit for a brand-new UGC._\n"
-            "_\u200b_\n"
-            "**TARGET:** Niche keyword from `!converge`\n"
-            "**PAYLOAD:** Champion title + description + 45 tags + price\n"
-            "**TIME:** ~20 seconds per strike\n"
-            "_\u200b_\n"
-            "**STEP 1 — AIM**\n"
-            "Type your concept like you're telling a friend:\n"
-            "`!chain purple kawaii cat beanie`\n"
-            "`!chain spooky halloween dance`\n"
-            "`!chain fluffy winter beanie`\n"
-            "_\u200b_\n"
-            "**STEP 2 — READ THE FIRING SOLUTION**\n"
-            "Bot replies with:\n"
-            "• 🥇 Champion name (tested against 73k Roblox items)\n"
-            "• 📝 Description — copy-paste ready\n"
-            "• 🏷️ 45 tags for search discovery\n"
-            "• 💰 Price recommendation\n"
-            "_\u200b_\n"
-            "**STEP 3 — DEPLOY**\n"
-            "Read the `✅ FINAL — DO THIS` block at the bottom.\n"
-            "Upload to Roblox. Post 1 TikTok.\n"
-            "_\u200b_\n"
-            "**In 14 days:** run `!verdict <item_id>` for damage assessment."
+        embed = discord.Embed(
+            title="🚀 FIRE — LAUNCH NEW ITEM",
+            description=(
+                "_Builds a full launch kit for a brand-new UGC._\n"
+                "_\u200b_\n"
+                "**TARGET:** Niche keyword from `!converge`\n"
+                "**PAYLOAD:** Champion title + description + 45 tags + price\n"
+                "**TIME:** ~20 seconds per strike\n"
+                "_\u200b_\n"
+                "**STEP 1 — AIM**\n"
+                "Type your concept like you're telling a friend:\n"
+                "`!chain purple kawaii cat beanie`\n"
+                "`!chain spooky halloween dance`\n"
+                "`!chain fluffy winter beanie`\n"
+                "_\u200b_\n"
+                "**STEP 2 — READ THE FIRING SOLUTION**\n"
+                "Bot replies with:\n"
+                "• 🥇 Champion name (tested against 73k Roblox items)\n"
+                "• 📝 Description — copy-paste ready\n"
+                "• 🏷️ 45 tags for search discovery\n"
+                "• 💰 Price recommendation\n"
+                "_\u200b_\n"
+                "**STEP 3 — DEPLOY**\n"
+                "Read the `✅ FINAL — DO THIS` block at the bottom.\n"
+                "Upload to Roblox. Post 1 TikTok.\n"
+                "_\u200b_\n"
+                "**In 14 days:** run `!verdict <item_id>` for damage assessment."
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_FIRE)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="⭐ STRIKE — Variant of Winner", style=discord.ButtonStyle.success)
     async def variant(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**⭐ STRIKE — VARIANT OF WINNER**\n"
-            "_Copies a proven winner's keywords with a fresh theme._\n"
-            "_\u200b_\n"
-            "**TARGET:** Your own top-performing item\n"
-            "**PAYLOAD:** Same keywords + new theme = new buyers\n"
-            "**DOCTRINE:** Highest ROI action in the fleet\n"
-            "_\u200b_\n"
-            "**STEP 1 — GET THE ID**\n"
-            "Open the item on Roblox. The number at the end of the URL is the ID.\n"
-            "_\u200b_\n"
-            "**STEP 2 — FIRE**\n"
-            "`!chain variant <item_id>` — bot picks a variation\n"
-            "`!chain variant <item_id> neon` — with a specific theme\n"
-            "`!chain variant <item_id> halloween` — seasonal\n"
-            "_\u200b_\n"
-            "**THEMES:** `neon` `cyber` `midnight` `frost` `dark` `deluxe` "
-            "`winter` `pastel` `goth` `kawaii` `halloween` `spooky` `pumpkin`\n"
-            "_\u200b_\n"
-            "**WHY THIS WORKS:** Proven keywords × fresh angle = same "
-            "discoverability, new buyers. Ship a variant every time an item wins."
+        embed = discord.Embed(
+            title="⭐ STRIKE — VARIANT OF WINNER",
+            description=(
+                "_Copies a proven winner's keywords with a fresh theme._\n"
+                "_\u200b_\n"
+                "**TARGET:** Your own top-performing item\n"
+                "**PAYLOAD:** Same keywords + new theme = new buyers\n"
+                "**DOCTRINE:** Highest ROI action in the fleet\n"
+                "_\u200b_\n"
+                "**STEP 1 — GET THE ID**\n"
+                "Open the item on Roblox. The number at the end of the URL is the ID.\n"
+                "_\u200b_\n"
+                "**STEP 2 — FIRE**\n"
+                "`!chain variant <item_id>` — bot picks a variation\n"
+                "`!chain variant <item_id> neon` — with a specific theme\n"
+                "`!chain variant <item_id> halloween` — seasonal\n"
+                "_\u200b_\n"
+                "**THEMES:** `neon` `cyber` `midnight` `frost` `dark` `deluxe` "
+                "`winter` `pastel` `goth` `kawaii` `halloween` `spooky` `pumpkin`\n"
+                "_\u200b_\n"
+                "**WHY THIS WORKS:** Proven keywords × fresh angle = same "
+                "discoverability, new buyers."
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_STRIKE)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="🔧 INSPECT — Check Live Item", style=discord.ButtonStyle.secondary)
     async def fix_existing(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**🔧 INSPECT — CHECK LIVE ITEM**\n"
-            "_Tells you whether to keep pushing an item or kill it._\n"
-            "_\u200b_\n"
-            "**TARGET:** Any item already live on Roblox\n"
-            "**PAYLOAD:** Sales · age · velocity · percentile · conversion\n"
-            "**WHEN:** 14 days after you launch anything\n"
-            "_\u200b_\n"
-            "**STEP 1 — GET THE ID**\n"
-            "Open the item on Roblox. The number at the end of the URL is the ID.\n"
-            "_\u200b_\n"
-            "**STEP 2 — RUN DIAGNOSTIC**\n"
-            "`!verdict 121930221694467`\n"
-            "_\u200b_\n"
-            "**STEP 3 — READ THE VERDICT**\n"
-            "🔥 **DOUBLE_DOWN** — It's working. Ship a variant this week.\n"
-            "✅ **KEEP** — Steady. Post 3 TikToks, re-check in 14 days.\n"
-            "🔧 **RENAME** — Buyers exist but title is weak. Run `!autopsy <id>`.\n"
-            "🪦 **KILL** — Dead. Launch something else.\n"
-            "⏳ **TOO_NEW** — Under 7 days old. Wait a few more days."
+        embed = discord.Embed(
+            title="🔧 INSPECT — CHECK LIVE ITEM",
+            description=(
+                "_Tells you whether to keep pushing an item or kill it._\n"
+                "_\u200b_\n"
+                "**TARGET:** Any item already live on Roblox\n"
+                "**PAYLOAD:** Sales · age · velocity · percentile · conversion\n"
+                "**WHEN:** 14 days after you launch anything\n"
+                "_\u200b_\n"
+                "**STEP 1 — GET THE ID**\n"
+                "Open the item on Roblox. The number at the end of the URL is the ID.\n"
+                "_\u200b_\n"
+                "**STEP 2 — RUN DIAGNOSTIC**\n"
+                "`!verdict 121930221694467`\n"
+                "_\u200b_\n"
+                "**STEP 3 — READ THE VERDICT**\n"
+                "🔥 **DOUBLE_DOWN** — It's working. Ship a variant this week.\n"
+                "✅ **KEEP** — Steady. Post 3 TikToks, re-check in 14 days.\n"
+                "🔧 **RENAME** — Buyers exist but title is weak. Run `!autopsy <id>`.\n"
+                "🪦 **KILL** — Dead. Launch something else.\n"
+                "⏳ **TOO_NEW** — Under 7 days old. Wait a few more days."
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_INSPECT)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="📡 SCAN — Find Trending Niche", style=discord.ButtonStyle.secondary)
     async def trending(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**📡 SCAN — FIND TRENDING NICHE**\n"
-            "_Radar sweeps the whole catalog. Finds weak spots to attack._\n"
-            "_\u200b_\n"
-            "**TARGET:** Every keyword in the Roblox catalog\n"
-            "**CONTACTS:** 73k items · 44k search signals\n"
-            "**REFRESH:** Every 6h (auto pipeline)\n"
-            "_\u200b_\n"
-            "**STEP 1 — ACTIVATE SONAR**\n"
-            "`!converge emotes` — dance/animation\n"
-            "`!converge hair` — hair/hats/beanies\n"
-            "`!converge face` — masks/glasses\n"
-            "`!converge tops` — shirts/jackets\n"
-            "`!converge classic` — classic clothing\n"
-            "`!converge gear` — swords/staffs\n"
-            "_\u200b_\n"
-            "**STEP 2 — READ THE CLASSIFICATION**\n"
-            "🔥 **SNIPE ZONE** — untapped. Best firing solution.\n"
-            "🟢 **GOLD** — low supply, high demand.\n"
-            "⚪ **NEUTRAL** — steady but not hot.\n"
-            "🔴 **SATURATED** — do not engage.\n"
-            "_\u200b_\n"
-            "**STEP 3 — LOCK ON AND FIRE**\n"
-            "`!chain <keyword> <family>`\n"
-            "Example: `!chain halloween emote`"
+        embed = discord.Embed(
+            title="📡 SCAN — FIND TRENDING NICHE",
+            description=(
+                "_Radar sweeps the whole catalog. Finds weak spots to attack._\n"
+                "_\u200b_\n"
+                "**TARGET:** Every keyword in the Roblox catalog\n"
+                "**CONTACTS:** 73k items · 44k search signals\n"
+                "**REFRESH:** Every 6h (auto pipeline)\n"
+                "_\u200b_\n"
+                "**STEP 1 — ACTIVATE SONAR**\n"
+                "`!converge emotes` — dance/animation\n"
+                "`!converge hair` — hair/hats/beanies\n"
+                "`!converge face` — masks/glasses\n"
+                "`!converge tops` — shirts/jackets\n"
+                "`!converge classic` — classic clothing\n"
+                "`!converge gear` — swords/staffs\n"
+                "_\u200b_\n"
+                "**STEP 2 — READ THE CLASSIFICATION**\n"
+                "🔥 **SNIPE ZONE** — untapped. Best firing solution.\n"
+                "🟢 **GOLD** — low supply, high demand.\n"
+                "⚪ **NEUTRAL** — steady but not hot.\n"
+                "🔴 **SATURATED** — do not engage.\n"
+                "_\u200b_\n"
+                "**STEP 3 — LOCK ON AND FIRE**\n"
+                "`!chain <keyword> <family>`\n"
+                "Example: `!chain halloween emote`"
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_SCAN)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="🖼️ RECON — Analyze Image", style=discord.ButtonStyle.secondary)
     async def from_image(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**🖼️ RECON — ANALYZE IMAGE**\n"
-            "_Reads a design image. Extracts colors, style, keywords._\n"
-            "_\u200b_\n"
-            "**TARGET:** A picture of your UGC design\n"
-            "**PAYLOAD:** Colors · style · features · item type · keywords\n"
-            "**ENGINE:** Gemini vision\n"
-            "_\u200b_\n"
-            "**STEP 1 — UPLOAD INTEL**\n"
-            "In ONE message, attach 1-4 images and type:\n"
-            "`!analyze_image`\n"
-            "Or with notes: `!analyze_image purple beanie with cat ears`\n"
-            "_\u200b_\n"
-            "**STEP 2 — READ SENSOR OUTPUT**\n"
-            "Bot returns: colors, style, features, item type, aesthetic guess, "
-            "and a `search_description` line you can copy.\n"
-            "_\u200b_\n"
-            "**STEP 3 — FEED TO FIRE**\n"
-            "`!chain <paste search_description here>`\n"
-            "_\u200b_\n"
-            "**Tip:** 2-3 angles (front/side/detail) improve targeting."
+        embed = discord.Embed(
+            title="🖼️ RECON — ANALYZE IMAGE",
+            description=(
+                "_Reads a design image. Extracts colors, style, keywords._\n"
+                "_\u200b_\n"
+                "**TARGET:** A picture of your UGC design\n"
+                "**PAYLOAD:** Colors · style · features · item type · keywords\n"
+                "**ENGINE:** Gemini vision\n"
+                "_\u200b_\n"
+                "**STEP 1 — UPLOAD INTEL**\n"
+                "In ONE message, attach 1-4 images and type:\n"
+                "`!analyze_image`\n"
+                "Or with notes: `!analyze_image purple beanie with cat ears`\n"
+                "_\u200b_\n"
+                "**STEP 2 — READ SENSOR OUTPUT**\n"
+                "Bot returns: colors, style, features, item type, aesthetic guess, "
+                "and a `search_description` line you can copy.\n"
+                "_\u200b_\n"
+                "**STEP 3 — FEED TO FIRE**\n"
+                "`!chain <paste search_description here>`\n"
+                "_\u200b_\n"
+                "**Tip:** 2-3 angles (front/side/detail) improve targeting."
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_RECON)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="🏷️ LOAD — Generate Tags", style=discord.ButtonStyle.success)
     async def tags_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "**🏷️ LOAD — GENERATE TAGS**\n"
-            "_Loads 45 SEO tags mined from real top-sellers in your niche._\n"
-            "_\u200b_\n"
-            "**TARGET:** Your item's champion name\n"
-            "**PAYLOAD:** 45 search-optimized tags\n"
-            "**SOURCE:** Real top-seller tag blocks + search demand\n"
-            "_\u200b_\n"
-            "**STEP 1 — SELECT NAME**\n"
-            "Use the champion title from `!chain` FINAL block.\n"
-            "_\u200b_\n"
-            "**STEP 2 — LOAD WARHEADS**\n"
-            "`!tags Winter Kawaii Cat Beanie`\n"
-            "_\u200b_\n"
-            "**With family scoping** (higher accuracy):\n"
-            "`!tags hair:Winter Kawaii Cat Beanie`\n"
-            "`!tags emotes:Smooth Hip Sway Dance`\n"
-            "_\u200b_\n"
-            "**STEP 3 — DEPLOY TO ROBLOX**\n"
-            "Paste tag line into your description, starting with `tags:`\n"
-            "_\u200b_\n"
-            "**Why it matters:** Search discovery. Most creators guess tags. "
-            "Yours are mined from actual winners."
+        embed = discord.Embed(
+            title="🏷️ LOAD — GENERATE TAGS",
+            description=(
+                "_Loads 45 SEO tags mined from real top-sellers in your niche._\n"
+                "_\u200b_\n"
+                "**TARGET:** Your item's champion name\n"
+                "**PAYLOAD:** 45 search-optimized tags\n"
+                "**SOURCE:** Real top-seller tag blocks + search demand\n"
+                "_\u200b_\n"
+                "**STEP 1 — SELECT NAME**\n"
+                "Use the champion title from `!chain` FINAL block.\n"
+                "_\u200b_\n"
+                "**STEP 2 — LOAD WARHEADS**\n"
+                "`!tags Winter Kawaii Cat Beanie`\n"
+                "_\u200b_\n"
+                "**With family scoping** (higher accuracy):\n"
+                "`!tags hair:Winter Kawaii Cat Beanie`\n"
+                "`!tags emotes:Smooth Hip Sway Dance`\n"
+                "_\u200b_\n"
+                "**STEP 3 — DEPLOY TO ROBLOX**\n"
+                "Paste tag line into your description, starting with `tags:`\n"
+                "_\u200b_\n"
+                "**Why it matters:** Search discovery. Most creators guess tags. "
+                "Yours are mined from actual winners."
+            ),
+            color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_LOAD)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="ℹ️ MANUAL — Full Guide", style=discord.ButtonStyle.secondary)
     async def workflow(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -237,18 +287,8 @@ class MenuView(discord.ui.View):
             ),
             color=COLOR_STEALTH,
         )
+        _apply_gif(embed, GIF_MANUAL)
         await interaction.response.send_message(embed=embed)
-
-
-def _gif_is_valid(url):
-    """Check the URL looks like a usable direct-image link."""
-    if not url or not isinstance(url, str):
-        return False
-    url = url.strip()
-    if "REPLACE_ME" in url or "example" in url:
-        return False
-    # Must end in a known image extension
-    return bool(url.lower().endswith((".gif", ".gifv", ".png", ".jpg", ".jpeg", ".webp")))
 
 
 def register_menu_commands(bot, get_db):
@@ -284,19 +324,7 @@ def register_menu_commands(bot, get_db):
             color=COLOR_STEALTH,
         )
 
-        # ── GIF HERO BANNER ────────────────────────────────────
-        if _gif_is_valid(MENU_GIF_URL):
-            try:
-                embed.set_image(url=MENU_GIF_URL.strip())
-            except Exception as e:
-                print(f"[menu] GIF embed failed: {e}", flush=True)
-        else:
-            print(
-                f"[menu] No GIF set. Set MENU_GIF_URL to a direct "
-                f".gif URL (currently: {MENU_GIF_URL!r})",
-                flush=True,
-            )
-        # ────────────────────────────────────────────────────────
+        _apply_gif(embed, GIF_MAIN)
 
         embed.set_footer(
             text="VANTA 73 · Stealth UGC Hunter · Absorbs 99.96% of competition"
