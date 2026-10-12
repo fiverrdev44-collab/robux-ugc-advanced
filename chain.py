@@ -1,6 +1,22 @@
 """
-chain.py — full pipeline in one command.
-Runs the same deep pipeline as !brainstorm, then adds a FINAL action block.
+chain.py — full pipeline. Brainstorm depth + FINAL action + statistical scoring.
+
+Runs:
+  1. Intent extraction
+  2. Niche pre-check (deduped, family-fixed)
+  3. Market scan
+  4. Winner analysis
+  5. Algo context
+  6. Keyword intelligence
+  7. Niche velocity / trajectory / concentration
+  8. Description mining
+  9. Big AI strategy prompt (with all context)
+  10. Focused title pass
+  11. Smart pipeline (parallel live enrich)
+  12. Statistical title scoring (real lift × demand × freshness)
+  13. FINAL block with statistical champion
+
+Variant mode: parent_id keeps winner keywords.
 """
 import re
 import json
@@ -9,7 +25,7 @@ from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 
-# ── Map any label returned by AI to a key that exists in FAMILIES ──
+# Map any AI-returned label to a valid FAMILIES key
 _FAMILY_MAP = {
     "headwear": "hair", "hat": "hair", "hats": "hair", "cap": "hair",
     "crown": "hair", "beanie": "hair", "beret": "hair", "hair": "hair",
@@ -23,7 +39,6 @@ _FAMILY_MAP = {
 
 
 def _map_family(label):
-    """Force family into a FAMILIES key. Falls back to 'hair'."""
     if not label:
         return "hair"
     l = str(label).lower().strip()
@@ -60,9 +75,9 @@ def run_chain(concept, family=None, parent_id=None):
                         f"Parent favs: {row[2]:,} · price R${row[3]}\n"
                         f"Parent description: {(row[1] or '')[:200]}\n"
                         f"\nRULES FOR VARIANT:\n"
-                        f"- KEEP the core keywords from the parent name\n"
-                        f"- Add ONE new theme word\n"
-                        f"- Don't drop the words that made the parent a winner\n"
+                        f"- KEEP core keywords from parent name\n"
+                        f"- Add ONE new theme word (color/vibe/effect)\n"
+                        f"- Don't drop words that made the parent a winner\n"
                     )
                     if not concept or concept.lower() in ("variant", "remix"):
                         concept = row[0]
@@ -86,7 +101,7 @@ def run_chain(concept, family=None, parent_id=None):
     item_type = family
     terms = all_terms(intent)
 
-    # ── Stage 2: Niche pre-check (deduped, correct family) ──
+    # ── Stage 2: Niche pre-check (deduped, family-fixed) ──
     niche_data = []
     try:
         conn = get_db(); cur = conn.cursor()
@@ -107,7 +122,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] niche pre-check failed: {e}", flush=True)
 
-    # ── Stage 3: Market ──
+    # ── Stage 3: Market scan ──
     try:
         allow_list, top_items, stats = _build_allow_list(intent, 60, None, family)
     except Exception as e:
@@ -116,7 +131,7 @@ def run_chain(concept, family=None, parent_id=None):
     if not allow_list:
         return {"error": "No DB matches. Try different keywords."}
 
-    # ── Stage 4: Winner analysis (brainstorm-level depth) ──
+    # ── Stage 4: Winner analysis ──
     winner_data = {}
     try:
         from winner_analysis import analyze_winners
@@ -202,7 +217,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] niche intel failed: {e}", flush=True)
 
-    # ── Stage 8: Description examples ──
+    # ── Stage 8: Description mining ──
     desc_examples = []
     try:
         from desc_forge import _fetch_top_descriptions
@@ -227,7 +242,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] desc mining failed: {e}", flush=True)
 
-    # ── Best niche keyword (for title forcing) ──
+    # ── Best niche keyword ──
     best_niche_kw = None
     best_niche_bucket = None
     if niche_data:
@@ -240,7 +255,7 @@ def run_chain(concept, family=None, parent_id=None):
         best_niche_kw = best_obj["keyword"]
         best_niche_bucket = best_obj["bucket"]
 
-    # ── Stage 9: Big strategy prompt (WITH ALL DATA) ──
+    # ── Stage 9: Big strategy prompt (with all context) ──
     synth = {}
     try:
         concept_for_ai = concept
@@ -369,6 +384,19 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] smart pipeline failed: {e}", flush=True)
 
+    # ── Stage 12: Statistical title scoring ──
+    scored_titles = []
+    try:
+        from title_scorer import score_titles_batch, pick_champion
+        all_titles = []
+        for k in ("titles_safe", "titles_differentiated",
+                  "titles_longtail", "titles_viral"):
+            all_titles.extend(synth.get(k) or [])
+        if all_titles:
+            scored_titles = score_titles_batch(all_titles, family=family)
+    except Exception as e:
+        print(f"[chain] title scoring failed: {e}", flush=True)
+
     return {
         "concept": concept,
         "parent_name": parent_name,
@@ -386,6 +414,7 @@ OUTPUT — ONLY JSON:
         "synth": synth,
         "pipeline_report": pipeline_report,
         "niche_intel": niche_intel,
+        "scored_titles": scored_titles,
     }
 
 
@@ -395,6 +424,7 @@ def format_chain(result):
 
     chunks = []
     synth = result.get("synth") or {}
+    s = result["stats"]
 
     # ── HEADER ──
     if result.get("is_variant") and result.get("parent_name"):
@@ -427,7 +457,6 @@ def format_chain(result):
         chunks.append("\n".join(lines))
 
     # ── MARKET ──
-    s = result["stats"]
     chunks.append(
         f"## 📊 Market\n"
         f"• Items matched: **{s.get('count', 0):,}**\n"
@@ -437,7 +466,7 @@ def format_chain(result):
         f"• Avg price: **R${s.get('price_avg', 0)}**"
     )
 
-    # ── TOP OPPORTUNITY KEYWORDS ──
+    # ── OPPORTUNITY KEYWORDS ──
     if s.get("opportunity_keywords"):
         lines = ["## 🕳️ Top opportunity keywords"]
         for kw in s["opportunity_keywords"][:8]:
@@ -446,7 +475,7 @@ def format_chain(result):
             )
         chunks.append("\n".join(lines))
 
-    # ── NICHE VELOCITY / TRAJECTORY / CONCENTRATION ──
+    # ── NICHE INTEL (velocity/trajectory/concentration) ──
     niche_intel = result.get("niche_intel")
     if niche_intel:
         try:
@@ -475,16 +504,15 @@ def format_chain(result):
             lines.append(f"**{name[:50]}** — {favs:,}♥\n_{d}_")
         chunks.append("\n".join(lines))
 
-    # ── UGC STRATEGY REPORT (brainstorm depth) ──
+    # ── AI STRATEGY SECTIONS ──
     if synth:
-        sections = [
-            ("search_diagnosis", "## 🔍 Search Diagnosis"),
-            ("positioning",      "## 🎯 Positioning"),
-            ("market_diagnosis", "## 📊 Market Diagnosis"),
-            ("winner_blueprint", "## 🏆 Winner Blueprint"),
+        for key, header in [
+            ("search_diagnosis",  "## 🔍 Search Diagnosis"),
+            ("positioning",       "## 🎯 Positioning"),
+            ("market_diagnosis",  "## 📊 Market Diagnosis"),
+            ("winner_blueprint",  "## 🏆 Winner Blueprint"),
             ("saturation_verdict","## ⚠️ Saturation Summary"),
-        ]
-        for key, header in sections:
+        ]:
             v = synth.get(key)
             if v:
                 chunks.append(f"{header}\n{v}")
@@ -509,7 +537,7 @@ def format_chain(result):
                 lines.append(f"• {b}")
             chunks.append("\n".join(lines))
 
-    # ── 10 TITLES ──
+    # ── 10 TITLES (grouped) ──
     if synth:
         title_groups = [
             ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
@@ -534,19 +562,57 @@ def format_chain(result):
         for i in range(0, len(rep), 1900):
             chunks.append(rep[i:i+1900])
 
+    # ── STATISTICAL TITLE RANKING ──
+    scored = result.get("scored_titles") or []
+    if scored:
+        lines = ["# 📊 STATISTICAL TITLE RANKING\n",
+                 "_Real word-lift × search-demand × freshness from DB._\n"]
+        for i, sc in enumerate(scored[:5], 1):
+            lines.append(
+                f"**#{i} `{sc['title']}`** — score **{sc['score']}**"
+                + (f" · unique" if sc['exact_matches'] == 0
+                   else f" · {sc['exact_matches']} matches")
+            )
+            for b in sorted(sc["breakdown"],
+                            key=lambda x: x["contribution"],
+                            reverse=True)[:4]:
+                lift = b["lift"]
+                if lift >= 2.5: emoji = "🟢"
+                elif lift >= 1.5: emoji = "🔵"
+                elif lift >= 1.0: emoji = "⚪"
+                elif lift >= 0.5: emoji = "🟠"
+                else: emoji = "🔴"
+                lines.append(
+                    f"   {emoji} `{b['word']}` lift {lift}× "
+                    f"({b['sample']} items · {b['demand']} searches) "
+                    f"→ +{b['contribution']}"
+                )
+            if sc.get("bigram"):
+                lines.append(f"   🎯 bigram `{sc['bigram']}` → +{sc['bigram_bonus']}")
+            lines.append("")
+        body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            chunks.append(body[i:i+1900])
+
     # ── FINAL BLOCK ──
     final_lines = ["# ✅ FINAL — DO THIS"]
 
-    titles = []
-    for key in ("titles_differentiated", "titles_safe", "titles_viral"):
-        titles.extend(synth.get(key) or [])
-
-    if titles:
-        final_lines.append(f"**1. Name:** `{titles[0]}`")
-        if len(titles) > 1:
-            final_lines.append(f"**2. Backup name:** `{titles[1]}`")
+    if scored:
+        champion = scored[0]["title"]
+        backup = scored[1]["title"] if len(scored) > 1 else None
+        final_lines.append(f"**1. Name:** `{champion}`  ← statistical winner")
+        if backup:
+            final_lines.append(f"**2. Backup name:** `{backup}`")
     else:
-        final_lines.append("**1. Name:** (no titles — try again)")
+        titles = []
+        for key in ("titles_differentiated", "titles_safe", "titles_viral"):
+            titles.extend(synth.get(key) or [])
+        if titles:
+            final_lines.append(f"**1. Name:** `{titles[0]}`")
+            if len(titles) > 1:
+                final_lines.append(f"**2. Backup name:** `{titles[1]}`")
+        else:
+            final_lines.append("**1. Name:** (no titles generated)")
 
     if synth.get("seo_description"):
         final_lines.append("**3. Paste description** (from above block)")
