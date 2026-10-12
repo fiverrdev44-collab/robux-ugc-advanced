@@ -1,23 +1,37 @@
 """
 intel_common.py — shared intelligence layer.
 Used by !brainstorm, !autopsy, !verdict, !converge.
-Single source of truth for:
-  - keyword classification (SATURATED / GOLD / etc.)
-  - percentile ranking vs category peers
-  - portfolio context (your winners, your losers)
-  - multi-signal verdict logic
-  - deterministic pivot picker (no AI flip-flop)
 
-VERDICT PRIORITY ORDER:
-  1. Sales data (strongest signal — real money)
-  2. Fast riser velocity override
-  3. Hard-kill rules (age × favs)
-  4. Freefaller detection
-  5. TOO_NEW guards (with velocity exception)
-  6. Percentile buckets
+FIXES in this version:
+  - _family_clause translates category_configs → convergence_engine
+    family names so lookups don't silently return 0 rows.
+  - classify_keyword uses median_favs for GOLD/OPPORTUNITY thresholds
+    so it agrees with recovery_brain.classify_keyword_health.
 """
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
+
+
+def _family_clause(family):
+    """
+    Translate category_configs family names → convergence_engine keys.
+    Without the translation, FAMILIES.get("emote") returns None and
+    the query returns 0 rows, silently mis-classifying everything.
+    """
+    if not family or family == "all":
+        return "", []
+    try:
+        from category_configs import to_convergence_family
+        fam = to_convergence_family(family)
+    except Exception:
+        fam = family
+    if fam is None:
+        return " and false", []
+    ids = FAMILIES.get(fam)
+    if not ids:
+        return " and false", []
+    ph = ",".join(["%s"] * len(ids))
+    return f" and asset_type_id in ({ph})", list(ids)
 
 
 # ── Shared classification thresholds — one place, one truth ──
@@ -25,6 +39,12 @@ def classify_keyword(cur, keyword, family=None):
     """
     Returns dict with classification fields used EVERYWHERE.
     No more contradictions between modules.
+
+    GOLD        — supply < 20  AND median_favs >= 150
+    OPPORTUNITY — supply < 50  AND median_favs >= 80
+    SATURATED   — supply > 200 OR median_favs < 15
+    VIRGIN      — supply = 0 but demand > 0
+    GHOST       — no supply, no demand
     """
     like = f'%{keyword}%'
     fam_sql, fam_params = _family_clause(family)
@@ -50,9 +70,9 @@ def classify_keyword(cur, keyword, family=None):
         bucket = "GHOST"
     elif supply == 0:
         bucket = "VIRGIN"
-    elif supply < 20 and demand >= 10:
+    elif supply < 20 and median_favs >= 150:
         bucket = "GOLD"
-    elif supply < 60 and median_favs >= 50:
+    elif supply < 50 and median_favs >= 80:
         bucket = "OPPORTUNITY"
     elif supply > 200 or median_favs < 15:
         bucket = "SATURATED"
@@ -67,16 +87,6 @@ def classify_keyword(cur, keyword, family=None):
         "demand": demand,
         "bucket": bucket,
     }
-
-
-def _family_clause(family):
-    if not family or family == "all":
-        return "", []
-    ids = FAMILIES.get(family)
-    if not ids:
-        return " and false", []
-    ph = ",".join(["%s"] * len(ids))
-    return f" and asset_type_id in ({ph})", list(ids)
 
 
 # ── Percentile rank — how good is THIS item vs peers? ──
@@ -135,7 +145,7 @@ def item_percentile(cur, item_id):
     }
 
 
-# ── Portfolio context — your winners shape every recommendation ──
+# ── Portfolio context ──
 def portfolio_context(cur, top_n=5):
     cur.execute("""
         select i.id, i.name, i.favorite_count, i.asset_type_id,
@@ -167,12 +177,10 @@ def portfolio_context(cur, top_n=5):
     }
 
 
-# ── Multi-signal verdict — 6-priority decision tree ──
+# ── Multi-signal verdict ──
 def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
                    total_sales=None, sample_size=None):
     """
-    Multi-signal verdict. Returns (verdict, emoji, reason).
-
     Priority:
       1. Sales data (>= 10 → DOUBLE_DOWN, >= 3 → KEEP, 0 & old → KILL)
       2. Fast riser velocity (>= 10/day)
@@ -271,7 +279,7 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
             f"Bottom {int(p)}% of peers. No signal to salvage.{low_conf}")
 
 
-# ── DETERMINISTIC PIVOT PICKER ───────────────────────────────────────
+# ── DETERMINISTIC PIVOT PICKER ──
 def pick_pivot_from_data(niche_data, keyword_intel=None):
     """
     Deterministic pivot picker. Uses real DB data, not AI opinion.
