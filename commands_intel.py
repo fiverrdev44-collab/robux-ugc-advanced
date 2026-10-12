@@ -5,8 +5,8 @@ VERDICT: multi-signal (sales + age + favs + velocity + percentile).
 AUTOPSY: peer comparison + statistical ranking + desc merge + FINAL block.
 DETERMINISM: pivot picked from data, tracked, consistency-checked.
 
-Smart pipeline removed from autopsy (redundant — the peer autopsy +
-statistical ranking already cover seed analysis without the live-enrich delay).
+Smart pipeline removed from autopsy (redundant + slow).
+Debug print added to pivot picker input for diagnosis.
 """
 import os
 import re
@@ -225,7 +225,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !verdict — 6-priority: sales · velocity · hard-kill · TOO_NEW · percentile
+    # !verdict
     # =========================================================
     @bot.command(name="verdict")
     async def verdict_cmd(ctx, item_id: int):
@@ -456,13 +456,18 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                             temp_niche.append(kw)
                 finally:
                     cur_p.close(); conn_p.close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[autopsy] niche build failed: {e}", flush=True)
+
+            # DEBUG: log the input the pivot picker receives
+            print(f"[autopsy] pivot debug input: {temp_niche}", flush=True)
 
             if temp_niche:
                 pivot_kw, pivot_conf, pivot_reason = pick_pivot_from_data(
                     temp_niche, None
                 )
+                print(f"[autopsy] pivot chosen: {pivot_kw} "
+                      f"conf={pivot_conf} reason={pivot_reason}", flush=True)
         except Exception as e:
             print(f"[autopsy] pivot picker failed: {e}", flush=True)
 
