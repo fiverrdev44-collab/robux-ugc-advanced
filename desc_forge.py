@@ -2,21 +2,20 @@
 desc_forge.py — mine top descriptions in a niche, generate one that matches.
 
 1. Query top items by favorite_count in the niche (with descriptions)
-2. Filter out promo spam / URLs / creator credits
+2. Filter out promo spam / URLs / credits / rants / meme spam
 3. If DB has fewer than MIN_DB_RESULTS clean rows → fallback to Roblox live search
 4. Analyze pattern: line count, emoji density, top phrases
 5. Feed real examples to Gemini → get a description that FITS the pattern
 6. Never output URLs — prompt explicitly forbids hallucinated links
 
 FIXES in this version:
-  - Promo filter now catches: "join the group", "join posé", "for more ugc",
-    "idea by X", leading "by X", decorative-symbol spam (♡⋆ฅﻌ), URL fragment
-    variants, and too-short rows.
-  - _query_db and _fetch_live_descriptions translate category_configs family
-    names (headwear, accessory, clothing...) to convergence_engine names
-    (hair, neck, tops...) before lookup.
-  - _generate_description falls back to a standard 3-line prompt when the
-    mined pattern is weak (sample < 10, avg_chars < 80, avg_lines < 1.5).
+  - Promo filter now rejects: "the group"/"in the group"/"group store",
+    reupload/ownership claims, political rants, word-repetition (meme spam),
+    description-is-item-name rows, decorative-symbol spam.
+  - _query_db and _fetch_live_descriptions translate category_configs
+    family names → convergence_engine names before lookup.
+  - _generate_description falls back to a standard 3-line prompt when
+    mined pattern is weak (sample<10, avg_chars<80, avg_lines<1.5).
 """
 import os
 import re
@@ -42,12 +41,14 @@ ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 _DECOR_SYMBOLS = set("♡♥⋆｡˚ฅﻌ°•·✧✦❀✿❁☆★彡ට็้ﺕ")
 
 
-def _is_promo_spam(desc):
+def _is_promo_spam(desc, name=None):
     """
     Returns True if description is dominated by URLs, group links,
-    creator credits, decorative-symbol spam, or is too short.
+    creator credits, decorative-symbol spam, political rants,
+    reupload notes, meme word-repetition, or is too short.
 
-    We only want actual descriptive text.
+    Optional `name` allows rejecting rows where the description is
+    just a repeat of the item name.
     """
     if not desc:
         return True
@@ -69,6 +70,9 @@ def _is_promo_spam(desc):
         "join the", "join our", "join for", "join us", "join me",
         "join posé", "join pose", "join discord", "join group",
         "join my", "join now",
+        # "the group" / "group store" catch-alls
+        "the group", "in the group", "from the group", "of the group",
+        "the group store", "group store", "our group store",
         # More items
         "for more ugc", "for more items", "for more emotes",
         "for more cute", "for more", "want more", "get more",
@@ -76,14 +80,14 @@ def _is_promo_spam(desc):
         "shop more", "shop all", "shop now", "buy more",
         "check out our", "check out my", "check out the",
         "visit our", "visit my",
-        # Group branding
+        # Branding
         "our store", "our group", "our community", "our catalog",
         "our ugc", "our emote", "our shop",
         "even better", "store:", "catalog:", "shop:", "group:",
         # Follow/subscribe CTAs
         "follow us", "follow me", "follow for", "subscribe",
-        "add to your collection", "exclusive ugc",
-        "dmca",
+        "add to your collection", "exclusive ugc", "dmca",
+        "support us", "support me", "support the",
     ]
     if any(m in dl for m in promo_markers):
         return True
@@ -93,17 +97,34 @@ def _is_promo_spam(desc):
         "idea by", "idea:", "idea -",
         "credit to", "credits to", "credit:",
         "made by", "created by", "model by", "anim by", "animation by",
-        "original by", "inspired by", "based on",
+        "inspired by", "based on",
     ]
     if any(m in dl for m in credit_markers):
+        return True
+
+    # ── Reupload / ownership claims ────────────────────────────
+    reupload_markers = [
+        "reupload", "re-upload", "original uploader", "original work",
+        "i am the original", "i made this", "not stolen", "not a reupload",
+        "please don't steal", "do not steal",
+    ]
+    if any(m in dl for m in reupload_markers):
+        return True
+
+    # ── Political / rant content ───────────────────────────────
+    rant_markers = [
+        "don't support", "do not support", "boycott", "corporations",
+        "refuse to", "workers", "protest", "politics", "political",
+        "free palestine", "black lives", "blm", "lgbtq",
+    ]
+    if any(m in dl for m in rant_markers):
         return True
 
     # Leading "by <name>" (creator attribution as first token)
     if dl.startswith("by ") or dl.startswith("by:"):
         return True
 
-    # ── Too short to be a real description ─────────────────────
-    # Real Roblox UGC descriptions are usually 60+ chars.
+    # ── Too short ──────────────────────────────────────────────
     if len(d) < 40:
         return True
 
@@ -112,19 +133,37 @@ def _is_promo_spam(desc):
     if len(d) > 0 and emoji_chars > len(d) * 0.25:
         return True
 
-    # ── Decorative symbol spam ─────────────────────────────────
-    # If 3+ decorative glyphs AND real words are sparse, reject.
-    # (Real descriptions rarely have kaomoji/decorative marks.)
+    # ── Decorative-symbol spam ─────────────────────────────────
     decor_count = sum(1 for c in d if c in _DECOR_SYMBOLS)
     if decor_count >= 3:
         real_words = re.findall(r"[a-zA-Z]{4,}", d)
         if len(real_words) < 5:
             return True
 
-    # ── URL fragments (bare domains without http) ──────────────
-    # Catches "youtube.com/c/..." or ".gg/abc" without scheme
+    # ── URL fragments (bare domains without scheme) ────────────
     if re.search(r"\b\w+\.(com|gg|io|net|org|tv|xyz)/", dl):
         return True
+
+    # ── Word-repetition (meme spam) ────────────────────────────
+    # "Bouncy bois very phrog of them froggy bois PHROG" — top token
+    # exceeds 40% of all tokens → meme spam.
+    tokens = re.findall(r"[a-z]{3,}", dl)
+    if len(tokens) >= 4:
+        top_count = Counter(tokens).most_common(1)[0][1]
+        if top_count / len(tokens) > 0.4:
+            return True
+
+    # ── Description IS the item name ───────────────────────────
+    if name:
+        name_tokens = set(re.findall(r"[a-z]{3,}", (name or "").lower()))
+        desc_tokens = set(tokens)
+        if name_tokens and desc_tokens:
+            overlap = len(name_tokens & desc_tokens)
+            # 80%+ of desc tokens came from the name AND desc adds
+            # little new content → reject.
+            if (overlap / len(desc_tokens) >= 0.8
+                    and len(desc_tokens) <= len(name_tokens) + 2):
+                return True
 
     return False
 
@@ -133,7 +172,7 @@ def _filter_clean(rows, limit):
     """Filter out promo spam, keep up to `limit`."""
     clean = []
     for name, desc, favs, price in rows:
-        if _is_promo_spam(desc):
+        if _is_promo_spam(desc, name=name):
             continue
         clean.append((name, desc, favs, price))
         if len(clean) >= limit:
@@ -152,7 +191,6 @@ def _query_db(keyword, family, limit):
         fam_params = []
         if family:
             from convergence_engine import FAMILIES
-            # Translate category_configs family → convergence_engine family
             try:
                 from category_configs import to_convergence_family
                 fam = to_convergence_family(family)
@@ -194,7 +232,6 @@ def _family_to_roblox_category(family):
     """Map our family name to Roblox catalog Category id (best-effort)."""
     if not family:
         return None
-    # Translate to convergence_engine keys for consistency
     try:
         from category_configs import to_convergence_family
         fam = to_convergence_family(family)
@@ -227,7 +264,6 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
         if cookie:
             headers["Cookie"] = f".ROBLOSECURITY={cookie}"
 
-        # Translate family for both the API call and the filter
         conv_family = family
         try:
             from category_configs import to_convergence_family
@@ -275,7 +311,6 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
                 if favs < 50:
                     continue
 
-                # Family filter uses translated name
                 if conv_family and ASSET_TO_FAMILY.get(atype) != conv_family:
                     continue
 
@@ -433,9 +468,6 @@ def _generate_description(keyword, family, rows, pattern):
 
     examples_block = "\n".join(examples) or "(no examples)"
 
-    # ── PATTERN QUALITY GATE ────────────────────────────────────
-    # If the mined pattern is weak, don't force the AI to match it.
-    # Fall back to a standard strong description instead.
     sample = pattern.get("sample_size", 0)
     avg_chars = pattern.get("avg_chars", 0)
     avg_lines = pattern.get("avg_lines", 0)
@@ -445,7 +477,6 @@ def _generate_description(keyword, family, rows, pattern):
         or avg_chars < 80
         or avg_lines < 1.5
     )
-    # ────────────────────────────────────────────────────────────
 
     if weak_pattern:
         prompt = f"""You write Roblox UGC descriptions for {family} items.
