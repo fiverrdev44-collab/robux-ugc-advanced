@@ -1,16 +1,9 @@
 """
 commands_intel.py — All intel commands. Category-aware autopsy.
 
-Creative pivot expansion DISABLED.
-Market velocity / trajectory / concentration wired into !autopsy.
-
-HARD RULES:
-- Pivot keyword MANDATORY as starting token in >=5 of 10 titles.
-- SATURATED/DEAD seed words FORBIDDEN as first token.
-- Post-filter rejects any title starting with a forbidden word.
-
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
 AUTOPSY: peer comparison + statistical ranking + desc merge + FINAL block.
+DETERMINISM: pivot picked from data, tracked, consistency-checked.
 """
 import os
 import re
@@ -34,7 +27,6 @@ from category_configs import (
     detect_family_from_asset_type, get_category_config,
 )
 
-# ── Shared intelligence layer (single source of truth) ──
 from intel_common import (
     item_percentile,
     decide_verdict,
@@ -230,7 +222,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !verdict — 6-priority: sales · velocity · hard-kill · TOO_NEW · percentile
+    # !verdict
     # =========================================================
     @bot.command(name="verdict")
     async def verdict_cmd(ctx, item_id: int):
@@ -331,7 +323,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         await ctx.send("\n".join(lines)[:1900])
 
     # =========================================================
-    # !autopsy — CATEGORY-AWARE + MARKET INTEL + DECISION
+    # !autopsy
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
@@ -445,7 +437,33 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             except Exception as e:
                 print(f"[autopsy] sales fetch failed: {e}", flush=True)
 
-        # ── 🎯 DECISION LINE — FIRST MESSAGE ─────────────────
+        # ── DETERMINISTIC PIVOT (data-driven, not AI) ──
+        pivot_kw = None
+        pivot_conf = 0.0
+        pivot_reason = ""
+        try:
+            from intel_common import pick_pivot_from_data
+            temp_niche = []
+            try:
+                conn_p = get_db(); cur_p = conn_p.cursor()
+                try:
+                    for w in name_words[:5]:
+                        kw = classify_keyword(cur_p, w, family)
+                        if kw:
+                            temp_niche.append(kw)
+                finally:
+                    cur_p.close(); conn_p.close()
+            except Exception:
+                pass
+
+            if temp_niche:
+                pivot_kw, pivot_conf, pivot_reason = pick_pivot_from_data(
+                    temp_niche, None
+                )
+        except Exception as e:
+            print(f"[autopsy] pivot picker failed: {e}", flush=True)
+
+        # ── DECISION LINE ─────────────────
         if pct_data:
             sales_30d = 0
             try:
@@ -509,9 +527,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 )
 
             await ctx.send("\n".join(dec_lines)[:1900])
-        # ─────────────────────────────────────────────────────
 
-        # ── 🚀 NICHE VELOCITY / TRAJECTORY / CONCENTRATION ────
+        # ── NICHE INTEL ────
         niche_intel = None
         try:
             from market_velocity import build_niche_intel, format_niche_intel_for_prompt
@@ -558,7 +575,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
-        # ── KEYWORD INTELLIGENCE ────────────────────────────
+        # ── KEYWORD INTELLIGENCE ──
         fast_class = None
         deep_intel = None
         try:
@@ -608,7 +625,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception as e:
             print(f"[autopsy] keyword intelligence block failed: {e}", flush=True)
 
-        # ── AI helpers ──────────────────────────────────────
+        # ── AI helpers ──
         try:
             from gemini_brain import is_available, extract_keywords, _generate, verify_titles
         except Exception:
@@ -749,7 +766,6 @@ FAILURE MODE: {diagnosis['failure_mode']}
    {', '.join(allow_list[:80])}
 8. Every title MUST be UNIQUE.
 9. If CREATOR'S OWN TOP PERFORMERS are listed above, style-match them.
-   Don't propose concepts in a style that has never worked for this creator.
 
 === 10 TITLES — GROUP INTO 4 STRATEGIES ===
 titles_safe (3), titles_differentiated (3), titles_longtail (2), titles_viral (2)
@@ -773,8 +789,9 @@ description_seo, description_hype, description_short
 """
 
         try:
+            # LOWERED temperature: 0.9 → 0.3
             raw = await asyncio.to_thread(
-                _generate, recovery_prompt, True, 0.9, 6000, "gemini"
+                _generate, recovery_prompt, True, 0.3, 6000, "gemini"
             )
             data = {}
             if raw:
@@ -787,7 +804,6 @@ description_seo, description_hype, description_short
                 await ai_msg.edit(content="⚠️ AI returned nothing. Try again.")
                 return
 
-            # ── Strip promo from recovery descriptions ──
             try:
                 from gemini_brain import _strip_promo_from_description
                 for dk in ("description_seo", "description_hype", "description_short"):
@@ -862,7 +878,7 @@ description_seo, description_hype, description_short
                 for i in range(1900, len(body), 1900):
                     await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
-            # ── PEER AUTOPSY (5 nearest winners + diffs) ──
+            # PEER AUTOPSY
             try:
                 from peer_autopsy import peer_autopsy
                 peer_chunks = peer_autopsy(item_id, top_n=5)
@@ -873,7 +889,7 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] peer autopsy failed: {e}", flush=True)
 
-            # ── STATISTICAL RECOVERY RANKING ──
+            # STATISTICAL RECOVERY RANKING
             scored_recovery = []
             champion = None
             backup = None
@@ -919,7 +935,7 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] title scoring failed: {e}", flush=True)
 
-            # ── DESCRIPTION ENGINE MERGE (tag block) ──
+            # DESCRIPTION ENGINE MERGE
             merged_desc = None
             try:
                 from description_engine import generate_description
@@ -950,8 +966,16 @@ description_seo, description_hype, description_short
                     f"{merged_desc[:1500]}\n```"
                 )
 
-            # ── FINAL BLOCK ──
+            # FINAL BLOCK
             final_lines = ["# ✅ FINAL — DO THIS FOR THIS ITEM"]
+
+            if pivot_kw:
+                final_lines.append(
+                    f"**🎯 Pivot:** `{pivot_kw}` "
+                    f"(confidence **{pivot_conf:.0%}**)\n"
+                    f"  _Reason: {pivot_reason}_"
+                )
+
             if champion:
                 final_lines.append(
                     f"**1. New name:** `{champion['title']}`  ← statistical winner"
@@ -984,7 +1008,27 @@ description_seo, description_hype, description_short
 
             await ctx.send("\n".join(final_lines))
 
-            # ── SMART PIPELINE ──
+            # CONSISTENCY CHECK + SAVE
+            if pivot_kw:
+                try:
+                    from pivot_history import consistency_check, save_recommendation
+                    check = consistency_check(item_id, pivot_kw, pivot_conf)
+                    if check:
+                        _, check_msg = check
+                        await ctx.send(f"## 🧠 Consistency check\n{check_msg}")
+
+                    save_recommendation(
+                        item_id,
+                        pivot_kw,
+                        pivot_conf,
+                        pivot_reason,
+                        (champion["title"] if champion else None),
+                        None,
+                    )
+                except Exception as e:
+                    print(f"[autopsy] consistency/save failed: {e}", flush=True)
+
+            # SMART PIPELINE
             try:
                 from smart_pipeline import run_full_pipeline
                 pipeline_ai_titles = []
