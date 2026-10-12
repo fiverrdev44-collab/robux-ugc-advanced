@@ -17,6 +17,9 @@ Runs:
   13. FINAL block with statistical champion
 
 Variant mode: parent_id keeps winner keywords.
+
+FIX: Hat/beanie items now use "hat, beanie, cap" as type words instead of
+     "hair" — prevents "beanie hair" style awkward titles.
 """
 import re
 import json
@@ -37,6 +40,10 @@ _FAMILY_MAP = {
     "gear": "gear", "bundle": "bundle",
 }
 
+# Concept words that mean "this is a HAT-type item" — use hat type words
+_HAT_WORDS = ("beanie", "hat", "cap", "beret", "crown", "bonnet",
+              "visor", "snapback", "bucket hat", "fedora", "bowler")
+
 
 def _map_family(label):
     if not label:
@@ -45,6 +52,16 @@ def _map_family(label):
     if l in FAMILIES:
         return l
     return _FAMILY_MAP.get(l, "hair")
+
+
+def _detect_type_override(concept):
+    """Return 'hat' if concept is clearly a hat-type item, else None."""
+    if not concept:
+        return None
+    c = concept.lower()
+    if any(w in c for w in _HAT_WORDS):
+        return "hat"
+    return None
 
 
 def run_chain(concept, family=None, parent_id=None):
@@ -100,6 +117,11 @@ def run_chain(concept, family=None, parent_id=None):
     intent["item_type"] = family
     item_type = family
     terms = all_terms(intent)
+
+    # ── Type override: hat/beanie items must use "hat" type words ──
+    type_override = _detect_type_override(concept)
+    if parent_name and not type_override:
+        type_override = _detect_type_override(parent_name)
 
     # ── Stage 2: Niche pre-check (deduped, family-fixed) ──
     niche_data = []
@@ -279,7 +301,13 @@ def run_chain(concept, family=None, parent_id=None):
     # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
-        type_words = ", ".join(cfg.get("type_words", [])[:6]) or "hat, beanie"
+
+        # ── FIX: Hat/beanie items get hat-specific type words ──
+        if type_override == "hat":
+            type_words = "hat, beanie, cap, beret, crown, visor"
+        else:
+            type_words = ", ".join(cfg.get("type_words", [])[:6]) or "hat, beanie"
+
         archetypes = "\n".join(
             f"- {a}" for a in cfg.get("title_archetypes", [])[:5]
         )
@@ -403,6 +431,7 @@ OUTPUT — ONLY JSON:
         "is_variant": bool(parent_id),
         "family": family,
         "item_type": item_type,
+        "type_override": type_override,
         "terms": terms,
         "niche": niche_data,
         "best_niche_kw": best_niche_kw,
@@ -427,16 +456,17 @@ def format_chain(result):
     s = result["stats"]
 
     # ── HEADER ──
+    type_label = result.get("type_override") or result['item_type']
     if result.get("is_variant") and result.get("parent_name"):
         chunks.append(
             f"# 🔗 CHAIN — VARIANT\n"
             f"_Parent: `{result['parent_name'][:60]}`_\n"
-            f"_Family: `{result['family']}` · Type: `{result['item_type']}`_"
+            f"_Family: `{result['family']}` · Type: `{type_label}`_"
         )
     else:
         chunks.append(
             f"# 🔗 CHAIN — `{result['concept'][:60]}`\n"
-            f"_Family: `{result['family']}` · Type: `{result['item_type']}`_"
+            f"_Family: `{result['family']}` · Type: `{type_label}`_"
         )
 
     # ── NICHE ──
@@ -568,23 +598,32 @@ def format_chain(result):
         lines = ["# 📊 STATISTICAL TITLE RANKING\n",
                  "_Real word-lift × search-demand × freshness from DB._\n"]
         for i, sc in enumerate(scored[:5], 1):
+            gap_part = f" · gap {sc.get('visibility_gap', 0):.0f}" \
+                       if sc.get("visibility_gap", 0) >= 5 else ""
             lines.append(
                 f"**#{i} `{sc['title']}`** — score **{sc['score']}**"
+                + gap_part
                 + (f" · unique" if sc['exact_matches'] == 0
                    else f" · {sc['exact_matches']} matches")
             )
             for b in sorted(sc["breakdown"],
                             key=lambda x: x["contribution"],
                             reverse=True)[:4]:
+                if b.get("no_data"):
+                    lines.append(f"   ⚫ `{b['word']}` — no data "
+                                 f"({b['demand']} searches) → +0.0")
+                    continue
                 lift = b["lift"]
                 if lift >= 2.5: emoji = "🟢"
                 elif lift >= 1.5: emoji = "🔵"
                 elif lift >= 1.0: emoji = "⚪"
                 elif lift >= 0.5: emoji = "🟠"
                 else: emoji = "🔴"
+                gap = b.get("visibility_gap", 0)
+                gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
                 lines.append(
                     f"   {emoji} `{b['word']}` lift {lift}× "
-                    f"({b['sample']} items · {b['demand']} searches) "
+                    f"({b['sample']} items · {b['demand']} searches{gap_str}) "
                     f"→ +{b['contribution']}"
                 )
             if sc.get("bigram"):
