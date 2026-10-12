@@ -5,6 +5,10 @@ Jobs:
   - daily_snapshot    — 03:30 UTC — captures top item favorites
   - daily_ml_train    — 04:00 UTC — retrains title predictor
   - post_monitor      — 18:00 UTC — daily sales report (CSV-based)
+
+FIXES:
+  - _run_post_monitor uses _main_loop (captured in on_ready) instead
+    of bot.loop — bot.loop doesn't exist in discord.py 2.x.
 """
 import os
 import asyncio
@@ -56,19 +60,22 @@ def _run_post_monitor():
             _log("⚠️ [post-monitor] ALERT_CHANNEL_ID not set")
             return
 
-        from discord_ugc_bot import bot
-        if bot.loop is None or bot.loop.is_closed():
-            _log("⚠️ [post-monitor] bot loop not ready")
+        # Import bot + captured loop from orchestrator
+        from discord_ugc_bot import bot, _main_loop
+
+        if _main_loop is None or _main_loop.is_closed():
+            _log("⚠️ [post-monitor] main loop not ready yet (bot not connected?)")
             return
 
         from post_monitor import send_daily_report
         asyncio.run_coroutine_threadsafe(
             send_daily_report(bot, channel_id),
-            bot.loop,
+            _main_loop,     # ← captured loop, NOT bot.loop
         )
         _log("📡 [post-monitor] report queued")
     except Exception as e:
         _log(f"❌ [post-monitor] {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 
 def start_scheduler():
