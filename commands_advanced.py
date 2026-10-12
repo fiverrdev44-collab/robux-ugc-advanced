@@ -509,7 +509,8 @@ def register_advanced_commands(bot, get_db):
             family, concept = _resolve_family_prefix(concept)
 
         mode_label = "VARIANT" if parent_id else "NEW"
-        progress = await ctx.send(f"🔗 Running chain [{mode_label}]... (~20s)")
+        eta = "~30-60s" if parent_id else "~60-120s"
+        progress = await ctx.send(f"🔗 Running chain [{mode_label}]... ({eta})")
 
         def _run():
             return run_chain(concept, family=family, parent_id=parent_id)
