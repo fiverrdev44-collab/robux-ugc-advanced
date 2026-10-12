@@ -10,6 +10,7 @@ HARD RULES:
 - Post-filter rejects any title starting with a forbidden word.
 
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
+AUTOPSY: peer comparison + statistical ranking + desc merge + FINAL block.
 """
 import os
 import re
@@ -248,7 +249,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 name, favs, price, age_days = r
                 pct = item_percentile(cur, item_id)
 
-                # Fetch sales data (fuzzy match on name)
                 sales_info = None
                 try:
                     from sales_listener import item_sales_summary
@@ -305,14 +305,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 "Change thumbnail first frame — motion, not static",
                 "Re-post to TikTok with a 1.5s hook",
             ]
-        else:  # KILL
+        else:
             actions = [
                 "Stop investing in this item",
                 f"Run `!converge {pct['family']}` for a fresh niche",
                 "Reallocate content time to your top 2 performers",
             ]
 
-        # Show sales in header if we have any
         sales_line = ""
         if data["sales_30d"] > 0:
             sales_line = f" · 💰 {data['sales_30d']} sales (30d)"
@@ -448,7 +447,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         # ── 🎯 DECISION LINE — FIRST MESSAGE ─────────────────
         if pct_data:
-            # Try to fetch sales too
             sales_30d = 0
             try:
                 from sales_listener import item_sales_summary
@@ -789,6 +787,15 @@ description_seo, description_hype, description_short
                 await ai_msg.edit(content="⚠️ AI returned nothing. Try again.")
                 return
 
+            # ── Strip promo from recovery descriptions ──
+            try:
+                from gemini_brain import _strip_promo_from_description
+                for dk in ("description_seo", "description_hype", "description_short"):
+                    if data.get(dk):
+                        data[dk] = _strip_promo_from_description(data[dk])
+            except Exception as e:
+                print(f"[autopsy] promo filter failed: {e}", flush=True)
+
             all_groups = {
                 "🟢 SAFE (search-first)":           data.get("titles_safe") or [],
                 "🎯 DIFFERENTIATED (unique angle)": data.get("titles_differentiated") or [],
@@ -854,6 +861,128 @@ description_seo, description_hype, description_short
             if len(body) > 1900:
                 for i in range(1900, len(body), 1900):
                     await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
+
+            # ── PEER AUTOPSY (5 nearest winners + diffs) ──
+            try:
+                from peer_autopsy import peer_autopsy
+                peer_chunks = peer_autopsy(item_id, top_n=5)
+                for chunk in peer_chunks:
+                    for i in range(0, len(chunk), 1900):
+                        await ctx.send(chunk[i:i+1900])
+                        await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"[autopsy] peer autopsy failed: {e}", flush=True)
+
+            # ── STATISTICAL RECOVERY RANKING ──
+            scored_recovery = []
+            champion = None
+            backup = None
+            try:
+                from title_scorer import score_titles_batch, pick_champion
+                all_titles = []
+                for k in ("titles_safe", "titles_differentiated",
+                          "titles_longtail", "titles_viral"):
+                    all_titles.extend(data.get(k) or [])
+                if all_titles:
+                    scored_recovery = score_titles_batch(all_titles, family=family)
+                    champion, backup, _ = pick_champion(scored_recovery)
+
+                    stat_lines = ["# 📊 STATISTICAL RECOVERY RANKING\n",
+                                  "_Real word-lift × search-demand from DB._\n"]
+                    for i, sc in enumerate(scored_recovery[:5], 1):
+                        stat_lines.append(
+                            f"**#{i} `{sc['title']}`** — score **{sc['score']}**"
+                            + (f" · gap {sc.get('visibility_gap', 0):.0f}"
+                               if sc.get("visibility_gap", 0) >= 5 else "")
+                            + (f" · unique" if sc['exact_matches'] == 0
+                               else f" · {sc['exact_matches']} matches")
+                        )
+                        for b in sorted(sc["breakdown"],
+                                        key=lambda x: x["contribution"],
+                                        reverse=True)[:3]:
+                            if b.get("no_data"):
+                                continue
+                            lift = b["lift"]
+                            emoji = "🟢" if lift >= 2.5 else "🔵" if lift >= 1.5 \
+                                    else "⚪" if lift >= 1.0 else "🟠" if lift >= 0.5 else "🔴"
+                            stat_lines.append(
+                                f"   {emoji} `{b['word']}` lift {lift}× "
+                                f"({b['sample']} items · {b['demand']} searches) "
+                                f"→ +{b['contribution']}"
+                            )
+                        stat_lines.append("")
+
+                    stat_body = "\n".join(stat_lines)
+                    for i in range(0, len(stat_body), 1900):
+                        await ctx.send(stat_body[i:i+1900])
+                        await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"[autopsy] title scoring failed: {e}", flush=True)
+
+            # ── DESCRIPTION ENGINE MERGE (tag block) ──
+            merged_desc = None
+            try:
+                from description_engine import generate_description
+                eng = generate_description(name or "item", family=family)
+                if eng and not eng.get("error"):
+                    eng_tag_block = ""
+                    for line in (eng.get("description") or "").split("\n"):
+                        if line.strip().lower().startswith("tags:"):
+                            eng_tag_block = line.strip()
+                            break
+
+                    base_body = ""
+                    if champion:
+                        base_body = champion["title"]
+                    elif data.get("titles_safe"):
+                        base_body = data["titles_safe"][0]
+
+                    if base_body and eng_tag_block:
+                        merged_desc = f"{base_body}\n\n{eng_tag_block}"
+                    elif eng_tag_block:
+                        merged_desc = eng_tag_block
+            except Exception as e:
+                print(f"[autopsy] desc merge failed: {e}", flush=True)
+
+            if merged_desc:
+                await ctx.send(
+                    f"## ✨ New description + tags (copy-paste)\n```\n"
+                    f"{merged_desc[:1500]}\n```"
+                )
+
+            # ── FINAL BLOCK ──
+            final_lines = ["# ✅ FINAL — DO THIS FOR THIS ITEM"]
+            if champion:
+                final_lines.append(
+                    f"**1. New name:** `{champion['title']}`  ← statistical winner"
+                )
+                if backup:
+                    final_lines.append(
+                        f"**2. Backup name:** `{backup['title']}`"
+                    )
+            elif data.get("titles_safe"):
+                final_lines.append(f"**1. New name:** `{data['titles_safe'][0]}`")
+
+            if merged_desc:
+                final_lines.append("**3. Paste description** (from above block)")
+            elif data.get("description_seo"):
+                final_lines.append(
+                    f"**3. Description:**\n```\n{data['description_seo'][:400]}\n```"
+                )
+
+            if item_stats.get("price"):
+                final_lines.append(
+                    f"**4. Price:** keep at R${item_stats['price']} — "
+                    f"test -5 after 14d if flat"
+                )
+
+            final_lines.append(
+                "**5. Today:** Rename on Roblox. Change thumbnail to motion frame. "
+                "Post 1 TikTok."
+            )
+            final_lines.append(f"**6. In 14 days:** `!verdict {item_id}`")
+
+            await ctx.send("\n".join(final_lines))
 
             # ── SMART PIPELINE ──
             try:
