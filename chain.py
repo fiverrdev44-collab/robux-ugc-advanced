@@ -10,16 +10,12 @@ Runs:
   6. Keyword intelligence
   7. Niche velocity / trajectory / concentration
   8. Description mining
-  9. Big AI strategy prompt (with all context)
+  9. Big AI strategy prompt
   10. Focused title pass
-  11. Smart pipeline (parallel live enrich)
-  12. Statistical title scoring (real lift × demand × freshness)
-  13. FINAL block with statistical champion
-
-Variant mode: parent_id keeps winner keywords.
-
-FIX: Hat/beanie items now use "hat, beanie, cap" as type words instead of
-     "hair" — prevents "beanie hair" style awkward titles.
+  11. Smart pipeline
+  12. Statistical title scoring
+  13. Description engine merge (AI body + data-driven tag block + audit)
+  14. FINAL block
 """
 import re
 import json
@@ -28,7 +24,6 @@ from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 
-# Map any AI-returned label to a valid FAMILIES key
 _FAMILY_MAP = {
     "headwear": "hair", "hat": "hair", "hats": "hair", "cap": "hair",
     "crown": "hair", "beanie": "hair", "beret": "hair", "hair": "hair",
@@ -40,7 +35,6 @@ _FAMILY_MAP = {
     "gear": "gear", "bundle": "bundle",
 }
 
-# Concept words that mean "this is a HAT-type item" — use hat type words
 _HAT_WORDS = ("beanie", "hat", "cap", "beret", "crown", "bonnet",
               "visor", "snapback", "bucket hat", "fedora", "bowler")
 
@@ -55,7 +49,6 @@ def _map_family(label):
 
 
 def _detect_type_override(concept):
-    """Return 'hat' if concept is clearly a hat-type item, else None."""
     if not concept:
         return None
     c = concept.lower()
@@ -72,7 +65,7 @@ def run_chain(concept, family=None, parent_id=None):
     from commands_ai import _build_allow_list
     from category_configs import get_category_config
 
-    # ── Parent context (variant mode) ──
+    # ── Parent context ──
     parent_context = ""
     parent_name = None
     if parent_id:
@@ -118,12 +111,11 @@ def run_chain(concept, family=None, parent_id=None):
     item_type = family
     terms = all_terms(intent)
 
-    # ── Type override: hat/beanie items must use "hat" type words ──
     type_override = _detect_type_override(concept)
     if parent_name and not type_override:
         type_override = _detect_type_override(parent_name)
 
-    # ── Stage 2: Niche pre-check (deduped, family-fixed) ──
+    # ── Stage 2: Niche pre-check ──
     niche_data = []
     try:
         conn = get_db(); cur = conn.cursor()
@@ -144,7 +136,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] niche pre-check failed: {e}", flush=True)
 
-    # ── Stage 3: Market scan ──
+    # ── Stage 3: Market ──
     try:
         allow_list, top_items, stats = _build_allow_list(intent, 60, None, family)
     except Exception as e:
@@ -210,7 +202,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] keyword intelligence failed: {e}", flush=True)
 
-    # ── Stage 7: Niche velocity / trajectory / concentration ──
+    # ── Stage 7: Niche velocity ──
     niche_intel = None
     try:
         from market_velocity import build_niche_intel
@@ -277,7 +269,7 @@ def run_chain(concept, family=None, parent_id=None):
         best_niche_kw = best_obj["keyword"]
         best_niche_bucket = best_obj["bucket"]
 
-    # ── Stage 9: Big strategy prompt (with all context) ──
+    # ── Stage 9: Big strategy prompt ──
     synth = {}
     try:
         concept_for_ai = concept
@@ -301,8 +293,6 @@ def run_chain(concept, family=None, parent_id=None):
     # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
-
-        # ── FIX: Hat/beanie items get hat-specific type words ──
         if type_override == "hat":
             type_words = "hat, beanie, cap, beret, crown, visor"
         else:
@@ -425,6 +415,42 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] title scoring failed: {e}", flush=True)
 
+    # ── Stage 13: Description engine merge ──
+    merged_description = None
+    description_audit = None
+    description_engine_raw = None
+    try:
+        from description_engine import generate_description
+        eng = generate_description(concept, family=family)
+        if eng and not eng.get("error"):
+            description_engine_raw = eng.get("description")
+            description_audit = eng.get("audit") or {}
+
+            # Extract tag block from engine output
+            eng_tag_block = ""
+            for line in (description_engine_raw or "").split("\n"):
+                if line.strip().lower().startswith("tags:"):
+                    eng_tag_block = line.strip()
+                    break
+
+            # AI-generated body — strip any tags/promo AI may have added
+            ai_body = (synth.get("seo_description") or "").strip()
+            ai_body_lines = [
+                ln for ln in ai_body.split("\n")
+                if not ln.strip().lower().startswith("tags:")
+            ]
+            ai_body = "\n".join(ai_body_lines).strip()
+
+            # Merge: AI body + engine tags
+            if ai_body and eng_tag_block:
+                merged_description = f"{ai_body}\n\n{eng_tag_block}"
+            elif ai_body:
+                merged_description = ai_body
+            else:
+                merged_description = description_engine_raw
+    except Exception as e:
+        print(f"[chain] description merge failed: {e}", flush=True)
+
     return {
         "concept": concept,
         "parent_name": parent_name,
@@ -444,6 +470,8 @@ OUTPUT — ONLY JSON:
         "pipeline_report": pipeline_report,
         "niche_intel": niche_intel,
         "scored_titles": scored_titles,
+        "merged_description": merged_description,
+        "description_audit": description_audit,
     }
 
 
@@ -496,7 +524,7 @@ def format_chain(result):
         f"• Avg price: **R${s.get('price_avg', 0)}**"
     )
 
-    # ── OPPORTUNITY KEYWORDS ──
+    # ── OPPORTUNITY ──
     if s.get("opportunity_keywords"):
         lines = ["## 🕳️ Top opportunity keywords"]
         for kw in s["opportunity_keywords"][:8]:
@@ -505,7 +533,7 @@ def format_chain(result):
             )
         chunks.append("\n".join(lines))
 
-    # ── NICHE INTEL (velocity/trajectory/concentration) ──
+    # ── NICHE INTEL ──
     niche_intel = result.get("niche_intel")
     if niche_intel:
         try:
@@ -526,7 +554,7 @@ def format_chain(result):
             lines.append(f"• `{name}` — {favs:,}♥ · R${price}")
         chunks.append("\n".join(lines))
 
-    # ── DESCRIPTION EXAMPLES ──
+    # ── REAL DESCRIPTIONS ──
     if result["desc_examples"]:
         lines = ["## 📝 Real descriptions from winners"]
         for name, desc, favs, price in result["desc_examples"]:
@@ -534,7 +562,7 @@ def format_chain(result):
             lines.append(f"**{name[:50]}** — {favs:,}♥\n_{d}_")
         chunks.append("\n".join(lines))
 
-    # ── AI STRATEGY SECTIONS ──
+    # ── AI STRATEGY ──
     if synth:
         for key, header in [
             ("search_diagnosis",  "## 🔍 Search Diagnosis"),
@@ -547,11 +575,6 @@ def format_chain(result):
             if v:
                 chunks.append(f"{header}\n{v}")
 
-        if synth.get("seo_description"):
-            chunks.append(
-                f"## ✨ Suggested description (copy-paste)\n```\n"
-                f"{synth['seo_description'][:800]}\n```"
-            )
         if synth.get("killer_keywords"):
             kw = ", ".join(f"`{k}`" for k in synth["killer_keywords"][:15])
             chunks.append(f"## 🎯 Killer keywords\n{kw}")
@@ -567,7 +590,29 @@ def format_chain(result):
                 lines.append(f"• {b}")
             chunks.append("\n".join(lines))
 
-    # ── 10 TITLES (grouped) ──
+    # ── MERGED DESCRIPTION (AI body + engine tags) ──
+    merged = result.get("merged_description")
+    audit = result.get("description_audit") or {}
+    if merged:
+        chunks.append(
+            f"## ✨ Suggested description (copy-paste)\n```\n"
+            f"{merged[:1500]}\n```"
+        )
+        if audit:
+            audit_lines = [
+                "**🔍 Description audit — every word traceable:**",
+                f"• Primary keyword: `{audit.get('primary_keyword', '?')}` "
+                f"({audit.get('primary_demand', 0)} searches)",
+                f"• Aesthetic words: "
+                f"`{', '.join(audit.get('aesthetic_words', []) or []) or 'none'}`",
+                f"• Tags mined: **{audit.get('mined_tag_count', 0)}**",
+            ]
+            top10 = audit.get("top_10_tags", [])
+            if top10:
+                audit_lines.append(f"• Top 10 tags: `{', '.join(top10)}`")
+            chunks.append("\n".join(audit_lines))
+
+    # ── 10 TITLES ──
     if synth:
         title_groups = [
             ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
@@ -653,7 +698,7 @@ def format_chain(result):
         else:
             final_lines.append("**1. Name:** (no titles generated)")
 
-    if synth.get("seo_description"):
+    if merged:
         final_lines.append("**3. Paste description** (from above block)")
 
     if result.get("best_niche_kw"):
