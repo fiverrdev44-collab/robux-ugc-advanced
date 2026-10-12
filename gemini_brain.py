@@ -3,19 +3,12 @@ gemini_brain.py — Hybrid AI for Roblox UGC.
 
 Category-aware. Reports facts. Does NOT predict outcomes.
 
-Reports the market as it IS. No marketplace algorithm playbook, no ranking
-factor breakdown, no sale velocity targets, no price elasticity calls, no
-launch window math, no trend intel, no discovery path, no expected
-performance, no verdict, no risk analysis.
+STEP 5: Portfolio context injected.
+DESC FORGE: Real top-seller descriptions injected.
+PROMO FILTER: Hard post-process strips promo language.
 
-STEP 5: Portfolio context injected — brainstorm output is style-anchored on
-this creator's own top performers from my_portfolio.
-
-DESC FORGE: Real top-seller descriptions in the niche are mined and injected
-so the AI style-matches, not hallucinate, the description format.
-
-PROMO FILTER: Hard post-process strips "Join the group" / "more items" /
-"our store" language from descriptions after the AI responds.
+DETERMINISM: Temperatures lowered on extract_keywords (0.1) and
+classify_keyword_intelligence (0.05) to prevent pivot flip-flop.
 """
 import os
 import re
@@ -52,7 +45,7 @@ ITEM_TYPE_WORDS = {
 }
 
 
-# ── PROMO FILTER — hard post-process for descriptions ─────────────
+# ── PROMO FILTER ─────────────────────────────────────────────────────
 _PROMO_MARKERS = [
     "join the group", "join our", "join this group", "join and",
     "check out", "want more", "our store", "our catalog", "our shop",
@@ -66,26 +59,18 @@ _PROMO_MARKERS = [
 
 
 def _strip_promo_from_description(desc):
-    """
-    Hard filter: strip AI-generated promo lines from a description.
-    Runs after the AI responds so no prompt-injection can bypass it.
-    """
     if not desc:
         return desc
-
     kept_lines = []
     for line in str(desc).split("\n"):
         line_lower = line.lower()
         if any(marker in line_lower for marker in _PROMO_MARKERS):
             continue
         kept_lines.append(line)
-
-    cleaned = "\n".join(kept_lines).strip()
-    return cleaned
+    return "\n".join(kept_lines).strip()
 
 
 def _apply_promo_filter_to_synth(synth):
-    """Apply promo filter to any description fields in synth."""
     if not isinstance(synth, dict):
         return synth
     for key in ("seo_description", "description_seo", "description_hype",
@@ -96,15 +81,8 @@ def _apply_promo_filter_to_synth(synth):
 # ──────────────────────────────────────────────────────────────────────
 
 
-# ── STEP 5: Portfolio context helper ─────────────────────────────────
+# ── Portfolio context helper ─────────────────────────────────────────
 def _portfolio_prompt_block():
-    """
-    Returns a prompt fragment describing this creator's own top performers
-    (from my_portfolio). Used to style-anchor brainstorm output.
-
-    Lazy imports avoid circular dependency issues at module load.
-    Safe no-op if portfolio is empty or DB is unreachable.
-    """
     try:
         from bot_core import get_db
         from intel_common import portfolio_context
@@ -117,10 +95,7 @@ def _portfolio_prompt_block():
         if not p or not p.get("winners"):
             return ""
 
-        lines = [
-            "",
-            "=== CREATOR'S OWN TOP PERFORMERS (style-match these) ===",
-        ]
+        lines = ["", "=== CREATOR'S OWN TOP PERFORMERS (style-match these) ==="]
         for w in p["winners"]:
             lines.append(
                 f"  · {w['name'][:45]} — {w['velocity']}/day, "
@@ -140,20 +115,11 @@ def _portfolio_prompt_block():
 # ──────────────────────────────────────────────────────────────────────
 
 
-# ── DESC FORGE: real top-seller description pattern helper ───────────
+# ── DESC FORGE helper ────────────────────────────────────────────────
 def _desc_pattern_prompt_block(casual_description, allow_list,
                                 specific_moves, item_type):
-    """
-    Mine real top-seller descriptions in this niche and return a compact
-    prompt block. Style-anchors the AI so descriptions match real winners.
-
-    Seed priority: concept's first word > specific_moves > allow_list.
-    Keeps description on-topic with what the user asked for.
-    Safe no-op if no data or on any failure.
-    """
     try:
         from desc_forge import pattern_prompt_block
-
         seed_kw = None
         if casual_description:
             parts = str(casual_description).strip().split()
@@ -166,14 +132,11 @@ def _desc_pattern_prompt_block(casual_description, allow_list,
             seed_kw = specific_moves[0]
         if not seed_kw and allow_list:
             seed_kw = allow_list[0]
-
         if not seed_kw:
             return ""
-
         seed_kw = str(seed_kw).strip().split()[0]
         if len(seed_kw) < 3:
             return ""
-
         return pattern_prompt_block(seed_kw, family=item_type)
     except Exception as e:
         print(f"⚠️ desc pattern block failed: {e}", flush=True)
@@ -317,7 +280,8 @@ CREATOR'S DESCRIPTION: {desc}
 def extract_keywords(casual_description):
     if not casual_description or not casual_description.strip(): return {}
     prompt = _EXTRACT_PROMPT.format(desc=casual_description.strip())
-    raw = _generate(prompt, json_mode=True, temperature=0.25, max_tokens=1024)
+    # CHANGED: 0.25 → 0.1 (determinism)
+    raw = _generate(prompt, json_mode=True, temperature=0.1, max_tokens=1024)
     if not raw: return {}
     try: data = json.loads(raw)
     except Exception:
@@ -459,7 +423,8 @@ def classify_keyword_intelligence(seed_keyword, competition_data,
         item_type=item_type,
         competition_data="\n".join(lines),
     )
-    raw = _generate(prompt, json_mode=True, temperature=0.35, max_tokens=3000)
+    # CHANGED: 0.35 → 0.05 (determinism)
+    raw = _generate(prompt, json_mode=True, temperature=0.05, max_tokens=3000)
     if not raw: return {}
     try:
         return json.loads(raw)
@@ -621,8 +586,8 @@ Generate 10 titles TOTAL, grouped into 4 strategic buckets:
   "saturation_verdict": "2-3 sentences. Name which seed keywords are SATURATED vs OPPORTUNITY vs GOLD.",
   "seo_description": "Match the pattern + examples from REAL TOP DESCRIPTIONS above. Match their line count, emoji count, and shape EXACTLY. First sentence MUST contain the top keyword + type word. NO corporate words, NO promo, NO group mentions. Write like a real creator describing their item to a friend. End with a mood or vibe line, NOT a call to action.",
   "killer_keywords": ["10-15 highest-value keywords from the allow-list"],
-  "cross_promotion_play": "2-3 SHORT sentences. Name 2 specific item types buyers would also want. No filler like 'compound buyer overlap' or 'leverage co-occurrence'.",
-  "social_playbook": "2-3 sentences. Specific TikTok hooks or video angles. NOT generic advice like 'anchor videos to trending audio'. Say WHAT to film.",
+  "cross_promotion_play": "2-3 SHORT sentences. Name 2 specific item types buyers would also want.",
+  "social_playbook": "2-3 sentences. Specific TikTok hooks or video angles.",
   "cultural_ammo": "3-4 sentences on the cultural context of this niche.",
   "bonus_plays": ["2-3 additional item ideas within the same niche"]
 }}
@@ -740,7 +705,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         except Exception: pass
 
     ac = algo_context or "(unavailable)"
-
     intel_text = format_keyword_intel_for_prompt(keyword_intel)
 
     niche_text = "(no niche intel)"
@@ -751,7 +715,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
         pass
 
     portfolio_block = _portfolio_prompt_block()
-
     desc_pattern_block = _desc_pattern_prompt_block(
         casual_description, allow_list, specific_moves, item_type
     )
@@ -784,7 +747,6 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
     if not raw: return {}
 
-    # Parse JSON
     synth = None
     try:
         synth = json.loads(raw)
@@ -799,9 +761,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     if not isinstance(synth, dict):
         return {}
 
-    # ── HARD PROMO FILTER — AI cannot bypass this ──
     synth = _apply_promo_filter_to_synth(synth)
-
     return synth
 
 
