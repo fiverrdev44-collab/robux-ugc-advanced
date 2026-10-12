@@ -2,7 +2,7 @@
 desc_forge.py — mine top descriptions in a niche, generate one that matches.
 
 1. Query top items by favorite_count in the niche (with descriptions)
-2. Filter out promo spam / URLs / credits / rants / meme spam
+2. Filter out promo spam / URLs / credits / rants / meme spam / all-caps
 3. If DB has fewer than MIN_DB_RESULTS clean rows → fallback to Roblox live search
 4. Analyze pattern: line count, emoji density, top phrases
 5. Feed real examples to Gemini → get a description that FITS the pattern
@@ -11,7 +11,9 @@ desc_forge.py — mine top descriptions in a niche, generate one that matches.
 FIXES in this version:
   - Promo filter now rejects: "the group"/"in the group"/"group store",
     reupload/ownership claims, political rants, word-repetition (meme spam),
-    description-is-item-name rows, decorative-symbol spam.
+    description-is-item-name rows, decorative-symbol spam, ALL-CAPS words
+    (PHROG/AAAA), "UGC" as a word (self-branding), meme-word blacklist
+    (bois/phrog/froggy/skibidi/gyatt/etc).
   - _query_db and _fetch_live_descriptions translate category_configs
     family names → convergence_engine names before lookup.
   - _generate_description falls back to a standard 3-line prompt when
@@ -40,12 +42,20 @@ ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 # in significant quantity. Katakana/kaomoji parts + cute glyphs.
 _DECOR_SYMBOLS = set("♡♥⋆｡˚ฅﻌ°•·✧✦❀✿❁☆★彡ට็้ﺕ")
 
+# Meme words that appear in troll UGC descriptions.
+_MEME_WORDS = {
+    "phrog", "froggy", "bois", "boi", "skibidi", "gyatt", "rizz",
+    "mewing", "ohio", "fanum", "sussy", "sus", "goofy",
+    "yass", "yasss", "gigachad", "lmao", "lmfao",
+}
+
 
 def _is_promo_spam(desc, name=None):
     """
     Returns True if description is dominated by URLs, group links,
     creator credits, decorative-symbol spam, political rants,
-    reupload notes, meme word-repetition, or is too short.
+    reupload notes, meme word-repetition, ALL-CAPS emphasis, or
+    self-branding like "x's UGC".
 
     Optional `name` allows rejecting rows where the description is
     just a repeat of the item name.
@@ -145,13 +155,30 @@ def _is_promo_spam(desc, name=None):
         return True
 
     # ── Word-repetition (meme spam) ────────────────────────────
-    # "Bouncy bois very phrog of them froggy bois PHROG" — top token
-    # exceeds 40% of all tokens → meme spam.
+    # Top token exceeds 40% of all tokens → meme spam.
     tokens = re.findall(r"[a-z]{3,}", dl)
     if len(tokens) >= 4:
         top_count = Counter(tokens).most_common(1)[0][1]
         if top_count / len(tokens) > 0.4:
             return True
+
+    # ── ALL-CAPS emphasis ──────────────────────────────────────
+    # "PHROG" / "AAAA" / "LOL" in caps 4+ chars = spam signal.
+    if re.findall(r"\b[A-Z]{4,}\b", d):
+        return True
+
+    # ── UGC self-branding ──────────────────────────────────────
+    # Real creators don't say "x's UGC" in the item description.
+    if re.search(r"\bugc\b", dl):
+        return True
+
+    # ── Meme-word blacklist ────────────────────────────────────
+    token_set = set(tokens)
+    meme_hits = len(token_set & _MEME_WORDS)
+    if meme_hits >= 2:
+        return True
+    if meme_hits >= 1 and len(tokens) <= 6:
+        return True
 
     # ── Description IS the item name ───────────────────────────
     if name:
