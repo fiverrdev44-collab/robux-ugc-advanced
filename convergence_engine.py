@@ -3,10 +3,10 @@ convergence_engine.py — category-aware niche scoring.
 Uses ONLY existing tables. No new columns. No AI calls.
 
 FIXES in this version:
-- Generic-word blocklist (kills "point", "cute", "item", etc.)
-- 3-tier median fallback: 20 → 15 → 10 (never returns empty)
-- Family translation: accepts both naming schemes
-- Prints how many passed each tier for debugging
+- Bulletproof family clause: if the family name is already a FAMILIES
+  key, use it directly. Only translate if it's a category_configs name.
+  This prevents "emotes" → None → "and false" from killing all queries.
+- Debug prints on gate rejections (first 5 per tier).
 """
 import re
 from bot_core import get_db
@@ -32,7 +32,6 @@ for fam, ids in FAMILIES.items():
         ASSET_TO_FAMILY[aid] = fam
 
 
-# ── Generic words that are NEVER niche keywords ────────────────
 _GENERIC_BLOCK = {
     "the", "and", "for", "with", "you", "your", "from", "that", "this",
     "into", "over", "under", "onto", "upon", "than", "then", "them",
@@ -52,25 +51,41 @@ _GENERIC_BLOCK = {
     "updated", "original", "reupload", "reuploaded", "upload", "uploaded",
     "credit", "credits", "created",
     "cheap", "expensive", "discount", "promo", "deal",
-    "popular", "trending", "trend", "trendy", "viral", "iconic",
-    "classic", "famous",
+    "popular", "trending", "trend", "trendy", "viral", "iconic", "famous",
 }
 
 
 def _family_clause(family):
-    """Accepts BOTH naming schemes (emote/headwear/accessory AND emotes/hair/tops)."""
+    """
+    Bulletproof:
+      1. If family is already a FAMILIES key, use it directly.
+      2. Else try to translate from category_configs naming.
+      3. If nothing works, return "and false" (no filter).
+    """
     if not family or family == "all":
         return "", []
+
+    # Step 1: already a valid convergence_engine family name?
+    if family in FAMILIES:
+        ids = FAMILIES[family]
+        placeholders = ",".join(["%s"] * len(ids))
+        return f" and asset_type_id in ({placeholders})", list(ids)
+
+    # Step 2: try translating from category_configs naming scheme
     try:
         from category_configs import to_convergence_family
-        fam = to_convergence_family(family)
-    except Exception:
-        fam = family
-    ids = FAMILIES.get(fam)
-    if not ids:
-        return " and false", []
-    placeholders = ",".join(["%s"] * len(ids))
-    return f" and asset_type_id in ({placeholders})", list(ids)
+        translated = to_convergence_family(family)
+        if translated and translated in FAMILIES:
+            ids = FAMILIES[translated]
+            placeholders = ",".join(["%s"] * len(ids))
+            return f" and asset_type_id in ({placeholders})", list(ids)
+    except Exception as e:
+        print(f"[convergence] family translate failed: {e}", flush=True)
+
+    # Step 3: unknown family — no filter instead of "and false"
+    # (safer: gives results instead of silently empty)
+    print(f"[convergence] unknown family '{family}' — no filter", flush=True)
+    return "", []
 
 
 def _kw_pattern(keyword):
@@ -80,17 +95,23 @@ def _kw_pattern(keyword):
     return rf"\y{re.escape(kw)}\y"
 
 
-def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
-    # ── BLOCKLIST ──────────────────────────────────────────────
+def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
+                   debug=False):
+    """Returns dict on pass, None on reject. If debug=True, prints why."""
+    def _reject(reason):
+        if debug:
+            print(f"[conv-debug] '{keyword}' REJECTED: {reason}", flush=True)
+        return None
+
     kw_clean = (keyword or "").strip().lower()
     if not kw_clean or len(kw_clean) < 3:
-        return None
+        return _reject(f"too short ({kw_clean!r})")
     if kw_clean in _GENERIC_BLOCK:
-        return None
+        return _reject("blocklist")
     if " " in kw_clean:
         tokens = kw_clean.split()
         if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
-            return None
+            return _reject("all tokens blocked")
 
     pat = _kw_pattern(keyword)
     is_phrase = " " in keyword.strip()
@@ -99,7 +120,6 @@ def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
     fam_sql, fam_params = _family_clause(family)
     match_op = "~*" if use_regex else "ilike"
 
-    # ── SUPPLY + MEDIAN + p90 ──────────────────────────────────
     cur.execute(f"""
         select count(*),
                coalesce(percentile_cont(0.5) within group
@@ -115,22 +135,19 @@ def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    # ── GATEKEEPERS (relaxed) ──────────────────────────────────
-    if supply < 3:                    return None
-    if supply > 500:                  return None
-    if median_favs > 50_000:          return None
-    if median_favs < min_median:      return None
+    if supply < 3:                return _reject(f"supply {supply} < 3")
+    if supply > 500:              return _reject(f"supply {supply} > 500")
+    if median_favs > 50_000:      return _reject(f"median {median_favs} > 50k")
+    if median_favs < min_median:  return _reject(f"median {median_favs} < {min_median}")
 
-    # ── DEMAND ─────────────────────────────────────────────────
     cur.execute(
         f"select count(*) from search_suggestions where suggestion {match_op} %s",
         (pat,)
     )
     demand = cur.fetchone()[0] or 0
 
-    if demand < min_demand:           return None
+    if demand < min_demand:       return _reject(f"demand {demand} < {min_demand}")
 
-    # ── FRESHNESS ──────────────────────────────────────────────
     cur.execute(f"""
         select count(*) from items
         where name {match_op} %s and created_at > now() - interval '14 days'
@@ -138,7 +155,6 @@ def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
     """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # ── VELOCITY (may be 0 if data is thin — that's OK) ────────
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -162,7 +178,6 @@ def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
 
-    # ── CONCENTRATION ──────────────────────────────────────────
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
@@ -179,9 +194,8 @@ def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
     concentration = (top_favs / total_favs) if total_favs else 0.0
 
     if concentration > 0.65:
-        return None
+        return _reject(f"concentration {concentration:.2f} > 0.65")
 
-    # ── SCORE COMPONENTS ───────────────────────────────────────
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
 
@@ -250,13 +264,8 @@ def format_brief(r):
     )
 
 
-def scan_convergence(family=None, limit=15):
-    """
-    3-tier fallback so it NEVER returns empty:
-      Tier 1: median >= 20, demand >= 2
-      Tier 2: median >= 15, demand >= 1
-      Tier 3: median >= 10, demand >= 1
-    """
+def scan_convergence(family=None, limit=15, debug=False):
+    """Single-pass scan with min_median=15, min_demand=1."""
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
         select keyword from learned_keywords
@@ -264,38 +273,26 @@ def scan_convergence(family=None, limit=15):
     """)
     keywords = [
         r[0] for r in cur.fetchall()
-        if r[0]
-        and r[0].lower().strip() not in _GENERIC_BLOCK
-        and len(r[0].strip()) >= 3
+        if r[0] and len(r[0].strip()) >= 3
     ]
 
     print(f"[convergence] scanning {len(keywords)} keywords family={family}", flush=True)
 
-    tiers = [
-        (20, 2, "strict"),
-        (15, 1, "mid"),
-        (10, 1, "loose"),
-    ]
+    results = []
+    for i, kw in enumerate(keywords):
+        try:
+            # Debug first 5 rejects only
+            show_debug = debug and i < 5 and len(results) < 3
+            r = _score_keyword(cur, kw, family,
+                               min_median=15, min_demand=1,
+                               debug=show_debug)
+            if r:
+                results.append(r)
+        except Exception as e:
+            print(f"[convergence] {kw}: {e}", flush=True)
 
-    for min_med, min_dem, label in tiers:
-        results = []
-        for kw in keywords:
-            try:
-                r = _score_keyword(cur, kw, family,
-                                   min_median=min_med, min_demand=min_dem)
-                if r:
-                    results.append(r)
-            except Exception as e:
-                print(f"[convergence] {kw}: {e}", flush=True)
+    print(f"[convergence] total results: {len(results)}", flush=True)
 
-        print(f"[convergence] {label} tier (median>={min_med}, demand>={min_dem}): {len(results)}", flush=True)
-
-        if len(results) >= 3:
-            cur.close(); conn.close()
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:limit]
-
-    # If all tiers fail, return whatever we got in the loosest tier
     cur.close(); conn.close()
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
