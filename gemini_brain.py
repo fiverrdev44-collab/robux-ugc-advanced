@@ -13,6 +13,9 @@ this creator's own top performers from my_portfolio.
 
 DESC FORGE: Real top-seller descriptions in the niche are mined and injected
 so the AI style-matches, not hallucinate, the description format.
+
+PROMO FILTER: Hard post-process strips "Join the group" / "more items" /
+"our store" language from descriptions after the AI responds.
 """
 import os
 import re
@@ -47,6 +50,50 @@ ITEM_TYPE_WORDS = {
     "glasses","necklace","chain","backpack","sword","pet","bag","scarf",
     "bandana","beret","visor","lens","head","snapback","bonnet","balaclava",
 }
+
+
+# ── PROMO FILTER — hard post-process for descriptions ─────────────
+_PROMO_MARKERS = [
+    "join the group", "join our", "join this group", "join and",
+    "check out", "want more", "our store", "our catalog", "our shop",
+    "our ugc", "follow us", "follow for", "subscribe",
+    "add to your collection", "exclusive ugc", "shop for",
+    "visit our", "want even more", "and more adorable",
+    "more cute items", "more items", "get the", "access to even more",
+    "don't forget to favorite", "please favorite", "favorite for cheaper",
+    "dmca", "credits to", "credit to", "for more cute",
+]
+
+
+def _strip_promo_from_description(desc):
+    """
+    Hard filter: strip AI-generated promo lines from a description.
+    Runs after the AI responds so no prompt-injection can bypass it.
+    """
+    if not desc:
+        return desc
+
+    kept_lines = []
+    for line in str(desc).split("\n"):
+        line_lower = line.lower()
+        if any(marker in line_lower for marker in _PROMO_MARKERS):
+            continue
+        kept_lines.append(line)
+
+    cleaned = "\n".join(kept_lines).strip()
+    return cleaned
+
+
+def _apply_promo_filter_to_synth(synth):
+    """Apply promo filter to any description fields in synth."""
+    if not isinstance(synth, dict):
+        return synth
+    for key in ("seo_description", "description_seo", "description_hype",
+                "description_short", "new_description"):
+        if synth.get(key):
+            synth[key] = _strip_promo_from_description(synth[key])
+    return synth
+# ──────────────────────────────────────────────────────────────────────
 
 
 # ── STEP 5: Portfolio context helper ─────────────────────────────────
@@ -108,7 +155,6 @@ def _desc_pattern_prompt_block(casual_description, allow_list,
         from desc_forge import pattern_prompt_block
 
         seed_kw = None
-        # 1) Concept's first word — what user actually asked for
         if casual_description:
             parts = str(casual_description).strip().split()
             if parts:
@@ -116,10 +162,8 @@ def _desc_pattern_prompt_block(casual_description, allow_list,
                 if ":" in first:
                     first = first.split(":", 1)[1]
                 seed_kw = first
-        # 2) Fallback: first specific move
         if not seed_kw and specific_moves:
             seed_kw = specific_moves[0]
-        # 3) Fallback: first allow-list word
         if not seed_kw and allow_list:
             seed_kw = allow_list[0]
 
@@ -547,10 +591,15 @@ Rules:
 - One emoji max per line.
 - First sentence = top keyword + type word. That's it.
 - Keywords appear naturally, not stuffed.
-- FORBIDDEN WORDS: enhance, elevate, seamless, integration,
+- FORBIDDEN WORDS (never use): enhance, elevate, seamless, integration,
   designed for, experience, ultimate, compound, leverage,
-  aligns, optimize, robust, comprehensive
-- If a sentence sounds like a LinkedIn post, rewrite it.
+  aligns, optimize, robust, comprehensive, join, group, community,
+  follow, subscribe, check out, visit, shop, our store, our catalog,
+  more items, want more, exclusive, add to your, collection
+- NEVER include group/community promo. NEVER say "Join the group" or 
+  "more items" or "check out". The description ONLY describes the ITEM.
+- If a sentence sounds like a LinkedIn post OR a promo pitch, rewrite it.
+- End the description with a mood, use case, or vibe line. NOT a CTA.
 
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
@@ -570,7 +619,7 @@ Generate 10 titles TOTAL, grouped into 4 strategic buckets:
   "market_diagnosis": "3-4 sentences on saturation, winners, losers. Reference real stats.",
   "winner_blueprint": "3-4 sentences on what top 10% items in this niche do that bottom 50% don't.",
   "saturation_verdict": "2-3 sentences. Name which seed keywords are SATURATED vs OPPORTUNITY vs GOLD.",
-  "seo_description": "Match the pattern + examples from REAL TOP DESCRIPTIONS above. Match their line count, emoji count, and shape EXACTLY. First sentence MUST contain the top keyword + type word. NO corporate words: enhance, elevate, seamless, integration, designed for, experience, ultimate, leverage, compound, optimize. Write like a real creator.",
+  "seo_description": "Match the pattern + examples from REAL TOP DESCRIPTIONS above. Match their line count, emoji count, and shape EXACTLY. First sentence MUST contain the top keyword + type word. NO corporate words, NO promo, NO group mentions. Write like a real creator describing their item to a friend. End with a mood or vibe line, NOT a call to action.",
   "killer_keywords": ["10-15 highest-value keywords from the allow-list"],
   "cross_promotion_play": "2-3 SHORT sentences. Name 2 specific item types buyers would also want. No filler like 'compound buyer overlap' or 'leverage co-occurrence'.",
   "social_playbook": "2-3 sentences. Specific TikTok hooks or video angles. NOT generic advice like 'anchor videos to trending audio'. Say WHAT to film.",
@@ -701,15 +750,11 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     except Exception:
         pass
 
-    # ── STEP 5: portfolio context ──
     portfolio_block = _portfolio_prompt_block()
-    # ───────────────────────────────
 
-    # ── DESC FORGE: real top-seller descriptions in this niche ──
     desc_pattern_block = _desc_pattern_prompt_block(
         casual_description, allow_list, specific_moves, item_type
     )
-    # ────────────────────────────────────────────────────────────
 
     prompt = _SYNTH_PROMPT.format(
         desc=casual_description.strip(),
@@ -738,12 +783,26 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
 
     raw = _generate(prompt, json_mode=True, temperature=0.95, max_tokens=8192)
     if not raw: return {}
-    try: return json.loads(raw)
+
+    # Parse JSON
+    synth = None
+    try:
+        synth = json.loads(raw)
     except Exception:
         m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m: return {}
-        try: return json.loads(m.group(0))
-        except Exception: return {}
+        if m:
+            try:
+                synth = json.loads(m.group(0))
+            except Exception:
+                synth = None
+
+    if not isinstance(synth, dict):
+        return {}
+
+    # ── HARD PROMO FILTER — AI cannot bypass this ──
+    synth = _apply_promo_filter_to_synth(synth)
+
+    return synth
 
 
 def verify_titles(titles, allow_list):
