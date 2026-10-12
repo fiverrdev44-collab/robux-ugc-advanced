@@ -2,13 +2,13 @@
 convergence_engine.py — category-aware niche scoring.
 
 FIXES in this version:
-- FAMILY-PRESENCE GATE: a keyword is only kept if it appears in
-  >=5 items in the target family with median >= 40. This kills
-  generic English tokens like "right", "head", "face" that appear
-  in search queries but aren't real concepts in the family.
-- Word-length floor: >= 5 chars (kills "mini", "doll", "head").
-- Reject top-N English word blacklist.
-- Multi-source gathering: learned_keywords + search_suggestions.
+- ACCESSORY FIX: "accessory" family now matches all 5 sub-types
+  (43 neck, 44 shoulder, 45 front, 46 back, 47 waist).
+- Multi-source keyword gathering (learned_keywords + search_suggestions).
+- Family-presence gate: keyword must appear in 5+ family items, median 40+.
+- Word-length floor: 5+ chars.
+- 3-tier median fallback: 25 → 20 → 15 (never empty).
+- Bulletproof family clause.
 """
 import re
 from collections import Counter
@@ -35,9 +35,8 @@ for fam, ids in FAMILIES.items():
         ASSET_TO_FAMILY[aid] = fam
 
 
-# Extended blocklist — top-500 English words + generic UGC terms
+# ── Generic words that are NEVER niche keywords ────────────────
 _GENERIC_BLOCK = {
-    # English glue
     "the", "and", "for", "with", "you", "your", "from", "that", "this",
     "into", "over", "under", "onto", "upon", "than", "then", "them",
     "they", "there", "here", "when", "what", "where", "which", "while",
@@ -47,7 +46,6 @@ _GENERIC_BLOCK = {
     "left", "high", "low", "one", "two", "three", "four", "five",
     "into", "onto", "your", "yours", "ours", "theirs", "its", "his",
     "her", "she", "him", "hers", "our", "ours", "who", "whom", "whose",
-    # Generic adjectives
     "new", "old", "best", "top", "good", "great", "cool", "nice", "cute",
     "big", "small", "hot", "cold", "fast", "slow", "bad", "hard", "easy",
     "free", "open", "real", "fake", "true", "happy", "sad", "love",
@@ -56,7 +54,6 @@ _GENERIC_BLOCK = {
     "young", "early", "late", "full", "half", "empty", "sweet",
     "sour", "soft", "hard", "smooth", "rough", "sharp", "dull",
     "bright", "dark", "light", "heavy", "clear", "blur", "pure",
-    # Generic nouns
     "point", "place", "thing", "stuff", "item", "items", "asset",
     "roblox", "ugc", "shop", "store", "buy", "sell", "sale", "price",
     "got", "get", "make", "made", "use", "used", "has", "have", "had",
@@ -65,15 +62,11 @@ _GENERIC_BLOCK = {
     "side", "top", "bottom", "front", "mid", "center", "corner",
     "world", "life", "way", "days", "day", "night", "time", "hour",
     "year", "week", "month", "minute", "second",
-    # Editing / meta
     "style", "design", "designs", "version", "edit", "edited", "update",
     "updated", "original", "reupload", "reuploaded", "upload", "uploaded",
     "credit", "credits", "created", "made", "make", "maker",
-    # Promo
-    "cheap", "expensive", "discount", "promo", "deal", "sale",
-    # Popularity
+    "cheap", "expensive", "discount", "promo", "deal",
     "popular", "trending", "trend", "trendy", "viral", "iconic", "famous",
-    # Common single-word concepts that pass every filter but aren't niches
     "adorable", "beautiful", "pretty", "lovely", "amazing", "awesome",
     "wonderful", "fantastic", "perfect", "special", "unique", "fashion",
     "styles", "styled", "designer", "creator",
@@ -81,21 +74,40 @@ _GENERIC_BLOCK = {
 
 
 def _family_clause(family):
+    """
+    Bulletproof family clause.
+    Special case: "accessory" matches ALL 5 accessory sub-types.
+    Otherwise accepts both naming schemes (category_configs / convergence).
+    """
     if not family or family == "all":
         return "", []
+
+    # ── ACCESSORY SPECIAL CASE: covers neck + shoulder + front + back + waist ──
+    if family == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
+    # ────────────────────────────────────────────────────────────────────────
+
+    # Direct match on FAMILIES key
     if family in FAMILIES:
         ids = FAMILIES[family]
         ph = ",".join(["%s"] * len(ids))
         return f" and asset_type_id in ({ph})", list(ids)
+
+    # Translate from category_configs naming
     try:
         from category_configs import to_convergence_family
         translated = to_convergence_family(family)
+        if translated == "accessory":
+            return " and asset_type_id in (43, 44, 45, 46, 47)", []
         if translated and translated in FAMILIES:
             ids = FAMILIES[translated]
             ph = ",".join(["%s"] * len(ids))
             return f" and asset_type_id in ({ph})", list(ids)
     except Exception:
         pass
+
+    # Unknown — no filter (better than returning nothing)
+    print(f"[convergence] unknown family '{family}' — no filter", flush=True)
     return "", []
 
 
@@ -110,7 +122,7 @@ def _gather_keywords(cur, family=None):
     """Multi-source gathering with family-presence filter."""
     keywords = set()
 
-    # ── Source 1: learned_keywords ─────────────────────────────
+    # Source 1: learned_keywords
     try:
         cur.execute("""
             select keyword from learned_keywords
@@ -124,7 +136,7 @@ def _gather_keywords(cur, family=None):
     except Exception as e:
         print(f"[convergence] learned_keywords read failed: {e}", flush=True)
 
-    # ── Source 2: search_suggestions tokens ────────────────────
+    # Source 2: search_suggestions tokens
     try:
         cur.execute("""
             select suggestion from search_suggestions
@@ -144,9 +156,7 @@ def _gather_keywords(cur, family=None):
     except Exception as e:
         print(f"[convergence] search_suggestions read failed: {e}", flush=True)
 
-    # ── FAMILY-PRESENCE FILTER ─────────────────────────────────
-    # A keyword must appear in >= 5 family items with median >= 40.
-    # Kills generic tokens that don't represent real family concepts.
+    # Family-presence filter
     if family and family != "all":
         fam_sql, fam_params = _family_clause(family)
         if fam_sql:
