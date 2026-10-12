@@ -3,13 +3,15 @@ title_scorer.py — statistical title scoring from real DB data.
 
 Signals:
   1. word_lift       — median favs of items containing word / category median
-  2. search_demand   — search_suggestions rows containing word
+  2. search_demand   — search_suggestions rows containing word (WORD BOUNDARY)
   3. bigram_lift     — median favs of items matching two words together
   4. freshness       — words appearing more in recent winners
-  5. visibility_gap  — demand / supply (finds "open spots")
+  5. visibility_gap  — demand / supply (capped at 25 to prevent domination)
   6. uniqueness      — 0 exact matches = bonus
 
-Clamps + floors prevent score explosions.
+FIXES:
+  - Word-boundary search demand (no more "ear" matching "wear"/"year")
+  - Visibility gap capped at 25 so no single word dominates
 """
 import re
 import math
@@ -28,6 +30,7 @@ LIFT_MIN = 0.1
 LIFT_MAX = 5.0
 BIGRAM_MAX = 5.0
 VISIBILITY_WEIGHT = 0.4
+VISIBILITY_CAP = 25.0   # FIX — no single word can dominate via gap
 
 
 def _words(title):
@@ -115,21 +118,28 @@ def compute_word_stats(family=None):
 
 
 def compute_search_demand(words):
+    """
+    For each word, count search queries with WORD-BOUNDARY match.
+    FIX: prevents "ear" from matching "wear", "year", "pearl", etc.
+    """
     if not words:
         return {}
     conn = get_db(); cur = conn.cursor()
     try:
-        patterns = [f"%{w}%" for w in words]
+        # SQL: Postgres regex \y = word boundary
+        patterns = [rf"\y{re.escape(w)}\y" for w in words]
         cur.execute("""
             select suggestion from search_suggestions
-            where suggestion ilike any(%s) limit 5000
+            where suggestion ~* any(%s) limit 5000
         """, (patterns,))
         rows = cur.fetchall()
+
         demand = Counter()
         for (s,) in rows:
             sl = (s or "").lower()
             for w in words:
-                if w in sl:
+                # Double-check in Python for safety
+                if re.search(rf"\b{re.escape(w)}\b", sl):
                     demand[w] += 1
         return dict(demand)
     finally:
@@ -192,8 +202,9 @@ def score_title(title, family=None, word_stats=None):
         contribution = lift * dem_mult * conf * fresh_mult
         total += contribution
 
-        # Visibility gap = demand per existing item
-        visibility_gap = dem / (cnt + 1)
+        # Visibility gap = demand per existing item (capped per-word)
+        raw_gap = dem / (cnt + 1)
+        visibility_gap = min(raw_gap, VISIBILITY_CAP)
         visibility_total += visibility_gap
 
         breakdown.append({
@@ -203,6 +214,7 @@ def score_title(title, family=None, word_stats=None):
             "visibility_gap": round(visibility_gap, 2),
         })
 
+    # Bigram bonus
     bigram_bonus = 0.0
     bigram_info = None
     if len(words) >= 2:
@@ -219,6 +231,7 @@ def score_title(title, family=None, word_stats=None):
         finally:
             cur.close(); conn.close()
 
+    # Uniqueness
     conn = get_db(); cur = conn.cursor()
     try:
         cur.execute("select count(*) from items where lower(name) = %s",
@@ -229,7 +242,9 @@ def score_title(title, family=None, word_stats=None):
 
     unique_mult = 1.5 if exact == 0 else (1.0 if exact < 3 else 0.5)
 
-    combined = ((total + bigram_bonus) * unique_mult) + (visibility_total * VISIBILITY_WEIGHT)
+    # FIX: cap total visibility too — even with per-word cap, many words could add up
+    capped_visibility = min(visibility_total, VISIBILITY_CAP)
+    combined = ((total + bigram_bonus) * unique_mult) + (capped_visibility * VISIBILITY_WEIGHT)
 
     return {
         "title": title,
@@ -237,7 +252,7 @@ def score_title(title, family=None, word_stats=None):
         "raw": round(total, 2),
         "bigram_bonus": round(bigram_bonus, 2),
         "bigram": bigram_info,
-        "visibility_gap": round(visibility_total, 2),
+        "visibility_gap": round(capped_visibility, 2),
         "uniqueness_mult": unique_mult,
         "exact_matches": exact,
         "breakdown": breakdown,
