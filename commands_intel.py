@@ -649,10 +649,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         try:
             from commands_ai import _build_allow_list
         except ImportError:
-            try:
-                from discord_ugc_bot import _build_allow_list
-            except ImportError:
-                _build_allow_list = None
+            _build_allow_list = None
 
         if _build_allow_list is not None:
             try:
@@ -943,12 +940,11 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] title scoring failed: {e}", flush=True)
 
-            # TAGS MERGE (use tag_generator, not description_engine)
+            # TAGS MERGE — uses tag_generator (not description_engine)
             merged_desc = None
             try:
                 from tag_generator import generate_tags
 
-                # Build a seed from champion title (or first safe title)
                 tag_seed = None
                 if champion and champion.get("title"):
                     tag_seed = champion["title"]
@@ -963,7 +959,6 @@ description_seo, description_hype, description_short
                     )
                     tags = (tag_result or {}).get("tags") or []
 
-                    # Base body — AI SEO desc, stripped of promo already
                     base_body = (data.get("description_seo") or "").strip()
 
                     if base_body and tags:
