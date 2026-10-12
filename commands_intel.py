@@ -4,6 +4,9 @@ commands_intel.py — All intel commands. Category-aware autopsy.
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
 AUTOPSY: peer comparison + statistical ranking + desc merge + FINAL block.
 DETERMINISM: pivot picked from data, tracked, consistency-checked.
+
+Smart pipeline removed from autopsy (redundant — the peer autopsy +
+statistical ranking already cover seed analysis without the live-enrich delay).
 """
 import os
 import re
@@ -222,7 +225,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !verdict
+    # !verdict — 6-priority: sales · velocity · hard-kill · TOO_NEW · percentile
     # =========================================================
     @bot.command(name="verdict")
     async def verdict_cmd(ctx, item_id: int):
@@ -437,7 +440,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             except Exception as e:
                 print(f"[autopsy] sales fetch failed: {e}", flush=True)
 
-        # ── DETERMINISTIC PIVOT (data-driven, not AI) ──
+        # ── DETERMINISTIC PIVOT ──
         pivot_kw = None
         pivot_conf = 0.0
         pivot_reason = ""
@@ -789,7 +792,6 @@ description_seo, description_hype, description_short
 """
 
         try:
-            # LOWERED temperature: 0.9 → 0.3
             raw = await asyncio.to_thread(
                 _generate, recovery_prompt, True, 0.3, 6000, "gemini"
             )
@@ -1027,44 +1029,6 @@ description_seo, description_hype, description_short
                     )
                 except Exception as e:
                     print(f"[autopsy] consistency/save failed: {e}", flush=True)
-
-            # SMART PIPELINE
-            try:
-                from smart_pipeline import run_full_pipeline
-                pipeline_ai_titles = []
-                for k in ("titles_safe", "titles_differentiated",
-                          "titles_longtail", "titles_viral"):
-                    pipeline_ai_titles.extend(data.get(k) or [])
-
-                cat_ids = [atype] if atype else None
-                pipeline_msg = await ctx.send(
-                    "🧬 **Running smart pipeline...**\n"
-                    "_Live-enriching thin data · cascading to alternatives_"
-                )
-
-                def _pipeline_autopsy():
-                    c3 = get_db(); cur3 = c3.cursor()
-                    try:
-                        return run_full_pipeline(
-                            cur3, name or "ugc item",
-                            intent=intent, item_type=family,
-                            category_asset_ids=cat_ids,
-                            ai_titles=pipeline_ai_titles,
-                            live_enrich=True,
-                        )
-                    finally:
-                        cur3.close(); c3.close()
-
-                pr = await asyncio.to_thread(_pipeline_autopsy)
-                if pr and pr.get("report"):
-                    pbody = pr["report"]
-                    for i in range(0, len(pbody), 1900):
-                        await ctx.send(pbody[i:i+1900]); await asyncio.sleep(0.3)
-
-                try: await pipeline_msg.delete()
-                except Exception: pass
-            except Exception as pe:
-                print(f"[autopsy] smart pipeline failed: {pe}", flush=True)
 
         except Exception as e:
             print(f"[autopsy] AI recovery failed: {e}", flush=True)
