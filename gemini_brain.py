@@ -14,9 +14,10 @@ FIXES:
   - MODEL_NAME default updated to gemini-3.5-flash-lite (2.5 is dead)
   - OPENROUTER_MODEL default updated to qwen/qwen-2.5-72b-instruct:free
   - verify_titles rejects ANY duplicate token, not just consecutive
-  - all_terms INCLUDES search_terms again — DB validation happens
-    downstream in smart_pipeline._extract_seeds (drops hallucinated
-    terms that don't exist in the catalog).
+  - search_terms FULLY REMOVED from prompt, extract_keywords, and
+    all_terms. Gemini's expansion drags in unrelated words from your
+    own DB history (e.g. "russian" after chaining a "viral russian
+    kick dance" item). Chain runs 3-5x faster without it.
 """
 import os
 import re
@@ -255,7 +256,6 @@ Extract structured intent for a DB search. Return ONLY JSON:
   "colors":       ["..."],
   "references":   ["..."],
   "trend_source": "<tiktok|youtube|anime|game|meme|music|movie|kpop|other|none>",
-  "search_terms": ["..."],
   "specific_moves": ["..."],
   "title_verbs":  ["..."]
 }}
@@ -276,12 +276,6 @@ RULES:
   "side step"). Only for emotes; empty list otherwise.
 - "title_verbs" = action verbs for emotes (sway, pump, groove, bounce); empty
   list for other categories.
-- "search_terms" = 10-15 words that are DIRECTLY related to the concept.
-  Think: immediate category variants and season/theme words.
-  GOOD examples for "halloween hip sway dance": "spooky", "pumpkin",
-  "ghost", "witch", "skeleton", "halloween".
-  BAD examples (do NOT include): "russian", "month", "movement", "dance"
-  (generic), "holiday" (too vague). Stay tight.
 - "references" = memes, songs, characters, celebrities, viral moments.
 - DO NOT invent brand names or Roblox item names.
 - Output ONLY JSON.
@@ -303,7 +297,7 @@ def extract_keywords(casual_description):
         except Exception: return {}
 
     keys = ["primary","synonyms","style","vibe","colors","references",
-            "search_terms","specific_moves","title_verbs"]
+            "specific_moves","title_verbs"]
     clean = {}
     for k in keys:
         val = data.get(k, [])
@@ -319,14 +313,16 @@ def all_terms(intent):
     """
     Return all meaningful terms for downstream processing.
 
-    search_terms IS included — AI expansion is useful. But downstream
-    (smart_pipeline._extract_seeds) validates each search_term against
-    the DB before using it for live-enrich. Hallucinated terms that
-    don't exist in the catalog get dropped automatically.
+    search_terms is EXCLUDED (removed from extract_keywords entirely).
+    Gemini's expansion dragged in unrelated words from our own DB
+    history — e.g. "russian" after chaining a "viral russian kick
+    dance" item. Only the user-typed primary + specific_moves + style
+    + vibe + colors + references + synonyms + title_verbs feed the
+    pipeline now.
     """
     seen, out = set(), []
     for k in ("primary","synonyms","style","vibe","colors","references",
-              "search_terms","specific_moves","title_verbs"):
+              "specific_moves","title_verbs"):
         for t in intent.get(k, []):
             if t and t not in seen:
                 seen.add(t); out.append(t)
@@ -817,7 +813,6 @@ def verify_titles(titles, allow_list):
         if len(toks) > 6:
             rejected.append((title, [f"too long ({len(toks)} words)"]))
             continue
-        # Reject ANY duplicate token anywhere
         if len(toks) != len(set(toks)):
             rejected.append((title, ["duplicate token"]))
             continue
