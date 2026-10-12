@@ -2,9 +2,10 @@
 title_scorer.py — statistical title scoring from real DB data.
 
 FIXES in this version:
-  - _words() now deduplicates tokens. Previously "Sway hip sway dance"
-    counted sway's lift twice, inflating scores.
-  - score_titles_batch reuses ONE DB connection (no pool exhaustion).
+  - ACCESSORY UMBRELLA: "accessory" matches all 5 sub-types
+    (43, 44, 45, 46, 47).
+  - _words() deduplicates tokens.
+  - score_titles_batch reuses ONE DB connection.
 """
 import re
 import math
@@ -24,6 +25,8 @@ LIFT_MAX = 5.0
 BIGRAM_MAX = 5.0
 VISIBILITY_WEIGHT = 0.4
 VISIBILITY_CAP = 25.0
+
+ACCESSORY_IDS = [43, 44, 45, 46, 47]
 
 
 def _words(title):
@@ -45,11 +48,30 @@ def _clamp(v, lo, hi):
 def _cat_median(cur, family):
     if not family:
         return CAT_MED_FLOOR
+    # Accessory umbrella — all 5 sub-types
+    if family == "accessory":
+        cur.execute("""
+            select percentile_cont(0.5) within group (order by favorite_count)
+            from items
+            where asset_type_id in (43, 44, 45, 46, 47) and favorite_count > 5
+        """)
+        r = cur.fetchone()
+        val = float(r[0] or 0)
+        return max(val, CAT_MED_FLOOR)
     try:
         from category_configs import to_convergence_family
         fam = to_convergence_family(family)
     except Exception:
         fam = family
+    if fam == "accessory":
+        cur.execute("""
+            select percentile_cont(0.5) within group (order by favorite_count)
+            from items
+            where asset_type_id in (43, 44, 45, 46, 47) and favorite_count > 5
+        """)
+        r = cur.fetchone()
+        val = float(r[0] or 0)
+        return max(val, CAT_MED_FLOOR)
     ids = FAMILIES.get(fam)
     if not ids:
         return CAT_MED_FLOOR
@@ -69,11 +91,16 @@ def _cat_median(cur, family):
 def _fam_clause(family):
     if not family:
         return "", []
+    # Accessory umbrella — all 5 sub-types
+    if family == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
     try:
         from category_configs import to_convergence_family
         fam = to_convergence_family(family)
     except Exception:
         fam = family
+    if fam == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
     ids = FAMILIES.get(fam)
     if not ids:
         return "", []
