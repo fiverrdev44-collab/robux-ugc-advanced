@@ -4,6 +4,8 @@ desc_forge.py — mine top descriptions in a niche, generate one that matches.
 FIXES in this version:
   - ACCESSORY UMBRELLA: "accessory" matches all 5 sub-types
     (43, 44, 45, 46, 47).
+  - FAMILY FILTER: accepts items with unknown asset_type_id instead of
+    silently dropping them. Fixes "30 results · 0 saved" bug.
   - Promo filter rejects: group promo, credits, rants, meme spam,
     all-caps, UGC self-branding, meme words.
   - Family translation between naming schemes.
@@ -301,9 +303,12 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
                 # Accessory umbrella — match any sub-type
                 if conv_family == "accessory" and atype not in ACCESSORY_IDS:
                     continue
-                # Regular family filter
+                # Regular family filter — only reject if we KNOW the type
+                # doesn't match. Unknown asset types are accepted rather
+                # than silently dropped. Fixes "30 results · 0 saved".
                 elif conv_family and conv_family != "accessory":
-                    if ASSET_TO_FAMILY.get(atype) != conv_family:
+                    item_family = ASSET_TO_FAMILY.get(atype)
+                    if item_family and item_family != conv_family:
                         continue
 
                 try:
