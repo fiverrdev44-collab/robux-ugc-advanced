@@ -1,12 +1,16 @@
 """
-smart_pipeline.py — v3.3: parallel scan + single-writer live enrichment.
+smart_pipeline.py — v3.5: parallel scan + single-writer live enrichment.
 
 FIXES in this version:
-  - _extract_seeds STOPS pulling from intent["search_terms"]. Gemini
-    hallucinates semantic cousins ("russian" for "hip sway") that waste
-    live-enrich quota on irrelevant keywords.
-  - _DRIFT_BLOCK list of common hallucinated tokens.
-  - Only pulls from intent["specific_moves"] + intent["primary"].
+- search_terms REMOVED entirely from _extract_seeds. Gemini's expansion
+  pulls in unrelated words from your OWN DB history (e.g. "russian"
+  leaking in after chaining a "viral russian kick dance" item). The
+  trade-off isn't worth it — chain runs 3-5x faster without it.
+
+- Only pulls from intent["specific_moves"] + intent["primary"]
+  (user-typed words that are guaranteed relevant).
+
+- _DRIFT_BLOCK still filters the most obvious noise tokens.
 """
 import math
 import re
@@ -36,13 +40,12 @@ ITEM_TYPES = {
 }
 
 # ── Drift blocklist ────────────────────────────────────────────
-# Gemini frequently hallucinates these as "related" to any query.
-# They burn live-enrich quota without helping the item.
+# Filter for tokens that should never trigger live-enrich.
 _DRIFT_BLOCK = {
     # Time
-    "month", "week", "year", "day", "time", "hour", "minute", "second",
+    "month", "week", "year", "time", "hour", "minute", "second",
     "today", "tomorrow", "yesterday", "morning", "evening", "night",
-    # Nationalities
+    # Generic nationalities
     "russian", "japanese", "korean", "chinese", "english", "american",
     "french", "german", "spanish", "italian", "mexican", "indian",
     "african", "european", "asian",
@@ -77,12 +80,15 @@ def _extract_seeds(description, intent=None, top_n=5):
     """
     Extract seed keywords for live enrichment.
 
-    FIX: only pulls from specific_moves + primary. NOT search_terms
-    (Gemini's hallucination zone). Filters _DRIFT_BLOCK.
+    ONLY pulls from specific_moves + primary. search_terms is EXCLUDED.
+    Reason: Gemini's expansion drags in unrelated words from your own
+    DB history (e.g. "russian" appears after chaining a "viral russian
+    kick dance" item). Every live-enrich call is expensive; the noise
+    isn't worth the trade-off.
     """
     words = _tokens(description)
     if intent:
-        # Only the trustworthy sources — no search_terms
+        # Only the trustworthy, user-typed sources
         priority = (intent.get("specific_moves") or []) + (intent.get("primary") or [])
         for p in priority:
             for t in _tokens(p):
