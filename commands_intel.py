@@ -2,11 +2,11 @@
 commands_intel.py — All intel commands. Category-aware autopsy.
 
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
-AUTOPSY: peer comparison + statistical ranking + desc merge + FINAL block.
+AUTOPSY: peer comparison + statistical ranking + tag merge + FINAL block.
 DETERMINISM: pivot picked from data, tracked, consistency-checked.
 
-Smart pipeline removed from autopsy (redundant + slow).
-Debug print added to pivot picker input for diagnosis.
+Uses tag_generator.py for the tag block (not description_engine).
+Title scoring runs via asyncio.to_thread (no heartbeat blocking).
 """
 import os
 import re
@@ -459,7 +459,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             except Exception as e:
                 print(f"[autopsy] niche build failed: {e}", flush=True)
 
-            # DEBUG: log the input the pivot picker receives
             print(f"[autopsy] pivot debug input: {temp_niche}", flush=True)
 
             if temp_niche:
@@ -896,7 +895,7 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] peer autopsy failed: {e}", flush=True)
 
-            # STATISTICAL RECOVERY RANKING
+            # STATISTICAL RECOVERY RANKING (OFF EVENT LOOP)
             scored_recovery = []
             champion = None
             backup = None
@@ -907,7 +906,9 @@ description_seo, description_hype, description_short
                           "titles_longtail", "titles_viral"):
                     all_titles.extend(data.get(k) or [])
                 if all_titles:
-                    scored_recovery = score_titles_batch(all_titles, family=family)
+                    scored_recovery = await asyncio.to_thread(
+                        score_titles_batch, all_titles, family
+                    )
                     champion, backup, _ = pick_champion(scored_recovery)
 
                     stat_lines = ["# 📊 STATISTICAL RECOVERY RANKING\n",
@@ -942,30 +943,38 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] title scoring failed: {e}", flush=True)
 
-            # DESCRIPTION ENGINE MERGE
+            # TAGS MERGE (use tag_generator, not description_engine)
             merged_desc = None
             try:
-                from description_engine import generate_description
-                eng = generate_description(name or "item", family=family)
-                if eng and not eng.get("error"):
-                    eng_tag_block = ""
-                    for line in (eng.get("description") or "").split("\n"):
-                        if line.strip().lower().startswith("tags:"):
-                            eng_tag_block = line.strip()
-                            break
+                from tag_generator import generate_tags
 
-                    base_body = ""
-                    if champion:
-                        base_body = champion["title"]
-                    elif data.get("titles_safe"):
-                        base_body = data["titles_safe"][0]
+                # Build a seed from champion title (or first safe title)
+                tag_seed = None
+                if champion and champion.get("title"):
+                    tag_seed = champion["title"]
+                elif data.get("titles_safe"):
+                    tag_seed = data["titles_safe"][0]
+                elif name:
+                    tag_seed = name
 
-                    if base_body and eng_tag_block:
-                        merged_desc = f"{base_body}\n\n{eng_tag_block}"
-                    elif eng_tag_block:
-                        merged_desc = eng_tag_block
+                if tag_seed:
+                    tag_result = await asyncio.to_thread(
+                        generate_tags, tag_seed, family, 45
+                    )
+                    tags = (tag_result or {}).get("tags") or []
+
+                    # Base body — AI SEO desc, stripped of promo already
+                    base_body = (data.get("description_seo") or "").strip()
+
+                    if base_body and tags:
+                        tag_line = ", ".join(tags)
+                        merged_desc = f"{base_body}\n\ntags: {tag_line}"
+                    elif base_body:
+                        merged_desc = base_body
+                    elif tags:
+                        merged_desc = f"tags: {', '.join(tags)}"
             except Exception as e:
-                print(f"[autopsy] desc merge failed: {e}", flush=True)
+                print(f"[autopsy] tag merge failed: {e}", flush=True)
 
             if merged_desc:
                 await ctx.send(
