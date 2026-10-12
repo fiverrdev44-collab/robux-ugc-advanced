@@ -1,8 +1,10 @@
 """
 title_scorer.py — statistical title scoring from real DB data.
 
-FIX: score_titles_batch reuses ONE DB connection instead of opening
-one per title. Prevents connection pool exhaustion + heartbeat blocking.
+FIXES in this version:
+  - _words() now deduplicates tokens. Previously "Sway hip sway dance"
+    counted sway's lift twice, inflating scores.
+  - score_titles_batch reuses ONE DB connection (no pool exhaustion).
 """
 import re
 import math
@@ -25,8 +27,15 @@ VISIBILITY_CAP = 25.0
 
 
 def _words(title):
-    return [w for w in re.findall(r"[a-z]{3,}", (title or "").lower())
-            if w not in STOPWORDS]
+    """Deduplicated, lowercase, stopword-filtered token list."""
+    seen = set()
+    out = []
+    for w in re.findall(r"[a-z]{3,}", (title or "").lower()):
+        if w in STOPWORDS or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+    return out
 
 
 def _clamp(v, lo, hi):
@@ -34,7 +43,14 @@ def _clamp(v, lo, hi):
 
 
 def _cat_median(cur, family):
-    ids = FAMILIES.get(family)
+    if not family:
+        return CAT_MED_FLOOR
+    try:
+        from category_configs import to_convergence_family
+        fam = to_convergence_family(family)
+    except Exception:
+        fam = family
+    ids = FAMILIES.get(fam)
     if not ids:
         return CAT_MED_FLOOR
     ph = ",".join(["%s"] * len(ids))
@@ -51,7 +67,14 @@ def _cat_median(cur, family):
 
 
 def _fam_clause(family):
-    ids = FAMILIES.get(family)
+    if not family:
+        return "", []
+    try:
+        from category_configs import to_convergence_family
+        fam = to_convergence_family(family)
+    except Exception:
+        fam = family
+    ids = FAMILIES.get(fam)
     if not ids:
         return "", []
     ph = ",".join(["%s"] * len(ids))
