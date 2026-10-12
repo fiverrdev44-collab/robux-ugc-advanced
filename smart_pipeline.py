@@ -1,11 +1,12 @@
 """
-smart_pipeline.py — v3.2: parallel scan + single-writer live enrichment.
+smart_pipeline.py — v3.3: parallel scan + single-writer live enrichment.
 
-- All seeds checked concurrently (own DB connection per thread)
-- Alternatives discovered concurrently
-- Titles scored concurrently
-- Live Roblox fetches gated to 1 at a time (prevents DB deadlocks)
-- Title ranking output REMOVED (superseded by title_scorer)
+FIXES in this version:
+  - _extract_seeds STOPS pulling from intent["search_terms"]. Gemini
+    hallucinates semantic cousins ("russian" for "hip sway") that waste
+    live-enrich quota on irrelevant keywords.
+  - _DRIFT_BLOCK list of common hallucinated tokens.
+  - Only pulls from intent["specific_moves"] + intent["primary"].
 """
 import math
 import re
@@ -34,41 +35,64 @@ ITEM_TYPES = {
     "scarf","bandana","beret","visor",
 }
 
+# ── Drift blocklist ────────────────────────────────────────────
+# Gemini frequently hallucinates these as "related" to any query.
+# They burn live-enrich quota without helping the item.
+_DRIFT_BLOCK = {
+    # Time
+    "month", "week", "year", "day", "time", "hour", "minute", "second",
+    "today", "tomorrow", "yesterday", "morning", "evening", "night",
+    # Nationalities
+    "russian", "japanese", "korean", "chinese", "english", "american",
+    "french", "german", "spanish", "italian", "mexican", "indian",
+    "african", "european", "asian",
+    # Generic motion words
+    "movement", "motion", "action", "gesture", "expression", "reaction",
+    # Generic nouns
+    "thing", "stuff", "person", "people", "place", "point", "case",
+    "way", "kind", "sort", "type", "form", "part", "line", "area",
+    # Meta
+    "sport", "game", "play", "playing", "trend", "trends", "popular",
+    "memes", "meme", "first", "second", "third", "next", "last",
+    # Abstract
+    "world", "life", "work", "school", "home", "house", "friend",
+    "family", "story", "book", "paper", "letter", "note", "list",
+}
+
 SATURATION_RED = 200
 SATURATION_YELLOW = 100
 MIN_DATA_ITEMS = 20
 
-# ── CHANGED: single writer to prevent concurrent upsert deadlocks ──
 LIVE_ENRICH_CONCURRENCY = 1
-# Max parallel worker threads for read-only queries
 MAX_WORKERS = 6
 
 _live_enrich_sem = threading.Semaphore(LIVE_ENRICH_CONCURRENCY)
 
 
-# ─────────────────────────────────────────────────────────────
-# Core helpers
-# ─────────────────────────────────────────────────────────────
 def _tokens(text):
     return [t for t in TOKEN_RE.findall((text or "").lower()) if t not in STOP]
 
 
 def _extract_seeds(description, intent=None, top_n=5):
+    """
+    Extract seed keywords for live enrichment.
+
+    FIX: only pulls from specific_moves + primary. NOT search_terms
+    (Gemini's hallucination zone). Filters _DRIFT_BLOCK.
+    """
     words = _tokens(description)
     if intent:
+        # Only the trustworthy sources — no search_terms
         priority = (intent.get("specific_moves") or []) + (intent.get("primary") or [])
         for p in priority:
             for t in _tokens(p):
                 if t not in words:
                     words.insert(0, t)
-        for p in (intent.get("search_terms") or []):
-            p_clean = (p or "").strip().lower()
-            if p_clean and p_clean not in words:
-                words.append(p_clean)
+
     seen = set()
     out = []
     for w in words:
-        if len(w) < 4 or w in seen:
+        if len(w) < 4 or w in seen or w in _DRIFT_BLOCK:
             continue
         seen.add(w)
         out.append(w)
@@ -178,9 +202,6 @@ def check_competition(cur, phrase, category_asset_ids=None, live_enrich=True):
     return local
 
 
-# ─────────────────────────────────────────────────────────────
-# Alternatives
-# ─────────────────────────────────────────────────────────────
 def _find_alt_candidates(cur, saturated_seeds, category_asset_ids):
     conditions = " OR ".join(["LOWER(name) LIKE %s"] * len(saturated_seeds))
     patterns = [f"%{s}%" for s in saturated_seeds]
@@ -205,7 +226,7 @@ def _find_alt_candidates(cur, saturated_seeds, category_asset_ids):
     word_counter = Counter()
     for name, favs in rows:
         for w in set(_tokens(name)):
-            if w in seed_set or len(w) < 4 or w in FILLER:
+            if w in seed_set or len(w) < 4 or w in FILLER or w in _DRIFT_BLOCK:
                 continue
             word_counter[w] += 1
 
@@ -308,16 +329,9 @@ def find_alternatives(cur, saturated_seeds, category_asset_ids=None, limit=10,
     return out[:limit]
 
 
-# ─────────────────────────────────────────────────────────────
-# Main pipeline (titles section now only reports raw seeds/alternatives)
-# ─────────────────────────────────────────────────────────────
 def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
                       category_asset_ids=None, ai_titles=None,
                       live_enrich=True, db_factory=None):
-    """
-    Returns seed analysis + alternatives. Does NOT score titles —
-    title scoring is done by title_scorer.py.
-    """
     parallel = db_factory is not None
 
     result = {
@@ -365,9 +379,6 @@ def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
     return result
 
 
-# ─────────────────────────────────────────────────────────────
-# Report (title ranking removed — see title_scorer)
-# ─────────────────────────────────────────────────────────────
 def _format_report(r):
     lines = ["# 🧬 SMART PIPELINE — Live Enriched", ""]
     if r.get("parallel"):
