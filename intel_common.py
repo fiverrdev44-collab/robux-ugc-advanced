@@ -6,6 +6,14 @@ Single source of truth for:
   - percentile ranking vs category peers
   - portfolio context (your winners, your losers)
   - multi-signal verdict logic
+
+VERDICT PRIORITY ORDER:
+  1. Sales data (strongest signal — real money)
+  2. Fast riser velocity override
+  3. Hard-kill rules (age × favs)
+  4. Freefaller detection
+  5. TOO_NEW guards (with velocity exception)
+  6. Percentile buckets
 """
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
@@ -29,7 +37,7 @@ def classify_keyword(cur, keyword, family=None):
     """, [like] + fam_params)
     row = cur.fetchone()
     supply = row[0] or 0
-    median_favs = float(row[1] or 0)
+    median_favs = min(float(row[1] or 0), 5000)  # cap outlier skew
 
     cur.execute(
         "select count(*) from search_suggestions where suggestion ilike %s",
@@ -158,71 +166,120 @@ def portfolio_context(cur, top_n=5):
     }
 
 
-# ── Multi-signal verdict — the lethal version ──
-def decide_verdict(percentile, age_days=None, favs=None, velocity=None):
+# ── Multi-signal verdict — 6-priority decision tree ──
+def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
+                   total_sales=None, sample_size=None):
     """
-    Multi-signal verdict. Hard-kill rules beat percentile.
-    Returns (verdict, emoji, reason).
+    Multi-signal verdict. Returns (verdict, emoji, reason).
 
-    Verdicts:
-      TOO_NEW      — <7 days old, not enough data
-      DOUBLE_DOWN  — clear winner, ship a variant
-      KEEP         — doing fine, post content
-      RENAME       — has signal but title/pitch is failing
-      KILL         — stop investing
+    Priority:
+      1. Sales data (>= 10 → DOUBLE_DOWN, >= 3 → KEEP, 0 & old → KILL)
+      2. Fast riser velocity (>= 10/day)
+      3. Hard-kill rules (age × favs)
+      4. Freefaller detection
+      5. TOO_NEW (with velocity exception)
+      6. Percentile buckets
     """
     p = percentile if percentile is not None else 0
     age = float(age_days) if age_days is not None else None
     f = int(favs) if favs is not None else None
     v = float(velocity) if velocity is not None else 0.0
+    sales = int(total_sales) if total_sales is not None else None
+    sample = int(sample_size) if sample_size is not None else None
 
-    # ── HARD KILL RULES (override percentile) ──
+    # Low-confidence warning appended to reasons
+    low_conf = ""
+    if sample is not None and sample < 20:
+        low_conf = f" (⚠️ only {sample} peers — low confidence)"
+
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 1: SALES DATA (strongest signal)
+    # ══════════════════════════════════════════════════════════
+    if sales is not None and sales >= 10:
+        return ("DOUBLE_DOWN", "🔥",
+                f"{sales} sales in 30d. Real money. Ship a variant.{low_conf}")
+
+    if sales is not None and sales >= 3:
+        return ("KEEP", "✅",
+                f"{sales} sales in 30d. Steady revenue.{low_conf}")
+
+    if (sales is not None and sales == 0
+            and age is not None and age >= 30
+            and f is not None and f >= 5):
+        return ("KILL", "🪦",
+                f"{age:.0f}d · {f}♥ · 0 sales in 30d. "
+                f"Favorites don't convert.{low_conf}")
+
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 2: FAST RISER (velocity override)
+    # ══════════════════════════════════════════════════════════
+    if v >= 10 and age is not None and age >= 3:
+        return ("DOUBLE_DOWN", "🔥",
+                f"{v}/day at {age:.0f}d. Velocity alone wins.{low_conf}")
+
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 3: HARD KILL RULES
+    # ══════════════════════════════════════════════════════════
     if age is not None and f is not None:
         if age >= 60 and f < 20:
             return ("KILL", "🪦",
-                    f"{age:.0f}d old · only {f}♥. Roblox algorithm has "
-                    f"already shelved it. Not recoverable.")
+                    f"{age:.0f}d · only {f}♥. High probability of "
+                    f"unrecoverable.{low_conf}")
         if age >= 30 and f < 10:
             return ("KILL", "🪦",
-                    f"{age:.0f}d old · {f}♥. Peer median is higher. Move on.")
+                    f"{age:.0f}d · {f}♥. Peer median is higher. "
+                    f"Move on.{low_conf}")
         if age >= 14 and f < 5:
             return ("KILL", "🪦",
-                    f"{age:.0f}d old · {f}♥. Not being discovered. Kill it.")
+                    f"{age:.0f}d · {f}♥. Not being discovered.{low_conf}")
         if age >= 7 and f < 3:
             return ("KILL", "🪦",
-                    f"{age:.0f}d · {f}♥. Zero traction after a week.")
+                    f"{age:.0f}d · {f}♥. Zero traction after a week.{low_conf}")
 
-    # ── TOO NEW TO JUDGE ──
-    if age is not None and age < 3:
-        return ("TOO_NEW", "⏳",
-                f"Only {age:.1f}d old. Need 7 days of data before verdict.")
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 4: FREEFALLER
+    # ══════════════════════════════════════════════════════════
+    if (v < 0.3 and age is not None and age >= 14
+            and f is not None and f < 50):
+        return ("KILL", "🪦",
+                f"{v}/day at {age:.0f}d · {f}♥. Trajectory has "
+                f"flatlined.{low_conf}")
 
-    if age is not None and age < 7 and (f is None or f < 30):
-        return ("TOO_NEW", "⏳",
-                f"{age:.1f}d old · {f}♥. Re-run in {max(1, int(7 - age))} days.")
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 5: TOO_NEW (with velocity exception)
+    # ══════════════════════════════════════════════════════════
+    if age is not None and age < 7:
+        if f is None:
+            return ("TOO_NEW", "⏳",
+                    f"Only {age:.1f}d old. No data yet.")
+        if v >= 5:
+            return ("DOUBLE_DOWN", "🔥",
+                    f"{v}/day at {age:.1f}d · {f}♥. Fast riser.{low_conf}")
+        if f < 30:
+            days_left = max(1, int(7 - age))
+            return ("TOO_NEW", "⏳",
+                    f"{age:.1f}d old · {f}♥. "
+                    f"Re-run in {days_left} days.")
 
-    # ── WINNER ──
+    # ══════════════════════════════════════════════════════════
+    # PRIORITY 6: PERCENTILE BUCKETS
+    # ══════════════════════════════════════════════════════════
     if p >= 90:
         return ("DOUBLE_DOWN", "🔥",
-                f"Top {100 - int(p)}% of peers. Absolute favs confirm demand.")
+                f"Top {100 - int(p)}% of peers. Strong.{low_conf}")
     if p >= 75 and f is not None and f >= 50:
         return ("DOUBLE_DOWN", "🔥",
-                f"Top {100 - int(p)}% · {f}♥. Strong traction.")
-
-    # ── KEEP ──
+                f"Top {100 - int(p)}% · {f}♥. Strong traction.{low_conf}")
     if p >= 60:
         return ("KEEP", "✅",
-                f"Top {100 - int(p)}% of peers. Above median.")
+                f"Top {100 - int(p)}% of peers. Above median.{low_conf}")
     if p >= 45 and f is not None and f >= 20:
         return ("KEEP", "✅",
-                f"Top {100 - int(p)}% · {f}♥. Steady but not standout.")
-
-    # ── RENAME ──
+                f"Top {100 - int(p)}% · {f}♥. Steady.{low_conf}")
     if p >= 25:
         return ("RENAME", "🔧",
-                f"Top {100 - int(p)}% — item has demand, title/thumbnail is "
-                f"blocking conversion.")
+                f"Top {100 - int(p)}% — item has demand, "
+                f"title/thumbnail blocking conversion.{low_conf}")
 
-    # ── KILL ──
     return ("KILL", "🪦",
-            f"Bottom {int(p)}% of peers. No signal to salvage.")
+            f"Bottom {int(p)}% of peers. No signal to salvage.{low_conf}")
