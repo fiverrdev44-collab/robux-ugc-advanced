@@ -4,6 +4,7 @@ Loaded by discord_ugc_bot.py via register_advanced_commands(bot, get_db).
 
 FIX: family parser accepts BOTH convergence_engine AND category_configs
      family names (headwear, accessory, clothing now work).
+ADDED: !converge_debug — diagnostic for stuck scans.
 """
 import asyncio
 
@@ -300,7 +301,10 @@ def register_advanced_commands(bot, get_db):
             return await ctx.send(f"❌ {e}")
 
         if not rows:
-            return await ctx.send(f"No convergence found for {label}.")
+            return await ctx.send(
+                f"No convergence found for {label}.\n"
+                f"Run `!converge_debug movement` to see why."
+            )
 
         lines = [f"**🎯 CONVERGENCE — {label}**\n"
                  "_Weighted: demand · velocity · supply · freshness · competition_\n"]
@@ -319,6 +323,117 @@ def register_advanced_commands(bot, get_db):
             await ctx.send(chunk)
 
     # ────────────────────────────────────────────────────────
+    # 🔬 CONVERGE DEBUG — shows exactly why a keyword fails
+    # ────────────────────────────────────────────────────────
+
+    @bot.command(name="converge_debug")
+    async def converge_debug_cmd(ctx, *, keyword: str = ""):
+        """Diagnose a single keyword. Usage: !converge_debug movement"""
+        from convergence_engine import _score_keyword, _family_clause, FAMILIES
+
+        if not keyword.strip():
+            return await ctx.send("Usage: `!converge_debug movement`")
+
+        kw = keyword.strip().split()[0]
+        family = "emotes"
+
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                # 1. Family clause check
+                fam_sql, fam_params = _family_clause(family)
+
+                # 2. Raw supply query (no gate)
+                from convergence_engine import _kw_pattern
+                pat = _kw_pattern(kw)
+                is_phrase = " " in kw.strip()
+                match_op = "ilike" if is_phrase else "~*"
+
+                cur.execute(f"""
+                    select count(*),
+                           coalesce(percentile_cont(0.5) within group
+                                    (order by favorite_count), 0)
+                    from items
+                    where name {match_op} %s and favorite_count > 5
+                    {fam_sql}
+                """, [pat] + fam_params)
+                raw = cur.fetchone()
+                raw_supply = raw[0] or 0
+                raw_median = float(raw[1] or 0)
+
+                # 3. Demand check
+                cur.execute(
+                    f"select count(*) from search_suggestions "
+                    f"where suggestion {match_op} %s",
+                    (pat,)
+                )
+                raw_demand = cur.fetchone()[0] or 0
+
+                # 4. Full score (may pass or reject)
+                scored = _score_keyword(cur, kw, family,
+                                        min_median=10, min_demand=0,
+                                        debug=True)
+
+                # 5. Family context
+                fam_ids = FAMILIES.get(family, [])
+
+                # 6. Total emote items in DB
+                cur.execute("""
+                    select count(*) from items
+                    where asset_type_id = 61 and favorite_count > 5
+                """)
+                total_emotes = cur.fetchone()[0] or 0
+
+                return {
+                    "family_sql": fam_sql,
+                    "family_ids": fam_ids,
+                    "raw_supply": raw_supply,
+                    "raw_median": raw_median,
+                    "raw_demand": raw_demand,
+                    "scored": scored,
+                    "total_emotes": total_emotes,
+                    "pat": pat,
+                    "match_op": match_op,
+                }
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            d = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await ctx.send(f"❌ {e}")
+
+        lines = [
+            f"# 🔬 DEBUG — `{kw}` in `{family}`\n",
+            f"**Family SQL:** `{d['family_sql'] or '(none)'}`",
+            f"**Family IDs:** `{d['family_ids']}`",
+            f"**Pattern:** `{d['pat']}` via `{d['match_op']}`",
+            f"**Total emote items in DB:** {d['total_emotes']:,}",
+            "",
+            "**Raw queries (before gates):**",
+            f"• Supply: **{d['raw_supply']}** items",
+            f"• Median favs: **{d['raw_median']}**",
+            f"• Demand: **{d['raw_demand']}** search hits",
+            "",
+        ]
+
+        if d["scored"]:
+            s = d["scored"]
+            lines.append("**✅ PASSES with min_median=10, min_demand=0:**")
+            lines.append(f"• Final score: **{s['score']}**")
+            lines.append(f"• Supply: {s['supply']}")
+            lines.append(f"• Demand: {s['demand']}")
+            lines.append(f"• Median: {s['avg_favs']}")
+            lines.append(f"• Recent: {s['recent']}")
+        else:
+            lines.append("**❌ REJECTED even with loosest gates**")
+            lines.append("Check Render logs for the `[conv-debug]` rejection reason.")
+
+        body = "\n".join(lines)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i+1900])
+
+    # ────────────────────────────────────────────────────────
     # 🔨 DESC FORGE
     # ────────────────────────────────────────────────────────
 
@@ -334,7 +449,6 @@ def register_advanced_commands(bot, get_db):
 
         from desc_forge import forge_description, format_forge
 
-        # FIX: accept both naming schemes
         family, keyword = _resolve_family_prefix(args.strip())
 
         progress = await ctx.send(f"🔨 Mining top descriptions for `{keyword}`...")
@@ -365,12 +479,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="chain")
     async def chain_cmd(ctx, *, args: str = ""):
-        """
-        !chain <concept>                     — new item
-        !chain variant <parent_item_id>      — variant of existing winner
-        !chain variant <id> <theme>          — variant with theme
-        !chain emotes:<concept>              — family scoped
-        """
+        """!chain <concept> | !chain variant <id> [theme] | !chain emotes:<concept>"""
         if not args.strip():
             return await ctx.send(
                 "**Usage:**\n"
@@ -397,7 +506,6 @@ def register_advanced_commands(bot, get_db):
             concept = " ".join(tokens[2:]) if len(tokens) > 2 else "variant"
         else:
             concept = args.strip()
-            # FIX: accept both naming schemes
             family, concept = _resolve_family_prefix(concept)
 
         mode_label = "VARIANT" if parent_id else "NEW"
@@ -427,16 +535,12 @@ def register_advanced_commands(bot, get_db):
                 await asyncio.sleep(0.2)
 
     # ────────────────────────────────────────────────────────
-    # 🏷️ TAGS — sales-weighted SEO tag generator
+    # 🏷️ TAGS
     # ────────────────────────────────────────────────────────
 
     @bot.command(name="tags")
     async def tags_cmd(ctx, *, args: str = ""):
-        """
-        Generate 45 sales-triggering tags for an item name.
-        !tags Cute Kawaii Kitty Beanie
-        !tags emotes:Smooth Hip Sway Dance
-        """
+        """Generate 45 sales-triggering tags. !tags <name> or !tags emotes:<name>"""
         if not args.strip():
             return await ctx.send(
                 "**Usage:** `!tags <item name>`\n"
@@ -446,7 +550,6 @@ def register_advanced_commands(bot, get_db):
 
         from tag_generator import generate_tags, format_tags
 
-        # FIX: accept both naming schemes
         family, item_name = _resolve_family_prefix(args.strip())
 
         progress = await ctx.send(f"🏷️ Generating tags for `{item_name[:60]}`...")
