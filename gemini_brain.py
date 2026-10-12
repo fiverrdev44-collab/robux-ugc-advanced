@@ -9,6 +9,12 @@ PROMO FILTER: Hard post-process strips promo language.
 
 DETERMINISM: Temperatures lowered on extract_keywords (0.1) and
 classify_keyword_intelligence (0.05) to prevent pivot flip-flop.
+
+FIXES:
+  - MODEL_NAME default updated to gemini-3.5-flash-lite (2.5 is dead)
+  - OPENROUTER_MODEL default updated to qwen/qwen-2.5-72b-instruct:free
+  - verify_titles now rejects ANY duplicate token, not just consecutive
+    (fixes "Sway hip sway dance" being accepted)
 """
 import os
 import re
@@ -20,10 +26,10 @@ from google import genai
 from google.genai import types
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
+    "qwen/qwen-2.5-72b-instruct:free")
 OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL",
     "inclusionai/ling-3.0-flash-vl:free")
 
@@ -280,7 +286,6 @@ CREATOR'S DESCRIPTION: {desc}
 def extract_keywords(casual_description):
     if not casual_description or not casual_description.strip(): return {}
     prompt = _EXTRACT_PROMPT.format(desc=casual_description.strip())
-    # CHANGED: 0.25 → 0.1 (determinism)
     raw = _generate(prompt, json_mode=True, temperature=0.1, max_tokens=1024)
     if not raw: return {}
     try: data = json.loads(raw)
@@ -423,7 +428,6 @@ def classify_keyword_intelligence(seed_keyword, competition_data,
         item_type=item_type,
         competition_data="\n".join(lines),
     )
-    # CHANGED: 0.35 → 0.05 (determinism)
     raw = _generate(prompt, json_mode=True, temperature=0.05, max_tokens=3000)
     if not raw: return {}
     try:
@@ -798,8 +802,10 @@ def verify_titles(titles, allow_list):
         if len(toks) > 6:
             rejected.append((title, [f"too long ({len(toks)} words)"]))
             continue
-        if any(toks[i] == toks[i+1] for i in range(len(toks)-1)):
-            rejected.append((title, ["consecutive dup"]))
+        # FIX: reject ANY duplicate token anywhere, not just consecutive.
+        # "Sway hip sway dance" is now rejected.
+        if len(toks) != len(set(toks)):
+            rejected.append((title, ["duplicate token"]))
             continue
         t_lower = title.lower().strip()
         if t_lower in seen_lower:
