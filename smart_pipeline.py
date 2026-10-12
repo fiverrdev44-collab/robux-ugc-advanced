@@ -1,9 +1,11 @@
 """
-smart_pipeline.py — v3: parallel scan + live enrichment.
+smart_pipeline.py — v3.2: parallel scan + single-writer live enrichment.
+
 - All seeds checked concurrently (own DB connection per thread)
 - Alternatives discovered concurrently
 - Titles scored concurrently
-- Live Roblox fetches gated to 4 concurrent (rate-limit safe)
+- Live Roblox fetches gated to 1 at a time (prevents DB deadlocks)
+- Title ranking output REMOVED (superseded by title_scorer)
 """
 import math
 import re
@@ -36,9 +38,9 @@ SATURATION_RED = 200
 SATURATION_YELLOW = 100
 MIN_DATA_ITEMS = 20
 
-# Max concurrent Roblox live fetches (rate-limit safety)
-LIVE_ENRICH_CONCURRENCY = 4
-# Max parallel worker threads
+# ── CHANGED: single writer to prevent concurrent upsert deadlocks ──
+LIVE_ENRICH_CONCURRENCY = 1
+# Max parallel worker threads for read-only queries
 MAX_WORKERS = 6
 
 _live_enrich_sem = threading.Semaphore(LIVE_ENRICH_CONCURRENCY)
@@ -59,7 +61,6 @@ def _extract_seeds(description, intent=None, top_n=5):
             for t in _tokens(p):
                 if t not in words:
                     words.insert(0, t)
-        # creative concepts — kept as full phrases
         for p in (intent.get("search_terms") or []):
             p_clean = (p or "").strip().lower()
             if p_clean and p_clean not in words:
@@ -111,7 +112,6 @@ def _check_comp_local(cur, phrase, category_asset_ids=None):
 
 
 def _comp_check_worker(seed, category_asset_ids, live_enrich, db_factory):
-    """Runs in its own thread. Opens its own DB connection."""
     conn = db_factory()
     try:
         cur = conn.cursor()
@@ -121,7 +121,6 @@ def _comp_check_worker(seed, category_asset_ids, live_enrich, db_factory):
             cur.close()
 
         if local["comp"] < MIN_DATA_ITEMS and live_enrich:
-            # Gate live fetches — only N at a time
             with _live_enrich_sem:
                 try:
                     from live_enrich import live_enrich_keyword
@@ -130,7 +129,6 @@ def _comp_check_worker(seed, category_asset_ids, live_enrich, db_factory):
                 except Exception as e:
                     print(f"[smart] live enrich failed '{seed}': {e}", flush=True)
 
-            # Fresh connection to see the newly-written rows
             conn.close()
             conn = db_factory()
             cur = conn.cursor()
@@ -147,7 +145,6 @@ def _comp_check_worker(seed, category_asset_ids, live_enrich, db_factory):
 
 
 def _parallel_comp_check(seeds, category_asset_ids, live_enrich, db_factory):
-    """Check all seeds concurrently. Preserves original order."""
     if not seeds:
         return []
     results = {}
@@ -167,7 +164,6 @@ def _parallel_comp_check(seeds, category_asset_ids, live_enrich, db_factory):
 
 
 def check_competition(cur, phrase, category_asset_ids=None, live_enrich=True):
-    """Legacy sequential path — used when db_factory not provided."""
     local = _check_comp_local(cur, phrase, category_asset_ids)
     if local["comp"] >= MIN_DATA_ITEMS:
         return local
@@ -186,7 +182,6 @@ def check_competition(cur, phrase, category_asset_ids=None, live_enrich=True):
 # Alternatives
 # ─────────────────────────────────────────────────────────────
 def _find_alt_candidates(cur, saturated_seeds, category_asset_ids):
-    """Just query co-occurring words — no comp check yet."""
     conditions = " OR ".join(["LOWER(name) LIKE %s"] * len(saturated_seeds))
     patterns = [f"%{s}%" for s in saturated_seeds]
     cat_filter = ""
@@ -293,7 +288,6 @@ def find_alternatives_parallel(saturated_seeds, category_asset_ids, db_factory,
 
 def find_alternatives(cur, saturated_seeds, category_asset_ids=None, limit=10,
                       live_enrich=True):
-    """Legacy sequential path."""
     if not saturated_seeds:
         return []
     candidates = _find_alt_candidates(cur, saturated_seeds, category_asset_ids)
@@ -315,163 +309,20 @@ def find_alternatives(cur, saturated_seeds, category_asset_ids=None, limit=10,
 
 
 # ─────────────────────────────────────────────────────────────
-# Titles
-# ─────────────────────────────────────────────────────────────
-def build_titles(seeds, alternatives, item_type="emote"):
-    type_variants = {
-        "emote": ["emote", "dance"],
-        "hat": ["hat", "beanie"],
-        "hair": ["hair"],
-    }.get(item_type, [item_type])
-
-    alt_words = [a["word"] for a in alternatives]
-    titles = set()
-
-    if len(seeds) >= 2:
-        for i, a in enumerate(seeds[:6]):
-            for b in seeds[i+1:i+4]:
-                titles.add((a, b, type_variants[0]))
-        for s in seeds[:5]:
-            titles.add((s, type_variants[0]))
-
-    for orig in seeds[:3]:
-        for alt in alt_words[:5]:
-            titles.add((orig, alt, type_variants[0]))
-            titles.add((alt, orig, type_variants[0]))
-
-    for i, a in enumerate(alt_words[:5]):
-        for b in alt_words[i+1:i+4]:
-            titles.add((a, b, type_variants[0]))
-
-    for alt in alt_words[:6]:
-        titles.add((alt, type_variants[0]))
-
-    return [" ".join(t) for t in titles if 2 <= len(t) <= 5]
-
-
-def score_title(cur, title, category_asset_ids=None):
-    toks = _tokens(title)
-    n = len(toks)
-    if n < 2 or n > 6:
-        return None
-
-    data = _check_comp_local(cur, title, category_asset_ids)
-    exact = data["comp"]
-    med_favs = data["median_favs"]
-
-    first = toks[0]
-    first_data = _check_comp_local(cur, first, category_asset_ids)
-
-    if exact == 0 and med_favs == 0 and first_data["comp"] < 10:
-        return {
-            "title": title, "score": 0, "verdict": "⛔ NO DATA",
-            "exact_matches": 0, "median_favs": 0,
-            "first_comp": first_data["comp"],
-            "filler_count": 0, "tokens": n,
-        }
-
-    if exact == 0:
-        scarcity = 30
-    elif exact < 5:
-        scarcity = 25
-    elif exact < 20:
-        scarcity = 15
-    elif exact < 50:
-        scarcity = 8
-    else:
-        scarcity = 0
-
-    demand = min(30, math.log1p(med_favs) * 3) if med_favs > 0 else 5
-
-    if 50 <= first_data["comp"] <= 500:
-        first_score = 15
-    elif first_data["comp"] < 50:
-        first_score = 10
-    elif first_data["comp"] < 2000:
-        first_score = 12
-    else:
-        first_score = 4
-
-    if 3 <= n <= 4:
-        length_score = 10
-    elif n == 5:
-        length_score = 6
-    else:
-        length_score = 2
-
-    type_score = 10 if toks[-1] in ITEM_TYPES else 0
-    filler_count = sum(1 for t in toks if t in FILLER)
-    filler_penalty = filler_count * 10
-
-    total = scarcity + demand + first_score + length_score + type_score - filler_penalty
-    total = max(0, min(100, total))
-
-    if total >= 80:
-        verdict = "🥇 GOLD"
-    elif total >= 65:
-        verdict = "🥈 STRONG"
-    elif total >= 50:
-        verdict = "🥉 VIABLE"
-    elif total >= 35:
-        verdict = "⚠️ WEAK"
-    else:
-        verdict = "❌ DEAD"
-
-    return {
-        "title": title, "score": round(total, 1), "verdict": verdict,
-        "exact_matches": exact, "median_favs": med_favs,
-        "first_comp": first_data["comp"], "filler_count": filler_count,
-        "tokens": n,
-    }
-
-
-def _score_worker(title, category_asset_ids, db_factory):
-    conn = db_factory()
-    try:
-        cur = conn.cursor()
-        try:
-            return score_title(cur, title, category_asset_ids)
-        finally:
-            cur.close()
-    finally:
-        try: conn.close()
-        except Exception: pass
-
-
-def _parallel_score_titles(candidates, category_asset_ids, db_factory):
-    if not candidates:
-        return []
-    results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {
-            ex.submit(_score_worker, t, category_asset_ids, db_factory): t
-            for t in candidates
-        }
-        for fut in as_completed(futures):
-            try:
-                r = fut.result()
-                if r:
-                    results.append(r)
-            except Exception as e:
-                print(f"[smart] score fail: {e}", flush=True)
-    return results
-
-
-# ─────────────────────────────────────────────────────────────
-# Main pipeline
+# Main pipeline (titles section now only reports raw seeds/alternatives)
 # ─────────────────────────────────────────────────────────────
 def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
                       category_asset_ids=None, ai_titles=None,
                       live_enrich=True, db_factory=None):
     """
-    If db_factory is provided → parallel scan (own connection per thread).
-    Else → legacy sequential mode using `cur`.
+    Returns seed analysis + alternatives. Does NOT score titles —
+    title scoring is done by title_scorer.py.
     """
     parallel = db_factory is not None
 
     result = {
         "seeds": [], "seed_analysis": [], "saturated_seeds": [],
-        "alternatives": [], "scored_titles": [], "best_title": None,
+        "alternatives": [],
         "live_enriched": live_enrich, "parallel": parallel, "report": "",
     }
 
@@ -510,43 +361,17 @@ def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
         alternatives = []
     result["alternatives"] = alternatives
 
-    candidates = set()
-    if ai_titles:
-        for t in ai_titles:
-            if t and t.strip():
-                candidates.add(t)
-    for t in build_titles(good_seeds, alternatives, item_type):
-        candidates.add(t)
-    candidates = list(candidates)[:25]
-
-    if parallel:
-        scored = _parallel_score_titles(candidates, category_asset_ids, db_factory)
-    else:
-        scored = []
-        for title in candidates:
-            try:
-                s = score_title(cur, title, category_asset_ids)
-                if s:
-                    scored.append(s)
-            except Exception as e:
-                print(f"[smart] score fail '{title}': {e}", flush=True)
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    result["scored_titles"] = scored
-    if scored:
-        result["best_title"] = scored[0]
-
     result["report"] = _format_report(result)
     return result
 
 
 # ─────────────────────────────────────────────────────────────
-# Report
+# Report (title ranking removed — see title_scorer)
 # ─────────────────────────────────────────────────────────────
 def _format_report(r):
     lines = ["# 🧬 SMART PIPELINE — Live Enriched", ""]
     if r.get("parallel"):
-        lines.append("_Parallel scan active (6 workers)._\n")
+        lines.append("_Parallel scan · single-writer enrich mode._\n")
     elif r["live_enriched"]:
         lines.append("_Live API enrichment active._\n")
 
@@ -554,7 +379,7 @@ def _format_report(r):
         lines.append(f"**Seeds:** `{'`, `'.join(r['seeds'])}`\n")
 
     if r["seed_analysis"]:
-        lines.append("## 🔍 SEED COMPETITION (parallel)")
+        lines.append("## 🔍 SEED COMPETITION")
         lines.append("")
         for s in r["seed_analysis"]:
             comp = s["comp"]
@@ -585,24 +410,5 @@ def _format_report(r):
             lines.append(f"**{i}. `{a['word']}`** — {a['comp']} comp · "
                          f"median {a['median_favs']:,} favs{price_str} · score {a['gap_score']}")
         lines.append("")
-
-    if r["scored_titles"]:
-        lines.append("## 🥇 FINAL RANKED TITLES\n")
-        for i, s in enumerate(r["scored_titles"][:10], 1):
-            lines.append(f"**{i}. `{s['title']}`** — **{s['score']}/100**")
-            lines.append(f"   · {s['verdict']} · exact: {s['exact_matches']} · "
-                         f"first comp: {s['first_comp']}")
-        lines.append("")
-
-    if r["best_title"]:
-        b = r["best_title"]
-        lines.append("## ✅ TOP RECOMMENDATION\n")
-        lines.append(f"### `{b['title']}`")
-        lines.append(f"**Score: {b['score']}/100** — {b['verdict']}")
-        lines.append(f"- Exact matches: **{b['exact_matches']}**")
-        lines.append(f"- Median favs: **{b['median_favs']:,}**")
-        lines.append(f"- First comp: **{b['first_comp']}**")
-        lines.append("")
-        lines.append("**→ Use this title.**")
 
     return "\n".join(lines)
