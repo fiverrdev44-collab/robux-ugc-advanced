@@ -3,6 +3,10 @@ peer_autopsy.py — compare an item to its 5 nearest winners.
 
 Answers ONE question: what do the winners have that this item doesn't?
 Every diff is specific and actionable.
+
+FIX: build_verdict now returns "TOO EARLY TO JUDGE" for items < 14
+days old. Prevents RENAME/KILL conflicts with intel_common.decide_verdict
+(winners are often 20-40 days old, so velocity comparison is unfair).
 """
 import re
 from bot_core import get_db
@@ -33,7 +37,6 @@ def find_peers(cur, item_id, top_n=5):
     if not my_words:
         return None
 
-    # Candidates: same asset_type, any of my words, favorites > 100
     patterns = [f"%{w}%" for w in my_words]
     cur.execute("""
         select name, favorite_count, price,
@@ -48,7 +51,6 @@ def find_peers(cur, item_id, top_n=5):
     """, (atype, item_id, patterns))
     candidates = cur.fetchall()
 
-    # Rank by keyword overlap + velocity
     scored = []
     for cn, cf, cp, ca in candidates:
         cw = set(_words(cn))
@@ -67,7 +69,6 @@ def find_peers(cur, item_id, top_n=5):
             "lead_word": (_words(cn) or [""])[0],
         })
 
-    # Sort: overlap desc, velocity desc
     scored.sort(key=lambda x: (-x["overlap"], -x["velocity"]))
     return {
         "my_name": name,
@@ -89,16 +90,15 @@ def analyze_diffs(pd):
 
     avg_words = sum(p["word_count"] for p in peers) / len(peers)
     avg_velocity = sum(p["velocity"] for p in peers) / len(peers)
+    avg_peer_age = sum(p["age"] for p in peers) / len(peers)
     no_parens = sum(1 for p in peers if not p["has_parens"])
     no_emoji = sum(1 for p in peers if not p["has_emoji"])
 
-    # Which non-category keywords do peers use that I don't
     peer_kw = set()
     for p in peers:
         peer_kw.update(_words(p["name"]))
     missing_kw = sorted(peer_kw - my_words_set)[:8]
 
-    # Lead words (excluding my own)
     lead_words = list(dict.fromkeys(
         p["lead_word"] for p in peers if p["lead_word"]
     ))[:5]
@@ -112,6 +112,7 @@ def analyze_diffs(pd):
     return {
         "avg_words": round(avg_words, 1),
         "avg_velocity": round(avg_velocity, 2),
+        "avg_peer_age": round(avg_peer_age, 1),
         "ratio": round(ratio, 2),
         "my_word_count": my_word_count,
         "my_has_parens": my_has_parens,
@@ -127,6 +128,20 @@ def build_verdict(pd, diffs):
     """One-sentence save-or-kill verdict."""
     if not diffs:
         return "Insufficient data."
+
+    # ── AGE GATE ───────────────────────────────────────────────
+    # Items younger than 14 days don't have enough data for a fair
+    # velocity comparison against peers (winners are often 20-40d old).
+    # Defer to intel_common.decide_verdict which uses percentile.
+    my_age = pd.get("my_age", 0)
+    avg_peer_age = diffs.get("avg_peer_age", 0)
+    if my_age < 14:
+        return (
+            f"⏳ **TOO EARLY TO JUDGE.** Item is {my_age:.1f}d old; "
+            f"peer winners average {avg_peer_age:.0f}d. "
+            f"Re-run `!autopsy` after day 14 for a fair comparison."
+        )
+    # ────────────────────────────────────────────────────────────
 
     ratio = diffs["ratio"]
     my_v = pd["my_velocity"]
@@ -198,6 +213,8 @@ def _format(pd, diffs, verdict):
     lines.append("\n## ✅ WINNERS' PATTERN")
     lines.append(f"• Avg title length: **{diffs['avg_words']} words** "
                  f"(you: {diffs['my_word_count']})")
+    lines.append(f"• Avg peer age: **{diffs['avg_peer_age']}d** "
+                 f"(you: {pd['my_age']}d)")
     lines.append(f"• Avg velocity: **{diffs['avg_velocity']}/day** "
                  f"(you: {pd['my_velocity']}/day — {diffs['ratio']:.0%} of peer)")
     lines.append(f"• No parens: **{diffs['peers_no_parens']}**")
