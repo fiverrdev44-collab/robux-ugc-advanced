@@ -3,28 +3,43 @@ intel_common.py — shared intelligence layer.
 Used by !brainstorm, !autopsy, !verdict, !converge.
 
 FIXES in this version:
-  - _family_clause translates category_configs → convergence_engine
-    family names so lookups don't silently return 0 rows.
-  - classify_keyword uses median_favs for GOLD/OPPORTUNITY thresholds
-    so it agrees with recovery_brain.classify_keyword_health.
+  - ACCESSORY UMBRELLA: "accessory" family matches all 5 sub-types
+    (43, 44, 45, 46, 47).
+  - classify_keyword uses WORD BOUNDARY for single words (hip ≠ chip).
+  - pick_pivot_from_data uses ABSOLUTE confidence (not margin-based).
+  - _family_clause translates category_configs → convergence_engine.
 """
+import re
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 
+ACCESSORY_IDS = [43, 44, 45, 46, 47]
+
+
 def _family_clause(family):
     """
-    Translate category_configs family names → convergence_engine keys.
-    Without the translation, FAMILIES.get("emote") returns None and
-    the query returns 0 rows, silently mis-classifying everything.
+    Bulletproof family clause.
+    Special case: "accessory" matches all 5 accessory sub-types.
+    Otherwise translates category_configs → convergence_engine names.
     """
     if not family or family == "all":
         return "", []
+
+    # ── ACCESSORY UMBRELLA ─────────────────────────────────────
+    if family == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
+    # ────────────────────────────────────────────────────────────
+
     try:
         from category_configs import to_convergence_family
         fam = to_convergence_family(family)
     except Exception:
         fam = family
+
+    # Translation might have produced "accessory" — handle it
+    if fam == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
     if fam is None:
         return " and false", []
     ids = FAMILIES.get(fam)
@@ -34,11 +49,18 @@ def _family_clause(family):
     return f" and asset_type_id in ({ph})", list(ids)
 
 
+def _kw_match_op(keyword):
+    """Word boundary for single words, ILIKE for phrases."""
+    kw = (keyword or "").strip().lower()
+    if " " in kw:
+        return "ilike", f"%{kw}%"
+    return "~*", rf"\y{re.escape(kw)}\y"
+
+
 # ── Shared classification thresholds — one place, one truth ──
 def classify_keyword(cur, keyword, family=None):
     """
     Returns dict with classification fields used EVERYWHERE.
-    No more contradictions between modules.
 
     GOLD        — supply < 20  AND median_favs >= 150
     OPPORTUNITY — supply < 50  AND median_favs >= 80
@@ -46,23 +68,26 @@ def classify_keyword(cur, keyword, family=None):
     VIRGIN      — supply = 0 but demand > 0
     GHOST       — no supply, no demand
     """
-    like = f'%{keyword}%'
+    match_op, pat = _kw_match_op(keyword)
     fam_sql, fam_params = _family_clause(family)
 
+    # Supply + median (word-boundary matched)
     cur.execute(f"""
         select count(*),
                percentile_cont(0.5) within group (order by favorite_count)
         from items
-        where name ilike %s and favorite_count > 5
+        where name {match_op} %s and favorite_count > 5
         {fam_sql}
-    """, [like] + fam_params)
+    """, [pat] + fam_params)
     row = cur.fetchone()
     supply = row[0] or 0
     median_favs = min(float(row[1] or 0), 5000)  # cap outlier skew
 
+    # Demand (word-boundary matched)
     cur.execute(
-        "select count(*) from search_suggestions where suggestion ilike %s",
-        (like,)
+        f"select count(*) from search_suggestions "
+        f"where suggestion {match_op} %s",
+        (pat,)
     )
     demand = cur.fetchone()[0] or 0
 
@@ -284,6 +309,10 @@ def pick_pivot_from_data(niche_data, keyword_intel=None):
     """
     Deterministic pivot picker. Uses real DB data, not AI opinion.
     Same input → same output. Returns (keyword, confidence, reason).
+
+    Confidence is ABSOLUTE (based on winning score), not margin-based.
+    Margin-based was giving ~3% when all candidates were NEUTRAL with
+    similar scores, even when the winning score was high.
     """
     if not niche_data:
         return (None, 0.0, "no niche data")
@@ -324,11 +353,13 @@ def pick_pivot_from_data(niche_data, keyword_intel=None):
     scored.sort(key=lambda x: x["score"], reverse=True)
     best = scored[0]
 
-    if len(scored) > 1:
-        margin = best["score"] - scored[1]["score"]
-        confidence = min(margin / 30.0, 1.0)
-    else:
+    # ── ABSOLUTE CONFIDENCE ────────────────────────────────────
+    # 120 = practical top score (100 base + 20 supply + 10 demand - small)
+    # Cap at 90% — no system should be 100% confident.
+    confidence = min(best["score"] / 120.0, 0.9)
+    if len(scored) == 1:
         confidence = 0.5
+    # ────────────────────────────────────────────────────────────
 
     reason = (
         f"bucket={best['bucket']} · supply={best['supply']} · "
