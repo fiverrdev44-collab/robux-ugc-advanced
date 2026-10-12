@@ -2,12 +2,13 @@
 convergence_engine.py — category-aware niche scoring.
 
 FIXES in this version:
-- MULTI-SOURCE keyword gathering: pulls from learned_keywords AND
-  search_suggestions tokens. Fixes "movement" being missed because
-  discover_keywords.py never learned it.
-- Bulletproof family clause (accepts both naming schemes, never
-  returns "and false" for known families).
-- 3-tier median fallback: 20 → 15 → 10.
+- FAMILY-PRESENCE GATE: a keyword is only kept if it appears in
+  >=5 items in the target family with median >= 40. This kills
+  generic English tokens like "right", "head", "face" that appear
+  in search queries but aren't real concepts in the family.
+- Word-length floor: >= 5 chars (kills "mini", "doll", "head").
+- Reject top-N English word blacklist.
+- Multi-source gathering: learned_keywords + search_suggestions.
 """
 import re
 from collections import Counter
@@ -34,42 +35,58 @@ for fam, ids in FAMILIES.items():
         ASSET_TO_FAMILY[aid] = fam
 
 
+# Extended blocklist — top-500 English words + generic UGC terms
 _GENERIC_BLOCK = {
+    # English glue
     "the", "and", "for", "with", "you", "your", "from", "that", "this",
     "into", "over", "under", "onto", "upon", "than", "then", "them",
     "they", "there", "here", "when", "what", "where", "which", "while",
     "who", "why", "how", "all", "any", "some", "each", "every", "both",
     "other", "another", "such", "only", "very", "just", "also", "even",
-    "still", "more", "most", "less", "few", "many", "much",
+    "still", "more", "most", "less", "few", "many", "much", "right",
+    "left", "high", "low", "one", "two", "three", "four", "five",
+    "into", "onto", "your", "yours", "ours", "theirs", "its", "his",
+    "her", "she", "him", "hers", "our", "ours", "who", "whom", "whose",
+    # Generic adjectives
     "new", "old", "best", "top", "good", "great", "cool", "nice", "cute",
-    "big", "small", "hot", "cold", "fast", "slow", "high", "low",
-    "bad", "hard", "easy", "free", "open", "real", "fake", "true",
-    "happy", "sad", "love", "hate",
+    "big", "small", "hot", "cold", "fast", "slow", "bad", "hard", "easy",
+    "free", "open", "real", "fake", "true", "happy", "sad", "love",
+    "hate", "tiny", "huge", "mini", "max", "super", "uber", "ultra",
+    "mega", "pro", "plus", "zero", "first", "last", "next", "prev",
+    "young", "early", "late", "full", "half", "empty", "sweet",
+    "sour", "soft", "hard", "smooth", "rough", "sharp", "dull",
+    "bright", "dark", "light", "heavy", "clear", "blur", "pure",
+    # Generic nouns
     "point", "place", "thing", "stuff", "item", "items", "asset",
     "roblox", "ugc", "shop", "store", "buy", "sell", "sale", "price",
     "got", "get", "make", "made", "use", "used", "has", "have", "had",
-    "one", "two", "three", "four", "five",
+    "head", "face", "hand", "foot", "arm", "leg", "body", "skin",
+    "hair", "eye", "eyes", "mouth", "nose", "ear", "ears", "back",
+    "side", "top", "bottom", "front", "mid", "center", "corner",
+    "world", "life", "way", "days", "day", "night", "time", "hour",
+    "year", "week", "month", "minute", "second",
+    # Editing / meta
     "style", "design", "designs", "version", "edit", "edited", "update",
     "updated", "original", "reupload", "reuploaded", "upload", "uploaded",
-    "credit", "credits", "created",
-    "cheap", "expensive", "discount", "promo", "deal",
+    "credit", "credits", "created", "made", "make", "maker",
+    # Promo
+    "cheap", "expensive", "discount", "promo", "deal", "sale",
+    # Popularity
     "popular", "trending", "trend", "trendy", "viral", "iconic", "famous",
-    "with", "without", "into", "onto", "your", "yours",
+    # Common single-word concepts that pass every filter but aren't niches
+    "adorable", "beautiful", "pretty", "lovely", "amazing", "awesome",
+    "wonderful", "fantastic", "perfect", "special", "unique", "fashion",
+    "styles", "styled", "designer", "creator",
 }
 
 
 def _family_clause(family):
-    """Bulletproof: use FAMILIES key directly if valid, else translate."""
     if not family or family == "all":
         return "", []
-
-    # Direct match on FAMILIES key
     if family in FAMILIES:
         ids = FAMILIES[family]
         ph = ",".join(["%s"] * len(ids))
         return f" and asset_type_id in ({ph})", list(ids)
-
-    # Try translating from category_configs naming
     try:
         from category_configs import to_convergence_family
         translated = to_convergence_family(family)
@@ -79,9 +96,6 @@ def _family_clause(family):
             return f" and asset_type_id in ({ph})", list(ids)
     except Exception:
         pass
-
-    # Unknown — no filter (better than returning nothing)
-    print(f"[convergence] unknown family '{family}' — no filter", flush=True)
     return "", []
 
 
@@ -92,14 +106,11 @@ def _kw_pattern(keyword):
     return rf"\y{re.escape(kw)}\y"
 
 
-def _gather_keywords(cur):
-    """
-    Multi-source keyword gathering. Fixes the case where a keyword
-    passes scoring but isn't in learned_keywords.
-    """
+def _gather_keywords(cur, family=None):
+    """Multi-source gathering with family-presence filter."""
     keywords = set()
 
-    # ── SOURCE 1: learned_keywords ─────────────────────────────
+    # ── Source 1: learned_keywords ─────────────────────────────
     try:
         cur.execute("""
             select keyword from learned_keywords
@@ -108,31 +119,60 @@ def _gather_keywords(cur):
         for r in cur.fetchall():
             if r[0]:
                 kw = r[0].strip().lower()
-                if len(kw) >= 3 and kw not in _GENERIC_BLOCK:
+                if len(kw) >= 5 and kw not in _GENERIC_BLOCK:
                     keywords.add(kw)
     except Exception as e:
         print(f"[convergence] learned_keywords read failed: {e}", flush=True)
 
-    # ── SOURCE 2: search_suggestions tokens ────────────────────
+    # ── Source 2: search_suggestions tokens ────────────────────
     try:
         cur.execute("""
             select suggestion from search_suggestions
             where suggestion is not null
-              and length(suggestion) between 3 and 40
+              and length(suggestion) between 5 and 40
             limit 3000
         """)
         token_counter = Counter()
         for (s,) in cur.fetchall():
             if not s:
                 continue
-            for t in re.findall(r"[a-z]{4,}", s.lower()):
+            for t in re.findall(r"[a-z]{5,}", s.lower()):
                 if t not in _GENERIC_BLOCK:
                     token_counter[t] += 1
-        # Top 200 tokens by frequency
-        for t, _ in token_counter.most_common(200):
+        for t, _ in token_counter.most_common(150):
             keywords.add(t)
     except Exception as e:
         print(f"[convergence] search_suggestions read failed: {e}", flush=True)
+
+    # ── FAMILY-PRESENCE FILTER ─────────────────────────────────
+    # A keyword must appear in >= 5 family items with median >= 40.
+    # Kills generic tokens that don't represent real family concepts.
+    if family and family != "all":
+        fam_sql, fam_params = _family_clause(family)
+        if fam_sql:
+            validated = set()
+            for kw in keywords:
+                try:
+                    pat = _kw_pattern(kw)
+                    is_phrase = " " in kw
+                    match_op = "ilike" if is_phrase else "~*"
+                    cur.execute(f"""
+                        select count(*),
+                               coalesce(percentile_cont(0.5) within group
+                                        (order by favorite_count), 0)
+                        from items
+                        where name {match_op} %s and favorite_count > 5
+                        {fam_sql}
+                    """, [pat] + fam_params)
+                    cnt, med = cur.fetchone()
+                    cnt = int(cnt or 0)
+                    med = float(med or 0)
+                    if cnt >= 5 and med >= 40:
+                        validated.add(kw)
+                except Exception:
+                    continue
+            print(f"[convergence] family filter: {len(validated)}/{len(keywords)} pass", flush=True)
+            keywords = validated
 
     print(f"[convergence] gathered {len(keywords)} candidate keywords", flush=True)
     return list(keywords)
@@ -140,7 +180,7 @@ def _gather_keywords(cur):
 
 def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     kw_clean = (keyword or "").strip().lower()
-    if not kw_clean or len(kw_clean) < 3:
+    if not kw_clean or len(kw_clean) < 5:
         return None
     if kw_clean in _GENERIC_BLOCK:
         return None
@@ -156,7 +196,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     fam_sql, fam_params = _family_clause(family)
     match_op = "~*" if use_regex else "ilike"
 
-    # Supply + median
     cur.execute(f"""
         select count(*),
                coalesce(percentile_cont(0.5) within group
@@ -177,7 +216,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     if median_favs > 50_000:       return None
     if median_favs < min_median:   return None
 
-    # Demand
     cur.execute(
         f"select count(*) from search_suggestions where suggestion {match_op} %s",
         (pat,)
@@ -185,7 +223,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     demand = cur.fetchone()[0] or 0
     if demand < min_demand:        return None
 
-    # Freshness
     cur.execute(f"""
         select count(*) from items
         where name {match_op} %s and created_at > now() - interval '14 days'
@@ -193,7 +230,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # Velocity
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -216,7 +252,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
 
-    # Concentration
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
@@ -235,7 +270,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     if concentration > 0.65:
         return None
 
-    # Score
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
 
@@ -304,13 +338,12 @@ def format_brief(r):
 
 
 def scan_convergence(family=None, limit=15):
-    """Multi-source scan with 3-tier median fallback."""
     conn = get_db(); cur = conn.cursor()
-    keywords = _gather_keywords(cur)
+    keywords = _gather_keywords(cur, family=family)
 
     print(f"[convergence] scanning {len(keywords)} keywords family={family}", flush=True)
 
-    tiers = [(20, 2, "strict"), (15, 1, "mid"), (10, 1, "loose")]
+    tiers = [(25, 2, "strict"), (20, 1, "mid"), (15, 1, "loose")]
 
     for min_med, min_dem, label in tiers:
         results = []
@@ -330,7 +363,6 @@ def scan_convergence(family=None, limit=15):
             results.sort(key=lambda x: x["score"], reverse=True)
             return results[:limit]
 
-    # Return whatever we found in the loosest tier
     cur.close(); conn.close()
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
