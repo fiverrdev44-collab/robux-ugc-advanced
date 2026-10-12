@@ -1,23 +1,35 @@
 """
 chain.py — full pipeline in one command.
-Runs: intent → niche → market → descriptions → focused title pass →
-      smart pipeline (brainstorm depth) → FINAL.
-
-Uses at most 2-3 Gemini calls:
-  1. Big synthesize_hybrid prompt (market analysis + description)
-  2. Focused title pass (brainstorm-quality titles)
-  3. Smart pipeline (parallel live enrichment + ranked titles)
-
-The focused pass OVERWRITES the titles from the big prompt because small
-models dilute titles when asked to do 15 things at once.
-
-Variant mode: pass parent_id to keep winner keywords + add ONE theme word.
+Runs the same deep pipeline as !brainstorm, then adds a FINAL action block.
 """
 import re
 import json
 import asyncio
 from bot_core import get_db
-from convergence_engine import ASSET_TO_FAMILY
+from convergence_engine import ASSET_TO_FAMILY, FAMILIES
+
+
+# ── Map any label returned by AI to a key that exists in FAMILIES ──
+_FAMILY_MAP = {
+    "headwear": "hair", "hat": "hair", "hats": "hair", "cap": "hair",
+    "crown": "hair", "beanie": "hair", "beret": "hair", "hair": "hair",
+    "face": "face", "neck": "neck", "shoulder": "shoulder",
+    "front": "front", "back": "back", "waist": "waist",
+    "shirt": "tops", "pants": "tops", "jacket": "back",
+    "shoes": "other", "classic": "classic",
+    "emote": "emotes", "dance": "emotes", "emotes": "emotes",
+    "gear": "gear", "bundle": "bundle",
+}
+
+
+def _map_family(label):
+    """Force family into a FAMILIES key. Falls back to 'hair'."""
+    if not label:
+        return "hair"
+    l = str(label).lower().strip()
+    if l in FAMILIES:
+        return l
+    return _FAMILY_MAP.get(l, "hair")
 
 
 def run_chain(concept, family=None, parent_id=None):
@@ -25,11 +37,10 @@ def run_chain(concept, family=None, parent_id=None):
         extract_keywords, all_terms, synthesize_hybrid, _generate
     )
     from intel_common import classify_keyword
-    from convergence_engine import FAMILIES
     from commands_ai import _build_allow_list
     from category_configs import get_category_config
 
-    # ── Parent context for variant mode ──
+    # ── Parent context (variant mode) ──
     parent_context = ""
     parent_name = None
     if parent_id:
@@ -38,23 +49,20 @@ def run_chain(concept, family=None, parent_id=None):
             try:
                 cur.execute("""
                     select name, description, favorite_count, price,
-                           asset_type_id
-                    from items where id = %s
+                           asset_type_id from items where id = %s
                 """, (parent_id,))
                 row = cur.fetchone()
                 if row:
                     parent_name = row[0]
                     parent_context = (
-                        f"\n=== PARENT ITEM (this is a VARIANT of this) ===\n"
+                        f"\n=== PARENT ITEM (this is a VARIANT) ===\n"
                         f"Parent name: {row[0]}\n"
                         f"Parent favs: {row[2]:,} · price R${row[3]}\n"
                         f"Parent description: {(row[1] or '')[:200]}\n"
                         f"\nRULES FOR VARIANT:\n"
                         f"- KEEP the core keywords from the parent name\n"
-                        f"- Add ONE new theme word (color, vibe, effect)\n"
+                        f"- Add ONE new theme word\n"
                         f"- Don't drop the words that made the parent a winner\n"
-                        f"- Don't use generic words like 'cute' or 'kawaii' "
-                        f"unless the parent already used them\n"
                     )
                     if not concept or concept.lower() in ("variant", "remix"):
                         concept = row[0]
@@ -68,25 +76,32 @@ def run_chain(concept, family=None, parent_id=None):
     if not intent:
         return {"error": "Intent extraction failed. Try a clearer description."}
 
+    raw_family = family or intent.get("item_type", "unknown")
     if family and family in FAMILIES:
-        intent["item_type"] = family
+        family = family
+    else:
+        family = _map_family(raw_family)
 
-    item_type = intent.get("item_type", "unknown")
-    family = family or _intent_to_family(intent)
+    intent["item_type"] = family
+    item_type = family
     terms = all_terms(intent)
 
-    # ── Stage 2: Niche pre-check ──
+    # ── Stage 2: Niche pre-check (deduped, correct family) ──
     niche_data = []
     try:
         conn = get_db(); cur = conn.cursor()
         try:
-            for t in terms[:5]:
+            seen = set()
+            for t in terms:
                 t_clean = str(t).strip().lower().split()[0] if str(t).strip() else ""
-                if len(t_clean) < 3:
+                if len(t_clean) < 3 or t_clean in seen:
                     continue
+                seen.add(t_clean)
                 kw = classify_keyword(cur, t_clean, family)
                 if kw:
                     niche_data.append(kw)
+                if len(niche_data) >= 6:
+                    break
         finally:
             cur.close(); conn.close()
     except Exception as e:
@@ -101,7 +116,93 @@ def run_chain(concept, family=None, parent_id=None):
     if not allow_list:
         return {"error": "No DB matches. Try different keywords."}
 
-    # ── Stage 4: Description examples ──
+    # ── Stage 4: Winner analysis (brainstorm-level depth) ──
+    winner_data = {}
+    try:
+        from winner_analysis import analyze_winners
+        def _run_winner():
+            c = get_db(); cu = c.cursor()
+            try:
+                return analyze_winners(cu, terms, top_n=40)
+            finally:
+                cu.close(); c.close()
+        winner_data = _run_winner()
+    except Exception as e:
+        print(f"[chain] winner analysis failed: {e}", flush=True)
+
+    # ── Stage 5: Algo context ──
+    algo_ctx = ""
+    try:
+        from algo_brain import build_algo_context
+        algo_ctx = build_algo_context(intent)
+    except Exception as e:
+        print(f"[chain] algo context failed: {e}", flush=True)
+
+    # ── Stage 6: Keyword intelligence ──
+    keyword_intel = None
+    try:
+        from gemini_brain import classify_keyword_intelligence
+        comp_data = []
+        for t in terms[:6]:
+            t_clean = str(t).strip()
+            if len(t_clean) < 3:
+                continue
+            c2 = get_db(); cu2 = c2.cursor()
+            try:
+                cu2.execute("""
+                    SELECT COUNT(*),
+                           COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP
+                                    (ORDER BY favorite_count), 0)
+                    FROM items
+                    WHERE LOWER(name) LIKE %s AND favorite_count > 5
+                """, (f"%{t_clean}%",))
+                r = cu2.fetchone()
+            finally:
+                cu2.close(); c2.close()
+            if r:
+                comp_data.append({
+                    "keyword": t_clean,
+                    "comp": int(r[0] or 0),
+                    "median_favs": int(r[1] or 0),
+                    "median_price": 0,
+                })
+        if comp_data:
+            keyword_intel = classify_keyword_intelligence(
+                comp_data[0]["keyword"], comp_data, family
+            )
+    except Exception as e:
+        print(f"[chain] keyword intelligence failed: {e}", flush=True)
+
+    # ── Stage 7: Niche velocity / trajectory / concentration ──
+    niche_intel = None
+    try:
+        from market_velocity import build_niche_intel
+        seed_keywords = []
+        for t in terms:
+            tc = str(t).strip().lower()
+            if len(tc) >= 3 and tc not in seed_keywords:
+                seed_keywords.append(tc)
+            if len(seed_keywords) >= 4:
+                break
+        if seed_keywords:
+            cat_ids = None
+            try:
+                cat_ids = get_category_config(family).get("asset_type_ids") or None
+            except Exception:
+                cat_ids = None
+
+            def _run_niche():
+                c = get_db(); cu = c.cursor()
+                try:
+                    return build_niche_intel(cu, seed_keywords, asset_ids=cat_ids)
+                finally:
+                    cu.close(); c.close()
+
+            niche_intel = _run_niche()
+    except Exception as e:
+        print(f"[chain] niche intel failed: {e}", flush=True)
+
+    # ── Stage 8: Description examples ──
     desc_examples = []
     try:
         from desc_forge import _fetch_top_descriptions
@@ -126,7 +227,7 @@ def run_chain(concept, family=None, parent_id=None):
     except Exception as e:
         print(f"[chain] desc mining failed: {e}", flush=True)
 
-    # ── Best niche keyword for title pass ──
+    # ── Best niche keyword (for title forcing) ──
     best_niche_kw = None
     best_niche_bucket = None
     if niche_data:
@@ -139,7 +240,7 @@ def run_chain(concept, family=None, parent_id=None):
         best_niche_kw = best_obj["keyword"]
         best_niche_bucket = best_obj["bucket"]
 
-    # ── Stage 5a: Big strategy prompt ──
+    # ── Stage 9: Big strategy prompt (WITH ALL DATA) ──
     synth = {}
     try:
         concept_for_ai = concept
@@ -154,19 +255,19 @@ def run_chain(concept, family=None, parent_id=None):
              "expanded_terms": stats.get("expanded_terms", []),
              "failed_terms": stats.get("failed_terms", []),
              "reasoning": stats.get("reasoning", "")},
-            None, intent.get("specific_moves", []), None, None, None, None,
+            None, intent.get("specific_moves", []),
+            winner_data, algo_ctx, keyword_intel, niche_intel,
         ) or {}
     except Exception as e:
         print(f"[chain] synth failed: {e}", flush=True)
 
-    # ── Stage 5b: FOCUSED TITLE PASS — brainstorm-quality ──
+    # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
-        type_words = ", ".join(cfg.get("type_words", [])[:6]) or "emote, dance"
+        type_words = ", ".join(cfg.get("type_words", [])[:6]) or "hat, beanie"
         archetypes = "\n".join(
             f"- {a}" for a in cfg.get("title_archetypes", [])[:5]
         )
-
         top_comp_lines = "\n".join(
             f"- {it.get('name', '')[:60]} ({it.get('favourite_count', 0):,}♥)"
             for it in top_items[:8]
@@ -176,49 +277,41 @@ def run_chain(concept, family=None, parent_id=None):
         if best_niche_kw and best_niche_bucket in ("GOLD", "OPPORTUNITY", "VIRGIN"):
             keyword_rule = (
                 f"\n=== MANDATORY KEYWORD ===\n"
-                f"At least 4 of the 10 titles MUST contain the word "
-                f"`{best_niche_kw}` as the FIRST or SECOND token.\n"
+                f"At least 4 of 10 titles MUST contain `{best_niche_kw}` "
+                f"as the FIRST or SECOND token.\n"
             )
 
         parent_rule = ""
         if parent_name:
             parent_rule = (
                 f"\n=== VARIANT RULE ===\n"
-                f"This is a variant of: `{parent_name}`\n"
-                f"KEEP the core keywords from that name. Add ONE new "
-                f"theme word (color/vibe/effect). At least 3 titles must "
-                f"share 2+ words with the parent name.\n"
+                f"Variant of `{parent_name}`. Keep core keywords.\n"
             )
 
         focused_prompt = f"""You are the #1 Roblox UGC naming strategist.
-
 Generate EXACTLY 10 titles for a Roblox {family} item.
 
-=== CONCEPT ===
-{concept}
+CONCEPT: {concept}
 
-=== REAL COMPETITORS (study their naming, do NOT copy) ===
+REAL COMPETITORS (study, do NOT copy):
 {top_comp_lines}
 
-=== CATEGORY TYPE WORDS (every title must end with one of these) ===
-{type_words}
+TYPE WORDS (every title ends with one): {type_words}
 
-=== EXAMPLE STRUCTURES ===
+STRUCTURES:
 {archetypes}
 
-=== ALLOW-LIST (only use words from this + type words + glue) ===
+ALLOW-LIST:
 {', '.join(allow_list[:80])}
 {keyword_rule}{parent_rule}
-=== RULES (NON-NEGOTIABLE) ===
-1. Every title = 3 to 5 tokens
-2. Every title ends with a type word above
+RULES:
+1. Every title = 3-5 tokens
+2. Every title ends with a type word
 3. Every title is UNIQUE
-4. NO generic fluff unless it's in the allow-list: cute, kawaii, aesthetic, adorable
-5. NO stopword padding
-6. Titles must READ as real product names, not keyword dumps
-7. Follow MANDATORY KEYWORD rule if given (do NOT ignore it)
+4. No generic fluff unless in allow-list
+5. Titles read as real product names
 
-=== OUTPUT — ONLY JSON ===
+OUTPUT — ONLY JSON:
 {{
   "titles_safe": ["...", "...", "..."],
   "titles_differentiated": ["...", "...", "..."],
@@ -226,33 +319,27 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
   "titles_viral": ["...", "..."]
 }}
 """
-
-        focused_raw = _generate(
-            focused_prompt, json_mode=True,
-            temperature=0.85, max_tokens=1500
-        )
+        focused_raw = _generate(focused_prompt, json_mode=True,
+                                temperature=0.85, max_tokens=1500)
         if focused_raw:
             try:
                 focused_data = json.loads(focused_raw)
             except Exception:
                 m = re.search(r"\{.*\}", focused_raw, re.DOTALL)
                 focused_data = json.loads(m.group(0)) if m else {}
-
             if focused_data:
                 for key in ("titles_safe", "titles_differentiated",
                             "titles_longtail", "titles_viral"):
                     if focused_data.get(key):
                         synth[key] = focused_data[key]
-                synth["_focused_title_pass"] = True
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
 
-    # ── Stage 6: SMART PIPELINE — brainstorm depth ──
+    # ── Stage 11: Smart pipeline ──
     pipeline_report = None
     try:
         from smart_pipeline import run_full_pipeline
         from rising_gaps import CATEGORY_MAP
-
         cfg = get_category_config(family)
 
         ai_titles = []
@@ -271,13 +358,9 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
 
         def _pipeline():
             return run_full_pipeline(
-                description=concept,
-                intent=intent,
-                item_type=family,
-                category_asset_ids=cat_ids,
-                ai_titles=ai_titles,
-                live_enrich=True,
-                db_factory=get_db,
+                description=concept, intent=intent, item_type=family,
+                category_asset_ids=cat_ids, ai_titles=ai_titles,
+                live_enrich=True, db_factory=get_db,
             )
 
         pr = _pipeline()
@@ -302,15 +385,8 @@ Generate EXACTLY 10 titles for a Roblox {family} item.
         "desc_examples": desc_examples,
         "synth": synth,
         "pipeline_report": pipeline_report,
+        "niche_intel": niche_intel,
     }
-
-
-def _intent_to_family(intent):
-    try:
-        from category_configs import detect_family_from_intent
-        return detect_family_from_intent(intent)
-    except Exception:
-        return "emote"
 
 
 def format_chain(result):
@@ -318,20 +394,19 @@ def format_chain(result):
         return [f"❌ {result['error']}"]
 
     chunks = []
+    synth = result.get("synth") or {}
 
     # ── HEADER ──
     if result.get("is_variant") and result.get("parent_name"):
         chunks.append(
             f"# 🔗 CHAIN — VARIANT\n"
             f"_Parent: `{result['parent_name'][:60]}`_\n"
-            f"_Family: `{result['family']}` · "
-            f"Type: `{result['item_type']}`_"
+            f"_Family: `{result['family']}` · Type: `{result['item_type']}`_"
         )
     else:
         chunks.append(
             f"# 🔗 CHAIN — `{result['concept'][:60]}`\n"
-            f"_Family: `{result['family']}` · "
-            f"Type: `{result['item_type']}`_"
+            f"_Family: `{result['family']}` · Type: `{result['item_type']}`_"
         )
 
     # ── NICHE ──
@@ -362,6 +437,26 @@ def format_chain(result):
         f"• Avg price: **R${s.get('price_avg', 0)}**"
     )
 
+    # ── TOP OPPORTUNITY KEYWORDS ──
+    if s.get("opportunity_keywords"):
+        lines = ["## 🕳️ Top opportunity keywords"]
+        for kw in s["opportunity_keywords"][:8]:
+            lines.append(
+                f"• `{kw['word']}` — {kw['count']} items, avg {kw['avg_favs']:,}♥"
+            )
+        chunks.append("\n".join(lines))
+
+    # ── NICHE VELOCITY / TRAJECTORY / CONCENTRATION ──
+    niche_intel = result.get("niche_intel")
+    if niche_intel:
+        try:
+            from market_velocity import format_niche_intel_for_prompt
+            body = format_niche_intel_for_prompt(niche_intel)
+            for i in range(0, len(body), 1900):
+                chunks.append(body[i:i+1900])
+        except Exception:
+            pass
+
     # ── COMPETITORS ──
     if result["top_items"]:
         lines = ["## 🥊 Top competitors"]
@@ -380,19 +475,41 @@ def format_chain(result):
             lines.append(f"**{name[:50]}** — {favs:,}♥\n_{d}_")
         chunks.append("\n".join(lines))
 
-    # ── AI STRATEGY ──
-    synth = result["synth"]
+    # ── UGC STRATEGY REPORT (brainstorm depth) ──
     if synth:
+        sections = [
+            ("search_diagnosis", "## 🔍 Search Diagnosis"),
+            ("positioning",      "## 🎯 Positioning"),
+            ("market_diagnosis", "## 📊 Market Diagnosis"),
+            ("winner_blueprint", "## 🏆 Winner Blueprint"),
+            ("saturation_verdict","## ⚠️ Saturation Summary"),
+        ]
+        for key, header in sections:
+            v = synth.get(key)
+            if v:
+                chunks.append(f"{header}\n{v}")
+
         if synth.get("seo_description"):
             chunks.append(
                 f"## ✨ Suggested description (copy-paste)\n```\n"
                 f"{synth['seo_description'][:800]}\n```"
             )
         if synth.get("killer_keywords"):
-            kw = ", ".join(f"`{k}`" for k in synth["killer_keywords"][:12])
+            kw = ", ".join(f"`{k}`" for k in synth["killer_keywords"][:15])
             chunks.append(f"## 🎯 Killer keywords\n{kw}")
+        if synth.get("cross_promotion_play"):
+            chunks.append(f"## 🔗 Cross-Promotion\n{synth['cross_promotion_play']}")
+        if synth.get("social_playbook"):
+            chunks.append(f"## 📱 Social Playbook\n{synth['social_playbook']}")
+        if synth.get("cultural_ammo"):
+            chunks.append(f"## 🎭 Cultural Context\n{synth['cultural_ammo']}")
+        if synth.get("bonus_plays"):
+            lines = ["## 💎 Bonus Plays"]
+            for b in synth["bonus_plays"][:5]:
+                lines.append(f"• {b}")
+            chunks.append("\n".join(lines))
 
-    # ── 10 TITLES — grouped like brainstorm ──
+    # ── 10 TITLES ──
     if synth:
         title_groups = [
             ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
@@ -400,7 +517,7 @@ def format_chain(result):
             ("🔎 LONG-TAIL SEO (4+ keywords)",   synth.get("titles_longtail") or []),
             ("🔥 VIRAL (meme/TikTok hook)",      synth.get("titles_viral") or []),
         ]
-        if any(group_titles for _, group_titles in title_groups):
+        if any(g for _, g in title_groups):
             lines = ["# 📝 10 TITLES\n"]
             for gname, group_titles in title_groups:
                 if not group_titles:
@@ -411,7 +528,7 @@ def format_chain(result):
                 lines.append("")
             chunks.append("\n".join(lines))
 
-    # ── SMART PIPELINE — brainstorm depth ──
+    # ── SMART PIPELINE ──
     if result.get("pipeline_report"):
         rep = result["pipeline_report"]
         for i in range(0, len(rep), 1900):
@@ -429,7 +546,7 @@ def format_chain(result):
         if len(titles) > 1:
             final_lines.append(f"**2. Backup name:** `{titles[1]}`")
     else:
-        final_lines.append("**1. Name:** (no titles generated — try again)")
+        final_lines.append("**1. Name:** (no titles — try again)")
 
     if synth.get("seo_description"):
         final_lines.append("**3. Paste description** (from above block)")
@@ -443,7 +560,7 @@ def format_chain(result):
     if s.get("price_avg"):
         final_lines.append(f"**5. Price:** R${s.get('price_avg', 0)}")
 
-    final_lines.append("**6. Post 1 TikTok today** with the name as text overlay")
+    final_lines.append("**6. Post 1 TikTok today** with the name as overlay")
     final_lines.append("**7. In 14 days:** run `!verdict <new_item_id>`")
 
     chunks.append("\n".join(final_lines))
