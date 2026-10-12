@@ -2,11 +2,21 @@
 desc_forge.py — mine top descriptions in a niche, generate one that matches.
 
 1. Query top items by favorite_count in the niche (with descriptions)
-2. Filter out promo spam / URLs (top sellers post garbage — we want real text)
+2. Filter out promo spam / URLs / creator credits
 3. If DB has fewer than MIN_DB_RESULTS clean rows → fallback to Roblox live search
 4. Analyze pattern: line count, emoji density, top phrases
 5. Feed real examples to Gemini → get a description that FITS the pattern
 6. Never output URLs — prompt explicitly forbids hallucinated links
+
+FIXES in this version:
+  - Promo filter now catches: "join the group", "join posé", "for more ugc",
+    "idea by X", leading "by X", decorative-symbol spam (♡⋆ฅﻌ), URL fragment
+    variants, and too-short rows.
+  - _query_db and _fetch_live_descriptions translate category_configs family
+    names (headwear, accessory, clothing...) to convergence_engine names
+    (hair, neck, tops...) before lookup.
+  - _generate_description falls back to a standard 3-line prompt when the
+    mined pattern is weak (sample < 10, avg_chars < 80, avg_lines < 1.5).
 """
 import os
 import re
@@ -27,36 +37,93 @@ ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 # PROMO SPAM FILTER
 # ─────────────────────────────────────────────────────────────────────
 
+# Decorative symbols that signal spam/meme descriptions when present
+# in significant quantity. Katakana/kaomoji parts + cute glyphs.
+_DECOR_SYMBOLS = set("♡♥⋆｡˚ฅﻌ°•·✧✦❀✿❁☆★彡ට็้ﺕ")
+
+
 def _is_promo_spam(desc):
     """
     Returns True if description is dominated by URLs, group links,
-    or promo spam. We only want actual descriptive text.
+    creator credits, decorative-symbol spam, or is too short.
+
+    We only want actual descriptive text.
     """
     if not desc:
         return True
+
     d = desc.strip()
     dl = d.lower()
 
+    # ── URLs (any form) ────────────────────────────────────────
     if any(x in dl for x in [
-        "http://", "https://", "www.", ".com", ".gg",
-        "roblox.com", "discord.gg", "youtube.com", "tiktok.com",
+        "http://", "https://", "www.", ".com", ".gg", ".io",
+        "roblox.com", "discord.gg", "discord.com", "youtube.com",
+        "tiktok.com", "twitch.tv",
     ]):
         return True
 
+    # ── Group / store / catalog promo ──────────────────────────
     promo_markers = [
-        "join for", "join our", "shop more", "check out our",
-        "visit our", "buy more", "our store", "our group",
-        "our community", "our catalog", "our ugc", "our emote",
-        "even better", "shop all", "store:", "catalog:",
+        # Joining
+        "join the", "join our", "join for", "join us", "join me",
+        "join posé", "join pose", "join discord", "join group",
+        "join my", "join now",
+        # More items
+        "for more ugc", "for more items", "for more emotes",
+        "for more cute", "for more", "want more", "get more",
+        # Store / catalog
+        "shop more", "shop all", "shop now", "buy more",
+        "check out our", "check out my", "check out the",
+        "visit our", "visit my",
+        # Group branding
+        "our store", "our group", "our community", "our catalog",
+        "our ugc", "our emote", "our shop",
+        "even better", "store:", "catalog:", "shop:", "group:",
+        # Follow/subscribe CTAs
+        "follow us", "follow me", "follow for", "subscribe",
+        "add to your collection", "exclusive ugc",
+        "dmca",
     ]
     if any(m in dl for m in promo_markers):
         return True
 
-    if len(d) < 25:
+    # ── Creator credits (not descriptions) ─────────────────────
+    credit_markers = [
+        "idea by", "idea:", "idea -",
+        "credit to", "credits to", "credit:",
+        "made by", "created by", "model by", "anim by", "animation by",
+        "original by", "inspired by", "based on",
+    ]
+    if any(m in dl for m in credit_markers):
         return True
 
+    # Leading "by <name>" (creator attribution as first token)
+    if dl.startswith("by ") or dl.startswith("by:"):
+        return True
+
+    # ── Too short to be a real description ─────────────────────
+    # Real Roblox UGC descriptions are usually 60+ chars.
+    if len(d) < 40:
+        return True
+
+    # ── Emoji-dominated ────────────────────────────────────────
     emoji_chars = sum(1 for c in d if ord(c) > 0x2600)
-    if emoji_chars > len(d) * 0.3:
+    if len(d) > 0 and emoji_chars > len(d) * 0.25:
+        return True
+
+    # ── Decorative symbol spam ─────────────────────────────────
+    # If 3+ decorative glyphs AND real words are sparse, reject.
+    # (Real descriptions rarely have kaomoji/decorative marks.)
+    decor_count = sum(1 for c in d if c in _DECOR_SYMBOLS)
+    if decor_count >= 3:
+        real_words = re.findall(r"[a-zA-Z]{4,}", d)
+        if len(real_words) < 5:
+            return True
+
+    # ── URL fragments (bare domains without http) ──────────────
+    # Catches "youtube.com/c/..." or ".gg/abc" without scheme
+    if re.search(r"\b\w+\.(com|gg|io|net|org|tv|xyz)/", dl):
         return True
 
     return False
@@ -85,7 +152,13 @@ def _query_db(keyword, family, limit):
         fam_params = []
         if family:
             from convergence_engine import FAMILIES
-            ids = FAMILIES.get(family)
+            # Translate category_configs family → convergence_engine family
+            try:
+                from category_configs import to_convergence_family
+                fam = to_convergence_family(family)
+            except Exception:
+                fam = family
+            ids = FAMILIES.get(fam)
             if ids:
                 ph = ",".join(["%s"] * len(ids))
                 fam_sql = f" and asset_type_id in ({ph})"
@@ -103,11 +176,11 @@ def _query_db(keyword, family, limit):
             where name {match_op} %s
               and favorite_count > 50
               and description is not null
-              and length(trim(description)) > 10
+              and length(trim(description)) > 20
               {fam_sql}
             order by favorite_count desc
             limit %s
-        """, [pat] + fam_params + [limit * 3])
+        """, [pat] + fam_params + [limit * 5])
         return cur.fetchall()
     finally:
         cur.close(); conn.close()
@@ -121,6 +194,12 @@ def _family_to_roblox_category(family):
     """Map our family name to Roblox catalog Category id (best-effort)."""
     if not family:
         return None
+    # Translate to convergence_engine keys for consistency
+    try:
+        from category_configs import to_convergence_family
+        fam = to_convergence_family(family)
+    except Exception:
+        fam = family
     return {
         "hair":     12,
         "face":     13,
@@ -129,7 +208,7 @@ def _family_to_roblox_category(family):
         "front":    7,
         "back":     8,
         "waist":    6,
-    }.get(family)
+    }.get(fam)
 
 
 def _fetch_live_descriptions(keyword, family=None, limit=20):
@@ -148,7 +227,15 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
         if cookie:
             headers["Cookie"] = f".ROBLOSECURITY={cookie}"
 
-        cat = _family_to_roblox_category(family)
+        # Translate family for both the API call and the filter
+        conv_family = family
+        try:
+            from category_configs import to_convergence_family
+            conv_family = to_convergence_family(family)
+        except Exception:
+            pass
+
+        cat = _family_to_roblox_category(conv_family)
 
         params = {
             "Keyword": keyword,
@@ -188,7 +275,8 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
                 if favs < 50:
                     continue
 
-                if family and ASSET_TO_FAMILY.get(atype) != family:
+                # Family filter uses translated name
+                if conv_family and ASSET_TO_FAMILY.get(atype) != conv_family:
                     continue
 
                 try:
@@ -345,7 +433,50 @@ def _generate_description(keyword, family, rows, pattern):
 
     examples_block = "\n".join(examples) or "(no examples)"
 
-    prompt = f"""You write Roblox UGC descriptions. Style-match the real top-seller examples below.
+    # ── PATTERN QUALITY GATE ────────────────────────────────────
+    # If the mined pattern is weak, don't force the AI to match it.
+    # Fall back to a standard strong description instead.
+    sample = pattern.get("sample_size", 0)
+    avg_chars = pattern.get("avg_chars", 0)
+    avg_lines = pattern.get("avg_lines", 0)
+
+    weak_pattern = (
+        sample < 10
+        or avg_chars < 80
+        or avg_lines < 1.5
+    )
+    # ────────────────────────────────────────────────────────────
+
+    if weak_pattern:
+        prompt = f"""You write Roblox UGC descriptions for {family} items.
+
+The DB is thin for '{keyword}' — do NOT copy any pattern below.
+Write a STANDARD strong Roblox UGC description instead.
+
+=== REQUIRED FORMAT (3 lines) ===
+Line 1: <keyword> + type word + ONE emoji. Example:
+        "Kawaii Plush Beanie 🎀"
+Line 2: 2-3 adjectives + use case. Example:
+        "Soft pastel fleece for cozy winter fits."
+Line 3: vibe / mood. Example:
+        "Perfect for cottagecore and preppy outfits."
+
+=== ABSOLUTE RULES ===
+1. NEVER include URLs, group links, or "join" language.
+2. NEVER reference creators, "by X", "idea by", or credits.
+3. NO corporate words: enhance, elevate, seamless, integration,
+   designed for, experience, ultimate, leverage, optimize.
+4. Include keyword: {keyword}
+5. Include a type word for {family} (hat/beanie/hair/dance/etc).
+6. Casual, human, creator-voice. 3 lines exactly.
+7. Return ONLY the description text. No quotes, no labels.
+
+REAL EXAMPLES FROM THIS NICHE FOR TONE ONLY:
+{examples_block}
+
+DESCRIPTION:"""
+    else:
+        prompt = f"""You write Roblox UGC descriptions. Style-match the real top-seller examples below.
 
 === NICHE ===
 Keyword: {keyword}
