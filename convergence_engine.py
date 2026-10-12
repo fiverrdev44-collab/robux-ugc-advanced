@@ -3,12 +3,10 @@ convergence_engine.py — category-aware niche scoring.
 Uses ONLY existing tables. No new columns. No AI calls.
 
 FIXES in this version:
-- Generic-word blocklist (point, cute, item, etc. rejected before scoring)
-- median_favs gate: 50 (kills "point" at 29, keeps real keywords at 60-80)
-- 3-tier fallback: strict (median>=50) → mid (median>=30) → loose (median>=15)
-- Family translation: accepts BOTH category_configs names (emote, headwear,
-  accessory) AND convergence_engine names (emotes, hair, tops)
-- Debug print shows how many passed each gate
+- Generic-word blocklist (kills "point", "cute", "item", etc.)
+- 3-tier median fallback: 20 → 15 → 10 (never returns empty)
+- Family translation: accepts both naming schemes
+- Prints how many passed each tier for debugging
 """
 import re
 from bot_core import get_db
@@ -34,41 +32,33 @@ for fam, ids in FAMILIES.items():
         ASSET_TO_FAMILY[aid] = fam
 
 
-# ── Generic words that should NEVER be niche keywords ──────────
+# ── Generic words that are NEVER niche keywords ────────────────
 _GENERIC_BLOCK = {
-    # Articles / glue
     "the", "and", "for", "with", "you", "your", "from", "that", "this",
     "into", "over", "under", "onto", "upon", "than", "then", "them",
     "they", "there", "here", "when", "what", "where", "which", "while",
     "who", "why", "how", "all", "any", "some", "each", "every", "both",
     "other", "another", "such", "only", "very", "just", "also", "even",
     "still", "more", "most", "less", "few", "many", "much",
-    # Generic adjectives
     "new", "old", "best", "top", "good", "great", "cool", "nice", "cute",
     "big", "small", "hot", "cold", "fast", "slow", "high", "low",
     "bad", "hard", "easy", "free", "open", "real", "fake", "true",
     "happy", "sad", "love", "hate",
-    # Generic nouns
     "point", "place", "thing", "stuff", "item", "items", "asset",
     "roblox", "ugc", "shop", "store", "buy", "sell", "sale", "price",
     "got", "get", "make", "made", "use", "used", "has", "have", "had",
     "one", "two", "three", "four", "five",
-    # Editing / meta
     "style", "design", "designs", "version", "edit", "edited", "update",
     "updated", "original", "reupload", "reuploaded", "upload", "uploaded",
     "credit", "credits", "created",
-    # Promo
     "cheap", "expensive", "discount", "promo", "deal",
-    # Popularity markers
     "popular", "trending", "trend", "trendy", "viral", "iconic",
     "classic", "famous",
 }
 
 
 def _family_clause(family):
-    """
-    Family SQL clause. Accepts BOTH naming schemes.
-    """
+    """Accepts BOTH naming schemes (emote/headwear/accessory AND emotes/hair/tops)."""
     if not family or family == "all":
         return "", []
     try:
@@ -90,8 +80,8 @@ def _kw_pattern(keyword):
     return rf"\y{re.escape(kw)}\y"
 
 
-def _score_keyword(cur, keyword, family=None, min_median=50):
-    # ── BLOCKLIST GATE ──────────────────────────────────────────
+def _score_keyword(cur, keyword, family=None, min_median=20, min_demand=2):
+    # ── BLOCKLIST ──────────────────────────────────────────────
     kw_clean = (keyword or "").strip().lower()
     if not kw_clean or len(kw_clean) < 3:
         return None
@@ -101,7 +91,6 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
         tokens = kw_clean.split()
         if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
             return None
-    # ────────────────────────────────────────────────────────────
 
     pat = _kw_pattern(keyword)
     is_phrase = " " in keyword.strip()
@@ -110,7 +99,7 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
     fam_sql, fam_params = _family_clause(family)
     match_op = "~*" if use_regex else "ilike"
 
-    # ── SUPPLY + MEDIAN + p90 ───────────────────────────────────
+    # ── SUPPLY + MEDIAN + p90 ──────────────────────────────────
     cur.execute(f"""
         select count(*),
                coalesce(percentile_cont(0.5) within group
@@ -126,22 +115,22 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    # ── GATEKEEPERS ─────────────────────────────────────────────
-    if supply < 3:              return None    # noise
-    if supply > 500:            return None    # saturated
-    if median_favs > 50_000:    return None    # legacy/OG
-    if median_favs < min_median: return None   # parametrized floor
+    # ── GATEKEEPERS (relaxed) ──────────────────────────────────
+    if supply < 3:                    return None
+    if supply > 500:                  return None
+    if median_favs > 50_000:          return None
+    if median_favs < min_median:      return None
 
-    # ── DEMAND ──────────────────────────────────────────────────
+    # ── DEMAND ─────────────────────────────────────────────────
     cur.execute(
         f"select count(*) from search_suggestions where suggestion {match_op} %s",
         (pat,)
     )
     demand = cur.fetchone()[0] or 0
 
-    if demand < 3:              return None
+    if demand < min_demand:           return None
 
-    # ── FRESHNESS ───────────────────────────────────────────────
+    # ── FRESHNESS ──────────────────────────────────────────────
     cur.execute(f"""
         select count(*) from items
         where name {match_op} %s and created_at > now() - interval '14 days'
@@ -149,7 +138,7 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
     """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
-    # ── VELOCITY ────────────────────────────────────────────────
+    # ── VELOCITY (may be 0 if data is thin — that's OK) ────────
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -166,14 +155,14 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
             having extract(epoch from
                    (max(ih.snapshot_at) - min(ih.snapshot_at))
                    )/86400.0 >= 2
-               and max(ih.favorite_count) - min(ih.favorite_count) >= 3
         )
         select avg(delta / days) from s
+        where delta >= 1
     """, [pat] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
 
-    # ── CONCENTRATION ───────────────────────────────────────────
+    # ── CONCENTRATION ──────────────────────────────────────────
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
@@ -192,7 +181,7 @@ def _score_keyword(cur, keyword, family=None, min_median=50):
     if concentration > 0.65:
         return None
 
-    # ── SCORE COMPONENTS ────────────────────────────────────────
+    # ── SCORE COMPONENTS ───────────────────────────────────────
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
 
@@ -261,26 +250,12 @@ def format_brief(r):
     )
 
 
-def _scan_pass(cur, keywords, family, min_median):
-    """One pass with a given median threshold. Returns list of results."""
-    results = []
-    for kw in keywords:
-        try:
-            r = _score_keyword(cur, kw, family, min_median=min_median)
-            if r:
-                results.append(r)
-        except Exception as e:
-            print(f"[convergence] {kw}: {e}", flush=True)
-            continue
-    return results
-
-
 def scan_convergence(family=None, limit=15):
     """
-    3-tier fallback:
-      Pass 1: strict  (median_favs >= 50)
-      Pass 2: mid     (median_favs >= 30) — if strict empty
-      Pass 3: loose   (median_favs >= 15) — if mid empty
+    3-tier fallback so it NEVER returns empty:
+      Tier 1: median >= 20, demand >= 2
+      Tier 2: median >= 15, demand >= 1
+      Tier 3: median >= 10, demand >= 1
     """
     conn = get_db(); cur = conn.cursor()
     cur.execute("""
@@ -294,24 +269,33 @@ def scan_convergence(family=None, limit=15):
         and len(r[0].strip()) >= 3
     ]
 
-    print(f"[convergence] scanning {len(keywords)} keywords for family={family}", flush=True)
+    print(f"[convergence] scanning {len(keywords)} keywords family={family}", flush=True)
 
-    # Pass 1: strict
-    results = _scan_pass(cur, keywords, family, min_median=50)
-    print(f"[convergence] strict pass (>=50): {len(results)} results", flush=True)
+    tiers = [
+        (20, 2, "strict"),
+        (15, 1, "mid"),
+        (10, 1, "loose"),
+    ]
 
-    # Pass 2: mid — if strict found < 3, relax
-    if len(results) < 3:
-        print(f"[convergence] relaxing to mid (>=30)", flush=True)
-        results = _scan_pass(cur, keywords, family, min_median=30)
-        print(f"[convergence] mid pass (>=30): {len(results)} results", flush=True)
+    for min_med, min_dem, label in tiers:
+        results = []
+        for kw in keywords:
+            try:
+                r = _score_keyword(cur, kw, family,
+                                   min_median=min_med, min_demand=min_dem)
+                if r:
+                    results.append(r)
+            except Exception as e:
+                print(f"[convergence] {kw}: {e}", flush=True)
 
-    # Pass 3: loose — if still < 3, relax more
-    if len(results) < 3:
-        print(f"[convergence] relaxing to loose (>=15)", flush=True)
-        results = _scan_pass(cur, keywords, family, min_median=15)
-        print(f"[convergence] loose pass (>=15): {len(results)} results", flush=True)
+        print(f"[convergence] {label} tier (median>={min_med}, demand>={min_dem}): {len(results)}", flush=True)
 
+        if len(results) >= 3:
+            cur.close(); conn.close()
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
+
+    # If all tiers fail, return whatever we got in the loosest tier
     cur.close(); conn.close()
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
