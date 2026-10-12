@@ -1,10 +1,15 @@
 """
 title_scorer.py — statistical title scoring from real DB data.
 
-FIXES:
-  - cat_med floored at 25 (prevents 499× lift explosions)
-  - word lift clamped to [0.1, 5.0]
-  - bigram lift clamped to [0, 5.0]
+Signals:
+  1. word_lift       — median favs of items containing word / category median
+  2. search_demand   — search_suggestions rows containing word
+  3. bigram_lift     — median favs of items matching two words together
+  4. freshness       — words appearing more in recent winners
+  5. visibility_gap  — demand / supply (finds "open spots")
+  6. uniqueness      — 0 exact matches = bonus
+
+Clamps + floors prevent score explosions.
 """
 import re
 import math
@@ -18,10 +23,11 @@ STOPWORDS = {"a", "an", "the", "of", "and", "or", "for", "to", "in", "on",
 
 MIN_SAMPLE = 5
 CONFIDENCE_CAP = 30
-CAT_MED_FLOOR = 25.0     # FIX — any median below this is untrustworthy
+CAT_MED_FLOOR = 25.0
 LIFT_MIN = 0.1
-LIFT_MAX = 5.0           # FIX — cap so no single word dominates
+LIFT_MAX = 5.0
 BIGRAM_MAX = 5.0
+VISIBILITY_WEIGHT = 0.4
 
 
 def _words(title):
@@ -45,7 +51,6 @@ def _cat_median(cur, family):
     """, ids)
     r = cur.fetchone()
     val = float(r[0] or 0)
-    # FIX: floor at CAT_MED_FLOOR so lift can't explode
     if val < CAT_MED_FLOOR:
         return CAT_MED_FLOOR
     return val
@@ -91,7 +96,6 @@ def compute_word_stats(family=None):
                 continue
             favs.sort()
             med = favs[len(favs) // 2]
-            # FIX: clamp lift
             lift = _clamp(med / cat_med, LIFT_MIN, LIFT_MAX)
 
             recent_share = (len(recent_buckets[w]) / max(total_recent, 1))
@@ -148,7 +152,6 @@ def _bigram_lift(cur, w1, w2, family):
     if not cnt or cnt < 5:
         return 0.0
     raw = float(med or 0) / _cat_median(cur, family)
-    # FIX: clamp so bigram can't dominate score
     return _clamp(raw, 0.0, BIGRAM_MAX)
 
 
@@ -161,25 +164,26 @@ def score_title(title, family=None, word_stats=None):
     if word_stats is None:
         word_stats = compute_word_stats(family)
 
-    demand = compute_search_demand(words)
+    demand_map = compute_search_demand(words)
 
     total = 0.0
+    visibility_total = 0.0
     breakdown = []
     for w in words:
         st = word_stats.get(w, {})
         if not st:
-            # word not in stats — mark as no data, contribute 0
             breakdown.append({
                 "word": w, "lift": 1.0, "sample": 0,
-                "demand": demand.get(w, 0), "freshness": 1.0,
-                "contribution": 0.0, "no_data": True,
+                "demand": demand_map.get(w, 0), "freshness": 1.0,
+                "contribution": 0.0, "visibility_gap": 0.0,
+                "no_data": True,
             })
             continue
 
         lift = st.get("lift", 1.0)
         cnt = st.get("count", 0)
         fresh = st.get("freshness", 1.0)
-        dem = demand.get(w, 0)
+        dem = demand_map.get(w, 0)
 
         dem_mult = 1 + math.log1p(dem) / 3.0
         conf = min(1.0, cnt / CONFIDENCE_CAP)
@@ -188,10 +192,15 @@ def score_title(title, family=None, word_stats=None):
         contribution = lift * dem_mult * conf * fresh_mult
         total += contribution
 
+        # Visibility gap = demand per existing item
+        visibility_gap = dem / (cnt + 1)
+        visibility_total += visibility_gap
+
         breakdown.append({
             "word": w, "lift": lift, "sample": cnt,
             "demand": dem, "freshness": fresh,
             "contribution": round(contribution, 2),
+            "visibility_gap": round(visibility_gap, 2),
         })
 
     bigram_bonus = 0.0
@@ -219,14 +228,16 @@ def score_title(title, family=None, word_stats=None):
         cur.close(); conn.close()
 
     unique_mult = 1.5 if exact == 0 else (1.0 if exact < 3 else 0.5)
-    final = (total + bigram_bonus) * unique_mult
+
+    combined = ((total + bigram_bonus) * unique_mult) + (visibility_total * VISIBILITY_WEIGHT)
 
     return {
         "title": title,
-        "score": round(final, 2),
+        "score": round(combined, 2),
         "raw": round(total, 2),
         "bigram_bonus": round(bigram_bonus, 2),
         "bigram": bigram_info,
+        "visibility_gap": round(visibility_total, 2),
         "uniqueness_mult": unique_mult,
         "exact_matches": exact,
         "breakdown": breakdown,
@@ -250,16 +261,17 @@ def score_titles_batch(titles, family=None):
 
 
 def format_report(s, show_all_words=False):
+    gap_total = s.get("visibility_gap", 0)
     lines = [
         f"**`{s['title']}`** — score **{s['score']}**"
-        + (f" · unique" if s['exact_matches'] == 0
-           else f" · {s['exact_matches']} exact matches")
+        + (f" · gap **{gap_total:.0f}**" if gap_total >= 5 else "")
+        + (f" · unique" if s["exact_matches"] == 0
+           else f" · {s['exact_matches']} exact")
     ]
     ranked = sorted(s["breakdown"], key=lambda x: x["contribution"], reverse=True)
     for b in ranked:
         if b.get("no_data"):
-            lines.append(f"  ⚫ `{b['word']}` — no data in DB "
-                         f"({b['demand']} searches) → +0.0")
+            lines.append(f"  ⚫ `{b['word']}` — no data ({b['demand']} searches) → +0.0")
             continue
         lift = b["lift"]
         if lift >= 2.5: emoji = "🟢"
@@ -267,9 +279,12 @@ def format_report(s, show_all_words=False):
         elif lift >= 1.0: emoji = "⚪"
         elif lift >= 0.5: emoji = "🟠"
         else: emoji = "🔴"
+        gap = b.get("visibility_gap", 0)
+        gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
         lines.append(
             f"  {emoji} `{b['word']}` lift {lift}× "
-            f"({b['sample']} items · {b['demand']} searches) → +{b['contribution']}"
+            f"({b['sample']} items · {b['demand']} searches{gap_str}) "
+            f"→ +{b['contribution']}"
         )
     if s.get("bigram"):
         lines.append(f"  🎯 bigram `{s['bigram']}` → +{s['bigram_bonus']}")
