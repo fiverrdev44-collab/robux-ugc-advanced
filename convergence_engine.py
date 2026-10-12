@@ -1,14 +1,16 @@
 """
 convergence_engine.py — category-aware niche scoring.
-Uses ONLY existing tables. No new columns. No AI calls.
 
 FIXES in this version:
-- Bulletproof family clause: if the family name is already a FAMILIES
-  key, use it directly. Only translate if it's a category_configs name.
-  This prevents "emotes" → None → "and false" from killing all queries.
-- Debug prints on gate rejections (first 5 per tier).
+- MULTI-SOURCE keyword gathering: pulls from learned_keywords AND
+  search_suggestions tokens. Fixes "movement" being missed because
+  discover_keywords.py never learned it.
+- Bulletproof family clause (accepts both naming schemes, never
+  returns "and false" for known families).
+- 3-tier median fallback: 20 → 15 → 10.
 """
 import re
+from collections import Counter
 from bot_core import get_db
 
 
@@ -52,38 +54,33 @@ _GENERIC_BLOCK = {
     "credit", "credits", "created",
     "cheap", "expensive", "discount", "promo", "deal",
     "popular", "trending", "trend", "trendy", "viral", "iconic", "famous",
+    "with", "without", "into", "onto", "your", "yours",
 }
 
 
 def _family_clause(family):
-    """
-    Bulletproof:
-      1. If family is already a FAMILIES key, use it directly.
-      2. Else try to translate from category_configs naming.
-      3. If nothing works, return "and false" (no filter).
-    """
+    """Bulletproof: use FAMILIES key directly if valid, else translate."""
     if not family or family == "all":
         return "", []
 
-    # Step 1: already a valid convergence_engine family name?
+    # Direct match on FAMILIES key
     if family in FAMILIES:
         ids = FAMILIES[family]
-        placeholders = ",".join(["%s"] * len(ids))
-        return f" and asset_type_id in ({placeholders})", list(ids)
+        ph = ",".join(["%s"] * len(ids))
+        return f" and asset_type_id in ({ph})", list(ids)
 
-    # Step 2: try translating from category_configs naming scheme
+    # Try translating from category_configs naming
     try:
         from category_configs import to_convergence_family
         translated = to_convergence_family(family)
         if translated and translated in FAMILIES:
             ids = FAMILIES[translated]
-            placeholders = ",".join(["%s"] * len(ids))
-            return f" and asset_type_id in ({placeholders})", list(ids)
-    except Exception as e:
-        print(f"[convergence] family translate failed: {e}", flush=True)
+            ph = ",".join(["%s"] * len(ids))
+            return f" and asset_type_id in ({ph})", list(ids)
+    except Exception:
+        pass
 
-    # Step 3: unknown family — no filter instead of "and false"
-    # (safer: gives results instead of silently empty)
+    # Unknown — no filter (better than returning nothing)
     print(f"[convergence] unknown family '{family}' — no filter", flush=True)
     return "", []
 
@@ -95,23 +92,62 @@ def _kw_pattern(keyword):
     return rf"\y{re.escape(kw)}\y"
 
 
-def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
-                   debug=False):
-    """Returns dict on pass, None on reject. If debug=True, prints why."""
-    def _reject(reason):
-        if debug:
-            print(f"[conv-debug] '{keyword}' REJECTED: {reason}", flush=True)
-        return None
+def _gather_keywords(cur):
+    """
+    Multi-source keyword gathering. Fixes the case where a keyword
+    passes scoring but isn't in learned_keywords.
+    """
+    keywords = set()
 
+    # ── SOURCE 1: learned_keywords ─────────────────────────────
+    try:
+        cur.execute("""
+            select keyword from learned_keywords
+            where item_count >= 3 order by score desc limit 300
+        """)
+        for r in cur.fetchall():
+            if r[0]:
+                kw = r[0].strip().lower()
+                if len(kw) >= 3 and kw not in _GENERIC_BLOCK:
+                    keywords.add(kw)
+    except Exception as e:
+        print(f"[convergence] learned_keywords read failed: {e}", flush=True)
+
+    # ── SOURCE 2: search_suggestions tokens ────────────────────
+    try:
+        cur.execute("""
+            select suggestion from search_suggestions
+            where suggestion is not null
+              and length(suggestion) between 3 and 40
+            limit 3000
+        """)
+        token_counter = Counter()
+        for (s,) in cur.fetchall():
+            if not s:
+                continue
+            for t in re.findall(r"[a-z]{4,}", s.lower()):
+                if t not in _GENERIC_BLOCK:
+                    token_counter[t] += 1
+        # Top 200 tokens by frequency
+        for t, _ in token_counter.most_common(200):
+            keywords.add(t)
+    except Exception as e:
+        print(f"[convergence] search_suggestions read failed: {e}", flush=True)
+
+    print(f"[convergence] gathered {len(keywords)} candidate keywords", flush=True)
+    return list(keywords)
+
+
+def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     kw_clean = (keyword or "").strip().lower()
     if not kw_clean or len(kw_clean) < 3:
-        return _reject(f"too short ({kw_clean!r})")
+        return None
     if kw_clean in _GENERIC_BLOCK:
-        return _reject("blocklist")
+        return None
     if " " in kw_clean:
         tokens = kw_clean.split()
         if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
-            return _reject("all tokens blocked")
+            return None
 
     pat = _kw_pattern(keyword)
     is_phrase = " " in keyword.strip()
@@ -120,6 +156,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     fam_sql, fam_params = _family_clause(family)
     match_op = "~*" if use_regex else "ilike"
 
+    # Supply + median
     cur.execute(f"""
         select count(*),
                coalesce(percentile_cont(0.5) within group
@@ -135,19 +172,20 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    if supply < 3:                return _reject(f"supply {supply} < 3")
-    if supply > 500:              return _reject(f"supply {supply} > 500")
-    if median_favs > 50_000:      return _reject(f"median {median_favs} > 50k")
-    if median_favs < min_median:  return _reject(f"median {median_favs} < {min_median}")
+    if supply < 3:                 return None
+    if supply > 500:               return None
+    if median_favs > 50_000:       return None
+    if median_favs < min_median:   return None
 
+    # Demand
     cur.execute(
         f"select count(*) from search_suggestions where suggestion {match_op} %s",
         (pat,)
     )
     demand = cur.fetchone()[0] or 0
+    if demand < min_demand:        return None
 
-    if demand < min_demand:       return _reject(f"demand {demand} < {min_demand}")
-
+    # Freshness
     cur.execute(f"""
         select count(*) from items
         where name {match_op} %s and created_at > now() - interval '14 days'
@@ -155,6 +193,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     """, [pat] + fam_params)
     recent = cur.fetchone()[0] or 0
 
+    # Velocity
     cur.execute(f"""
         with s as (
             select ih.item_id,
@@ -172,12 +211,12 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
                    (max(ih.snapshot_at) - min(ih.snapshot_at))
                    )/86400.0 >= 2
         )
-        select avg(delta / days) from s
-        where delta >= 1
+        select avg(delta / days) from s where delta >= 1
     """, [pat] + fam_params)
     velocity = float(cur.fetchone()[0] or 0)
     velocity = min(velocity, 20.0)
 
+    # Concentration
     cur.execute(f"""
         with cf as (
             select creator_name, sum(favorite_count) as favs
@@ -194,8 +233,9 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     concentration = (top_favs / total_favs) if total_favs else 0.0
 
     if concentration > 0.65:
-        return _reject(f"concentration {concentration:.2f} > 0.65")
+        return None
 
+    # Score
     demand_score   = min(demand / 30.0, 1.0)
     velocity_score = min(velocity / 5.0, 1.0)
 
@@ -205,10 +245,10 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     elif supply <= 150:  supply_score = 0.4
     else:                supply_score = 0.15
 
-    fresh_score    = (1.0 if recent == 0 else
-                      0.7 if recent < 5 else
-                      0.3 if recent < 15 else 0.1)
-    conc_score     = 1.0 - concentration
+    fresh_score = (1.0 if recent == 0 else
+                   0.7 if recent < 5 else
+                   0.3 if recent < 15 else 0.1)
+    conc_score = 1.0 - concentration
 
     score = (demand_score * 25 + velocity_score * 25 +
              supply_score * 20 + fresh_score * 20 + conc_score * 10)
@@ -242,7 +282,6 @@ def family_for_asset(asset_type_id):
 def format_brief(r):
     if r is None:
         return "⚠️ *No items found in this category — no signal.*"
-
     zone = ""
     if r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1:
         zone = " 🔥 **SNIPE ZONE**"
@@ -264,35 +303,34 @@ def format_brief(r):
     )
 
 
-def scan_convergence(family=None, limit=15, debug=False):
-    """Single-pass scan with min_median=15, min_demand=1."""
+def scan_convergence(family=None, limit=15):
+    """Multi-source scan with 3-tier median fallback."""
     conn = get_db(); cur = conn.cursor()
-    cur.execute("""
-        select keyword from learned_keywords
-        where item_count >= 3 order by score desc limit 200
-    """)
-    keywords = [
-        r[0] for r in cur.fetchall()
-        if r[0] and len(r[0].strip()) >= 3
-    ]
+    keywords = _gather_keywords(cur)
 
     print(f"[convergence] scanning {len(keywords)} keywords family={family}", flush=True)
 
-    results = []
-    for i, kw in enumerate(keywords):
-        try:
-            # Debug first 5 rejects only
-            show_debug = debug and i < 5 and len(results) < 3
-            r = _score_keyword(cur, kw, family,
-                               min_median=15, min_demand=1,
-                               debug=show_debug)
-            if r:
-                results.append(r)
-        except Exception as e:
-            print(f"[convergence] {kw}: {e}", flush=True)
+    tiers = [(20, 2, "strict"), (15, 1, "mid"), (10, 1, "loose")]
 
-    print(f"[convergence] total results: {len(results)}", flush=True)
+    for min_med, min_dem, label in tiers:
+        results = []
+        for kw in keywords:
+            try:
+                r = _score_keyword(cur, kw, family,
+                                   min_median=min_med, min_demand=min_dem)
+                if r:
+                    results.append(r)
+            except Exception as e:
+                print(f"[convergence] {kw}: {e}", flush=True)
 
+        print(f"[convergence] {label} tier (median>={min_med}, demand>={min_dem}): {len(results)}", flush=True)
+
+        if len(results) >= 3:
+            cur.close(); conn.close()
+            results.sort(key=lambda x: x["score"], reverse=True)
+            return results[:limit]
+
+    # Return whatever we found in the loosest tier
     cur.close(); conn.close()
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
