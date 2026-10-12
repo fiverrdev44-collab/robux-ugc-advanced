@@ -2,11 +2,11 @@
 tag_generator.py — sales-weighted SEO tag generator.
 
 FIXES in this version:
+  - ACCESSORY UMBRELLA: "accessory" family matches all 5 sub-types
+    (43 neck, 44 shoulder, 45 front, 46 back, 47 waist).
   - Translates category_configs family names → convergence_engine
-    family names before FAMILIES.get()
-  - Relevance gate rejects tags that don't share a root with the item
-    name and aren't in the aesthetic/color sibling lists.
-    (Kills "whipped cream" leaking into a "hip sway" tag block.)
+    family names before FAMILIES.get() (skips "accessory").
+  - Relevance gate rejects tags that don't share a root with the item.
 """
 import os
 import re
@@ -18,6 +18,9 @@ from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
 ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 MIN_DB_TAGS = 12
+
+# Accessory umbrella — all 5 Roblox accessory sub-types
+ACCESSORY_IDS = [43, 44, 45, 46, 47]
 
 
 CATEGORY_HINTS = {
@@ -147,7 +150,7 @@ def _extract_tags_from_description(desc):
     if not tag_section:
         return []
 
-    raw_tokens = re.split(r"[,|;\n]+", tag_section)
+    raw_tokens = re.split(r"[_,|;\n]+", tag_section)
     out = []
     seen = set()
     for raw in raw_tokens:
@@ -168,6 +171,9 @@ def _extract_tags_from_description(desc):
 
 def _family_to_roblox_category(family):
     if not family:
+        return None
+    # Accessory umbrella — no single Roblox category ID works
+    if family == "accessory":
         return None
     return {
         "hair":     12, "face": 13, "neck": 5, "shoulder": 9,
@@ -214,6 +220,14 @@ def _fetch_live_items(keyword, family=None, limit=30):
                 price = item.get("price") or 0
                 atype = item.get("assetType") or 0
                 creator = item.get("creatorName") or ""
+
+                # Accessory umbrella filter — keep only accessory sub-types
+                if family == "accessory" and atype not in ACCESSORY_IDS:
+                    continue
+                # Regular family filter
+                elif family and family != "accessory":
+                    if ASSET_TO_FAMILY.get(atype) != family:
+                        continue
 
                 try:
                     cur.execute("""
@@ -264,6 +278,9 @@ def _mine_live_tags(keyword, family):
 
 
 def _detect_category(name, explicit_family=None):
+    # Accessory umbrella — valid but not a FAMILIES key
+    if explicit_family == "accessory":
+        return "accessory"
     if explicit_family and explicit_family in FAMILIES:
         return explicit_family
     name_lower = (name or "").lower()
@@ -278,6 +295,9 @@ def _detect_category(name, explicit_family=None):
 
 
 def _family_sql(family):
+    # Accessory umbrella — matches all 5 sub-types
+    if family == "accessory":
+        return " and asset_type_id in (43, 44, 45, 46, 47)", []
     ids = FAMILIES.get(family)
     if not ids:
         return "", []
@@ -414,8 +434,9 @@ def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
-    # FIX 1: translate category_configs → convergence_engine family
-    if family:
+    # FIX 1: translate category_configs → convergence_engine family,
+    # BUT keep "accessory" as-is (umbrella family)
+    if family and family != "accessory":
         try:
             from category_configs import to_convergence_family
             family = to_convergence_family(family)
@@ -501,12 +522,22 @@ def generate_tags(item_name, family=None, max_tags=45):
         and not any(c in tag for c in "0123456789@#")
     }
 
-    # ── FIX 2: RELEVANCE GATE ──────────────────────────────────
-    # Reject tags that don't share a root with the item name and aren't
-    # in the aesthetic/color sibling lists. This kills "whipped cream"
-    # leaking into a "hip sway" tag block.
+    # ── RELEVANCE GATE ──────────────────────────────────────────
+    FILLER_ANCHORS = {
+        "cute", "cool", "nice", "best", "top", "new", "hot", "trendy",
+        "viral", "aesthetic", "chibi", "soft", "pretty", "sweet",
+        "amazing", "awesome", "epic", "lovely", "chill", "smooth",
+        "fancy", "flashy", "silly", "goofy",
+    }
+    GENERIC_AESTHETICS = {
+        "cute", "soft", "sweet", "pretty", "adorable", "lovely",
+        "nice", "cool",
+    }
+
     name_roots = set()
     for w in name_words:
+        if w in FILLER_ANCHORS:
+            continue
         name_roots.add(w)
         if len(w) >= 5:
             name_roots.add(w[:4])
@@ -517,21 +548,38 @@ def generate_tags(item_name, family=None, max_tags=45):
     color_set = set(colors.keys())
 
     def _is_relevant(tag):
+        if not name_roots:
+            if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
+                return True
+            return tag in color_set
+
         if tag in name_roots:
             return True
-        if tag in aesthetic_set or tag in color_set:
-            return True
-        # Multi-word tags: accept if ANY word shares a root
-        for part in tag.split():
-            if part in name_roots:
+
+        parts = tag.split()
+
+        if len(parts) >= 2:
+            hits = 0
+            for part in parts:
+                for r in name_roots:
+                    if len(r) >= 4 and (r in part or part in r):
+                        hits += 1
+                        break
+            if hits >= 2:
                 return True
-            for r in name_roots:
-                if len(r) >= 4 and (r in part or part in r):
-                    return True
-        # Single-word: substring check
+            if tag in color_set:
+                return True
+            if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
+                return True
+            return False
+
         for r in name_roots:
             if len(r) >= 4 and (r in tag or tag in r):
                 return True
+        if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
+            return True
+        if tag in color_set:
+            return True
         return False
 
     filtered = {t: s for t, s in filtered.items() if _is_relevant(t)}
