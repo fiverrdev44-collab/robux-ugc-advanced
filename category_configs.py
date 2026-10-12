@@ -1,8 +1,11 @@
 """
 category_configs.py — Category-aware configuration shared across the stack.
 
-NEW: concept_vocab per family — hard gate for creative_pivot candidates.
-     Only words in the family's concept_vocab (plus its aliases) can be pivots.
+concept_vocab per family — hard gate for creative_pivot candidates.
+Only words in the family's concept_vocab (plus its aliases) can be pivots.
+
+FIX: aliases extended so convergence_engine family names also resolve here.
+     Translation functions at bottom map between the two naming schemes.
 """
 
 # Universal abstract English — should NEVER be a UGC concept
@@ -53,7 +56,8 @@ CATEGORY_FAMILIES = {
     "emote": {
         "label": "Emote / Dance",
         "asset_type_ids": [61],
-        "aliases": ["emote", "dance", "animation", "anim"],
+        # FIX: added "emotes" so convergence_engine family names resolve here
+        "aliases": ["emote", "emotes", "dance", "animation", "anim"],
         "type_words": ["emote", "dance", "animation"],
         "shape": "movement",
         "shape_rule": (
@@ -80,7 +84,6 @@ CATEGORY_FAMILIES = {
             "with","your","you","a","an","of","in","on","to","my","is","it","as",
             "at","by","roblox","tiktok","viral","trend","trendy","new","best",
         },
-        # Only these words can be pivots for emotes
         "concept_vocab": {
             # Movement verbs
             "sway","step","bounce","hop","jump","slide","spin","twirl","wave",
@@ -101,7 +104,7 @@ CATEGORY_FAMILIES = {
             "house","jazz","salsa","ballet","vogue","krump","breakdance",
             # Viral / meme
             "sigma","rizz","skibidi","gyatt","mewing","sus","ratio","goat",
-            "slay","bussin","yeet","bruh","fanum","cap","aura","drip","flex",
+            "slay","bussin","yeet","bruh","fanum","cap","drip","flex",
             # Iconic moves
             "floss","griddy","dab","moonwalk","renegade","dougie","stanky",
             "robot","gangnam","shmoney",
@@ -114,7 +117,8 @@ CATEGORY_FAMILIES = {
     "hair": {
         "label": "Hair",
         "asset_type_ids": [41],
-        "aliases": ["hair"],
+        # FIX: added "headwear" so mapping resolves
+        "aliases": ["hair", "headwear"],
         "type_words": ["hair"],
         "shape": "aesthetic",
         "shape_rule": (
@@ -151,7 +155,7 @@ CATEGORY_FAMILIES = {
             "ethereal","glowing","sparkling","shimmer","holographic","iridescent",
             "pearl","crystal","diamond","silk","velvet","satin",
             # Colors as modifiers
-            "pastel","neon","blonde","brunette","pink","purple","blue","green",
+            "neon","blonde","brunette","pink","purple","blue","green",
             "silver","golden","rose","lavender","mint","peach",
         },
     },
@@ -159,8 +163,8 @@ CATEGORY_FAMILIES = {
     "headwear": {
         "label": "Hat / Cap / Crown",
         "asset_type_ids": [8],
-        "aliases": ["hat", "cap", "beanie", "crown", "beret", "snapback", "bonnet",
-                    "headwear", "visor", "balaclava"],
+        "aliases": ["hat", "hats", "cap", "beanie", "crown", "beret", "snapback",
+                    "bonnet", "headwear", "visor", "balaclava"],
         "type_words": ["hat", "cap", "beanie", "crown", "beret", "snapback",
                        "bonnet", "visor", "balaclava"],
         "shape": "theme",
@@ -234,9 +238,10 @@ CATEGORY_FAMILIES = {
     "accessory": {
         "label": "Accessory (Neck/Shoulder/Back/Waist)",
         "asset_type_ids": [43, 44, 45, 46, 47],
-        "aliases": ["neck", "shoulder", "front", "back", "waist", "chain",
-                    "necklace", "wing", "wings", "tail", "backpack", "scarf",
-                    "bag", "belt"],
+        # FIX: added convergence_engine keys — neck/shoulder/front/back/waist
+        "aliases": ["neck", "shoulder", "front", "back", "waist",
+                    "accessory", "chain", "necklace", "wing", "wings", "tail",
+                    "backpack", "scarf", "bag", "belt"],
         "type_words": ["chain", "necklace", "wing", "wings", "tail",
                        "backpack", "scarf", "bag", "belt", "sword"],
         "shape": "theme",
@@ -272,9 +277,11 @@ CATEGORY_FAMILIES = {
 
     "clothing": {
         "label": "Clothing",
-        "asset_type_ids": [64, 65, 66, 67, 68, 69, 70, 71, 72],
+        "asset_type_ids": [64, 65, 66, 67, 68, 69, 70, 71, 72, 2, 11, 12],
+        # FIX: added convergence_engine keys — tops, classic
         "aliases": ["shirt", "pants", "jacket", "shoes", "shorts", "sweater",
-                    "dress", "skirt", "t-shirt", "tshirt", "clothing"],
+                    "dress", "skirt", "t-shirt", "tshirt", "clothing",
+                    "tops", "classic"],
         "type_words": ["shirt", "pants", "jacket", "shoes", "shorts", "sweater",
                        "dress", "skirt", "hoodie", "tee"],
         "shape": "style",
@@ -304,7 +311,7 @@ CATEGORY_FAMILIES = {
             "athletic","gym","jock","runner","active","sporty","track",
             "vintage","y2k","80s","90s","retro","nostalgic","throwback",
             "cottagecore","cozy","knit","fluffy","soft","pastel","kawaii",
-            "grunge","cyber","gothic","punk","emo","alt","emo",
+            "grunge","cyber","gothic","punk","emo","alt",
             "preppy","coquette","anime","manga","kpop",
         },
     },
@@ -340,7 +347,7 @@ CATEGORY_FAMILIES = {
             "hero","villain","knight","mage","wizard","ninja","pirate","samurai",
             "warrior","archer","assassin","rogue","paladin","cleric","ranger",
             "fire","ice","storm","shadow","celestial","nature","void","arcane",
-            "cyber","neon","plasma","quantum","hologram","crystal","void",
+            "cyber","neon","plasma","quantum","hologram","crystal",
             "ghost","spirit","phantom","wraith","skeleton","zombie","vampire",
         },
     },
@@ -381,6 +388,58 @@ CATEGORY_FAMILIES = {
 
 DEFAULT_FAMILY = "emote"
 
+
+# ══════════════════════════════════════════════════════════════
+# Cross-engine family translation
+# ──────────────────────────────────────────────────────────────
+# convergence_engine / title_scorer / tag_generator / intel_common
+# use a different family-naming scheme. These helpers translate
+# both directions so lookups never silently fail.
+
+_CONVERGENCE_TO_CATEGORY = {
+    "emotes":   "emote",
+    "hair":     "hair",
+    "face":     "face",
+    "neck":     "accessory",
+    "shoulder": "accessory",
+    "front":    "accessory",
+    "back":     "accessory",
+    "waist":    "accessory",
+    "tops":     "clothing",
+    "classic":  "clothing",
+    "gear":     "gear",
+    "bundle":   "bundle",
+}
+
+_CATEGORY_TO_CONVERGENCE = {
+    "emote":     "emotes",
+    "hair":      "hair",
+    "headwear":  "hair",       # both map to convergence "hair"
+    "face":      "face",
+    "accessory": "neck",       # primary; other 4 sub-ids share "neck"
+    "clothing":  "tops",
+    "gear":      "gear",
+    # bundle has no convergence_engine equivalent
+}
+
+
+def to_convergence_family(cat_family):
+    """category_configs family name → convergence_engine family name."""
+    if not cat_family:
+        return cat_family
+    return _CATEGORY_TO_CONVERGENCE.get(str(cat_family).lower(), cat_family)
+
+
+def to_category_family(conv_family):
+    """convergence_engine family name → category_configs family name."""
+    if not conv_family:
+        return conv_family
+    return _CONVERGENCE_TO_CATEGORY.get(str(conv_family).lower(), conv_family)
+
+
+# ══════════════════════════════════════════════════════════════
+# Original resolution helpers (unchanged behavior)
+# ══════════════════════════════════════════════════════════════
 
 def _resolve_family(item_type_or_family):
     if not item_type_or_family:
