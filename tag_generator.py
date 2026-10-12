@@ -11,6 +11,10 @@ Sources (weighted by sales signal):
 
 Every tag must appear in 2+ top sellers OR be a real search query.
 Nothing hallucinated.
+
+FIX: generate_tags() translates category_configs family names
+     (emote, accessory, clothing...) to convergence_engine family
+     names (emotes, neck, tops...) before FAMILIES.get() lookup.
 """
 import os
 import re
@@ -442,6 +446,16 @@ def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
+    # FIX: translate category_configs family names → convergence_engine
+    # family names. Otherwise FAMILIES.get("emote") returns None and the
+    # category filter silently drops.
+    if family:
+        try:
+            from category_configs import to_convergence_family
+            family = to_convergence_family(family)
+        except Exception:
+            pass
+
     skip = {"the", "and", "for", "with", "you", "your", "from", "that",
             "this", "into", "over", "will", "can", "are", "has", "how",
             "its", "our", "all"}
@@ -481,9 +495,7 @@ def generate_tags(item_name, family=None, max_tags=45):
     db_tag_total = len(top_sellers) + len(recent_winners)
 
     if db_tag_total < MIN_DB_TAGS:
-        # Use the most specific name word as keyword
         live_kw = None
-        # Prefer longer/rarer words
         sorted_words = sorted(name_words, key=len, reverse=True)
         if sorted_words:
             live_kw = sorted_words[0]
