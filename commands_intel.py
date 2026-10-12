@@ -9,7 +9,7 @@ HARD RULES:
 - SATURATED/DEAD seed words FORBIDDEN as first token.
 - Post-filter rejects any title starting with a forbidden word.
 
-VERDICT: multi-signal (percentile + age + favs + velocity).
+VERDICT: multi-signal (sales + age + favs + velocity + percentile).
 """
 import os
 import re
@@ -229,11 +229,11 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
     # =========================================================
-    # !verdict — multi-signal: age · favs · velocity · percentile
+    # !verdict — 6-priority: sales · velocity · hard-kill · TOO_NEW · percentile
     # =========================================================
     @bot.command(name="verdict")
     async def verdict_cmd(ctx, item_id: int):
-        """Multi-signal verdict: age · favs · velocity · percentile."""
+        """Multi-signal verdict: sales · age · favs · velocity · percentile."""
         def _run():
             conn = get_db(); cur = conn.cursor()
             try:
@@ -247,9 +247,19 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                     return None
                 name, favs, price, age_days = r
                 pct = item_percentile(cur, item_id)
+
+                # Fetch sales data (fuzzy match on name)
+                sales_info = None
+                try:
+                    from sales_listener import item_sales_summary
+                    sales_info = item_sales_summary(name, days=30)
+                except Exception as e:
+                    print(f"[verdict] sales fetch failed: {e}", flush=True)
+
                 return {
                     "name": name, "favs": favs or 0, "price": price or 0,
                     "age_days": float(age_days or 0), "pct": pct,
+                    "sales_30d": (sales_info["units"] if sales_info else 0),
                 }
             finally:
                 cur.close(); conn.close()
@@ -267,6 +277,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             age_days=data["age_days"],
             favs=data["favs"],
             velocity=pct["velocity"],
+            total_sales=data["sales_30d"],
+            sample_size=pct["sample_size"],
         )
 
         if verdict == "TOO_NEW":
@@ -300,12 +312,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 "Reallocate content time to your top 2 performers",
             ]
 
+        # Show sales in header if we have any
+        sales_line = ""
+        if data["sales_30d"] > 0:
+            sales_line = f" · 💰 {data['sales_30d']} sales (30d)"
+
         lines = [
             f"{emoji} **{data['name'][:60]}**",
             f"**{verdict.replace('_', ' ')}** — top **{pct['percentile']}%** "
             f"of `{pct['family']}`",
             f"_{data['age_days']:.1f}d old · {data['favs']}♥ · "
-            f"{pct['velocity']}/day · {pct['sample_size']} peers_\n",
+            f"{pct['velocity']}/day{sales_line}_\n",
             f"**Why:** {reason}\n",
             "**3 actions:**",
         ]
@@ -431,11 +448,23 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         # ── 🎯 DECISION LINE — FIRST MESSAGE ─────────────────
         if pct_data:
+            # Try to fetch sales too
+            sales_30d = 0
+            try:
+                from sales_listener import item_sales_summary
+                si = item_sales_summary(name, days=30)
+                if si:
+                    sales_30d = si["units"]
+            except Exception as e:
+                print(f"[autopsy] sales fetch failed: {e}", flush=True)
+
             verdict, v_emoji, v_reason = decide_verdict(
                 pct_data["percentile"],
                 age_days=item_stats["age_days"],
                 favs=item_stats["favs"],
                 velocity=pct_data["velocity"],
+                total_sales=sales_30d,
+                sample_size=pct_data["sample_size"],
             )
 
             if verdict == "TOO_NEW":
@@ -461,11 +490,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                         f"Run `!converge {pct_data['family']}` for a snipe zone.",
                         "Reallocate content to your top-2 performers."]
 
+            sales_line = f" · 💰 {sales_30d} sales (30d)" if sales_30d > 0 else ""
+
             dec_lines = [
                 f"{v_emoji} **{name[:60]}** — **{verdict.replace('_', ' ')}**",
                 f"Top **{pct_data['percentile']}%** of `{pct_data['family']}`",
                 f"_{pct_data['age_days']}d old · {favs}♥ · "
-                f"{pct_data['velocity']}/day · {pct_data['sample_size']} peers_\n",
+                f"{pct_data['velocity']}/day{sales_line} · {pct_data['sample_size']} peers_\n",
                 f"**Why:** {v_reason}\n",
                 "**3 actions:**",
             ]
