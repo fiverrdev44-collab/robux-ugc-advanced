@@ -1,21 +1,20 @@
 """
 tag_generator.py — sales-weighted SEO tag generator.
 
-SALES-FOCUSED FILTER:
-  1. Name-based mining — top sellers matching THIS item's name
-  2. Live Roblox — top sellers for the item's primary keyword
-  3. Search demand — real queries matching the item's words
-  4. Aesthetic siblings — only if name matches aesthetic
+FILLS TO 45:
+  - Two-signal tags (2+ independent sources) rank highest
+  - Single-signal tags fill the remaining slots
+  - Category-wide pool guarantees enough candidates
+  - Relevance gate rejects API fields + English junk
 
-RELEVANCE GATE (the key change):
-  Every tag must appear in 2+ sources to survive. Signals that
-  matter for sales: (top seller OR live) AND (search demand).
-  If a tag is in top sellers but nobody searches for it → drop.
-  If a tag is searched but no winner uses it → drop.
-  Both signals = real demand + real conversion.
-
-Removed: family-wide mining (too broad, brought noise).
-Removed: IP blocklist (filtering by signal, not by name).
+Signal pools:
+  1. Name-matched top sellers (tags + words)
+  2. Live Roblox for keyword (tags + words)
+  3. Search suggestions matching name (phrases + words)
+  4. Category-wide top sellers (words, 3+ appearances)
+  5. Aesthetic siblings (name-matching only)
+  6. Color siblings
+  7. Name words (base boost)
 """
 import os
 import re
@@ -177,18 +176,17 @@ _ENGLISH_BLOCK = {
     "felt","feeling","love","loves","loved","loving","hate","hates",
     "hated","hating","like","likes","liked","liking","look","looks",
     "looked","looking","know","knows","knew","known","knowing",
-    # Short garbage
-    "favorite", "favorited", "bookmarked", "hand", "head", "foot",
-    "arm", "leg", "body", "skin", "eye", "eyes", "mouth", "nose",
-    "ear", "ears", "hair", "finger", "toe", "chest", "back",
-    "hello", "goodbye", "welcome", "thanks", "thank",
-    "girl", "boy", "man", "woman", "person", "people", "child",
-    "kid", "friend", "family", "guy", "guys",
-    "anywhere", "everywhere", "somewhere", "nowhere",
-    "always", "never", "sometimes", "often", "usually",
-    "floating", "hanging", "standing", "sitting", "walking",
-    "running", "jumping", "falling", "rising", "shining",
-    "friendly", "excited", "confused",
+    "favorite","favorited","bookmarked","hand","head","foot",
+    "arm","leg","body","skin","eye","eyes","mouth","nose",
+    "ear","ears","hair","finger","toe","chest","back",
+    "hello","goodbye","welcome","thanks","thank",
+    "girl","boy","man","woman","person","people","child",
+    "kid","friend","family","guy","guys",
+    "anywhere","everywhere","somewhere","nowhere",
+    "always","never","sometimes","often","usually",
+    "floating","hanging","standing","sitting","walking",
+    "running","jumping","falling","rising","shining",
+    "friendly","excited","confused","matching","contained",
 }
 
 
@@ -203,10 +201,10 @@ def _detect_accessory_subtype(name):
 
 
 def _is_valid_word(w):
-    """Basic shape check — length, no digits, has vowels, not an adverb."""
+    """Shape check + English block."""
     if not w:
         return False
-    if not (4 <= len(w) <= 25):
+    if not (3 <= len(w) <= 25):
         return False
     if any(c in w for c in "0123456789@#_"):
         return False
@@ -255,7 +253,6 @@ def _extract_tags_from_description(desc):
 
 
 def _extract_words_from_text(text):
-    """Extract clean words from name+description."""
     t = (text or "").lower()
     return [w for w in set(re.findall(r"[a-z]{4,}", t)) if _is_valid_word(w)]
 
@@ -292,7 +289,6 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
         r = requests.get(ROBLOX_SEARCH_URL, params=params,
                          headers=headers, timeout=15)
         if r.status_code != 200:
-            print(f"[tag_generator] live HTTP {r.status_code}", flush=True)
             return []
 
         data = (r.json() or {}).get("data", []) or []
@@ -352,7 +348,6 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
 
 
 def _mine_live_tags(keyword, family, subtype=None):
-    """Mine live top sellers for keyword — return (tag_block, words, count)."""
     rows = _fetch_live_items(keyword, family=family, subtype=subtype, limit=30)
     if not rows:
         return Counter(), Counter(), 0
@@ -367,7 +362,6 @@ def _mine_live_tags(keyword, family, subtype=None):
         for tag in set(tags):
             tag_weight[tag] += weight
             tag_appearances[tag] += 1
-
         text = f"{name or ''} {desc or ''}"
         for w in _extract_words_from_text(text):
             word_weight[w] += weight
@@ -412,10 +406,7 @@ def _family_sql(family, subtype=None):
 
 
 def _mine_top_seller_tags(cur, name_words, family, subtype=None):
-    """
-    Mine tags + words from top sellers matching this item's name.
-    Returns (tag_block, words).
-    """
+    """Top sellers matching THIS item's name words."""
     if not name_words:
         return Counter(), Counter()
     fam_sql, fam_params = _family_sql(family, subtype)
@@ -440,12 +431,10 @@ def _mine_top_seller_tags(cur, name_words, family, subtype=None):
 
     for name, desc, favs in rows:
         weight = 1 + ((favs or 0) / 1000.0)
-
         tags = _extract_tags_from_description(desc)
         for tag in set(tags):
             tag_weight[tag] += weight
             tag_appearances[tag] += 1
-
         text = f"{name or ''} {desc or ''}"
         for w in _extract_words_from_text(text):
             word_weight[w] += weight
@@ -457,8 +446,44 @@ def _mine_top_seller_tags(cur, name_words, family, subtype=None):
     return tag_block, word_weight
 
 
+def _mine_category_wide_words(cur, family, subtype=None, limit=300):
+    """
+    Top sellers across the WHOLE family (no name filter).
+    Requires 3+ appearances — this kills one-off noise but ensures
+    we always have enough candidates to fill 45 tags.
+    """
+    if not family:
+        return Counter()
+    fam_sql, fam_params = _family_sql(family, subtype)
+
+    cur.execute(f"""
+        select name, description, favorite_count
+        from items
+        where favorite_count > 50
+          and favorite_count < 500000
+          {fam_sql}
+        order by favorite_count desc
+        limit %s
+    """, fam_params + [limit])
+
+    rows = cur.fetchall()
+    word_weight = Counter()
+    word_appearances = Counter()
+
+    for name, desc, favs in rows:
+        text = f"{name or ''} {desc or ''}"
+        weight = 1 + ((favs or 0) / 1000.0)
+        for w in _extract_words_from_text(text):
+            word_weight[w] += weight
+            word_appearances[w] += 1
+
+    return Counter({
+        w: score for w, score in word_weight.items()
+        if word_appearances[w] >= 3
+    })
+
+
 def _mine_search_demand(cur, name_words):
-    """Get real search queries matching name words + their tokenized words."""
     if not name_words:
         return Counter(), Counter()
     patterns = [f"%{w}%" for w in name_words[:4]]
@@ -467,7 +492,7 @@ def _mine_search_demand(cur, name_words):
         select suggestion
         from search_suggestions
         where suggestion ilike any(%s)
-        limit 300
+        limit 400
     """, (patterns,))
 
     rows = cur.fetchall()
@@ -484,7 +509,8 @@ def _mine_search_demand(cur, name_words):
         if parts and all(p in _ENGLISH_BLOCK for p in parts):
             continue
 
-        phrase_weight[s] += 3.0
+        if _is_valid_word(s) or " " in s:
+            phrase_weight[s] += 3.0
         for w in re.findall(r"[a-z]{3,}", s):
             if _is_valid_word(w):
                 word_weight[w] += 1.0
@@ -549,6 +575,7 @@ def generate_tags(item_name, family=None, max_tags=45):
     live_count = 0
     search_phrases = Counter()
     search_words = Counter()
+    category_wide = Counter()
 
     conn = get_db(); cur = conn.cursor()
     try:
@@ -559,22 +586,31 @@ def generate_tags(item_name, family=None, max_tags=45):
                   f"{len(top_words)} words", flush=True)
         except Exception as e:
             print(f"[tag_generator] top_seller failed: {e}", flush=True)
+
         try:
             search_phrases, search_words = _mine_search_demand(cur, name_words)
             print(f"[tag_generator] search: {len(search_phrases)} phrases · "
                   f"{len(search_words)} words", flush=True)
         except Exception as e:
             print(f"[tag_generator] demand failed: {e}", flush=True)
+
+        # Always mine category-wide — provides the filler pool
+        try:
+            category_wide = _mine_category_wide_words(
+                cur, detected_family, accessory_subtype, limit=300)
+            print(f"[tag_generator] category-wide: {len(category_wide)} words",
+                  flush=True)
+        except Exception as e:
+            print(f"[tag_generator] category-wide failed: {e}", flush=True)
     finally:
         cur.close(); conn.close()
 
-    # Live fallback when DB is thin
+    # Live fallback when DB thin
     if len(top_tags) + len(top_words) < MIN_DB_TAGS:
         live_kw = None
         sorted_words = sorted(name_words, key=len, reverse=True)
         if sorted_words:
             live_kw = sorted_words[0]
-
         if live_kw and len(live_kw) >= 3:
             try:
                 live_tags, live_words, live_count = _mine_live_tags(
@@ -588,45 +624,68 @@ def generate_tags(item_name, family=None, max_tags=45):
     aesthetic = _find_aesthetic_matches(name_words)
     colors = _color_matches(name_words)
 
-    # ── SALES FILTER: tag must appear in 2+ independent sources ──
-    # "Sources" are the 4 signal pools. A tag with 1 source is likely noise.
-    source_count = Counter()
+    # ── SCORING: signal-weighted sum + multi-source bonus ──
+    # Each source contributes to `combined` (weighted score) and
+    # `source_count` (how many pools the tag appeared in).
     combined = Counter()
+    source_count = Counter()
 
-    for pool, weight in [
-        (top_tags, 1.0),
-        (top_words, 0.8),
-        (live_tags, 1.2),
-        (live_words, 1.0),
+    signal_pools = [
+        (top_tags, 1.5),
+        (top_words, 1.0),
+        (live_tags, 1.8),
+        (live_words, 1.2),
         (search_phrases, 1.5),
         (search_words, 1.0),
-        (aesthetic, 0.6),
-        (colors, 0.6),
-    ]:
+        (category_wide, 0.4),
+        (aesthetic, 1.2),
+        (colors, 1.0),
+    ]
+
+    for pool, weight in signal_pools:
         for tag, score in pool.items():
             combined[tag] += score * weight
             source_count[tag] += 1
 
-    # Name words get a strong boost and count as a source
     for w in name_words:
         combined[w] += 5.0
         source_count[w] += 1
 
-    # ── APPLY GATE ──
-    # Keep only tags with 2+ source appearances.
-    # Exception: tags in name_words always pass (they're in the item).
+    # Multi-source bonus — tags appearing in 2+ pools get boosted
+    for tag, cnt in source_count.items():
+        if cnt >= 2:
+            combined[tag] += 30.0 * (cnt - 1)
+
     name_word_set = set(name_words)
-    filtered = {}
-    for tag, score in combined.items():
+
+    def _is_acceptable(tag):
         if not _is_valid_word(tag):
-            continue
+            return False
         if len(tag) > 25:
-            continue
+            return False
         if tag in name_word_set:
-            filtered[tag] = score
-            continue
+            return True
+        # Require 2+ source appearances OR category-wide presence
+        # (which itself requires 3+ item appearances)
         if source_count[tag] >= 2:
-            filtered[tag] = score
+            return True
+        if tag in category_wide and category_wide[tag] >= 3.0:
+            return True
+        # Single-signal tags from name-matched sources still pass
+        if tag in top_tags or tag in top_words:
+            return True
+        if tag in live_tags or tag in live_words:
+            return True
+        if tag in search_phrases or tag in search_words:
+            return True
+        if tag in aesthetic or tag in colors:
+            return True
+        return False
+
+    filtered = {
+        tag: score for tag, score in combined.items()
+        if _is_acceptable(tag)
+    }
 
     ranked = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
     final_tags = [tag for tag, _ in ranked[:max_tags]]
@@ -645,6 +704,7 @@ def generate_tags(item_name, family=None, max_tags=45):
             "top_seller_words": len(top_words),
             "search_phrases":  len(search_phrases),
             "search_words":    len(search_words),
+            "category_wide":   len(category_wide),
             "aesthetic":       len(aesthetic),
             "colors":          len(colors),
             "name_words":      len(name_words),
@@ -689,7 +749,7 @@ def format_tags(result):
         live_str += " 🔥 (live Roblox)"
 
     chunks.append(
-        f"**📊 Signals mined (tags appear in 2+ to survive):**\n"
+        f"**📊 Signals mined (2+ sources = bonus weight):**\n"
         f"• Live Roblox top sellers: {live_str}\n"
         f"    – tag blocks: **{src.get('live_tag_blocks', 0)}**\n"
         f"    – word mining: **{src.get('live_words', 0)}**\n"
@@ -697,10 +757,11 @@ def format_tags(result):
         f"• DB top-seller words: **{src.get('top_seller_words', 0)}**\n"
         f"• Search phrases: **{src.get('search_phrases', 0)}**\n"
         f"• Search words: **{src.get('search_words', 0)}**\n"
+        f"• Category-wide: **{src.get('category_wide', 0)}**\n"
         f"• Aesthetic siblings: **{src['aesthetic']}**\n"
         f"• Color siblings: **{src['colors']}**\n"
         f"• Name words: **{src['name_words']}**\n"
-        f"\n_Every surviving tag appears in 2+ signals. Real demand + real conversion._"
+        f"\n_Every tag traces to real data. 2+ source agreement = stronger signal._"
     )
 
     return chunks
