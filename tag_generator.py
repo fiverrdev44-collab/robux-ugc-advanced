@@ -1,20 +1,21 @@
 """
 tag_generator.py — sales-weighted SEO tag generator.
 
-HYBRID approach:
-  1. Live Roblox (top sellers by keyword) — mines tag blocks AND words
-  2. DB top sellers (name-based) — mines tag blocks
-  3. DB recent winners (last 90d) — mines tag blocks
-  4. DB family-wide fallback — mines common words from top items
-  5. Real search suggestions — real demand signals
-  6. Aesthetic + color siblings — static lookup
+SALES-FOCUSED FILTER:
+  1. Name-based mining — top sellers matching THIS item's name
+  2. Live Roblox — top sellers for the item's primary keyword
+  3. Search demand — real queries matching the item's words
+  4. Aesthetic siblings — only if name matches aesthetic
 
-FIXES in this version:
-  - Extended _ENGLISH_BLOCK + new _JUNK_WORDS set blocks API field
-    names (creatorname, salestypefilter, subcategory, etc.) that leak
-    from Roblox data dumps into descriptions.
-  - Vowel check rejects consonant-only garbage.
-  - Family-wide fallback for thin name-based mining.
+RELEVANCE GATE (the key change):
+  Every tag must appear in 2+ sources to survive. Signals that
+  matter for sales: (top seller OR live) AND (search demand).
+  If a tag is in top sellers but nobody searches for it → drop.
+  If a tag is searched but no winner uses it → drop.
+  Both signals = real demand + real conversion.
+
+Removed: family-wide mining (too broad, brought noise).
+Removed: IP blocklist (filtering by signal, not by name).
 """
 import os
 import re
@@ -125,7 +126,6 @@ COLOR_SIBLINGS = {
 
 
 _ENGLISH_BLOCK = {
-    # Articles / glue
     "the","and","for","with","you","your","from","that","this","into",
     "over","under","will","can","are","has","how","its","our","all",
     "have","had","was","were","been","being","get","got","make","made",
@@ -135,7 +135,6 @@ _ENGLISH_BLOCK = {
     "whose","why","yes","not","but","nor","yet","so","if","or","as",
     "at","by","in","on","of","to","up","down","out","off","new","old",
     "one","two","three","four","five","six","seven","eight","nine","ten",
-    # Generic UGC
     "model","models","item","items","shop","store","group","community",
     "communities","join","follow","visit","check","click","link","links",
     "http","https","www","com","net","org","roblox","catalog","asset",
@@ -146,7 +145,6 @@ _ENGLISH_BLOCK = {
     "kind","sort","something","anything","nothing","everything",
     "anyone","someone","everyone","nobody","somebody","anybody",
     "everybody","would","could","should","still","many","much","less",
-    # Meta / API field names (Roblox data leaks)
     "creatorname","creatortype","salestypefilter","subcategory",
     "category","assettype","assetid","itemtype","itemid",
     "favoritecount","favorited","favourite","favorites",
@@ -156,7 +154,6 @@ _ENGLISH_BLOCK = {
     "gonna","wanna","gotta","kinda","sorta",
     "lol","lmao","omg","wtf","tbh","imo","idk",
     "yeah","yep","nope","okay","even","better",
-    # Generic verbs (conjugated)
     "want","wants","wanted","wanting","need","needs","needed","needing",
     "make","makes","making","give","gives","gave","given","giving",
     "take","takes","took","taken","taking","come","comes","came",
@@ -180,39 +177,19 @@ _ENGLISH_BLOCK = {
     "felt","feeling","love","loves","loved","loving","hate","hates",
     "hated","hating","like","likes","liked","liking","look","looks",
     "looked","looking","know","knows","knew","known","knowing",
+    # Short garbage
+    "favorite", "favorited", "bookmarked", "hand", "head", "foot",
+    "arm", "leg", "body", "skin", "eye", "eyes", "mouth", "nose",
+    "ear", "ears", "hair", "finger", "toe", "chest", "back",
+    "hello", "goodbye", "welcome", "thanks", "thank",
+    "girl", "boy", "man", "woman", "person", "people", "child",
+    "kid", "friend", "family", "guy", "guys",
+    "anywhere", "everywhere", "somewhere", "nowhere",
+    "always", "never", "sometimes", "often", "usually",
+    "floating", "hanging", "standing", "sitting", "walking",
+    "running", "jumping", "falling", "rising", "shining",
+    "friendly", "excited", "confused",
 }
-
-
-# Words that never belong in a tag block, regardless of source.
-_JUNK_WORDS = {
-    # Roblox API fields (belt-and-suspenders with _ENGLISH_BLOCK)
-    "creatorname", "creatortype", "salestypefilter", "subcategory",
-    "category", "assettype", "assetid", "itemtype", "itemid",
-    "favoritecount", "favorited", "favourite", "favorites",
-    "snapshot", "snapshots", "updated", "created",
-    # Description meta
-    "contained", "tall", "better", "break", "quality", "enjoy",
-    "using", "please", "hope", "guys", "folks", "everyone",
-    "really", "actually", "basically", "literally", "honestly",
-    "gonna", "wanna", "gotta", "kinda", "sorta",
-    "lol", "lmao", "omg", "wtf", "tbh", "imo", "idk",
-    "yeah", "yep", "nope", "okay",
-    # Generic verbs
-    "want", "wants", "wanted", "need", "needs", "needed",
-    "make", "makes", "made", "give", "gives", "gave",
-    "take", "takes", "took", "come", "comes", "came",
-    "look", "looks", "know", "knows", "feel", "feels",
-    "tell", "tells", "show", "shows", "leave", "leaves",
-    # Popularity fillers
-    "popular", "viral", "trending", "trend", "trendy",
-    "amazing", "awesome", "epic", "great", "wonderful",
-    "fantastic", "perfect", "special",
-    # Random one-off junk
-    "panini", "meanie", "nervy",
-}
-
-# Words must be at least 4 chars and contain a vowel
-_MIN_WORD_LEN = 4
 
 
 def _detect_accessory_subtype(name):
@@ -225,20 +202,19 @@ def _detect_accessory_subtype(name):
     return None
 
 
-def _is_tag_shaped(tok):
-    if not tok:
+def _is_valid_word(w):
+    """Basic shape check — length, no digits, has vowels, not an adverb."""
+    if not w:
         return False
-    if not (3 <= len(tok) <= 20):
+    if not (4 <= len(w) <= 25):
         return False
-    if tok in _ENGLISH_BLOCK or tok in _JUNK_WORDS:
+    if any(c in w for c in "0123456789@#_"):
         return False
-    if not re.match(r"^[a-z][a-z'’\- ]*$", tok):
+    if w in _ENGLISH_BLOCK:
         return False
-    if tok.count("-") > 1:
+    if not re.search(r"[aeiou]", w):
         return False
-    if re.search(r"[a-z]-[a-z]-[a-z]", tok):
-        return False
-    if not re.search(r"[aeiou]", tok):
+    if w.endswith("ly") and len(w) > 4:
         return False
     return True
 
@@ -268,33 +244,20 @@ def _extract_tags_from_description(desc):
         if not parts:
             continue
         if len(parts) == 1:
-            if _is_tag_shaped(tok) and tok not in seen:
+            if _is_valid_word(tok) and tok not in seen:
                 seen.add(tok); out.append(tok)
         elif len(parts) == 2:
-            if not all(p in _ENGLISH_BLOCK for p in parts):
-                if all(_is_tag_shaped(p) or p in _ENGLISH_BLOCK for p in parts):
+            if all(_is_valid_word(p) or p in _ENGLISH_BLOCK for p in parts):
+                if not all(p in _ENGLISH_BLOCK for p in parts):
                     if tok not in seen:
                         seen.add(tok); out.append(tok)
     return out
 
 
 def _extract_words_from_text(text):
-    """Extract clean words from name+description for tag mining."""
+    """Extract clean words from name+description."""
     t = (text or "").lower()
-    out = []
-    for w in re.findall(r"[a-z]{4,}", t):
-        if len(w) > 20:
-            continue
-        if w in _ENGLISH_BLOCK or w in _JUNK_WORDS:
-            continue
-        # Must contain a vowel (rejects consonant-only garbage)
-        if not re.search(r"[aeiou]", w):
-            continue
-        # Reject 4-letter words that start with 3 consonants (yffs, etc.)
-        if len(w) == 4 and not re.search(r"[aeiou]", w[:2]):
-            continue
-        out.append(w)
-    return out
+    return [w for w in set(re.findall(r"[a-z]{4,}", t)) if _is_valid_word(w)]
 
 
 def _family_to_roblox_category(family, subtype=None):
@@ -350,8 +313,6 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
                 atype = item.get("assetType") or 0
                 creator = item.get("creatorName") or ""
 
-                # Loose family filter — accept if we know it matches OR
-                # if the type is unknown (0/missing).
                 if subtype:
                     if atype and atype != subtype:
                         continue
@@ -391,12 +352,7 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
 
 
 def _mine_live_tags(keyword, family, subtype=None):
-    """
-    HYBRID live mining — extracts BOTH:
-      1. Tag blocks (from descriptions with 'tags:' sections)
-      2. Common words from name+description (weighted by favs)
-    Returns (tag_block_counter, word_counter, item_count).
-    """
+    """Mine live top sellers for keyword — return (tag_block, words, count)."""
     rows = _fetch_live_items(keyword, family=family, subtype=subtype, limit=30)
     if not rows:
         return Counter(), Counter(), 0
@@ -407,31 +363,24 @@ def _mine_live_tags(keyword, family, subtype=None):
 
     for name, desc, favs in rows:
         weight = 1 + ((favs or 0) / 1000.0)
-
-        # Source 1: explicit tag blocks
         tags = _extract_tags_from_description(desc)
         for tag in set(tags):
             tag_weight[tag] += weight
             tag_appearances[tag] += 1
 
-        # Source 2: words from name + description
         text = f"{name or ''} {desc or ''}"
-        for w in set(_extract_words_from_text(text)):
+        for w in _extract_words_from_text(text):
             word_weight[w] += weight
 
-    # Tag blocks: require 2+ appearances
-    live_tag_block = Counter({
+    live_tags = Counter({
         tag: score for tag, score in tag_weight.items()
         if tag_appearances[tag] >= 2
     })
-
-    # Word mining: keep words that appear in at least 2-3 live items
     live_words = Counter({
         w: score for w, score in word_weight.items()
         if score >= 2.0
     })
-
-    return live_tag_block, live_words, len(rows)
+    return live_tags, live_words, len(rows)
 
 
 def _detect_category(name, explicit_family=None):
@@ -463,140 +412,84 @@ def _family_sql(family, subtype=None):
 
 
 def _mine_top_seller_tags(cur, name_words, family, subtype=None):
+    """
+    Mine tags + words from top sellers matching this item's name.
+    Returns (tag_block, words).
+    """
     if not name_words:
-        return Counter()
+        return Counter(), Counter()
     fam_sql, fam_params = _family_sql(family, subtype)
     patterns = [f"%{w}%" for w in name_words[:4]]
-
-    cur.execute(f"""
-        select description, favorite_count
-        from items
-        where lower(name) like any(%s)
-          and favorite_count > 500
-          and description is not null
-          and length(trim(description)) > 30
-          and lower(description) like '%%tags:%%'
-          {fam_sql}
-        order by favorite_count desc
-        limit 60
-    """, [patterns] + fam_params)
-
-    rows = cur.fetchall()
-    tag_weight = Counter()
-    tag_appearances = Counter()
-    for desc, favs in rows:
-        tags = _extract_tags_from_description(desc)
-        if not tags:
-            continue
-        weight = 1 + ((favs or 0) / 1000.0)
-        for tag in set(tags):
-            tag_weight[tag] += weight
-            tag_appearances[tag] += 1
-
-    return Counter({
-        tag: score for tag, score in tag_weight.items()
-        if tag_appearances[tag] >= 2
-    })
-
-
-def _mine_recent_winners(cur, name_words, family, subtype=None):
-    if not name_words:
-        return Counter()
-    fam_sql, fam_params = _family_sql(family, subtype)
-    patterns = [f"%{w}%" for w in name_words[:4]]
-
-    cur.execute(f"""
-        select description, favorite_count
-        from items
-        where lower(name) like any(%s)
-          and favorite_count > 100
-          and created_at > now() - interval '90 days'
-          and description is not null
-          and length(trim(description)) > 30
-          and lower(description) like '%%tags:%%'
-          {fam_sql}
-        order by favorite_count desc
-        limit 40
-    """, [patterns] + fam_params)
-
-    rows = cur.fetchall()
-    tag_weight = Counter()
-    tag_appearances = Counter()
-    for desc, favs in rows:
-        tags = _extract_tags_from_description(desc)
-        if not tags:
-            continue
-        weight = (1 + ((favs or 0) / 500.0)) * 1.5
-        for tag in set(tags):
-            tag_weight[tag] += weight
-            tag_appearances[tag] += 1
-
-    return Counter({
-        tag: score for tag, score in tag_weight.items()
-        if tag_appearances[tag] >= 2
-    })
-
-
-def _mine_family_wide_tags(cur, family, subtype=None, limit=200):
-    """DB family-wide fallback — mines common words from top items."""
-    if not family:
-        return Counter()
-    fam_sql, fam_params = _family_sql(family, subtype)
 
     cur.execute(f"""
         select name, description, favorite_count
         from items
-        where favorite_count > 50
-          and favorite_count < 500000
+        where lower(name) like any(%s)
+          and favorite_count > 100
+          and description is not null
+          and length(trim(description)) > 30
           {fam_sql}
         order by favorite_count desc
-        limit %s
-    """, fam_params + [limit])
+        limit 100
+    """, [patterns] + fam_params)
 
     rows = cur.fetchall()
+    tag_weight = Counter()
+    tag_appearances = Counter()
     word_weight = Counter()
+
     for name, desc, favs in rows:
-        text = f"{name or ''} {desc or ''}"
         weight = 1 + ((favs or 0) / 1000.0)
-        for w in set(_extract_words_from_text(text)):
+
+        tags = _extract_tags_from_description(desc)
+        for tag in set(tags):
+            tag_weight[tag] += weight
+            tag_appearances[tag] += 1
+
+        text = f"{name or ''} {desc or ''}"
+        for w in _extract_words_from_text(text):
             word_weight[w] += weight
 
-    return word_weight
+    tag_block = Counter({
+        tag: score for tag, score in tag_weight.items()
+        if tag_appearances[tag] >= 2
+    })
+    return tag_block, word_weight
 
 
 def _mine_search_demand(cur, name_words):
+    """Get real search queries matching name words + their tokenized words."""
     if not name_words:
-        return Counter()
+        return Counter(), Counter()
     patterns = [f"%{w}%" for w in name_words[:4]]
 
     cur.execute("""
         select suggestion
         from search_suggestions
         where suggestion ilike any(%s)
-        limit 200
+        limit 300
     """, (patterns,))
 
     rows = cur.fetchall()
-    tag_weight = Counter()
+    phrase_weight = Counter()
+    word_weight = Counter()
+
     for row in rows:
         s = (row[0] or "").lower().strip()
-        if not s or len(s) > 30:
+        if not s or len(s) > 35:
             continue
         if any(x in s for x in ["http", "www", ".com"]):
             continue
-        # Skip single-word suggestions that are junk
         parts = re.findall(r"[a-z]{3,}", s)
-        if parts and all(p in _ENGLISH_BLOCK or p in _JUNK_WORDS for p in parts):
+        if parts and all(p in _ENGLISH_BLOCK for p in parts):
             continue
-        tag_weight[s] += 3.0
-        for w in re.findall(r"[a-z]{3,}", s):
-            if w in _ENGLISH_BLOCK or w in _JUNK_WORDS:
-                continue
-            if not re.search(r"[aeiou]", w):
-                continue
-            tag_weight[w] += 0.5
 
-    return tag_weight
+        phrase_weight[s] += 3.0
+        for w in re.findall(r"[a-z]{3,}", s):
+            if _is_valid_word(w):
+                word_weight[w] += 1.0
+
+    return phrase_weight, word_weight
 
 
 def _find_aesthetic_matches(name_words):
@@ -649,46 +542,34 @@ def generate_tags(item_name, family=None, max_tags=45):
     if detected_family == "accessory":
         accessory_subtype = _detect_accessory_subtype(item_name)
 
-    # ── DB mining ──
-    top_sellers = Counter()
-    recent_winners = Counter()
-    search_demand = Counter()
-    family_wide = Counter()
+    top_tags = Counter()
+    top_words = Counter()
     live_tags = Counter()
     live_words = Counter()
     live_count = 0
+    search_phrases = Counter()
+    search_words = Counter()
 
     conn = get_db(); cur = conn.cursor()
     try:
         try:
-            top_sellers = _mine_top_seller_tags(
+            top_tags, top_words = _mine_top_seller_tags(
                 cur, name_words, detected_family, accessory_subtype)
+            print(f"[tag_generator] top-seller: {len(top_tags)} tags · "
+                  f"{len(top_words)} words", flush=True)
         except Exception as e:
             print(f"[tag_generator] top_seller failed: {e}", flush=True)
         try:
-            recent_winners = _mine_recent_winners(
-                cur, name_words, detected_family, accessory_subtype)
-        except Exception as e:
-            print(f"[tag_generator] recent failed: {e}", flush=True)
-        try:
-            search_demand = _mine_search_demand(cur, name_words)
+            search_phrases, search_words = _mine_search_demand(cur, name_words)
+            print(f"[tag_generator] search: {len(search_phrases)} phrases · "
+                  f"{len(search_words)} words", flush=True)
         except Exception as e:
             print(f"[tag_generator] demand failed: {e}", flush=True)
-
-        if len(top_sellers) + len(recent_winners) < 8:
-            try:
-                family_wide = _mine_family_wide_tags(
-                    cur, detected_family, accessory_subtype, limit=200)
-                print(f"[tag_generator] family-wide: {len(family_wide)} words",
-                      flush=True)
-            except Exception as e:
-                print(f"[tag_generator] family-wide failed: {e}", flush=True)
     finally:
         cur.close(); conn.close()
 
-    # ── LIVE FALLBACK ──
-    db_total = len(top_sellers) + len(recent_winners) + len(family_wide)
-    if db_total < MIN_DB_TAGS * 2:
+    # Live fallback when DB is thin
+    if len(top_tags) + len(top_words) < MIN_DB_TAGS:
         live_kw = None
         sorted_words = sorted(name_words, key=len, reverse=True)
         if sorted_words:
@@ -696,123 +577,56 @@ def generate_tags(item_name, family=None, max_tags=45):
 
         if live_kw and len(live_kw) >= 3:
             try:
-                result = _mine_live_tags(
+                live_tags, live_words, live_count = _mine_live_tags(
                     live_kw, detected_family, accessory_subtype)
-                if isinstance(result, tuple) and len(result) == 3:
-                    live_tags, live_words, live_count = result
                 print(f"[tag_generator] live: {live_count} items · "
-                      f"{len(live_tags)} tag-block tags · "
-                      f"{len(live_words)} word tags", flush=True)
+                      f"{len(live_tags)} tags · {len(live_words)} words",
+                      flush=True)
             except Exception as e:
-                print(f"[tag_generator] live mining failed: {e}", flush=True)
+                print(f"[tag_generator] live failed: {e}", flush=True)
 
     aesthetic = _find_aesthetic_matches(name_words)
     colors = _color_matches(name_words)
 
+    # ── SALES FILTER: tag must appear in 2+ independent sources ──
+    # "Sources" are the 4 signal pools. A tag with 1 source is likely noise.
+    source_count = Counter()
     combined = Counter()
-    for source, mult in [
-        (live_tags, 1.8),
-        (live_words, 1.4),
-        (search_demand, 1.2),
-        (recent_winners, 1.0),
-        (top_sellers, 0.7),
-        (family_wide, 0.4),
-        (aesthetic, 1.2),
-        (colors, 1.0),
-    ]:
-        for tag, weight in source.items():
-            combined[tag] += weight * mult
 
+    for pool, weight in [
+        (top_tags, 1.0),
+        (top_words, 0.8),
+        (live_tags, 1.2),
+        (live_words, 1.0),
+        (search_phrases, 1.5),
+        (search_words, 1.0),
+        (aesthetic, 0.6),
+        (colors, 0.6),
+    ]:
+        for tag, score in pool.items():
+            combined[tag] += score * weight
+            source_count[tag] += 1
+
+    # Name words get a strong boost and count as a source
     for w in name_words:
         combined[w] += 5.0
+        source_count[w] += 1
 
-    junk = {"http", "https", "www", "com", "roblox", "catalog", "store",
-            "shop", "join", "group", "the", "and", "for", "you", "your",
-            "with", "from", "this", "that", "have", "will", "can", "all",
-            "our", "its", "new", "best", "top", "buy", "get", "any"}
-    junk = junk | _JUNK_WORDS
-    filtered = {
-        tag: score for tag, score in combined.items()
-        if tag not in junk
-        and tag not in _ENGLISH_BLOCK
-        and 3 <= len(tag) <= 25
-        and not any(c in tag for c in "0123456789@#")
-        and re.search(r"[aeiou]", tag)
-    }
-
-    # ── RELEVANCE GATE ──
-    FILLER_ANCHORS = {
-        "cute", "cool", "nice", "best", "top", "new", "hot", "trendy",
-        "viral", "aesthetic", "chibi", "soft", "pretty", "sweet",
-        "amazing", "awesome", "epic", "lovely", "chill", "smooth",
-        "fancy", "flashy", "silly", "goofy",
-    }
-    GENERIC_AESTHETICS = {
-        "cute", "soft", "sweet", "pretty", "adorable", "lovely",
-        "nice", "cool",
-    }
-
-    name_roots = set()
-    for w in name_words:
-        if w in FILLER_ANCHORS:
+    # ── APPLY GATE ──
+    # Keep only tags with 2+ source appearances.
+    # Exception: tags in name_words always pass (they're in the item).
+    name_word_set = set(name_words)
+    filtered = {}
+    for tag, score in combined.items():
+        if not _is_valid_word(tag):
             continue
-        name_roots.add(w)
-        if len(w) >= 5:
-            name_roots.add(w[:4])
-        if len(w) >= 4:
-            name_roots.add(w[:3])
-
-    aesthetic_set = set(aesthetic.keys())
-    color_set = set(colors.keys())
-
-    relax_gate = (
-        len(family_wide) > 30
-        or len(live_tags) + len(live_words) > 20
-    )
-
-    def _is_relevant(tag):
-        if tag in _ENGLISH_BLOCK or tag in _JUNK_WORDS:
-            return False
-
-        if relax_gate:
-            if tag in FILLER_ANCHORS:
-                return False
-            return True
-
-        if not name_roots:
-            if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
-                return True
-            return tag in color_set
-
-        if tag in name_roots:
-            return True
-
-        parts = tag.split()
-        if len(parts) >= 2:
-            hits = 0
-            for part in parts:
-                for r in name_roots:
-                    if len(r) >= 4 and (r in part or part in r):
-                        hits += 1
-                        break
-            if hits >= 2:
-                return True
-            if tag in color_set:
-                return True
-            if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
-                return True
-            return False
-
-        for r in name_roots:
-            if len(r) >= 4 and (r in tag or tag in r):
-                return True
-        if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
-            return True
-        if tag in color_set:
-            return True
-        return False
-
-    filtered = {t: s for t, s in filtered.items() if _is_relevant(t)}
+        if len(tag) > 25:
+            continue
+        if tag in name_word_set:
+            filtered[tag] = score
+            continue
+        if source_count[tag] >= 2:
+            filtered[tag] = score
 
     ranked = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
     final_tags = [tag for tag, _ in ranked[:max_tags]]
@@ -827,10 +641,10 @@ def generate_tags(item_name, family=None, max_tags=45):
             "live_roblox":     live_count,
             "live_tag_blocks": len(live_tags),
             "live_words":      len(live_words),
-            "search_demand":   len(search_demand),
-            "recent_winners":  len(recent_winners),
-            "top_sellers":     len(top_sellers),
-            "family_wide":     len(family_wide),
+            "top_seller_tags": len(top_tags),
+            "top_seller_words": len(top_words),
+            "search_phrases":  len(search_phrases),
+            "search_words":    len(search_words),
             "aesthetic":       len(aesthetic),
             "colors":          len(colors),
             "name_words":      len(name_words),
@@ -875,18 +689,18 @@ def format_tags(result):
         live_str += " 🔥 (live Roblox)"
 
     chunks.append(
-        f"**📊 Sources mined:**\n"
+        f"**📊 Signals mined (tags appear in 2+ to survive):**\n"
         f"• Live Roblox top sellers: {live_str}\n"
         f"    – tag blocks: **{src.get('live_tag_blocks', 0)}**\n"
         f"    – word mining: **{src.get('live_words', 0)}**\n"
-        f"• Search demand (real queries): **{src['search_demand']}**\n"
-        f"• Recent winners (last 90d): **{src['recent_winners']}**\n"
-        f"• Top sellers (DB, all time): **{src['top_sellers']}**\n"
-        f"• Family-wide (fallback): **{src.get('family_wide', 0)}**\n"
+        f"• DB top-seller tags: **{src.get('top_seller_tags', 0)}**\n"
+        f"• DB top-seller words: **{src.get('top_seller_words', 0)}**\n"
+        f"• Search phrases: **{src.get('search_phrases', 0)}**\n"
+        f"• Search words: **{src.get('search_words', 0)}**\n"
         f"• Aesthetic siblings: **{src['aesthetic']}**\n"
         f"• Color siblings: **{src['colors']}**\n"
         f"• Name words: **{src['name_words']}**\n"
-        f"\n_Every tag traces to real data. No hallucination._"
+        f"\n_Every surviving tag appears in 2+ signals. Real demand + real conversion._"
     )
 
     return chunks
