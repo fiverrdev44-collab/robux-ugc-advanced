@@ -9,7 +9,12 @@ HYBRID approach:
   5. Real search suggestions — real demand signals
   6. Aesthetic + color siblings — static lookup
 
-Every tag traces to real data.
+FIXES in this version:
+  - Extended _ENGLISH_BLOCK + new _JUNK_WORDS set blocks API field
+    names (creatorname, salestypefilter, subcategory, etc.) that leak
+    from Roblox data dumps into descriptions.
+  - Vowel check rejects consonant-only garbage.
+  - Family-wide fallback for thin name-based mining.
 """
 import os
 import re
@@ -120,26 +125,94 @@ COLOR_SIBLINGS = {
 
 
 _ENGLISH_BLOCK = {
+    # Articles / glue
     "the","and","for","with","you","your","from","that","this","into",
-    "over","will","can","are","has","how","its","our","all","have","had",
-    "was","were","been","being","get","got","make","made","more","most",
-    "some","any","every","each","other","another","such","only","very",
-    "just","also","than","then","them","they","their","there","here",
-    "when","what","where","which","while","who","whom","whose","why",
-    "yes","not","but","nor","yet","so","if","or","as","at","by","in",
-    "on","of","to","up","down","out","off","new","old","one","two","three",
+    "over","under","will","can","are","has","how","its","our","all",
+    "have","had","was","were","been","being","get","got","make","made",
+    "more","most","some","any","every","each","other","another","such",
+    "only","very","just","also","than","then","them","they","their",
+    "there","here","when","what","where","which","while","who","whom",
+    "whose","why","yes","not","but","nor","yet","so","if","or","as",
+    "at","by","in","on","of","to","up","down","out","off","new","old",
+    "one","two","three","four","five","six","seven","eight","nine","ten",
+    # Generic UGC
     "model","models","item","items","shop","store","group","community",
     "communities","join","follow","visit","check","click","link","links",
     "http","https","www","com","net","org","roblox","catalog","asset",
-    "id","page","site","website","created","creator",
-    "buy","buying","sell","selling","sold","sale","price","prices","cost",
-    "free","paid","cheap","expensive","discount","promo","promotion",
-    "version","edition","style","styled","type","kinds","kind","sort",
-    "something","anything","nothing","everything","anyone","someone",
-    "everyone","nobody","somebody","anybody","everybody",
-    "would","could","should","also","just","only","very","still",
-    "many","much","more","less","every",
+    "assets","id","page","site","website","created","creator","creators",
+    "buy","buying","sell","selling","sold","sale","price","prices",
+    "cost","free","paid","cheap","expensive","discount","promo",
+    "promotion","version","edition","style","styled","type","kinds",
+    "kind","sort","something","anything","nothing","everything",
+    "anyone","someone","everyone","nobody","somebody","anybody",
+    "everybody","would","could","should","still","many","much","less",
+    # Meta / API field names (Roblox data leaks)
+    "creatorname","creatortype","salestypefilter","subcategory",
+    "category","assettype","assetid","itemtype","itemid",
+    "favoritecount","favorited","favourite","favorites",
+    "snapshot","snapshots","updated","contained","tall","break",
+    "quality","enjoy","using","please","hope","guys","folks",
+    "really","actually","basically","literally","honestly",
+    "gonna","wanna","gotta","kinda","sorta",
+    "lol","lmao","omg","wtf","tbh","imo","idk",
+    "yeah","yep","nope","okay","even","better",
+    # Generic verbs (conjugated)
+    "want","wants","wanted","wanting","need","needs","needed","needing",
+    "make","makes","making","give","gives","gave","given","giving",
+    "take","takes","took","taken","taking","come","comes","came",
+    "coming","go","goes","went","gone","going","get","gets","getting",
+    "see","sees","saw","seen","seeing","use","uses","used","using",
+    "user","users","work","works","worked","working","play","plays",
+    "played","playing","stop","stops","stopped","stopping","start",
+    "starts","started","starting","find","finds","found","finding",
+    "keep","keeps","kept","keeping","call","calls","called","calling",
+    "try","tries","tried","trying","ask","asks","asked","asking",
+    "put","puts","putting","say","says","said","saying","tell","tells",
+    "told","telling","show","shows","showed","shown","showing",
+    "leave","leaves","left","leaving","let","lets","letting",
+    "seem","seems","seemed","seeming","sound","sounds","sounded",
+    "sounding","turn","turns","turned","turning","help","helps",
+    "helped","helping","walk","walks","walked","walking","run","runs",
+    "ran","running","believe","believes","believed","believing",
+    "happen","happens","happened","happening","talk","talks","talked",
+    "talking","move","moves","moved","moving","live","lives","lived",
+    "living","think","thinks","thought","thinking","feel","feels",
+    "felt","feeling","love","loves","loved","loving","hate","hates",
+    "hated","hating","like","likes","liked","liking","look","looks",
+    "looked","looking","know","knows","knew","known","knowing",
 }
+
+
+# Words that never belong in a tag block, regardless of source.
+_JUNK_WORDS = {
+    # Roblox API fields (belt-and-suspenders with _ENGLISH_BLOCK)
+    "creatorname", "creatortype", "salestypefilter", "subcategory",
+    "category", "assettype", "assetid", "itemtype", "itemid",
+    "favoritecount", "favorited", "favourite", "favorites",
+    "snapshot", "snapshots", "updated", "created",
+    # Description meta
+    "contained", "tall", "better", "break", "quality", "enjoy",
+    "using", "please", "hope", "guys", "folks", "everyone",
+    "really", "actually", "basically", "literally", "honestly",
+    "gonna", "wanna", "gotta", "kinda", "sorta",
+    "lol", "lmao", "omg", "wtf", "tbh", "imo", "idk",
+    "yeah", "yep", "nope", "okay",
+    # Generic verbs
+    "want", "wants", "wanted", "need", "needs", "needed",
+    "make", "makes", "made", "give", "gives", "gave",
+    "take", "takes", "took", "come", "comes", "came",
+    "look", "looks", "know", "knows", "feel", "feels",
+    "tell", "tells", "show", "shows", "leave", "leaves",
+    # Popularity fillers
+    "popular", "viral", "trending", "trend", "trendy",
+    "amazing", "awesome", "epic", "great", "wonderful",
+    "fantastic", "perfect", "special",
+    # Random one-off junk
+    "panini", "meanie", "nervy",
+}
+
+# Words must be at least 4 chars and contain a vowel
+_MIN_WORD_LEN = 4
 
 
 def _detect_accessory_subtype(name):
@@ -157,13 +230,15 @@ def _is_tag_shaped(tok):
         return False
     if not (3 <= len(tok) <= 20):
         return False
-    if tok in _ENGLISH_BLOCK:
+    if tok in _ENGLISH_BLOCK or tok in _JUNK_WORDS:
         return False
     if not re.match(r"^[a-z][a-z'’\- ]*$", tok):
         return False
     if tok.count("-") > 1:
         return False
     if re.search(r"[a-z]-[a-z]-[a-z]", tok):
+        return False
+    if not re.search(r"[aeiou]", tok):
         return False
     return True
 
@@ -208,7 +283,15 @@ def _extract_words_from_text(text):
     t = (text or "").lower()
     out = []
     for w in re.findall(r"[a-z]{4,}", t):
-        if len(w) > 20 or w in _ENGLISH_BLOCK:
+        if len(w) > 20:
+            continue
+        if w in _ENGLISH_BLOCK or w in _JUNK_WORDS:
+            continue
+        # Must contain a vowel (rejects consonant-only garbage)
+        if not re.search(r"[aeiou]", w):
+            continue
+        # Reject 4-letter words that start with 3 consonants (yffs, etc.)
+        if len(w) == 4 and not re.search(r"[aeiou]", w[:2]):
             continue
         out.append(w)
     return out
@@ -268,8 +351,7 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
                 creator = item.get("creatorName") or ""
 
                 # Loose family filter — accept if we know it matches OR
-                # if the type is unknown (0/missing). Only reject when we
-                # clearly know it's a different family.
+                # if the type is unknown (0/missing).
                 if subtype:
                     if atype and atype != subtype:
                         continue
@@ -313,10 +395,11 @@ def _mine_live_tags(keyword, family, subtype=None):
     HYBRID live mining — extracts BOTH:
       1. Tag blocks (from descriptions with 'tags:' sections)
       2. Common words from name+description (weighted by favs)
+    Returns (tag_block_counter, word_counter, item_count).
     """
     rows = _fetch_live_items(keyword, family=family, subtype=subtype, limit=30)
     if not rows:
-        return Counter(), 0
+        return Counter(), Counter(), 0
 
     tag_weight = Counter()
     tag_appearances = Counter()
@@ -342,14 +425,13 @@ def _mine_live_tags(keyword, family, subtype=None):
         if tag_appearances[tag] >= 2
     })
 
-    # Word mining: keep words that appear in at least 3 live items
+    # Word mining: keep words that appear in at least 2-3 live items
     live_words = Counter({
         w: score for w, score in word_weight.items()
-        if score >= 3.0  # implies 2-3 items at weight 1 each
+        if score >= 2.0
     })
 
-    total_items = len(rows)
-    return live_tag_block, live_words, total_items
+    return live_tag_block, live_words, len(rows)
 
 
 def _detect_category(name, explicit_family=None):
@@ -456,10 +538,7 @@ def _mine_recent_winners(cur, name_words, family, subtype=None):
 
 
 def _mine_family_wide_tags(cur, family, subtype=None, limit=200):
-    """
-    DB family-wide fallback — mines common words from top items
-    in the family (no name filter).
-    """
+    """DB family-wide fallback — mines common words from top items."""
     if not family:
         return Counter()
     fam_sql, fam_params = _family_sql(family, subtype)
@@ -505,8 +584,16 @@ def _mine_search_demand(cur, name_words):
             continue
         if any(x in s for x in ["http", "www", ".com"]):
             continue
+        # Skip single-word suggestions that are junk
+        parts = re.findall(r"[a-z]{3,}", s)
+        if parts and all(p in _ENGLISH_BLOCK or p in _JUNK_WORDS for p in parts):
+            continue
         tag_weight[s] += 3.0
         for w in re.findall(r"[a-z]{3,}", s):
+            if w in _ENGLISH_BLOCK or w in _JUNK_WORDS:
+                continue
+            if not re.search(r"[aeiou]", w):
+                continue
             tag_weight[w] += 0.5
 
     return tag_weight
@@ -588,7 +675,6 @@ def generate_tags(item_name, family=None, max_tags=45):
         except Exception as e:
             print(f"[tag_generator] demand failed: {e}", flush=True)
 
-        # Family-wide DB fallback
         if len(top_sellers) + len(recent_winners) < 8:
             try:
                 family_wide = _mine_family_wide_tags(
@@ -600,9 +686,9 @@ def generate_tags(item_name, family=None, max_tags=45):
     finally:
         cur.close(); conn.close()
 
-    # ── LIVE FALLBACK — always runs when DB thin ──
+    # ── LIVE FALLBACK ──
     db_total = len(top_sellers) + len(recent_winners) + len(family_wide)
-    if db_total < MIN_DB_TAGS * 2:  # < 24 → try live
+    if db_total < MIN_DB_TAGS * 2:
         live_kw = None
         sorted_words = sorted(name_words, key=len, reverse=True)
         if sorted_words:
@@ -625,8 +711,8 @@ def generate_tags(item_name, family=None, max_tags=45):
 
     combined = Counter()
     for source, mult in [
-        (live_tags, 1.8),      # highest — live winners with real tags
-        (live_words, 1.4),     # live word mining — strong signal
+        (live_tags, 1.8),
+        (live_words, 1.4),
         (search_demand, 1.2),
         (recent_winners, 1.0),
         (top_sellers, 0.7),
@@ -644,11 +730,14 @@ def generate_tags(item_name, family=None, max_tags=45):
             "shop", "join", "group", "the", "and", "for", "you", "your",
             "with", "from", "this", "that", "have", "will", "can", "all",
             "our", "its", "new", "best", "top", "buy", "get", "any"}
+    junk = junk | _JUNK_WORDS
     filtered = {
         tag: score for tag, score in combined.items()
         if tag not in junk
+        and tag not in _ENGLISH_BLOCK
         and 3 <= len(tag) <= 25
         and not any(c in tag for c in "0123456789@#")
+        and re.search(r"[aeiou]", tag)
     }
 
     # ── RELEVANCE GATE ──
@@ -676,13 +765,15 @@ def generate_tags(item_name, family=None, max_tags=45):
     aesthetic_set = set(aesthetic.keys())
     color_set = set(colors.keys())
 
-    # Relax gate when we have a lot of live/family signals
     relax_gate = (
         len(family_wide) > 30
         or len(live_tags) + len(live_words) > 20
     )
 
     def _is_relevant(tag):
+        if tag in _ENGLISH_BLOCK or tag in _JUNK_WORDS:
+            return False
+
         if relax_gate:
             if tag in FILLER_ANCHORS:
                 return False
