@@ -1,15 +1,15 @@
 """
 tag_generator.py — sales-weighted SEO tag generator.
 
-FIXES in this version:
-  - ACCESSORY UMBRELLA + SUB-TYPE:
-      * "accessory:" without a hint → all 5 sub-types (43-47)
-      * "accessory:kawaii backpack" → detects "backpack" → back only [46]
-      * "accessory:gold chain" → detects "chain" → neck only [43]
-      * Falls back to umbrella if no sub-type hint in name.
-  - Translates category_configs family names → convergence_engine
-    family names before FAMILIES.get() (skips "accessory").
-  - Relevance gate rejects tags that don't share a root with the item.
+HYBRID approach:
+  1. Live Roblox (top sellers by keyword) — mines tag blocks AND words
+  2. DB top sellers (name-based) — mines tag blocks
+  3. DB recent winners (last 90d) — mines tag blocks
+  4. DB family-wide fallback — mines common words from top items
+  5. Real search suggestions — real demand signals
+  6. Aesthetic + color siblings — static lookup
+
+Every tag traces to real data.
 """
 import os
 import re
@@ -22,38 +22,26 @@ from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 ROBLOX_SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 MIN_DB_TAGS = 12
 
-# Accessory umbrella — all 5 Roblox accessory sub-types
 ACCESSORY_IDS = [43, 44, 45, 46, 47]
 
-# Sub-type labels for display
 SUBTYPE_LABELS = {
-    43: "neck",
-    44: "shoulder",
-    45: "front",
-    46: "back",
-    47: "waist",
+    43: "neck", 44: "shoulder", 45: "front", 46: "back", 47: "waist",
 }
 
-# Name hints → specific accessory sub-type ID
 _ACCESSORY_SUBTYPE_HINTS = {
-    # BACK (46)
     "back": 46, "backpack": 46, "bookbag": 46,
     "wing": 46, "wings": 46, "cape": 46, "cloak": 46,
     "tail": 46, "tails": 46, "quiver": 46, "satchel": 46,
     "antenna": 46, "antennae": 46, "jetpack": 46,
-    # NECK (43)
     "neck": 43, "necklace": 43, "chain": 43, "choker": 43,
     "pendant": 43, "collar": 43, "scarf": 43, "bandana": 43,
     "bowtie": 43, "lanyard": 43, "medallion": 43,
-    # SHOULDER (44)
     "shoulder": 44, "parrot": 44, "buddy": 44, "companion": 44,
     "mouse": 44, "rat": 44,
-    # FRONT (45)
     "front": 45, "chest": 45, "apron": 45, "sash": 45,
     "brooch": 45, "chestplate": 45, "bib": 45,
-    # WAIST (47)
     "waist": 47, "belt": 47, "hip": 47, "fanny": 47,
-    "pouch": 47, "sash": 47, "kimono": 47,
+    "pouch": 47, "kimono": 47,
 }
 
 
@@ -149,21 +137,15 @@ _ENGLISH_BLOCK = {
     "version","edition","style","styled","type","kinds","kind","sort",
     "something","anything","nothing","everything","anyone","someone",
     "everyone","nobody","somebody","anybody","everybody",
+    "would","could","should","also","just","only","very","still",
+    "many","much","more","less","every",
 }
 
 
-# ── Sub-type detection ──────────────────────────────────────────
-
 def _detect_accessory_subtype(name):
-    """
-    Return specific accessory asset_type_id (43-47) based on
-    hints in the item name. Returns None if no hint found.
-    """
     if not name:
         return None
     n = (name or "").lower()
-    # Longer hints first (so "backpack" wins over "back" — same result
-    # here, but safer ordering for overlapping hints)
     for hint in sorted(_ACCESSORY_SUBTYPE_HINTS, key=len, reverse=True):
         if re.search(rf"\b{re.escape(hint)}\b", n):
             return _ACCESSORY_SUBTYPE_HINTS[hint]
@@ -221,24 +203,27 @@ def _extract_tags_from_description(desc):
     return out
 
 
+def _extract_words_from_text(text):
+    """Extract clean words from name+description for tag mining."""
+    t = (text or "").lower()
+    out = []
+    for w in re.findall(r"[a-z]{4,}", t):
+        if len(w) > 20 or w in _ENGLISH_BLOCK:
+            continue
+        out.append(w)
+    return out
+
+
 def _family_to_roblox_category(family, subtype=None):
-    """Roblox catalog category ID (best-effort). Accessory = None."""
     if subtype:
-        # Map our asset_type_id → Roblox catalog Category
-        return {
-            43: 5,   # Neck
-            44: 9,   # Shoulder
-            45: 7,   # Front
-            46: 8,   # Back
-            47: 6,   # Waist
-        }.get(subtype)
+        return {43: 5, 44: 9, 45: 7, 46: 8, 47: 6}.get(subtype)
     if not family:
         return None
     if family == "accessory":
-        return None  # umbrella — no single Roblox category
+        return None
     return {
-        "hair":     12, "face": 13, "neck": 5, "shoulder": 9,
-        "front":    7,  "back": 8,  "waist": 6,
+        "hair": 12, "face": 13, "neck": 5, "shoulder": 9,
+        "front": 7, "back": 8, "waist": 6,
     }.get(family)
 
 
@@ -282,15 +267,20 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
                 atype = item.get("assetType") or 0
                 creator = item.get("creatorName") or ""
 
-                # Accessory sub-type or umbrella filter
-                if subtype and atype != subtype:
-                    continue
+                # Loose family filter — accept if we know it matches OR
+                # if the type is unknown (0/missing). Only reject when we
+                # clearly know it's a different family.
+                if subtype:
+                    if atype and atype != subtype:
+                        continue
                 elif family == "accessory" and not subtype:
-                    if atype not in ACCESSORY_IDS:
+                    if atype and atype not in ACCESSORY_IDS:
                         continue
                 elif family and family != "accessory":
-                    if ASSET_TO_FAMILY.get(atype) != family:
-                        continue
+                    if atype:
+                        item_family = ASSET_TO_FAMILY.get(atype)
+                        if item_family and item_family != family:
+                            continue
 
                 try:
                     cur.execute("""
@@ -319,25 +309,47 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
 
 
 def _mine_live_tags(keyword, family, subtype=None):
+    """
+    HYBRID live mining — extracts BOTH:
+      1. Tag blocks (from descriptions with 'tags:' sections)
+      2. Common words from name+description (weighted by favs)
+    """
     rows = _fetch_live_items(keyword, family=family, subtype=subtype, limit=30)
     if not rows:
-        return Counter()
+        return Counter(), 0
 
     tag_weight = Counter()
     tag_appearances = Counter()
+    word_weight = Counter()
+
     for name, desc, favs in rows:
-        tags = _extract_tags_from_description(desc)
-        if not tags:
-            continue
         weight = 1 + ((favs or 0) / 1000.0)
+
+        # Source 1: explicit tag blocks
+        tags = _extract_tags_from_description(desc)
         for tag in set(tags):
             tag_weight[tag] += weight
             tag_appearances[tag] += 1
 
-    return Counter({
+        # Source 2: words from name + description
+        text = f"{name or ''} {desc or ''}"
+        for w in set(_extract_words_from_text(text)):
+            word_weight[w] += weight
+
+    # Tag blocks: require 2+ appearances
+    live_tag_block = Counter({
         tag: score for tag, score in tag_weight.items()
         if tag_appearances[tag] >= 2
     })
+
+    # Word mining: keep words that appear in at least 3 live items
+    live_words = Counter({
+        w: score for w, score in word_weight.items()
+        if score >= 3.0  # implies 2-3 items at weight 1 each
+    })
+
+    total_items = len(rows)
+    return live_tag_block, live_words, total_items
 
 
 def _detect_category(name, explicit_family=None):
@@ -357,11 +369,6 @@ def _detect_category(name, explicit_family=None):
 
 
 def _family_sql(family, subtype=None):
-    """
-    Accessory handling:
-      * subtype set → narrow to that exact asset_type_id
-      * family=accessory, no subtype → umbrella (all 5)
-    """
     if family == "accessory":
         if subtype:
             return " and asset_type_id = %s", [subtype]
@@ -448,6 +455,36 @@ def _mine_recent_winners(cur, name_words, family, subtype=None):
     })
 
 
+def _mine_family_wide_tags(cur, family, subtype=None, limit=200):
+    """
+    DB family-wide fallback — mines common words from top items
+    in the family (no name filter).
+    """
+    if not family:
+        return Counter()
+    fam_sql, fam_params = _family_sql(family, subtype)
+
+    cur.execute(f"""
+        select name, description, favorite_count
+        from items
+        where favorite_count > 50
+          and favorite_count < 500000
+          {fam_sql}
+        order by favorite_count desc
+        limit %s
+    """, fam_params + [limit])
+
+    rows = cur.fetchall()
+    word_weight = Counter()
+    for name, desc, favs in rows:
+        text = f"{name or ''} {desc or ''}"
+        weight = 1 + ((favs or 0) / 1000.0)
+        for w in set(_extract_words_from_text(text)):
+            word_weight[w] += weight
+
+    return word_weight
+
+
 def _mine_search_demand(cur, name_words):
     if not name_words:
         return Counter()
@@ -502,7 +539,6 @@ def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
 
-    # Translate category_configs → convergence_engine family (skip accessory)
     if family and family != "accessory":
         try:
             from category_configs import to_convergence_family
@@ -522,16 +558,18 @@ def generate_tags(item_name, family=None, max_tags=45):
 
     detected_family = _detect_category(item_name, explicit_family=family)
 
-    # ── SUB-TYPE DETECTION for accessory ────────────────────────
     accessory_subtype = None
     if detected_family == "accessory":
         accessory_subtype = _detect_accessory_subtype(item_name)
-    # ────────────────────────────────────────────────────────────
 
     # ── DB mining ──
     top_sellers = Counter()
     recent_winners = Counter()
     search_demand = Counter()
+    family_wide = Counter()
+    live_tags = Counter()
+    live_words = Counter()
+    live_count = 0
 
     conn = get_db(); cur = conn.cursor()
     try:
@@ -549,14 +587,22 @@ def generate_tags(item_name, family=None, max_tags=45):
             search_demand = _mine_search_demand(cur, name_words)
         except Exception as e:
             print(f"[tag_generator] demand failed: {e}", flush=True)
+
+        # Family-wide DB fallback
+        if len(top_sellers) + len(recent_winners) < 8:
+            try:
+                family_wide = _mine_family_wide_tags(
+                    cur, detected_family, accessory_subtype, limit=200)
+                print(f"[tag_generator] family-wide: {len(family_wide)} words",
+                      flush=True)
+            except Exception as e:
+                print(f"[tag_generator] family-wide failed: {e}", flush=True)
     finally:
         cur.close(); conn.close()
 
-    # ── LIVE FALLBACK if DB is thin ──
-    live_tags = Counter()
-    db_tag_total = len(top_sellers) + len(recent_winners)
-
-    if db_tag_total < MIN_DB_TAGS:
+    # ── LIVE FALLBACK — always runs when DB thin ──
+    db_total = len(top_sellers) + len(recent_winners) + len(family_wide)
+    if db_total < MIN_DB_TAGS * 2:  # < 24 → try live
         live_kw = None
         sorted_words = sorted(name_words, key=len, reverse=True)
         if sorted_words:
@@ -564,8 +610,13 @@ def generate_tags(item_name, family=None, max_tags=45):
 
         if live_kw and len(live_kw) >= 3:
             try:
-                live_tags = _mine_live_tags(
+                result = _mine_live_tags(
                     live_kw, detected_family, accessory_subtype)
+                if isinstance(result, tuple) and len(result) == 3:
+                    live_tags, live_words, live_count = result
+                print(f"[tag_generator] live: {live_count} items · "
+                      f"{len(live_tags)} tag-block tags · "
+                      f"{len(live_words)} word tags", flush=True)
             except Exception as e:
                 print(f"[tag_generator] live mining failed: {e}", flush=True)
 
@@ -574,10 +625,12 @@ def generate_tags(item_name, family=None, max_tags=45):
 
     combined = Counter()
     for source, mult in [
-        (live_tags, 1.5),
+        (live_tags, 1.8),      # highest — live winners with real tags
+        (live_words, 1.4),     # live word mining — strong signal
         (search_demand, 1.2),
         (recent_winners, 1.0),
         (top_sellers, 0.7),
+        (family_wide, 0.4),
         (aesthetic, 1.2),
         (colors, 1.0),
     ]:
@@ -598,7 +651,7 @@ def generate_tags(item_name, family=None, max_tags=45):
         and not any(c in tag for c in "0123456789@#")
     }
 
-    # ── RELEVANCE GATE ──────────────────────────────────────────
+    # ── RELEVANCE GATE ──
     FILLER_ANCHORS = {
         "cute", "cool", "nice", "best", "top", "new", "hot", "trendy",
         "viral", "aesthetic", "chibi", "soft", "pretty", "sweet",
@@ -623,7 +676,18 @@ def generate_tags(item_name, family=None, max_tags=45):
     aesthetic_set = set(aesthetic.keys())
     color_set = set(colors.keys())
 
+    # Relax gate when we have a lot of live/family signals
+    relax_gate = (
+        len(family_wide) > 30
+        or len(live_tags) + len(live_words) > 20
+    )
+
     def _is_relevant(tag):
+        if relax_gate:
+            if tag in FILLER_ANCHORS:
+                return False
+            return True
+
         if not name_roots:
             if tag in aesthetic_set and tag not in GENERIC_AESTHETICS:
                 return True
@@ -633,7 +697,6 @@ def generate_tags(item_name, family=None, max_tags=45):
             return True
 
         parts = tag.split()
-
         if len(parts) >= 2:
             hits = 0
             for part in parts:
@@ -659,7 +722,6 @@ def generate_tags(item_name, family=None, max_tags=45):
         return False
 
     filtered = {t: s for t, s in filtered.items() if _is_relevant(t)}
-    # ────────────────────────────────────────────────────────────
 
     ranked = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
     final_tags = [tag for tag, _ in ranked[:max_tags]]
@@ -671,10 +733,13 @@ def generate_tags(item_name, family=None, max_tags=45):
         "subtype_label": SUBTYPE_LABELS.get(accessory_subtype),
         "tags": final_tags,
         "sources": {
-            "live_roblox":     len(live_tags),
+            "live_roblox":     live_count,
+            "live_tag_blocks": len(live_tags),
+            "live_words":      len(live_words),
             "search_demand":   len(search_demand),
             "recent_winners":  len(recent_winners),
             "top_sellers":     len(top_sellers),
+            "family_wide":     len(family_wide),
             "aesthetic":       len(aesthetic),
             "colors":          len(colors),
             "name_words":      len(name_words),
@@ -693,7 +758,6 @@ def format_tags(result):
 
     chunks = []
 
-    # Sub-type label (back / neck / shoulder / front / waist) if known
     subtype_str = ""
     if result.get("subtype_label"):
         subtype_str = f" · `{result['subtype_label']}`"
@@ -722,9 +786,12 @@ def format_tags(result):
     chunks.append(
         f"**📊 Sources mined:**\n"
         f"• Live Roblox top sellers: {live_str}\n"
+        f"    – tag blocks: **{src.get('live_tag_blocks', 0)}**\n"
+        f"    – word mining: **{src.get('live_words', 0)}**\n"
         f"• Search demand (real queries): **{src['search_demand']}**\n"
         f"• Recent winners (last 90d): **{src['recent_winners']}**\n"
         f"• Top sellers (DB, all time): **{src['top_sellers']}**\n"
+        f"• Family-wide (fallback): **{src.get('family_wide', 0)}**\n"
         f"• Aesthetic siblings: **{src['aesthetic']}**\n"
         f"• Color siblings: **{src['colors']}**\n"
         f"• Name words: **{src['name_words']}**\n"
