@@ -244,7 +244,89 @@ class MenuView(discord.ui.View):
         _apply_gif(embed, GIF_LOAD)
         await interaction.response.send_message(embed=embed)
 
-    @discord.ui.button(label="ℹ️ MANUAL — Full Guide", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🐋 WHALE — Studio Radar", style=discord.ButtonStyle.secondary, row=2)
+    async def whale_radar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🐋 WHALE — TOP STUDIO RADAR",
+            description=(
+                "_Surveils top 50 Roblox studios (Erythia, Rush, Foov) within 15 minutes._\n"
+                "_\u200b_\n"
+                "**TARGET:** Monitored elite studios dropping new UGC items\n"
+                "**PAYLOAD:** Asset ID, item title, price, favorite velocity\n"
+                "_\u200b_\n"
+                "**HOW TO FIRE:**\n"
+                "`!whales` — view all recent drops across top studios\n"
+                "`!whales Erythia` — track drops by specific studio name\n"
+                "`!whales Rush` — check Rush Production\n"
+                "_\u200b_\n"
+                "**DOCTRINE:** Catch studio meta shifts the hour they drop."
+            ),
+            color=COLOR_STEALTH,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="🎯 VACUUM — Search Sniper", style=discord.ButtonStyle.secondary, row=2)
+    async def vacuum_sniper(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎯 VACUUM — SEARCH SNIPER",
+            description=(
+                "_Finds high-volume player search terms with zero or low catalog supply._\n"
+                "_\u200b_\n"
+                "**TARGET:** 54,397 mined Roblox autocomplete suggestions\n"
+                "**PAYLOAD:** High query volume vs <= 5 catalog items\n"
+                "_\u200b_\n"
+                "**HOW TO FIRE:**\n"
+                "`!vacuum` — scan top zero-supply search gaps\n"
+                "`!vacuum 10` — retrieve top 10 market gaps\n"
+                "_\u200b_\n"
+                "**DOCTRINE:** Design where thousands of players search and nobody is selling."
+            ),
+            color=COLOR_STEALTH,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="📈 REVSIM — Revenue Forecast", style=discord.ButtonStyle.secondary, row=3)
+    async def revsim_forecast(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📈 REVSIM — 30-DAY REVENUE SIMULATOR",
+            description=(
+                "_Forecasts 30-day unit sales and Robux return before you model._\n"
+                "_\u200b_\n"
+                "**TARGET:** Pricing and launch momentum model\n"
+                "**PAYLOAD:** Estimated sales, gross Robux, 70% creator net profit\n"
+                "_\u200b_\n"
+                "**HOW TO FIRE:**\n"
+                "`!revsim 105 1500 organic` — organic launch baseline\n"
+                "`!revsim 125 2000 moderate` — moderate promotion (Discord/Ads)\n"
+                "`!revsim 150 3000 aggressive` — aggressive top-tier push\n"
+                "_\u200b_\n"
+                "**CALIBRATION:** Tested against 43,877 historical item snapshots."
+            ),
+            color=COLOR_STEALTH,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="⚡ VELOCITY — 48h Radar", style=discord.ButtonStyle.secondary, row=3)
+    async def velocity_radar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="⚡ VELOCITY — 48-HOUR TESTING WINDOW",
+            description=(
+                "_Scans early favorite spikes during Roblox's golden algorithmic test._\n"
+                "_\u200b_\n"
+                "**TARGET:** Items published within the last 48 hours\n"
+                "**PAYLOAD:** Real-time favorite acceleration\n"
+                "_\u200b_\n"
+                "**HOW TO FIRE:**\n"
+                "`!velocity` — scan top accelerating items\n"
+                "`!velocity 8` — top 8 momentum leaders\n"
+                "_\u200b_\n"
+                "**DOCTRINE:** Spot viral trends before they hit the global front page."
+            ),
+            color=COLOR_STEALTH,
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="ℹ️ MANUAL — Full Guide", style=discord.ButtonStyle.secondary, row=4)
     async def workflow(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="⚓ VANTA 73 — COMBAT MANUAL",
@@ -318,6 +400,18 @@ def register_menu_commands(bot, get_db):
                 "_\u200b_\n"
                 "**🏷️ LOAD — Generate Tags**\n"
                 "45 SEO tags mined from real top-sellers. Copy-paste ready.\n"
+                "_\u200b_\n"
+                "**🐋 WHALE — Studio Radar**\n"
+                "Surveils top 50 studios & drops within 15m (`!whales`).\n"
+                "_\u200b_\n"
+                "**🎯 VACUUM — Search Sniper**\n"
+                "Zero-supply gaps from 54,397 search suggestions (`!vacuum`).\n"
+                "_\u200b_\n"
+                "**📈 REVSIM — Revenue Simulator**\n"
+                "30-day unit and 70% Robux creator forecast (`!revsim`).\n"
+                "_\u200b_\n"
+                "**⚡ VELOCITY — 48h Radar**\n"
+                "Golden window algorithmic acceleration (`!velocity`).\n"
                 "_\u200b_\n"
                 "**ℹ️ Click MANUAL for the full 3-phase combat guide.**"
             ),
