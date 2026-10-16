@@ -249,17 +249,26 @@ class MenuView(discord.ui.View):
         embed = discord.Embed(
             title="🐋 WHALE — TOP STUDIO RADAR",
             description=(
-                "_Surveils top 50 Roblox studios (Erythia, Rush, Foov) within 15 minutes._\n"
+                "_Surveils top 50 studios (Erythia, Rush, Foov) within 15 minutes of drop._\n"
                 "_\u200b_\n"
                 "**TARGET:** Monitored elite studios dropping new UGC items\n"
-                "**PAYLOAD:** Asset ID, item title, price, favorite velocity\n"
+                "**PAYLOAD:** Asset ID · item title · price · favorite velocity\n"
+                "**DOCTRINE:** Catch studio meta shifts before they saturate\n"
                 "_\u200b_\n"
-                "**HOW TO FIRE:**\n"
-                "`!whales` — view all recent drops across top studios\n"
-                "`!whales Erythia` — track drops by specific studio name\n"
+                "**STEP 1 — ACTIVATE RADAR**\n"
+                "`!whales` — sweep all top 50 monitored studios\n"
+                "`!whales Erythia` — track specific studio drops\n"
                 "`!whales Rush` — check Rush Production\n"
                 "_\u200b_\n"
-                "**DOCTRINE:** Catch studio meta shifts the hour they drop."
+                "**STEP 2 — ASSESS THREAT**\n"
+                "Bot replies with:\n"
+                "• 🏷️ New item name & direct Roblox catalog link\n"
+                "• 💰 Price point & category\n"
+                "• ⭐ Early favorite velocity\n"
+                "_\u200b_\n"
+                "**STEP 3 — COUNTER-STRIKE**\n"
+                "When a top studio validates a winning theme:\n"
+                "Fire `!chain variant <item_id> <theme>` with your unique twist."
             ),
             color=COLOR_STEALTH,
         )
@@ -273,13 +282,22 @@ class MenuView(discord.ui.View):
                 "_Finds high-volume player search terms with zero or low catalog supply._\n"
                 "_\u200b_\n"
                 "**TARGET:** 54,397 mined Roblox autocomplete suggestions\n"
-                "**PAYLOAD:** High query volume vs <= 5 catalog items\n"
+                "**PAYLOAD:** High monthly search volume vs <= 5 catalog items\n"
+                "**DOCTRINE:** Launch where thousands search and nobody sells\n"
                 "_\u200b_\n"
-                "**HOW TO FIRE:**\n"
+                "**STEP 1 — FIRE SNIPER**\n"
                 "`!vacuum` — scan top zero-supply search gaps\n"
                 "`!vacuum 10` — retrieve top 10 market gaps\n"
                 "_\u200b_\n"
-                "**DOCTRINE:** Design where thousands of players search and nobody is selling."
+                "**STEP 2 — SELECT VACUUM TARGET**\n"
+                "Look for high query volume with 0 to 3 catalog items.\n"
+                "Example: `gothic cyber horns` (45k searches · 3 items)\n"
+                "_\u200b_\n"
+                "**STEP 3 — LOCK ON & LAUNCH**\n"
+                "Take that exact winning query and fire:\n"
+                "`!chain <vacuum query>`\n"
+                "_\u200b_\n"
+                "**WHY THIS WORKS:** Instant top-page search ranking with zero competition."
             ),
             color=COLOR_STEALTH,
         )
@@ -288,19 +306,27 @@ class MenuView(discord.ui.View):
     @discord.ui.button(label="📈 REVSIM — Revenue Forecast", style=discord.ButtonStyle.secondary, row=3)
     async def revsim_forecast(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
-            title="📈 REVSIM — 30-DAY REVENUE SIMULATOR",
+            title="📈 REVSIM — PRE-LAUNCH REVENUE SIMULATOR",
             description=(
                 "_Forecasts 30-day unit sales and Robux return before you model._\n"
                 "_\u200b_\n"
-                "**TARGET:** Pricing and launch momentum model\n"
-                "**PAYLOAD:** Estimated sales, gross Robux, 70% creator net profit\n"
+                "**TARGET:** Any upcoming item concept or price point\n"
+                "**PAYLOAD:** 30d units + gross Robux + 70% creator net profit\n"
+                "**CALIBRATION:** Tested against 43,877 real item snapshots\n"
                 "_\u200b_\n"
-                "**HOW TO FIRE:**\n"
-                "`!revsim 105 1500 organic` — organic launch baseline\n"
-                "`!revsim 125 2000 moderate` — moderate promotion (Discord/Ads)\n"
-                "`!revsim 150 3000 aggressive` — aggressive top-tier push\n"
+                "**STEP 1 — RUN SIMULATION**\n"
+                "`!revsim 105 1000 organic` — organic launch baseline\n"
+                "`!revsim 125 2000 moderate` — Discord / group shout push\n"
+                "`!revsim 150 3000 aggressive` — top creator whale push\n"
                 "_\u200b_\n"
-                "**CALIBRATION:** Tested against 43,877 historical item snapshots."
+                "**STEP 2 — READ FINANCIAL CURVE**\n"
+                "Bot replies with:\n"
+                "• 📦 Estimated 30-day unit sales\n"
+                "• 💰 Gross Robux volume\n"
+                "• 💎 Creator net earnings (after 30% Roblox cut)\n"
+                "• 📈 Day 1, 3, 7, and 30 favorite trajectory curve\n"
+                "_\u200b_\n"
+                "**WHY THIS WORKS:** Know your profit margins before spending modeling hours."
             ),
             color=COLOR_STEALTH,
         )
@@ -314,13 +340,19 @@ class MenuView(discord.ui.View):
                 "_Scans early favorite spikes during Roblox's golden algorithmic test._\n"
                 "_\u200b_\n"
                 "**TARGET:** Items published within the last 48 hours\n"
-                "**PAYLOAD:** Real-time favorite acceleration\n"
+                "**PAYLOAD:** Real-time favorite acceleration (+150 favs/hr)\n"
+                "**WHEN:** Check daily to catch breakout viral hits early\n"
                 "_\u200b_\n"
-                "**HOW TO FIRE:**\n"
+                "**STEP 1 — ACTIVATE RADAR**\n"
                 "`!velocity` — scan top accelerating items\n"
                 "`!velocity 8` — top 8 momentum leaders\n"
                 "_\u200b_\n"
-                "**DOCTRINE:** Spot viral trends before they hit the global front page."
+                "**STEP 2 — READ SENSOR OUTPUT**\n"
+                "Look for items gaining >100-200 favorites per hour.\n"
+                "Roblox pushes these items to the global front page.\n"
+                "_\u200b_\n"
+                "**STEP 3 — RIDE THE WAVE**\n"
+                "See what's accelerating and launch a complementary variant while hot."
             ),
             color=COLOR_STEALTH,
         )
