@@ -128,6 +128,15 @@ try:
 except Exception as e:
     print(f"⚠️ X-Ray commands failed to load: {e}", flush=True)
 
+# ── 🚀 Supercomputer 100x Upgrade Commands ───────────────────
+try:
+    from commands_supercomputer import register_supercomputer_commands
+    register_supercomputer_commands(bot)
+    print("✅ Supercomputer commands loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Supercomputer commands failed to load: {e}", flush=True)
+
+
 
 # ── Start background scheduler ───────────────────────────────
 try:
