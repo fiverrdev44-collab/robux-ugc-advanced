@@ -149,23 +149,25 @@ def register_supercomputer_commands(bot):
             if "catalog_supply" in cols:
                 supply_expr = "COALESCE(s.catalog_supply, 0)"
                 supply_join = ""
-                group_by = "s.suggestion"
                 having = "COALESCE(s.catalog_supply, 0) <= 5"
             else:
                 supply_expr = "COUNT(i.id)"
                 supply_join = (
                     "LEFT JOIN items i ON i.name ILIKE '%' || s.suggestion || '%'"
                 )
-                group_by = "s.suggestion"
                 having = "COUNT(i.id) <= 5"
 
             vol_sel = ", s.search_volume" if has_volume else ""
             vol_order = "s.search_volume" if has_volume else "s.fetched_at"
+            # GROUP BY must cover every non-aggregated column in the outer SELECT.
+            group_by = "s.suggestion, s.search_volume" if has_volume else "s.suggestion"
+            # Outer SELECT must reference columns the subquery actually exposes.
+            outer_vol = "s.search_volume" if has_volume else "NULL"
 
             cur.execute(
                 f"""
                 SELECT s.suggestion,
-                       {vol_order} AS search_volume,
+                       {outer_vol} AS search_volume,
                        {supply_expr} AS supply
                 FROM (
                     SELECT suggestion{vol_sel}
