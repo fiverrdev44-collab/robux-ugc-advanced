@@ -131,24 +131,21 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # Hybrid approach — three filters that work without any
-            # external data (search_volume is all NULL in this DB):
+            # Hybrid ranking — three demand signals that work even though
+            # search_volume is all NULL in this database:
             #
-            # 1. Multi-word phrases only — single generic tokens are never
-            #    real vacuum targets, and 2+ words is what actually describes
-            #    a niche (e.g. "cyberpunk katana", not "katana").
-            # 2. Misspellings filtered — every word in the phrase must
-            #    appear inside a real item name. "dollette" matches nothing
-            #    so "coquett dollette" is dropped; "coquette" matches real
-            #    items so "coquette" passes.
-            # 3. Low-supply only — <= 5 catalog items.
+            # 1. Suggestion FREQUENCY — how many times the phrase appears
+            #    across all 54,397 seed→suggestion rows. A phrase mined
+            #    from many different seeds is genuinely popular; a phrase
+            #    that appears once is noise. This is the real demand proxy.
+            # 2. learned_keywords — 500 vetted keywords with scores. Prioritize
+            #    suggestions that match a vetted keyword.
+            # 3. Low catalog supply — <= 5 items.
             #
-            # NOTE: the '%' in the ILIKE pattern must be escaped as '%%'
-            # because psycopg2 uses %-style parameter binding and would
-            # otherwise treat those literal '%' as format specifiers.
-
-            # Real words that actually appear in item names. Used to drop
-            # misspelled suggestions like "dollette" (real word: "coquette").
+            # Multi-word phrases only, and misspellings filtered (every word
+            # must appear inside a real item name).
+            #
+            # NOTE: '%' in ILIKE must be '%%' — psycopg2 uses %-style binding.
             cur.execute("""
                 SELECT DISTINCT word FROM (
                     SELECT unnest(regexp_split_to_array(lower(name), ' ')) AS word
@@ -159,15 +156,23 @@ def register_supercomputer_commands(bot):
             """)
             real_words = {r[0] for r in cur.fetchall()}
 
+            # Vetted keywords (lowercased for matching).
+            try:
+                cur.execute("SELECT keyword FROM learned_keywords")
+                vetted = {r[0].lower() for r in cur.fetchall() if r[0]}
+            except Exception:
+                vetted = set()
+
             cur.execute(
                 """
-                SELECT DISTINCT ON (lower(suggestion))
-                    suggestion, fetched_at
+                SELECT suggestion, COUNT(*) AS freq
                 FROM search_suggestions
                 WHERE suggestion IS NOT NULL
                   AND suggestion ~ '^[a-z]+ [a-z]+'
                   AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
-                ORDER BY lower(suggestion), fetched_at DESC
+                GROUP BY lower(suggestion)
+                HAVING COUNT(*) >= 2
+                ORDER BY COUNT(*) DESC, lower(suggestion)
                 LIMIT 400
                 """
             )
@@ -175,30 +180,31 @@ def register_supercomputer_commands(bot):
 
             # Filter misspellings in Python (fast — just set membership).
             spelled = []
-            for sugg, fetched in candidates:
+            for sugg, freq in candidates:
                 words = [w for w in re.split(r'\s+', sugg.lower()) if w]
                 if words and all(w in real_words for w in words):
-                    spelled.append((sugg, fetched))
+                    spelled.append((sugg, freq))
 
-            # Compute live supply for each surviving candidate.
+            # Compute live supply for each surviving candidate, and rank:
+            # vetted keywords first, then by frequency, then by low supply.
             results = []
-            for sugg, fetched in spelled:
+            for sugg, freq in spelled:
                 cur.execute(
                     "SELECT COUNT(*) FROM items WHERE name ILIKE '%%' || %s || '%%'",
                     (sugg,)
                 )
                 supply = cur.fetchone()[0] or 0
                 if supply <= 5:
-                    results.append((sugg, None, supply, fetched))
-
-            # Hard cap — never compute supply for more than this many candidates,
-            # and never return more results than the user asked for.
-            # Keeps the command fast and the embed within Discord's
-            # 6000-byte limit.
-            results = results[:max(limit, 5)]
+                    is_vetted = sugg.lower() in vetted
+                    results.append((sugg, freq, supply, is_vetted))
 
             cur.close()
             conn.close()
+
+            # Sort: vetted keywords first, then by frequency (demand), then
+            # by supply (lower is better).
+            results.sort(key=lambda r: (not r[3], -r[1], r[2]))
+            results = results[:max(limit, 5)]
 
             # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
             # limit is never hit, and split across multiple messages if needed.
@@ -216,29 +222,29 @@ def register_supercomputer_commands(bot):
 
             shown = 0
             seen = set()
-            for query, volume, supply, fetched in results:
+            for sugg, freq, supply, is_vetted in results:
                 try:
-                    key = (query or "").strip().lower()
+                    key = (sugg or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
-                    # Field name is the query; value is the stats only.
-                    # (No duplication, and no $ which Discord escapes.)
+                    # Frequency is the demand proxy (search_volume is NULL).
+                    demand = f"{freq}× mined" if freq else "High Trend"
+                    vetted_tag = " 🧠" if is_vetted else ""
                     field = (
-                        f"Search Volume: **{vol_str}** · "
-                        f"Catalog Items: ⚠️ **{supply}**"
+                        f"Demand: **{demand}** · "
+                        f"Catalog Items: ⚠️ **{supply}**{vetted_tag}"
                     )
                     # Start a new embed if this one would exceed the cap.
-                    if current_len + len(query) + len(field) + 40 > 5500:
+                    if current_len + len(sugg) + len(field) + 40 > 5500:
                         embeds.append(current)
                         current = make_embed(
                             "🎯 Search Vacuum Sniper (continued)",
                             "More zero-supply gaps:",
                         )
                         current_len = len(current.description or "")
-                    current.add_field(name=f"🔍 \"{query}\"", value=field, inline=False)
-                    current_len += len(query) + len(field) + 40
+                    current.add_field(name=f"🔍 \"{sugg}\"", value=field, inline=False)
+                    current_len += len(sugg) + len(field) + 40
                     shown += 1
                 except Exception:
                     continue
