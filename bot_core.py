@@ -80,7 +80,7 @@ def get_db():
         DATABASE_URL,
         sslmode='require',
         connect_timeout=10,
-        options='-c statement_timeout=20000',
+        options='-c statement_timeout=20000 -c TimeZone=UTC',
     )
 
 

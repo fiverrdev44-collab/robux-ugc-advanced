@@ -9,6 +9,7 @@ NOT the old API version (that was blocked).
 This version reads CSV data you upload.
 """
 import asyncio
+from datetime import datetime, timezone
 from bot_core import get_db
 
 
@@ -18,16 +19,26 @@ def analyze_sales(days=7):
         # Today
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
-            from my_sales where sale_date = current_date
+            from my_sales where sale_date = (now() AT TIME ZONE 'UTC')::date
         """)
         today_units, today_robux = cur.fetchone()
+
+        # Last 24h — timezone-agnostic sanity check. If "today" is 0 but this
+        # is non-zero, the issue is a day-boundary/timezone mismatch; if both
+        # are 0, the sales were never captured in my_sales.
+        cur.execute("""
+            select count(*), coalesce(sum(amount_robux), 0)
+            from my_sales
+            where sale_time >= now() - interval '24 hours'
+        """)
+        last24_units, last24_robux = cur.fetchone()
 
         # This week (last 7 days, excl today)
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date >= current_date - interval '7 days'
-              and sale_date < current_date
+            where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '7 days'
+              and sale_date < (now() AT TIME ZONE 'UTC')::date
         """)
         week_units, week_robux = cur.fetchone()
 
@@ -35,8 +46,8 @@ def analyze_sales(days=7):
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date >= current_date - interval '14 days'
-              and sale_date < current_date - interval '7 days'
+            where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '14 days'
+              and sale_date < (now() AT TIME ZONE 'UTC')::date - interval '7 days'
         """)
         prev_units, prev_robux = cur.fetchone()
 
@@ -44,7 +55,7 @@ def analyze_sales(days=7):
         cur.execute("""
             select item_name, count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date >= current_date - interval '7 days'
+            where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '7 days'
             group by item_name
             order by 3 desc limit 5
         """)
@@ -54,14 +65,14 @@ def analyze_sales(days=7):
         cur.execute("""
             with t as (
                 select item_name, count(*)::float as u
-                from my_sales where sale_date = current_date
+                from my_sales where sale_date = (now() AT TIME ZONE 'UTC')::date
                 group by item_name
             ),
             a as (
                 select item_name, count(*)::float / 7 as avg_u
                 from my_sales
-                where sale_date >= current_date - interval '7 days'
-                  and sale_date < current_date
+                where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '7 days'
+                  and sale_date < (now() AT TIME ZONE 'UTC')::date
                 group by item_name
             )
             select t.item_name, t.u, a.avg_u
@@ -75,12 +86,12 @@ def analyze_sales(days=7):
         cur.execute("""
             with p as (
                 select distinct item_name from my_sales
-                where sale_date >= current_date - interval '14 days'
-                  and sale_date < current_date - interval '7 days'
+                where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '14 days'
+                  and sale_date < (now() AT TIME ZONE 'UTC')::date - interval '7 days'
             ),
             w as (
                 select distinct item_name from my_sales
-                where sale_date >= current_date - interval '7 days'
+                where sale_date >= (now() AT TIME ZONE 'UTC')::date - interval '7 days'
             )
             select p.item_name from p
             where p.item_name not in (select item_name from w)
@@ -101,6 +112,9 @@ def analyze_sales(days=7):
             "prev_units": prev_units or 0, "prev_robux": prev_robux or 0,
             "top_items": top_items, "spikes": spikes, "silent": silent,
             "trend": trend,
+            "report_date": datetime.now(timezone.utc).date().isoformat(),
+            "last24_units": last24_units or 0,
+            "last24_robux": last24_robux or 0,
         }
     finally:
         cur.close(); conn.close()
@@ -110,7 +124,7 @@ def format_report(data):
     t = {"up": "📈", "down": "📉", "flat": "➡️"}[data["trend"]]
 
     lines = [
-        "# 📡 POST MONITOR — daily report\n",
+        f"# 📡 POST MONITOR — daily report (UTC {data.get('report_date', '')})\n",
         f"## Today\n"
         f"• **{data['today_units']}** sales · **R${data['today_robux']:,}**\n",
         f"## Week {t} vs last week\n"
@@ -139,7 +153,12 @@ def format_report(data):
             lines.append(f"• `{name[:45]}`")
 
     if not data["today_units"] and not data["week_units"]:
-        lines.append("\n_No data. Run `!sales_import` first._")
+        lines.append("\n_No data. Run `!sales_backfill` first._")
+    elif not data["today_units"] and data.get("last24_units"):
+        lines.append(
+            f"\n_Last 24h: **{data['last24_units']}** sales · "
+            f"R${data['last24_robux']:,} (UTC day boundary)_"
+        )
 
     return "\n".join(lines)
 

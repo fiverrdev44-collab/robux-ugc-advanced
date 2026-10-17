@@ -300,7 +300,7 @@ def sales_summary(days=30):
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date > current_date - %s
+            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
         """, (days,))
         total_units, total_robux = cur.fetchone()
 
@@ -308,7 +308,7 @@ def sales_summary(days=30):
             select item_name, count(*) as units,
                    coalesce(sum(amount_robux), 0) as robux
             from my_sales
-            where sale_date > current_date - %s
+            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
             group by item_name
             order by robux desc
             limit 10
@@ -318,7 +318,7 @@ def sales_summary(days=30):
         cur.execute("""
             select sale_date, count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date > current_date - %s
+            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
             group by sale_date
             order by sale_date desc
             limit 14
@@ -355,7 +355,7 @@ def item_sales_summary(item_name, days=30):
             select count(*), coalesce(sum(amount_robux), 0), max(sale_time)
             from my_sales
             where lower(item_name) like lower(%s)
-              and sale_date > current_date - %s
+              and sale_date > (now() AT TIME ZONE 'UTC')::date - %s
         """, (like, days))
         units, robux, last = cur.fetchone()
         if not units:

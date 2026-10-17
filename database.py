@@ -12,7 +12,7 @@ def get_db_connection():
         connect_timeout=10,
     )
     with conn.cursor() as c:
-        c.execute("SET statement_timeout = '30s'")
+        c.execute("SET statement_timeout = '30s'; SET TimeZone = 'UTC'")
     conn.commit()
     return conn
 
