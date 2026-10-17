@@ -136,6 +136,10 @@ def register_supercomputer_commands(bot):
             # search_volume is all NULL in this database, so we can't rank
             # by popularity. Instead order by recency over a wider net so
             # !vacuum surfaces fresh, real gaps instead of one sparse result.
+            #
+            # NOTE: the '%' in the ILIKE pattern must be escaped as '%%'
+            # because psycopg2 uses %-style parameter binding and would
+            # otherwise treat those literal '%' as format specifiers.
             cur.execute(
                 """
                 SELECT s.suggestion,
@@ -150,7 +154,7 @@ def register_supercomputer_commands(bot):
                     LIMIT 400
                 ) s
                 LEFT JOIN items i
-                  ON i.name ILIKE '%' || s.suggestion || '%'
+                  ON i.name ILIKE '%%' || s.suggestion || '%%'
                 GROUP BY s.suggestion, s.search_volume, s.fetched_at
                 HAVING COUNT(i.id) <= 5
                 ORDER BY fetched_at DESC, COUNT(i.id) ASC
