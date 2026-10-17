@@ -133,13 +133,9 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # Schema confirmed on the live DB:
-            #   id, seed_keyword, suggestion, fetched_at,
-            #   search_volume, catalog_supply
-            #
-            # Supply is computed LIVE from the items table. The precomputed
-            # catalog_supply column is all NULL, so trusting it returned
-            # garbage like "white" and "hat".
+            # search_volume is all NULL in this database, so we can't rank
+            # by popularity. Instead order by recency over a wider net so
+            # !vacuum surfaces fresh, real gaps instead of one sparse result.
             cur.execute(
                 """
                 SELECT s.suggestion,
@@ -150,14 +146,14 @@ def register_supercomputer_commands(bot):
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
                       AND (length(suggestion) >= 6 OR suggestion ~ ' ')
-                    ORDER BY search_volume DESC NULLS LAST, fetched_at DESC
-                    LIMIT 200
+                    ORDER BY fetched_at DESC
+                    LIMIT 400
                 ) s
                 LEFT JOIN items i
                   ON i.name ILIKE '%' || s.suggestion || '%'
                 GROUP BY s.suggestion, s.search_volume, s.fetched_at
                 HAVING COUNT(i.id) <= 5
-                ORDER BY search_volume DESC NULLS LAST, COUNT(i.id) ASC
+                ORDER BY fetched_at DESC, COUNT(i.id) ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
