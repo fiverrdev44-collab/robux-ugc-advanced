@@ -210,7 +210,7 @@ def register_supercomputer_commands(bot):
             embeds = []
             current = make_embed(
                 "🎯 Search Vacuum Sniper (Zero Supply Gaps)",
-                "High player search frequency with $\\le 5$ catalog items:",
+                "High player search frequency with ≤ 5 catalog items:",
             )
             current_len = len(current.description or "")
 
@@ -223,12 +223,14 @@ def register_supercomputer_commands(bot):
                         continue
                     seen.add(key)
                     vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
+                    # Field name is the query; value is the stats only.
+                    # (No duplication, and no $ which Discord escapes.)
                     field = (
-                        f"🔍 \"{query}\"\n"
-                        f" Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**"
+                        f"Search Volume: **{vol_str}** · "
+                        f"Catalog Items: ⚠️ **{supply}**"
                     )
                     # Start a new embed if this one would exceed the cap.
-                    if current_len + len(field) + 20 > 5500:
+                    if current_len + len(query) + len(field) + 40 > 5500:
                         embeds.append(current)
                         current = make_embed(
                             "🎯 Search Vacuum Sniper (continued)",
@@ -236,7 +238,7 @@ def register_supercomputer_commands(bot):
                         )
                         current_len = len(current.description or "")
                     current.add_field(name=f"🔍 \"{query}\"", value=field, inline=False)
-                    current_len += len(field) + 20
+                    current_len += len(query) + len(field) + 40
                     shown += 1
                 except Exception:
                     continue
