@@ -157,7 +157,7 @@ def register_supercomputer_commands(bot):
                   ON i.name ILIKE '%%' || s.suggestion || '%%'
                 GROUP BY s.suggestion, s.search_volume, s.fetched_at
                 HAVING COUNT(i.id) <= 5
-                ORDER BY fetched_at DESC, COUNT(i.id) ASC
+                ORDER BY s.fetched_at DESC, COUNT(i.id) ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
