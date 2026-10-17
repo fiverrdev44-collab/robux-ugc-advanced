@@ -194,7 +194,11 @@ def register_supercomputer_commands(bot):
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"⚠️ Search vacuum error: {type(e).__name__}: {e}")
+            import traceback as _tb
+            await ctx.send(
+                f"⚠️ Search vacuum error: {type(e).__name__}: {e}\n"
+                f"```\n{_tb.format_exc()[-1200:]}\n```"
+            )
 
     # ── 3. 🛡️ Stealth Description Engine 2.0 ─────────────────────────
     @bot.command(name="stealth", aliases=["stealth_desc"])
