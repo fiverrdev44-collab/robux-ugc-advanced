@@ -189,9 +189,12 @@ def register_supercomputer_commands(bot):
             # vetted keywords first, then by frequency, then by low supply.
             results = []
             for sugg, freq in spelled:
+                # Pass the full pattern as a parameter — no literal '%' in
+                # the SQL string, so no psycopg2 escaping is needed, and the
+                # pg_trgm GIN index on items.name can serve the lookup.
                 cur.execute(
-                    "SELECT COUNT(*) FROM items WHERE name ILIKE '%%' || %s || '%%'",
-                    (sugg,)
+                    "SELECT COUNT(*) FROM items WHERE name ILIKE %s",
+                    (f"%{sugg}%",)
                 )
                 supply = cur.fetchone()[0] or 0
                 if supply <= 5:
