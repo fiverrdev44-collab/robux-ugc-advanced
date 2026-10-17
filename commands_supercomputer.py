@@ -28,6 +28,10 @@ BOT_OWNERS = {
     int(os.getenv("DISCORD_OWNER_ID", "0").strip() or "0"),
 } - {0}
 
+# Cache of words that actually appear in item names. Used by !vacuum to
+# reject nonsense suggestions. Computed once per process (90k-row scan).
+_REAL_WORDS_CACHE = None
+
 TOP_WHALE_STUDIOS = {
     "1276023": "Erythia Studios",
     "4829104": "Rush Production",
@@ -132,94 +136,89 @@ def register_supercomputer_commands(bot):
             cur = conn.cursor()
 
             # ── Demand model ──────────────────────────────────────────────
-            # search_volume is NULL everywhere, and every suggestion appears
-            # under exactly one seed, so neither is a usable signal. The only
-            # statistically proven demand in this DB is learned_keywords
-            # (500 scored keywords with avg favorites / sales).
+            # search_volume is NULL everywhere and every suggestion appears
+            # under exactly one seed, so neither ranks anything. learned_keywords
+            # was also unusable (raw, un-normalized scores dominated by generic
+            # words like "over"/"point").
             #
-            # So: take a wide pool of multi-word suggestions, keep ONLY the
-            # ones that contain a proven keyword, then filter to low catalog
-            # supply. Every result is proven demand + low supply.
-            single_kw = {}   # word   -> (score, avg_fav, avg_sales)
-            multi_kw = []    # (phrase, score, avg_fav, avg_sales)
-            try:
-                cur.execute(
-                    "SELECT lower(keyword), score, avg_favorites, avg_sales "
-                    "FROM learned_keywords WHERE keyword IS NOT NULL"
-                )
-                for kw, score, avg_fav, avg_sales in cur.fetchall():
-                    if not kw:
-                        continue
-                    row = (
-                        float(score or 0),
-                        float(avg_fav or 0),
-                        float(avg_sales or 0),
-                    )
-                    if " " in kw:
-                        multi_kw.append((kw,) + row)
-                    else:
-                        single_kw[kw] = row
-            except Exception:
-                pass
+            # So measure demand DIRECTLY from the catalog: for each phrase,
+            # count matching items (supply) and their average favorites
+            # (proven demand). A phrase with 1-5 items and high avg favorites
+            # is a real, underserved niche. A phrase with 0 items is an
+            # untested gap — shown last, since demand is unproven.
+            #
+            # Candidates are RANDOM-sampled: ordering by frequency surfaced
+            # only common phrases (already saturated) or alphabetically-first
+            # junk. Random sampling explores the whole suggestion space.
+            global _REAL_WORDS_CACHE
+            if _REAL_WORDS_CACHE is None:
+                cur.execute("""
+                    SELECT DISTINCT word FROM (
+                        SELECT unnest(regexp_split_to_array(lower(name), ' ')) AS word
+                        FROM items WHERE name IS NOT NULL
+                    ) sub
+                    WHERE word ~ '^[a-z]{3,}$'
+                """)
+                _REAL_WORDS_CACHE = {r[0] for r in cur.fetchall()}
+            real_words = _REAL_WORDS_CACHE
 
-            # Wide candidate pool — distinct multi-word suggestions by frequency.
             cur.execute(
                 """
-                SELECT MIN(suggestion) AS suggestion, COUNT(*) AS freq
-                FROM search_suggestions
-                WHERE suggestion IS NOT NULL
-                  AND suggestion ~ '^[a-z]+ [a-z]+'
-                  AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
-                GROUP BY lower(suggestion)
-                ORDER BY COUNT(*) DESC, lower(suggestion)
-                LIMIT 3000
+                SELECT suggestion, freq FROM (
+                    SELECT MIN(suggestion) AS suggestion, COUNT(*) AS freq
+                    FROM search_suggestions
+                    WHERE suggestion IS NOT NULL
+                      AND suggestion ~ '^[a-z]+ [a-z]+'
+                      AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
+                    GROUP BY lower(suggestion)
+                ) t
+                ORDER BY random()
+                LIMIT 400
                 """
             )
             candidates = cur.fetchall()
             scanned = len(candidates)
 
-            # Keep only candidates containing a proven keyword.
-            proven = []
-            for sugg, freq in candidates:
-                sl = (sugg or "").lower()
-                if not sl:
-                    continue
-                words = set(re.findall(r"[a-z]{2,}", sl))
-                best_score = best_fav = best_sales = 0.0
-                best_kw = None
-                for w in words:
-                    row = single_kw.get(w)
-                    if row and row[0] > best_score:
-                        best_score, best_fav, best_sales = row
-                        best_kw = w
-                for kw, score, avg_fav, avg_sales in multi_kw:
-                    if kw in sl and score > best_score:
-                        best_score, best_fav, best_sales = score, avg_fav, avg_sales
-                        best_kw = kw
-                if best_kw:
-                    proven.append((sugg, best_score, best_fav, best_sales, best_kw))
-
-            # Bound the supply lookups — check the strongest proven phrases
-            # first so the command never runs hundreds of ILIKE queries.
-            proven.sort(key=lambda r: (-r[1], -r[2]))
-            proven = proven[:300]
-
-            # Compute live supply and keep the low-supply gaps.
             results = []
-            for sugg, score, avg_fav, avg_sales, via in proven:
+            for sugg, freq in candidates:
+                wo = [w for w in re.split(r'\s+', (sugg or '').lower()) if w]
+                # At least one word must be a real word used in item names,
+                # otherwise the phrase is nonsense ("abdomen tail" survives
+                # this, "coquett dollette" does not).
+                coverage = sum(1 for w in wo if w in real_words)
+                if coverage == 0:
+                    continue
                 cur.execute(
-                    "SELECT COUNT(*) FROM items WHERE name ILIKE %s",
+                    "SELECT COUNT(*), COALESCE(AVG(favorite_count), 0), "
+                    "COALESCE(SUM(favorite_count), 0) "
+                    "FROM items WHERE name ILIKE %s",
                     (f"%{sugg}%",)
                 )
-                supply = cur.fetchone()[0] or 0
-                if supply <= 5:
-                    results.append((sugg, score, avg_fav, avg_sales, supply, via))
+                supply, avg_fav, total_fav = cur.fetchone()
+                supply = int(supply or 0)
+                if supply > 5:
+                    continue
+                results.append({
+                    "sugg": sugg,
+                    "freq": int(freq or 0),
+                    "supply": supply,
+                    "avg_fav": float(avg_fav or 0),
+                    "total_fav": int(total_fav or 0),
+                    "coverage": coverage,
+                    "proven": supply > 0,
+                })
 
             cur.close()
             conn.close()
 
-            # Rank: proven lift, then avg favorites, then lowest supply.
-            results.sort(key=lambda r: (-r[1], -r[2], r[4]))
+            # Rank: proven demand first (highest avg favorites), then
+            # untested zero-supply phrases by real-word coverage and frequency.
+            def _rank(r):
+                if r["proven"]:
+                    return (0, -r["avg_fav"], 0, 0)
+                return (1, 0, -r["coverage"], -r["freq"])
+
+            results.sort(key=_rank)
             results = results[:max(limit, 5)]
 
             # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
@@ -232,30 +231,36 @@ def register_supercomputer_commands(bot):
             embeds = []
             current = make_embed(
                 "🎯 Search Vacuum Sniper (Low Supply Gaps)",
-                "Proven demand (learned keywords) · ≤ 5 catalog items:",
+                "Ranked by real catalog demand (avg favorites) · ≤ 5 items:",
             )
             current_len = len(current.description or "")
 
             shown = 0
             seen = set()
-            for sugg, score, avg_fav, avg_sales, supply, via in results:
+            for r in results:
                 try:
+                    sugg = r["sugg"]
                     key = (sugg or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    field = (
-                        f"🧠 via **{via}** · Lift **{score:.2f}** · "
-                        f"⭐ **{int(avg_fav):,}** avg favs · "
-                        f"💰 **{int(avg_sales):,}** avg sales · "
-                        f"Items ⚠️ **{supply}**"
-                    )
+                    if r["proven"]:
+                        field = (
+                            f"⭐ **{int(r['avg_fav']):,}** avg favs · "
+                            f"📦 **{r['total_fav']:,}** total · "
+                            f"Items ⚠️ **{r['supply']}** · ✅ Proven demand"
+                        )
+                    else:
+                        field = (
+                            "🆕 No matching items · Untested gap · "
+                            "Items ⚠️ **0**"
+                        )
                     # Start a new embed if this one would exceed the cap.
                     if current_len + len(sugg) + len(field) + 40 > 5500:
                         embeds.append(current)
                         current = make_embed(
                             "🎯 Search Vacuum Sniper (continued)",
-                            "More zero-supply gaps:",
+                            "More low-supply gaps:",
                         )
                         current_len = len(current.description or "")
                     current.add_field(name=f"🔍 \"{sugg}\"", value=field, inline=False)
