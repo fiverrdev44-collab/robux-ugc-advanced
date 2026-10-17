@@ -194,37 +194,53 @@ def register_supercomputer_commands(bot):
             cur.close()
             conn.close()
 
-            embed = discord.Embed(
-                title="🎯 Search Vacuum Sniper (Zero Supply Gaps)",
-                description="High player search frequency with $\\le 5$ catalog items:",
-                color=0xF59E0B
+            # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
+            # limit is never hit, and split across multiple messages if needed.
+            def make_embed(title, description, color=0xF59E0B):
+                e = discord.Embed(title=title, description=description, color=color)
+                e.set_footer(text="Mined from 54,397 Roblox Autocomplete Queries")
+                return e
+
+            embeds = []
+            current = make_embed(
+                "🎯 Search Vacuum Sniper (Zero Supply Gaps)",
+                "High player search frequency with $\\le 5$ catalog items:",
             )
+            current_len = len(current.description or "")
 
             shown = 0
             seen = set()
             for query, volume, supply, fetched in results:
-                # Defensive: never let one bad row crash the command,
-                # and skip duplicate suggestions.
                 try:
                     key = (query or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
                     vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
-                    embed.add_field(
-                        name=f"🔍 \"{query}\"",
-                        value=f"Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**",
-                        inline=False
+                    field = (
+                        f"🔍 \"{query}\"\n"
+                        f" Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**"
                     )
+                    # Start a new embed if this one would exceed the cap.
+                    if current_len + len(field) + 20 > 5500:
+                        embeds.append(current)
+                        current = make_embed(
+                            "🎯 Search Vacuum Sniper (continued)",
+                            "More zero-supply gaps:",
+                        )
+                        current_len = len(current.description or "")
+                    current.add_field(name="\u200b", value=field, inline=False)
+                    current_len += len(field) + 20
                     shown += 1
                 except Exception:
                     continue
 
             if shown == 0:
-                embed.description = "No zero-supply vacancies found in current catalog slice."
+                current.description = "No zero-supply vacancies found in current catalog slice."
+            embeds.append(current)
 
-            embed.set_footer(text="Mined from 54,397 Roblox Autocomplete Queries")
-            await ctx.send(embed=embed)
+            for e in embeds[:5]:  # never send more than 5 embeds
+                await ctx.send(embed=e)
 
         except Exception as e:
             await ctx.send(f"⚠️ Search vacuum error: {type(e).__name__}: {e}")
