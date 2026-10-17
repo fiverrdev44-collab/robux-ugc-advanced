@@ -125,8 +125,6 @@ def register_supercomputer_commands(bot):
         Scan 54,397 search suggestions for exploding volume with minimal catalog competition.
         Supply is computed LIVE from the items table (not a stale column), so
         generic words like "white" or "hat" never show up as zero-supply gaps.
-        Only multi-word or longer (6+ char) suggestions are considered — single
-        generic tokens are never real vacuum targets.
         Usage: !vacuum [limit]
         """
         try:
@@ -136,6 +134,10 @@ def register_supercomputer_commands(bot):
             # search_volume is all NULL in this database, so we can't rank
             # by popularity. Instead order by recency over a wider net so
             # !vacuum surfaces fresh, real gaps instead of one sparse result.
+            #
+            # Require multi-word phrases — single generic tokens are never
+            # real vacuum targets, and 2+ words is what actually describes a
+            # niche (e.g. "cyberpunk katana", not "katana").
             #
             # NOTE: the '%' in the ILIKE pattern must be escaped as '%%'
             # because psycopg2 uses %-style parameter binding and would
@@ -149,7 +151,8 @@ def register_supercomputer_commands(bot):
                     SELECT suggestion, search_volume, fetched_at
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
-                      AND (length(suggestion) >= 6 OR suggestion ~ ' ')
+                      AND suggestion ~ '^[a-z]+ [a-z]+'
+                      AND suggestion !~ '^(work|got|komi|its|youre|whats|how to)'
                     ORDER BY fetched_at DESC
                     LIMIT 400
                 ) s
@@ -198,11 +201,7 @@ def register_supercomputer_commands(bot):
             await ctx.send(embed=embed)
 
         except Exception as e:
-            import traceback as _tb
-            await ctx.send(
-                f"⚠️ Search vacuum error: {type(e).__name__}: {e}\n"
-                f"```\n{_tb.format_exc()[-1200:]}\n```"
-            )
+            await ctx.send(f"⚠️ Search vacuum error: {type(e).__name__}: {e}")
 
     # ── 3. 🛡️ Stealth Description Engine 2.0 ─────────────────────────
     @bot.command(name="stealth", aliases=["stealth_desc"])
