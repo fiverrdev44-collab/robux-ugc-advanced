@@ -196,5 +196,3 @@ delete from discovered_items
 where id not in (select id from items)
   and id not in (select id from item_history);
 vacuum full discovered_items;
--e 
-# test push from AI Studio Sat Oct 17 05:21:51 AM UTC 2026

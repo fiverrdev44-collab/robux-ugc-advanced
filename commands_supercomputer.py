@@ -9,12 +9,10 @@ Integrates the 5 roadmap engines directly into the VANTA 73 Prototype bot:
 """
 
 import os
-import sys
 import re
 import math
 import asyncio
 import aiohttp
-import subprocess
 import discord
 from collections import Counter, defaultdict
 
@@ -34,17 +32,6 @@ TOP_WHALE_STUDIOS = {
 }
 
 
-async def _fetch_roblox_live_favs(session, item_id):
-    try:
-        async with session.get(f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count", timeout=5) as resp:
-            if resp.status == 200:
-                txt = await resp.text()
-                return int(txt)
-    except Exception:
-        pass
-    return None
-
-
 def register_supercomputer_commands(bot):
 
     # ── 1. 🐋 Whale Tracker ──────────────────────────────────────────
@@ -59,25 +46,23 @@ def register_supercomputer_commands(bot):
             cur = conn.cursor()
 
             if studio_name:
-                # Use word boundary so 'Rush' matches 'Rush Production', NOT 'Brushwork' or 'Brushables'
-                pattern = f"\\m{re.escape(studio_name.strip())}\\M"
                 cur.execute(
                     """
                     SELECT id, name, creator_name, price, favorite_count, created_at
                     FROM items
                     WHERE creator_name ~* %s
-                    ORDER BY favorite_count DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+                    ORDER BY created_at DESC NULLS LAST, id DESC
                     LIMIT 5
                     """,
-                    (pattern,)
+                    (studio_name,)
                 )
             else:
                 cur.execute(
                     """
                     SELECT id, name, creator_name, price, favorite_count, created_at
                     FROM items
-                    WHERE creator_name ~* '\\m(Erythia|Rush|Foov|VoxelCrafters|Starbound|Polarity|Lovespun)\\M'
-                    ORDER BY favorite_count DESC NULLS LAST, created_at DESC NULLS LAST, id DESC
+                    WHERE creator_name ~* 'Erythia|Rush|Foov|Voxel|Starbound|Polarity|Lovespun'
+                    ORDER BY created_at DESC NULLS LAST, id DESC
                     LIMIT 6
                     """
                 )
@@ -87,24 +72,18 @@ def register_supercomputer_commands(bot):
 
             embed = discord.Embed(
                 title="🐋 Whale Studio Surveillance Radar",
-                description="Live surveillance of top 50 studios & verified catalog drops:",
+                description="Live surveillance of top 50 studios & recent catalog drops:",
                 color=0x10B981
             )
 
             if rows:
-                # Fetch live Roblox favorites in parallel if DB has 0 or needs refresh
-                async with aiohttp.ClientSession() as session:
-                    fav_tasks = [_fetch_roblox_live_favs(session, r[0]) for r in rows]
-                    live_favs = await asyncio.gather(*fav_tasks)
-
-                for (item_id, name, creator, price, db_favs, created_at), live_fav in zip(rows, live_favs):
-                    # Use live count if available, otherwise fallback to database
-                    favs = live_fav if (live_fav is not None and live_fav > 0) else (db_favs or 0)
-                    fav_str = f"{favs:,}"
+                for row in rows:
+                    item_id, name, creator, price, favs, created_at = row
+                    fav_str = f"{favs:,}" if favs else "0"
                     price_str = f"{price} R$" if price else "Free/Offsale"
                     embed.add_field(
-                        name=f"[{creator}] {name[:40]}",
-                        value=f"🔗 [Catalog Link](https://www.roblox.com/catalog/{item_id}) · Price: **{price_str}** · Favs: ⭐ **{fav_str}**",
+                        name=f"[{creator}] {name[:35]}",
+                        value=f"ID: `{item_id}` · Price: **{price_str}** · Favs: ⭐ `{fav_str}`",
                         inline=False
                     )
             else:
@@ -289,16 +268,11 @@ def register_supercomputer_commands(bot):
             )
 
             if rows:
-                async with aiohttp.ClientSession() as session:
-                    fav_tasks = [_fetch_roblox_live_favs(session, r[0]) for r in rows]
-                    live_favs = await asyncio.gather(*fav_tasks)
-
-                for (item_id, name, creator, price, db_favs, created_at), live_fav in zip(rows, live_favs):
-                    favs = live_fav if (live_fav is not None and live_fav > 0) else (db_favs or 0)
-                    price_str = f"{price} R$" if price else "Free/Offsale"
+                for r in rows:
+                    item_id, name, creator, price, favs, created_at = r
                     embed.add_field(
                         name=f"[{creator}] {name[:35]}",
-                        value=f"🔗 [Catalog Link](https://www.roblox.com/catalog/{item_id}) · ⭐ **{favs:,} favs** · Price: **{price_str}**",
+                        value=f"ID: `{item_id}` · ⭐ **{favs:,} favs** · Price: `{price} R$`",
                         inline=False
                     )
             else:
@@ -309,106 +283,3 @@ def register_supercomputer_commands(bot):
 
         except Exception as e:
             await ctx.send(f"⚠️ Velocity radar error: {e}")
-
-    # ── 6. 🔄 Live Git Pull & Hot Bot Reloader ────────────────────────
-    @bot.command(name="bot_update", aliases=["update_bot", "sync", "reload_bot"])
-    async def bot_update_command(ctx):
-        """
-        Pulls latest code from GitHub and reloads the bot on Oracle Server without SSH.
-        Usage: !bot_update or !sync
-        """
-        embed = discord.Embed(
-            title="🔄 VANTA 73 — Fleet Sync & Deploy",
-            description="Initiating hot `git pull origin main` on Oracle Server...",
-            color=0x3B82F6
-        )
-        status_msg = await ctx.send(embed=embed)
-
-        try:
-            # 1. Run git pull
-            pull_proc = subprocess.run(
-                ["git", "pull", "origin", "main"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            git_out = (pull_proc.stdout + pull_proc.stderr).strip() or "No output from git."
-
-            # 2. Get latest commit log
-            log_proc = subprocess.run(
-                ["git", "log", "-1", "--format=%h — %s (%cd)", "--date=relative"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            latest_commit = log_proc.stdout.strip() or "Unknown commit"
-
-            success = (pull_proc.returncode == 0)
-            embed.title = "✅ Git Pull Succeeded" if success else "⚠️ Git Pull Returned Code " + str(pull_proc.returncode)
-            embed.color = 0x10B981 if success else 0xF59E0B
-            embed.description = (
-                f"**Active Head:** `{latest_commit}`\n\n"
-                f"```text\n{git_out[:1200]}\n```\n"
-                f"⚡ **Rebooting bot process into fresh code...**"
-            )
-            await status_msg.edit(embed=embed)
-
-            # Give Discord a brief moment to deliver the response message
-            await asyncio.sleep(1.2)
-
-            # 3. Clean process reboot:
-            # Try PM2 restart first if available
-            try:
-                subprocess.Popen(["pm2", "restart", "ugc-bot"])
-            except Exception:
-                pass
-
-            # Also restart the Python process via execv so it reloads immediately under any supervisor
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-
-        except Exception as e:
-            err_embed = discord.Embed(
-                title="❌ Hot Update Failed",
-                description=f"Error executing update: `{e}`",
-                color=0xEF4444
-            )
-            await ctx.send(embed=err_embed)
-
-    @bot.command(name="bot_version", aliases=["version", "git_status"])
-    async def bot_version_command(ctx):
-        """Displays current commit hash, branch, and status on Oracle Server."""
-        try:
-            log_proc = subprocess.run(
-                ["git", "log", "-1", "--format=%h — %s (%cd)", "--date=relative"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            branch_proc = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            status_proc = subprocess.run(
-                ["git", "status", "-s"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-
-            commit = log_proc.stdout.strip() or "N/A"
-            branch = branch_proc.stdout.strip() or "main"
-            clean = "Working tree clean ✅" if not status_proc.stdout.strip() else f"Uncommitted files:\n```{status_proc.stdout.strip()[:300]}```"
-
-            embed = discord.Embed(
-                title="⚓ VANTA 73 — Fleet Version & Status",
-                color=0x06B6D4
-            )
-            embed.add_field(name="Branch", value=f"`{branch}`", inline=True)
-            embed.add_field(name="Active Commit", value=f"`{commit}`", inline=False)
-            embed.add_field(name="Git Working Tree", value=clean, inline=False)
-            embed.set_footer(text="Oracle Server 2 (ugc-bot-worker) · Stealth UGC Supercomputer")
-            await ctx.send(embed=embed)
-        except Exception as e:
-            await ctx.send(f"⚠️ Error checking version: {e}")
