@@ -119,9 +119,53 @@ def _kw_pattern(keyword):
 
 
 def _gather_keywords(cur, family=None):
-    """Multi-source gathering with family-presence filter."""
+    """Mine candidate keywords from the target family's own item names.
+
+    Previously this pulled GLOBAL keywords (learned_keywords + search
+    suggestions) and merely checked they appeared in the family. That let
+    clothing words like "jeans"/"shirt"/"preppy" leak into !converge emotes,
+    because emote names sometimes contain style words. Mining directly from
+    the family's own names guarantees relevance.
+    """
     keywords = set()
 
+    # ── Family-specific: tokens + bigrams from that family's item names ──
+    if family and family != "all":
+        fam_sql, fam_params = _family_clause(family)
+        if fam_sql:
+            try:
+                cur.execute(f"""
+                    select name
+                    from items
+                    where name is not null and favorite_count > 5
+                    {fam_sql}
+                    order by favorite_count desc
+                    limit 5000
+                """, fam_params)
+                counter = Counter()
+                for (name,) in cur.fetchall():
+                    if not name:
+                        continue
+                    words = [
+                        w for w in re.findall(r"[a-z]{4,}", name.lower())
+                        if w not in _GENERIC_BLOCK
+                    ]
+                    for w in set(words):
+                        counter[w] += 1
+                    for i in range(len(words) - 1):
+                        counter[f"{words[i]} {words[i+1]}"] += 1
+                for kw, cnt in counter.most_common(250):
+                    if cnt >= 3:
+                        keywords.add(kw)
+            except Exception as e:
+                print(f"[convergence] family keyword mining failed: {e}", flush=True)
+            print(
+                f"[convergence] mined {len(keywords)} keywords for family={family}",
+                flush=True,
+            )
+            return list(keywords)
+
+    # ── Global gathering (family="all") ──
     # Source 1: learned_keywords
     try:
         cur.execute("""
@@ -155,34 +199,6 @@ def _gather_keywords(cur, family=None):
             keywords.add(t)
     except Exception as e:
         print(f"[convergence] search_suggestions read failed: {e}", flush=True)
-
-    # Family-presence filter
-    if family and family != "all":
-        fam_sql, fam_params = _family_clause(family)
-        if fam_sql:
-            validated = set()
-            for kw in keywords:
-                try:
-                    pat = _kw_pattern(kw)
-                    is_phrase = " " in kw
-                    match_op = "ilike" if is_phrase else "~*"
-                    cur.execute(f"""
-                        select count(*),
-                               coalesce(percentile_cont(0.5) within group
-                                        (order by favorite_count), 0)
-                        from items
-                        where name {match_op} %s and favorite_count > 5
-                        {fam_sql}
-                    """, [pat] + fam_params)
-                    cnt, med = cur.fetchone()
-                    cnt = int(cnt or 0)
-                    med = float(med or 0)
-                    if cnt >= 5 and med >= 40:
-                        validated.add(kw)
-                except Exception:
-                    continue
-            print(f"[convergence] family filter: {len(validated)}/{len(keywords)} pass", flush=True)
-            keywords = validated
 
     print(f"[convergence] gathered {len(keywords)} candidate keywords", flush=True)
     return list(keywords)
