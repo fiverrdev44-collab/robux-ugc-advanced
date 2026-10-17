@@ -133,7 +133,7 @@ def register_supercomputer_commands(bot):
 
             # search_volume is all NULL in this database, so we can't rank
             # by popularity. Instead order by recency over a wider net so
-            # !vacuum surfaces fresh, real gaps instead of one sparse result.
+            # !vacuum surfaces fresh, real gaps.
             #
             # Require multi-word phrases — single generic tokens are never
             # real vacuum targets, and 2+ words is what actually describes a
@@ -148,12 +148,13 @@ def register_supercomputer_commands(bot):
                        s.search_volume,
                        COUNT(i.id) AS supply
                 FROM (
-                    SELECT suggestion, search_volume, fetched_at
+                    SELECT DISTINCT ON (lower(suggestion))
+                        suggestion, search_volume, fetched_at
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
                       AND suggestion ~ '^[a-z]+ [a-z]+'
-                      AND suggestion !~ '^(work|got|komi|its|youre|whats|how to)'
-                    ORDER BY fetched_at DESC
+                      AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is)'
+                    ORDER BY lower(suggestion), fetched_at DESC
                     LIMIT 400
                 ) s
                 LEFT JOIN items i
@@ -176,17 +177,22 @@ def register_supercomputer_commands(bot):
             )
 
             shown = 0
+            seen = set()
             for r in rows:
-                # Defensive: never let one bad row crash the command.
+                # Defensive: never let one bad row crash the command,
+                # and skip duplicate suggestions.
                 try:
                     if not r or len(r) < 3:
                         continue
-                    query = r[0] if r[0] else "?"
+                    query = (r[0] or "").strip().lower()
+                    if not query or query in seen:
+                        continue
+                    seen.add(query)
                     volume = r[1]
                     supply = r[2]
                     vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
                     embed.add_field(
-                        name=f"🔍 \"{query}\"",
+                        name=f"🔍 \"{r[0]}\"",
                         value=f"Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**",
                         inline=False
                     )
