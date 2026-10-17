@@ -1,3 +1,5 @@
+# TEST PUSH LOG MARKER 2026
+print("[UGC Bot] 🚀 TEST PUSH LIVE UPDATE SUCCESSFUL!")
 """
 discord_ugc_bot.py — thin orchestrator.
 All commands live in commands_*.py modules.
