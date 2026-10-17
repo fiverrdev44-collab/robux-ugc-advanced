@@ -194,3 +194,58 @@ def register_sales_commands(bot, get_db):
             lines.append(f"• `{(name or '')[:30]}` — {sd} · {st} · R${amt}")
 
         await ctx.send("\n".join(lines)[:1900])
+
+    @bot.command(name="sales_scan")
+    async def sales_scan_cmd(ctx, limit: int = 50):
+        """Scan SALES_CHANNEL_ID and report embed formats (diagnostic)."""
+        from sales_listener import _extract_sale_from_embed
+
+        ch_id = os.getenv("SALES_CHANNEL_ID", "").strip()
+        if not ch_id:
+            return await ctx.send("❌ `SALES_CHANNEL_ID` is not set.")
+
+        try:
+            ch = bot.get_channel(int(ch_id))
+        except Exception:
+            ch = None
+        if not ch:
+            return await ctx.send(
+                f"❌ Channel `{ch_id}` not found or not visible to the bot."
+            )
+
+        limit = max(1, min(limit, 200))
+        scanned = embeds = matched = 0
+        samples = []
+
+        async for msg in ch.history(limit=limit):
+            scanned += 1
+            for e in (msg.embeds or []):
+                embeds += 1
+                try:
+                    sale = _extract_sale_from_embed(e, msg)
+                except Exception as ex:
+                    if len(samples) < 5:
+                        samples.append((f"ERROR {type(ex).__name__}", []))
+                    continue
+                if sale:
+                    matched += 1
+                elif len(samples) < 5:
+                    samples.append((
+                        (e.title or "(no title)")[:70],
+                        [f.name for f in (e.fields or [])][:6],
+                    ))
+
+        lines = [
+            "🔍 **SALES SCAN**",
+            f"Channel: <#{ch_id}>",
+            f"Messages: **{scanned}** · Embeds: **{embeds}** · "
+            f"Matched sales: **{matched}**",
+        ]
+        if samples:
+            lines.append("\n**Unmatched embed samples:**")
+            for title, fields in samples:
+                lines.append(f"• `{title}` · fields={fields}")
+        else:
+            lines.append("\n_No unmatched embeds in this window._")
+
+        await ctx.send("\n".join(lines)[:1900])

@@ -40,14 +40,16 @@ def _extract_sale_from_embed(embed, message):
     tl = title.lower()
     dl = desc.lower()
 
-    # Match on title OR description
-    is_sale = (
-        "new sale" in tl
-        or "thank you for your purchase" in tl
-        or "new sale" in dl
-        or "thank you for your purchase" in dl
+    # Match on title OR description. Broader than before: sale webhooks
+    # change wording ("purchase", "sold", "transaction", "order"), and a
+    # strict match silently drops every new sale.
+    sale_markers = (
+        "new sale", "thank you for your purchase", "purchase",
+        "sold", "sale", "transaction", "order",
     )
+    is_sale = any(m in tl or m in dl for m in sale_markers)
     if not is_sale:
+        print(f"[sales_listener] not a sale — title={title[:60]!r}", flush=True)
         return None
 
     item_name = ""
@@ -67,13 +69,20 @@ def _extract_sale_from_embed(embed, message):
         value = _safe_str(field.value)
         if not value:
             continue
-        if "item" in name and not item_name:
+        item_like = (
+            "item" in name or "product" in name or "asset" in name
+            or name.strip() in ("name", "item name", "product name")
+        )
+        if not item_name and item_like:
             item_name = _strip_emoji(value)
-        elif ("revenue" in name or "amount" in name) and revenue == 0:
+        elif revenue == 0 and any(k in name for k in
+                                  ("revenue", "amount", "price", "robux", "total")):
             revenue = _parse_revenue(value)
-        elif ("buyer" in name or "user" in name or "source" in name) and not buyer:
+        elif not buyer and any(k in name for k in
+                               ("buyer", "user", "customer", "source")):
             buyer = _strip_emoji(value)
-        elif ("group" in name or "seller" in name) and not group_name:
+        elif not group_name and any(k in name for k in
+                                    ("group", "seller", "store")):
             group_name = _strip_emoji(value)
 
     # Fallback: try to extract item name from title/description
