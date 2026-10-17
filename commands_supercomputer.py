@@ -132,24 +132,53 @@ def register_supercomputer_commands(bot):
         try:
             conn = get_db()
             cur = conn.cursor()
+
+            # The live search_suggestions table may predate the
+            # search_volume / catalog_supply columns. Detect the real
+            # columns so the query below always matches the live schema.
+            cur.execute("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'search_suggestions'
+            """)
+            cols = {r[0] for r in cur.fetchall()}
+            has_volume = "search_volume" in cols
+
+            # Prefer a precomputed supply column when present; otherwise
+            # compute supply live from the items table.
+            if "catalog_supply" in cols:
+                supply_expr = "COALESCE(s.catalog_supply, 0)"
+                supply_join = ""
+                group_by = "s.suggestion"
+                having = "COALESCE(s.catalog_supply, 0) <= 5"
+            else:
+                supply_expr = "COUNT(i.id)"
+                supply_join = (
+                    "LEFT JOIN items i ON i.name ILIKE '%' || s.suggestion || '%'"
+                )
+                group_by = "s.suggestion"
+                having = "COUNT(i.id) <= 5"
+
+            vol_sel = ", s.search_volume" if has_volume else ""
+            vol_order = "s.search_volume" if has_volume else "s.fetched_at"
+
             cur.execute(
-                """
+                f"""
                 SELECT s.suggestion,
-                       s.search_volume,
-                       COUNT(i.id) AS supply
+                       {vol_order} AS search_volume,
+                       {supply_expr} AS supply
                 FROM (
-                    SELECT suggestion, search_volume
+                    SELECT suggestion{vol_sel}
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
                       AND (length(suggestion) >= 6 OR suggestion ~ ' ')
-                    ORDER BY search_volume DESC NULLS LAST
+                    ORDER BY {vol_order} DESC NULLS LAST
                     LIMIT 200
                 ) s
-                LEFT JOIN items i
-                  ON i.name ILIKE '%' || s.suggestion || '%'
-                GROUP BY s.suggestion, s.search_volume
-                HAVING COUNT(i.id) <= 5
-                ORDER BY s.search_volume DESC NULLS LAST, COUNT(i.id) ASC
+                {supply_join}
+                GROUP BY {group_by}
+                HAVING {having}
+                ORDER BY {vol_order} DESC NULLS LAST, {supply_expr} ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
@@ -166,7 +195,10 @@ def register_supercomputer_commands(bot):
 
             if rows:
                 for r in rows:
-                    query, volume, supply = r
+                    # Defensive: skip any malformed row instead of crashing.
+                    if not r or len(r) < 3:
+                        continue
+                    query, volume, supply = r[0], r[1], r[2]
                     vol_str = f"{volume:,}/mo" if volume else "High Trend"
                     embed.add_field(
                         name=f"🔍 \"{query}\"",
@@ -180,7 +212,7 @@ def register_supercomputer_commands(bot):
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"⚠️ Search vacuum error: {e}")
+            await ctx.send(f"⚠️ Search vacuum error: {type(e).__name__}: {e}")
 
     # ── 3. 🛡️ Stealth Description Engine 2.0 ─────────────────────────
     @bot.command(name="stealth", aliases=["stealth_desc"])
