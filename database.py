@@ -105,6 +105,32 @@ def setup_database():
         ADD COLUMN IF NOT EXISTS catalog_supply INTEGER;
     """, "search_suggestions_cols")
 
+    # Dedupe and enforce uniqueness so repeated scraper runs don't bloat
+    # the table. The scraper inserts with ON CONFLICT DO NOTHING.
+    try:
+        cur.execute("""
+            DELETE FROM search_suggestions a USING search_suggestions b
+            WHERE a.id > b.id
+              AND a.seed_keyword IS NOT DISTINCT FROM b.seed_keyword
+              AND lower(a.suggestion) = lower(b.suggestion)
+        """)
+        conn.commit()
+    except Exception as e:
+        print(
+            f"⚠️ [setup] search_suggestions dedup failed: "
+            f"{type(e).__name__}: {str(e)[:150]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    _safe_exec(cur, '''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_search_suggestions_unique
+        ON search_suggestions (seed_keyword, lower(suggestion));
+    ''', "idx_search_suggestions_unique")
+
     # pg_trgm GIN index so !vacuum can count real catalog supply per
     # suggestion with an indexed ILIKE join instead of a full scan.
     _safe_exec(cur, "CREATE EXTENSION IF NOT EXISTS pg_trgm;", "pg_trgm_ext")

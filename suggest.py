@@ -229,7 +229,8 @@ def run_suggest():
         for seed, suggs in results:
             for s in suggs:
                 cur.execute(
-                    "INSERT INTO search_suggestions (seed_keyword, suggestion) VALUES (%s, %s)",
+                    "INSERT INTO search_suggestions (seed_keyword, suggestion) "
+                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (seed, s)
                 )
                 total += 1
@@ -241,7 +242,8 @@ def run_suggest():
         fallback = mine_database_keywords()
         for phrase, count in fallback:
             cur.execute(
-                "INSERT INTO search_suggestions (seed_keyword, suggestion) VALUES (%s, %s)",
+                "INSERT INTO search_suggestions (seed_keyword, suggestion) "
+                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 ("__db_mined__", phrase)
             )
             total += 1

@@ -851,6 +851,37 @@ def register_supercomputer_commands(bot):
         )
         await ctx.send("\n".join(lines)[:1900])
 
+    # ── 10. 💬 Run the suggestion scraper (server-side) ──────────────
+    @bot.command(name="suggest_run", aliases=["scrape_suggest"])
+    async def suggest_run_command(ctx):
+        """
+        Owner-only: run the autocomplete scraper now, using the server's
+        DB access and cookie. Takes a few minutes.
+        """
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+
+        await ctx.send(
+            "💬 **Suggestion scraper started** — this can take a few minutes. "
+            "I'll reply when it's done."
+        )
+
+        def _run():
+            from suggest import run_suggest
+            run_suggest()
+            return True
+
+        try:
+            await asyncio.to_thread(_run)
+            await ctx.send(
+                "✅ **Suggestion scraper finished.**\n"
+                "Now try `!meta_sniper <niche>` for better gap data."
+            )
+        except Exception as e:
+            await ctx.send(
+                f"⚠️ Scraper failed: {type(e).__name__}: {e}"
+            )
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
