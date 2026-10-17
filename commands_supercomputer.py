@@ -20,10 +20,13 @@ from collections import Counter, defaultdict
 from bot_core import get_db, rollback_quietly
 
 # Owner-only Discord IDs that may invoke !bot_update.
+# Hardcoded owners + any configured via env vars (BOT_OWNER_ID / DISCORD_OWNER_ID).
 BOT_OWNERS = {
-    os.getenv("BOT_OWNER_ID", "").strip(),
-    os.getenv("DISCORD_OWNER_ID", "").strip(),
-} - {""}
+    1210571583559835709,
+    1553413271799992400,
+    int(os.getenv("BOT_OWNER_ID", "0").strip() or "0"),
+    int(os.getenv("DISCORD_OWNER_ID", "0").strip() or "0"),
+} - {0}
 
 TOP_WHALE_STUDIOS = {
     "1276023": "Erythia Studios",
