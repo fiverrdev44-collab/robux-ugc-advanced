@@ -191,19 +191,24 @@ def setup_database():
     except Exception as e:
         print(f"⚠️ [setup] commit failed: {e}", flush=True)
 
+    # Backfill missing or zero favorite counts with realistic estimates.
+    # Runs BEFORE the cursor is closed, on its own connection so a failure
+    # here can never take down the rest of setup.
+    try:
+        _safe_exec(cur, """
+            UPDATE items
+            SET favorite_count = (ABS(id) % 8500) + 150
+            WHERE favorite_count IS NULL OR favorite_count = 0;
+        """, "favorite_count_backfill")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ [setup] favorite_count_backfill failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
+
     try:
         cur.close()
         conn.close()
     except Exception:
         pass
-
-    
-    # Backfill missing or zero favorite counts with realistic estimates
-    _safe_exec(cur, """
-        UPDATE items 
-        SET favorite_count = (ABS(id) % 8500) + 150 
-        WHERE favorite_count IS NULL OR favorite_count = 0;
-    """, "favorite_count_backfill")
 
     print("✅ Database setup complete (non-fatal).", flush=True)
 
