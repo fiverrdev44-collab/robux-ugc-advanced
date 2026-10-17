@@ -184,19 +184,26 @@ def register_supercomputer_commands(bot):
                 color=0xF59E0B
             )
 
-            if rows:
-                for r in rows:
-                    # Defensive: skip any malformed row instead of crashing.
+            shown = 0
+            for r in rows:
+                # Defensive: skip any malformed row instead of crashing.
+                try:
                     if not r or len(r) < 3:
                         continue
-                    query, volume, supply = r[0], r[1], r[2]
-                    vol_str = f"{volume:,}/mo" if volume else "High Trend"
+                    query = r[0] if r[0] else "?"
+                    volume = r[1]
+                    supply = r[2]
+                    vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
                     embed.add_field(
                         name=f"🔍 \"{query}\"",
                         value=f"Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**",
                         inline=False
                     )
-            else:
+                    shown += 1
+                except Exception:
+                    continue
+
+            if shown == 0:
                 embed.description = "No zero-supply vacancies found in current catalog slice."
 
             embed.set_footer(text="Mined from 54,397 Roblox Autocomplete Queries")
