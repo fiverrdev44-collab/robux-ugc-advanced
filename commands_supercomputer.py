@@ -560,6 +560,44 @@ def register_supercomputer_commands(bot):
 
             ranked.sort(key=lambda x: -x[4])
             ranked = ranked[:5]
+            fallback_used = False
+
+            # ── Fallback: catalog co-occurrence ──────────────────────
+            # Autocomplete is thin for many niches. If no suggestion-based
+            # gap survives, find words that co-occur with this niche in real
+            # item names but are missing from the top competitors' titles.
+            if not ranked:
+                terms2 = [t for t in niche.split() if len(t) >= 3] or [niche]
+                pats2 = [f"%{t}%" for t in terms2]
+                cur.execute(f"""
+                    SELECT name FROM items
+                    WHERE name ILIKE ANY(%s) AND favorite_count > 0
+                    {fam_sql}
+                    LIMIT 5000
+                """, [pats2] + fam_params)
+                names = [r[0] for r in cur.fetchall()]
+
+                co = {}
+                for nm in names:
+                    for w in set(toks(nm)):
+                        if w in niche_terms:
+                            continue
+                        co[w] = co.get(w, 0) + 1
+
+                co_cands = []
+                for w, freq in sorted(co.items(), key=lambda x: -x[1])[:80]:
+                    if freq < 20:
+                        continue
+                    cov = top_tokens.get(w, 0)
+                    if cov > 3:
+                        continue
+                    co_cands.append((w, freq, cov))
+
+                co_cands.sort(key=lambda x: (-x[1], x[2]))
+                for w, freq, cov in co_cands[:5]:
+                    # Reuse the 5-tuple shape; score field is unused here.
+                    ranked.append((w, freq, cov, freq, 0.0))
+                fallback_used = bool(ranked)
 
             cur.close()
             conn.close()
@@ -567,6 +605,8 @@ def register_supercomputer_commands(bot):
             embed = discord.Embed(
                 title=f"🎯 Meta Sniper — {niche}",
                 description=(
+                    "Suggestion data is thin — using **catalog co-occurrence**:"
+                    if fallback_used else
                     "High-demand search terms the top items do NOT cover:"
                 ),
                 color=0xEF4444,
@@ -574,10 +614,14 @@ def register_supercomputer_commands(bot):
 
             if ranked:
                 for w, sc, cov, use, _ in ranked:
+                    if fallback_used:
+                        evidence = f"**{sc}** niche items use it"
+                    else:
+                        evidence = f"**{sc}** suggestions"
                     embed.add_field(
                         name=f"🔍 {w}",
                         value=(
-                            f"**{sc}** suggestions · "
+                            f"{evidence} · "
                             f"top-{len(top)} coverage **{cov}/{len(top)}** · "
                             f"**{use:,}** items in this family use it"
                         ),
@@ -604,6 +648,8 @@ def register_supercomputer_commands(bot):
 
             embed.set_footer(
                 text=(
+                    "Co-occurrence = words paired with this niche in real item names"
+                    if fallback_used else
                     "Demand = ≥3 suggestions · gap = absent from top titles · "
                     "relevance = same-family usage"
                 )
