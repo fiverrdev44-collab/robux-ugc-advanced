@@ -105,6 +105,14 @@ def setup_database():
         ADD COLUMN IF NOT EXISTS catalog_supply INTEGER;
     """, "search_suggestions_cols")
 
+    # pg_trgm GIN index so !vacuum can count real catalog supply per
+    # suggestion with an indexed ILIKE join instead of a full scan.
+    _safe_exec(cur, "CREATE EXTENSION IF NOT EXISTS pg_trgm;", "pg_trgm_ext")
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_items_name_trgm
+        ON items USING gin (name gin_trgm_ops);
+    ''', "idx_items_name_trgm")
+
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS learned_keywords (
             id SERIAL PRIMARY KEY,

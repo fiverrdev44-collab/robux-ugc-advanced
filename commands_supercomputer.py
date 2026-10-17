@@ -123,6 +123,10 @@ def register_supercomputer_commands(bot):
     async def vacuum_command(ctx, limit: int = 5):
         """
         Scan 54,397 search suggestions for exploding volume with minimal catalog competition.
+        Supply is computed LIVE from the items table (not a stale column), so
+        generic words like "white" or "hat" never show up as zero-supply gaps.
+        Only multi-word or longer (6+ char) suggestions are considered — single
+        generic tokens are never real vacuum targets.
         Usage: !vacuum [limit]
         """
         try:
@@ -130,10 +134,22 @@ def register_supercomputer_commands(bot):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT suggestion AS query, search_volume, COALESCE(catalog_supply, 0) as supply
-                FROM search_suggestions
-                WHERE COALESCE(catalog_supply, 0) <= 5
-                ORDER BY search_volume DESC NULLS LAST
+                SELECT s.suggestion,
+                       s.search_volume,
+                       COUNT(i.id) AS supply
+                FROM (
+                    SELECT suggestion, search_volume
+                    FROM search_suggestions
+                    WHERE suggestion IS NOT NULL
+                      AND (length(suggestion) >= 6 OR suggestion ~ ' ')
+                    ORDER BY search_volume DESC NULLS LAST
+                    LIMIT 200
+                ) s
+                LEFT JOIN items i
+                  ON i.name ILIKE '%' || s.suggestion || '%'
+                GROUP BY s.suggestion, s.search_volume
+                HAVING COUNT(i.id) <= 5
+                ORDER BY s.search_volume DESC NULLS LAST, COUNT(i.id) ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
