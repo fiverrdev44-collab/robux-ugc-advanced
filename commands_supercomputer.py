@@ -127,7 +127,7 @@ def register_supercomputer_commands(bot):
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT query, search_volume, COALESCE(catalog_supply, 0) as supply
+                SELECT suggestion AS query, search_volume, COALESCE(catalog_supply, 0) as supply
                 FROM search_suggestions
                 WHERE COALESCE(catalog_supply, 0) <= 5
                 ORDER BY search_volume DESC NULLS LAST
