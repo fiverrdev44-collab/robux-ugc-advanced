@@ -1,0 +1,33 @@
+name: Oracle Auto-Deploy (Render-Style)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  deploy:
+    name: Auto-Deploy to Oracle Server 2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Oracle Server 2 via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: 129.213.137.177
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            echo "🚀 [Auto-Deploy] Pulling latest code into ~/robux-ugc-advanced..."
+            cd ~/robux-ugc-advanced
+            git pull origin main
+            
+            echo "📦 [Auto-Deploy] Checking dependencies..."
+            source ~/ugc_env/bin/activate
+            pip install -q asyncpg aiohttp discord.py google-genai 2>/dev/null || true
+            
+            echo "🔄 [Auto-Deploy] Restarting ugc-bot service..."
+            sudo systemctl restart ugc-bot
+            sudo systemctl status ugc-bot --no-pager
+            
+            echo "✅ [Auto-Deploy] Successfully deployed like Render!"

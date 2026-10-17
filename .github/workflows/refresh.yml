@@ -1,0 +1,35 @@
+name: Daily Enrichment
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Refresh top items
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ROBLOSECURITY_COOKIE_1: ${{ secrets.ROBLOSECURITY_COOKIE_1 }}
+          ROBLOSECURITY_COOKIE_2: ${{ secrets.ROBLOSECURITY_COOKIE_2 }}
+          REFRESH_MODE: "true"
+          PYTHONUNBUFFERED: "1"
+        run: python -u enricher.py refresh

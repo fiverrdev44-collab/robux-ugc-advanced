@@ -1,0 +1,33 @@
+name: Backfill Dates
+
+on:
+  schedule:
+    - cron: '30 6 * * *'   # 6:30 AM UTC daily
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'How many items to process this run'
+        required: false
+        default: '3000'
+
+concurrency:
+  group: backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run backfill
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size || '3000' }}
+          PYTHONUNBUFFERED: "1"
+        run: python -u backfill_dates.py
