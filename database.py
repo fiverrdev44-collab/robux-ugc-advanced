@@ -194,6 +194,63 @@ def setup_database():
         );
     ''', "item_tracker")
 
+    # ── my_sales ────────────────────────────────────────────────────
+    # sale_date MUST be DATE. Older databases created it as TEXT, which
+    # breaks every comparison against current_date/date arithmetic.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS my_sales (
+            id SERIAL PRIMARY KEY,
+            sale_date DATE,
+            sale_time TIMESTAMP,
+            item_name TEXT,
+            buyer TEXT,
+            amount_robux INTEGER,
+            status TEXT,
+            UNIQUE(sale_time, item_name, buyer, amount_robux)
+        );
+    ''', "my_sales")
+
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_my_sales_date
+        ON my_sales (sale_date);
+    ''', "idx_my_sales_date")
+
+    # Migrate an existing TEXT sale_date column to a real DATE column.
+    try:
+        cur.execute("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name = 'my_sales' AND column_name = 'sale_date'
+        """)
+        row = cur.fetchone()
+        if row and str(row[0]).lower() != "date":
+            cur.execute("""
+                ALTER TABLE my_sales
+                ALTER COLUMN sale_date TYPE date
+                USING sale_date::date
+            """)
+            conn.commit()
+            print("✅ [setup] my_sales.sale_date migrated TEXT → DATE", flush=True)
+    except Exception as e:
+        print(
+            f"⚠️ [setup] my_sales.sale_date migration failed: "
+            f"{type(e).__name__}: {str(e)[:200]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    # ── my_portfolio ────────────────────────────────────────────────
+    # Referenced by intel_common.portfolio_context but never created.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS my_portfolio (
+            item_id BIGINT PRIMARY KEY,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT
+        );
+    ''', "my_portfolio")
+
     try:
         conn.commit()
     except Exception as e:
