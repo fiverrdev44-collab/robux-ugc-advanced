@@ -156,12 +156,25 @@ def register_supercomputer_commands(bot):
             """)
             real_words = {r[0] for r in cur.fetchall()}
 
-            # Vetted keywords (lowercased for matching).
+            # Load learned (statistically proven) keywords with their lift data.
+            # learned_keywords is the only real demand signal in this DB
+            # (search_volume is NULL everywhere), so vacuum ranks phrases by
+            # whether they contain a proven keyword.
+            learned = {}
             try:
-                cur.execute("SELECT keyword FROM learned_keywords")
-                vetted = {r[0].lower() for r in cur.fetchall() if r[0]}
+                cur.execute(
+                    "SELECT lower(keyword), score, avg_favorites, item_count "
+                    "FROM learned_keywords"
+                )
+                for kw, score, avg_fav, cnt in cur.fetchall():
+                    if kw:
+                        learned[kw] = (
+                            float(score or 0),
+                            float(avg_fav or 0),
+                            int(cnt or 0),
+                        )
             except Exception:
-                vetted = set()
+                learned = {}
 
             cur.execute(
                 """
@@ -205,16 +218,26 @@ def register_supercomputer_commands(bot):
                     (f"%{sugg}%",)
                 )
                 supply = cur.fetchone()[0] or 0
-                if supply <= 5:
-                    is_vetted = sugg.lower() in vetted
-                    results.append((sugg, seeds, freq, supply, is_vetted, real_count))
+                if supply > 5:
+                    continue
+                # Proven keyword lift — max score among learned words present.
+                matched = [w for w in words if w in learned]
+                if matched:
+                    lift = max(learned[w][0] for w in matched)
+                    avg_fav = max(learned[w][1] for w in matched)
+                else:
+                    lift = 0.0
+                    avg_fav = 0.0
+                results.append(
+                    (sugg, seeds, freq, supply, lift, avg_fav, real_count)
+                )
 
             cur.close()
             conn.close()
 
-            # Rank: vetted first, then real-word coverage, then cross-seed
-            # demand, then raw frequency, then lowest supply.
-            results.sort(key=lambda r: (not r[4], -r[5], -r[1], -r[2], r[3]))
+            # Rank: proven keyword lift first, then its avg favorites, then
+            # lowest supply, then cross-seed demand and raw frequency.
+            results.sort(key=lambda r: (-r[4], -r[5], r[3], -r[1], -r[2]))
             results = results[:max(limit, 5)]
 
             # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
@@ -226,25 +249,28 @@ def register_supercomputer_commands(bot):
 
             embeds = []
             current = make_embed(
-                "🎯 Search Vacuum Sniper (Zero Supply Gaps)",
-                "High player search frequency with ≤ 5 catalog items:",
+                "🎯 Search Vacuum Sniper (Low Supply Gaps)",
+                f"Ranked by proven keyword lift ({len(learned)} vetted keywords) · ≤ 5 catalog items:",
             )
             current_len = len(current.description or "")
 
             shown = 0
             seen = set()
-            for sugg, seeds, freq, supply, is_vetted, real_count in results:
+            for sugg, seeds, freq, supply, lift, avg_fav, real_count in results:
                 try:
                     key = (sugg or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    # Cross-seed count is the demand proxy (search_volume is NULL).
-                    demand = f"{seeds} seeds" if seeds else "1 seed"
-                    vetted_tag = " 🧠" if is_vetted else ""
+                    if lift > 0:
+                        demand = (
+                            f"🧠 Proven · Lift **{lift:.2f}** · "
+                            f"⭐ **{int(avg_fav):,}** avg favs"
+                        )
+                    else:
+                        demand = "Unrated"
                     field = (
-                        f"Demand: **{demand}** · "
-                        f"Catalog Items: ⚠️ **{supply}**{vetted_tag}"
+                        f"{demand} · Catalog Items: ⚠️ **{supply}**"
                     )
                     # Start a new embed if this one would exceed the cap.
                     if current_len + len(sugg) + len(field) + 40 > 5500:
