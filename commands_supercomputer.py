@@ -191,6 +191,12 @@ def register_supercomputer_commands(bot):
                 if supply <= 5:
                     results.append((sugg, None, supply, fetched))
 
+            # Hard cap — never compute supply for more than this many
+            # candidates, and never return more results than the user asked
+            # for. Keeps the command fast and the embed within Discord's
+            # 6000-byte limit.
+            results = results[:max(limit * 4, 20)]
+
             cur.close()
             conn.close()
 
