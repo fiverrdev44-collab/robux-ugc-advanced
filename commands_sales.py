@@ -134,3 +134,63 @@ def register_sales_commands(bot, get_db):
         for i in range(0, len(report), 1900):
             await ctx.send(report[i:i+1900])
             await asyncio.sleep(0.2)
+
+    @bot.command(name="sales_debug")
+    async def sales_debug_cmd(ctx):
+        """Diagnose why sales aren't showing: dates, timezone, channel config."""
+        from bot_core import get_db
+
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT current_setting('TimeZone'), now(),
+                       (now() AT TIME ZONE 'UTC')::date
+            """)
+            tz, now_ts, utc_today = cur.fetchone()
+
+            cur.execute("""
+                SELECT count(*), min(sale_date), max(sale_date)
+                FROM my_sales
+            """)
+            total, min_d, max_d = cur.fetchone()
+
+            cur.execute("""
+                SELECT sale_date, count(*), coalesce(sum(amount_robux), 0)
+                FROM my_sales
+                GROUP BY sale_date
+                ORDER BY sale_date DESC
+                LIMIT 7
+            """)
+            by_date = cur.fetchall()
+
+            cur.execute("""
+                SELECT sale_time, sale_date, item_name, amount_robux
+                FROM my_sales
+                ORDER BY sale_time DESC
+                LIMIT 5
+            """)
+            recent = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+        ch = os.getenv("SALES_CHANNEL_ID", "").strip()
+        lines = [
+            "🩺 **SALES DEBUG**",
+            f"DB timezone: `{tz}`",
+            f"now: `{now_ts}`",
+            f"UTC today: `{utc_today}`",
+            f"SALES_CHANNEL_ID: `{ch or 'NOT SET'}`",
+            f"Rows: **{total}** · dates `{min_d}` → `{max_d}`",
+            "",
+            "**By date:**",
+        ]
+        for d, units, robux in by_date:
+            lines.append(f"• {d} — {units} · R${robux:,}")
+        lines.append("")
+        lines.append("**Latest 5:**")
+        for st, sd, name, amt in recent:
+            lines.append(f"• `{(name or '')[:30]}` — {sd} · {st} · R${amt}")
+
+        await ctx.send("\n".join(lines)[:1900])
