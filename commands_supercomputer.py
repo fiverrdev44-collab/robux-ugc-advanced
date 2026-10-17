@@ -131,113 +131,95 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # Hybrid ranking — three demand signals that work even though
-            # search_volume is all NULL in this database:
+            # ── Demand model ──────────────────────────────────────────────
+            # search_volume is NULL everywhere, and every suggestion appears
+            # under exactly one seed, so neither is a usable signal. The only
+            # statistically proven demand in this DB is learned_keywords
+            # (500 scored keywords with avg favorites / sales).
             #
-            # 1. CROSS-SEED DEMAND — how many DIFFERENT seed keywords
-            #    produced this phrase. A phrase surfaced by many unrelated
-            #    seeds is genuinely popular; a phrase that only appears under
-            #    one seed (even many times) is pagination noise.
-            # 2. learned_keywords — 500 vetted keywords with scores. Prioritize
-            #    suggestions that match a vetted keyword.
-            # 3. Low catalog supply — <= 5 items.
-            #
-            # Multi-word phrases only, and misspellings filtered (every word
-            # must appear inside a real item name).
-            #
-            # NOTE: '%' in ILIKE must be '%%' — psycopg2 uses %-style binding.
-            cur.execute("""
-                SELECT DISTINCT word FROM (
-                    SELECT unnest(regexp_split_to_array(lower(name), ' ')) AS word
-                    FROM items
-                    WHERE name IS NOT NULL
-                ) sub
-                WHERE word ~ '^[a-z]{3,}$'
-            """)
-            real_words = {r[0] for r in cur.fetchall()}
-
-            # Load learned (statistically proven) keywords with their lift data.
-            # learned_keywords is the only real demand signal in this DB
-            # (search_volume is NULL everywhere), so vacuum ranks phrases by
-            # whether they contain a proven keyword.
-            learned = {}
+            # So: take a wide pool of multi-word suggestions, keep ONLY the
+            # ones that contain a proven keyword, then filter to low catalog
+            # supply. Every result is proven demand + low supply.
+            single_kw = {}   # word   -> (score, avg_fav, avg_sales)
+            multi_kw = []    # (phrase, score, avg_fav, avg_sales)
             try:
                 cur.execute(
-                    "SELECT lower(keyword), score, avg_favorites, item_count "
-                    "FROM learned_keywords"
+                    "SELECT lower(keyword), score, avg_favorites, avg_sales "
+                    "FROM learned_keywords WHERE keyword IS NOT NULL"
                 )
-                for kw, score, avg_fav, cnt in cur.fetchall():
-                    if kw:
-                        learned[kw] = (
-                            float(score or 0),
-                            float(avg_fav or 0),
-                            int(cnt or 0),
-                        )
+                for kw, score, avg_fav, avg_sales in cur.fetchall():
+                    if not kw:
+                        continue
+                    row = (
+                        float(score or 0),
+                        float(avg_fav or 0),
+                        float(avg_sales or 0),
+                    )
+                    if " " in kw:
+                        multi_kw.append((kw,) + row)
+                    else:
+                        single_kw[kw] = row
             except Exception:
-                learned = {}
+                pass
 
+            # Wide candidate pool — distinct multi-word suggestions by frequency.
             cur.execute(
                 """
-                SELECT MIN(suggestion) AS suggestion,
-                       COUNT(DISTINCT seed_keyword) AS seeds,
-                       COUNT(*) AS freq
+                SELECT MIN(suggestion) AS suggestion, COUNT(*) AS freq
                 FROM search_suggestions
                 WHERE suggestion IS NOT NULL
                   AND suggestion ~ '^[a-z]+ [a-z]+'
                   AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
                 GROUP BY lower(suggestion)
-                ORDER BY COUNT(DISTINCT seed_keyword) DESC,
-                         COUNT(*) DESC,
-                         lower(suggestion)
-                LIMIT 300
+                ORDER BY COUNT(*) DESC, lower(suggestion)
+                LIMIT 3000
                 """
             )
             candidates = cur.fetchall()
+            scanned = len(candidates)
 
-            # Score each candidate instead of hard-filtering:
-            #   real_count = how many words actually appear in real item names
-            #   (a hard filter dropped valid plurals/inflections and emptied
-            #    the result set, so it is now a ranking signal).
+            # Keep only candidates containing a proven keyword.
+            proven = []
+            for sugg, freq in candidates:
+                sl = (sugg or "").lower()
+                if not sl:
+                    continue
+                words = set(re.findall(r"[a-z]{2,}", sl))
+                best_score = best_fav = best_sales = 0.0
+                best_kw = None
+                for w in words:
+                    row = single_kw.get(w)
+                    if row and row[0] > best_score:
+                        best_score, best_fav, best_sales = row
+                        best_kw = w
+                for kw, score, avg_fav, avg_sales in multi_kw:
+                    if kw in sl and score > best_score:
+                        best_score, best_fav, best_sales = score, avg_fav, avg_sales
+                        best_kw = kw
+                if best_kw:
+                    proven.append((sugg, best_score, best_fav, best_sales, best_kw))
+
+            # Bound the supply lookups — check the strongest proven phrases
+            # first so the command never runs hundreds of ILIKE queries.
+            proven.sort(key=lambda r: (-r[1], -r[2]))
+            proven = proven[:300]
+
+            # Compute live supply and keep the low-supply gaps.
             results = []
-            scanned = 0
-            for sugg, seeds, freq in candidates:
-                scanned += 1
-                words = [w for w in re.split(r'\s+', sugg.lower()) if w]
-                # If the real-word set failed to load, don't discard everything.
-                if not real_words:
-                    real_count = len(words)
-                else:
-                    real_count = sum(1 for w in words if w in real_words)
-                if real_count == 0:
-                    continue  # pure garbage — no word appears in any item
-                # Pass the full pattern as a parameter — no literal '%' in
-                # the SQL string, so no psycopg2 escaping is needed, and the
-                # pg_trgm GIN index on items.name can serve the lookup.
+            for sugg, score, avg_fav, avg_sales, via in proven:
                 cur.execute(
                     "SELECT COUNT(*) FROM items WHERE name ILIKE %s",
                     (f"%{sugg}%",)
                 )
                 supply = cur.fetchone()[0] or 0
-                if supply > 5:
-                    continue
-                # Proven keyword lift — max score among learned words present.
-                matched = [w for w in words if w in learned]
-                if matched:
-                    lift = max(learned[w][0] for w in matched)
-                    avg_fav = max(learned[w][1] for w in matched)
-                else:
-                    lift = 0.0
-                    avg_fav = 0.0
-                results.append(
-                    (sugg, seeds, freq, supply, lift, avg_fav, real_count)
-                )
+                if supply <= 5:
+                    results.append((sugg, score, avg_fav, avg_sales, supply, via))
 
             cur.close()
             conn.close()
 
-            # Rank: proven keyword lift first, then its avg favorites, then
-            # lowest supply, then cross-seed demand and raw frequency.
-            results.sort(key=lambda r: (-r[4], -r[5], r[3], -r[1], -r[2]))
+            # Rank: proven lift, then avg favorites, then lowest supply.
+            results.sort(key=lambda r: (-r[1], -r[2], r[4]))
             results = results[:max(limit, 5)]
 
             # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
@@ -250,27 +232,23 @@ def register_supercomputer_commands(bot):
             embeds = []
             current = make_embed(
                 "🎯 Search Vacuum Sniper (Low Supply Gaps)",
-                f"Ranked by proven keyword lift ({len(learned)} vetted keywords) · ≤ 5 catalog items:",
+                "Proven demand (learned keywords) · ≤ 5 catalog items:",
             )
             current_len = len(current.description or "")
 
             shown = 0
             seen = set()
-            for sugg, seeds, freq, supply, lift, avg_fav, real_count in results:
+            for sugg, score, avg_fav, avg_sales, supply, via in results:
                 try:
                     key = (sugg or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    if lift > 0:
-                        demand = (
-                            f"🧠 Proven · Lift **{lift:.2f}** · "
-                            f"⭐ **{int(avg_fav):,}** avg favs"
-                        )
-                    else:
-                        demand = "Unrated"
                     field = (
-                        f"{demand} · Catalog Items: ⚠️ **{supply}**"
+                        f"🧠 via **{via}** · Lift **{score:.2f}** · "
+                        f"⭐ **{int(avg_fav):,}** avg favs · "
+                        f"💰 **{int(avg_sales):,}** avg sales · "
+                        f"Items ⚠️ **{supply}**"
                     )
                     # Start a new embed if this one would exceed the cap.
                     if current_len + len(sugg) + len(field) + 40 > 5500:
