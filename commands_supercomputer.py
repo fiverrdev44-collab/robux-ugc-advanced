@@ -420,6 +420,187 @@ def register_supercomputer_commands(bot):
         except Exception as e:
             await ctx.send(f"⚠️ Velocity radar error: {e}")
 
+    # ── 7. 🎯 Meta Sniper (traffic interceptor) ──────────────────────
+    @bot.command(name="meta_sniper", aliases=["sniper"])
+    async def meta_sniper_command(ctx, *, niche: str = ""):
+        """
+        Find high-demand search terms the top items in a niche do NOT use
+        in their titles, then generate the exact title/tags to capture them.
+        Usage: !meta_sniper aura emote
+        """
+        niche = (niche or "").strip().lower()
+        if not niche:
+            return await ctx.send(
+                "Usage: `!meta_sniper <niche>`\n"
+                "Example: `!meta_sniper aura emote`"
+            )
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Infer the asset family from the last word, when possible.
+            fam_sql, fam_params = "", []
+            try:
+                from convergence_engine import _family_clause
+                last = niche.split()[-1]
+                fam_map = {
+                    "emote": "emotes", "emotes": "emotes", "dance": "emotes",
+                    "hat": "hair", "hair": "hair", "beanie": "hair",
+                    "crown": "hair", "cap": "hair",
+                    "face": "face", "mask": "face", "glasses": "face",
+                    "neck": "neck", "necklace": "neck", "chain": "neck",
+                    "back": "back", "cape": "back", "wings": "back",
+                    "backpack": "back", "waist": "waist",
+                    "shoulder": "shoulder", "front": "front",
+                    "shirt": "classic", "pants": "classic", "jacket": "classic",
+                }
+                fam = fam_map.get(last)
+                if fam:
+                    fam_sql, fam_params = _family_clause(fam)
+            except Exception:
+                pass
+
+            # Top 20 competitors in the niche (by favorites).
+            cur.execute(f"""
+                SELECT name, favorite_count
+                FROM items
+                WHERE name ILIKE %s AND favorite_count > 0
+                {fam_sql}
+                ORDER BY favorite_count DESC
+                LIMIT 20
+            """, [f"%{niche}%"] + fam_params)
+            top = cur.fetchall()
+
+            if not top:
+                terms = [t for t in niche.split() if len(t) >= 3] or [niche]
+                pats = [f"%{t}%" for t in terms]
+                cur.execute(f"""
+                    SELECT name, favorite_count
+                    FROM items
+                    WHERE name ILIKE ANY(%s) AND favorite_count > 0
+                    {fam_sql}
+                    ORDER BY favorite_count DESC
+                    LIMIT 20
+                """, [pats] + fam_params)
+                top = cur.fetchall()
+
+            if not top:
+                cur.close(); conn.close()
+                return await ctx.send(f"❌ No top items found for `{niche}`.")
+
+            # Tokenize competitor titles.
+            stop = {
+                "the", "a", "an", "and", "of", "in", "to", "for", "is", "on",
+                "with", "my", "your", "new", "hot", "best", "top", "roblox",
+                "ugc", "item", "cute", "funny", "cool", "trendy", "aesthetic",
+                "viral", "sale", "free", "cheap",
+            }
+
+            def toks(s):
+                return [
+                    w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower())
+                    if w not in stop and not w.isdigit()
+                ]
+
+            top_tokens = {}
+            for name, _ in top:
+                for w in set(toks(name)):
+                    top_tokens[w] = top_tokens.get(w, 0) + 1
+
+            # Suggestions relevant to the niche terms.
+            niche_terms = [t for t in niche.split() if len(t) >= 3]
+            pats = [f"%{t}%" for t in niche_terms] or [f"%{niche}%"]
+            cur.execute("""
+                SELECT suggestion, COUNT(*) AS n
+                FROM search_suggestions
+                WHERE suggestion IS NOT NULL
+                  AND suggestion ILIKE ANY(%s)
+                GROUP BY suggestion
+                ORDER BY COUNT(*) DESC
+                LIMIT 500
+            """, (pats,))
+            suggestions = cur.fetchall()
+
+            # Count how many suggestions contain each candidate word.
+            cand = {}
+            for sugg, _ in suggestions:
+                for w in set(toks(sugg)):
+                    if w in niche_terms:
+                        continue
+                    cand[w] = cand.get(w, 0) + 1
+
+            # Rank gaps: high suggestion coverage, absent from top titles,
+            # and a real word used across the catalog.
+            ranked = []
+            for w, sugg_count in sorted(cand.items(), key=lambda x: -x[1])[:60]:
+                coverage = top_tokens.get(w, 0)
+                if coverage > 3:
+                    continue
+                cur.execute(
+                    "SELECT COUNT(*) FROM items WHERE name ILIKE %s",
+                    (f"%{w}%",)
+                )
+                use = cur.fetchone()[0] or 0
+                if use < 20:
+                    continue
+                score = (
+                    sugg_count
+                    * (1 - coverage / max(len(top), 1))
+                    * (1 + min(use, 5000) / 1000)
+                )
+                ranked.append((w, sugg_count, coverage, use, score))
+
+            ranked.sort(key=lambda x: -x[4])
+            ranked = ranked[:5]
+
+            cur.close()
+            conn.close()
+
+            embed = discord.Embed(
+                title=f"🎯 Meta Sniper — {niche}",
+                description=(
+                    "High-demand search terms the top items do NOT cover:"
+                ),
+                color=0xEF4444,
+            )
+
+            if ranked:
+                for w, sc, cov, use, _ in ranked:
+                    embed.add_field(
+                        name=f"🔍 {w}",
+                        value=(
+                            f"**{sc}** suggestions · "
+                            f"top-20 coverage **{cov}/{len(top)}** · "
+                            f"**{use:,}** catalog items use it"
+                        ),
+                        inline=False,
+                    )
+
+                title_words = [w for w, *_ in ranked[:3]]
+                suggested = " ".join(x.capitalize() for x in title_words)
+                embed.add_field(
+                    name="✅ Suggested title",
+                    value=(
+                        f"`{suggested} {niche.title()}`\n"
+                        f"Tags: `{', '.join(title_words)}`"
+                    ),
+                    inline=False,
+                )
+            else:
+                embed.description = (
+                    "No gaps found — the top items already cover the "
+                    "high-demand terms in this niche."
+                )
+
+            embed.set_footer(
+                text="Demand = suggestion coverage · gap = absence from top titles"
+            )
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Meta sniper error: {type(e).__name__}: {e}")
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
