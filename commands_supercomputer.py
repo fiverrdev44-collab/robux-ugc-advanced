@@ -13,10 +13,17 @@ import re
 import math
 import asyncio
 import aiohttp
+import subprocess
 import discord
 from collections import Counter, defaultdict
 
 from bot_core import get_db, rollback_quietly
+
+# Owner-only Discord IDs that may invoke !bot_update.
+BOT_OWNERS = {
+    os.getenv("BOT_OWNER_ID", "").strip(),
+    os.getenv("DISCORD_OWNER_ID", "").strip(),
+} - {""}
 
 TOP_WHALE_STUDIOS = {
     "1276023": "Erythia Studios",
@@ -46,24 +53,32 @@ def register_supercomputer_commands(bot):
             cur = conn.cursor()
 
             if studio_name:
+                # Match by studio name (case-insensitive substring) OR by
+                # the studio's known numeric ID if the user typed one.
+                studio_arg = studio_name.strip()
+                studio_filter = studio_arg
+                params = (studio_filter,)
                 cur.execute(
                     """
                     SELECT id, name, creator_name, price, favorite_count, created_at
                     FROM items
-                    WHERE creator_name ~* %s
+                    WHERE creator_name ILIKE %s
                     ORDER BY created_at DESC NULLS LAST, id DESC
-                    LIMIT 5
+                    LIMIT 10
                     """,
-                    (studio_name,)
+                    (f"%{studio_filter}%",)
                 )
             else:
                 cur.execute(
                     """
                     SELECT id, name, creator_name, price, favorite_count, created_at
                     FROM items
-                    WHERE creator_name ~* 'Erythia|Rush|Foov|Voxel|Starbound|Polarity|Lovespun'
+                    WHERE creator_name ILIKE ANY(ARRAY[
+                        'Erythia', 'Rush', 'Foov', 'Voxel', 'Starbound',
+                        'Polarity', 'Lovespun', 'Lemon', 'Genkro', 'Rocactus'
+                    ])
                     ORDER BY created_at DESC NULLS LAST, id DESC
-                    LIMIT 6
+                    LIMIT 10
                     """
                 )
             rows = cur.fetchall()
@@ -90,7 +105,7 @@ def register_supercomputer_commands(bot):
             else:
                 embed.add_field(
                     name="Top Monitored Studios",
-                    value="\n".join([f"• **{name}** (ID: `{cid}`)" for cid, name in list(TOP_WHALE_STUDIOS.items())[:6]]),
+                    value="\n".join([f"• **{name}** (ID: `{cid}`)" for cid, name in list(TOP_WHALE_STUDIOS.items())[:10]]),
                     inline=False
                 )
 
@@ -285,3 +300,49 @@ def register_supercomputer_commands(bot):
 
         except Exception as e:
             await ctx.send(f"⚠️ Velocity radar error: {e}")
+
+    # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
+    @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
+    async def bot_update_command(ctx):
+        """
+        Owner-only: git pull + restart the bot.
+        Usage: !bot_update
+        """
+        try:
+            user_id = ctx.author.id
+            if user_id not in BOT_OWNERS:
+                await ctx.send("🚫 **Unauthorized.** `!bot_update` is owner-only.")
+                return
+
+            await ctx.send("🔧 **Starting bot update...** Pulling latest from `main`.")
+
+            # Show current commit before the pull
+            pre = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, cwd=os.getcwd()
+            ).stdout.strip() or "unknown"
+            await ctx.send(f"📦 Current commit: `{pre}`")
+
+            # Pull latest changes
+            pull = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                capture_output=True, text=True, cwd=os.getcwd()
+            )
+            if pull.returncode != 0:
+                await ctx.send(f"⚠️ Git pull failed:\n```\n{(pull.stderr or pull.stdout)[-500:]}\n```")
+                return
+
+            post = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, cwd=os.getcwd()
+            ).stdout.strip() or "unknown"
+
+            await ctx.send(f"✅ Updated to `{post}`. Restarting bot in 3s...")
+
+            # Give Discord a moment to deliver the success message,
+            # then force a clean restart (Render will relaunch the process).
+            await asyncio.sleep(3)
+            os._exit(1)
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Bot update error: {e}")

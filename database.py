@@ -86,14 +86,24 @@ def setup_database():
             id SERIAL PRIMARY KEY,
             seed_keyword TEXT,
             suggestion TEXT,
+            search_volume INTEGER,
+            catalog_supply INTEGER,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''', "search_suggestions")
 
     _safe_exec(cur, '''
-        CREATE INDEX IF NOT EXISTS idx_search_suggestions_suggestion 
+        CREATE INDEX IF NOT EXISTS idx_search_suggestions_suggestion
         ON search_suggestions (suggestion);
     ''', "idx_search_suggestions_suggestion")
+
+    # Backfill the two columns vacuum queries against, in case this table
+    # was created by an older schema that omitted them.
+    _safe_exec(cur, """
+        ALTER TABLE search_suggestions
+        ADD COLUMN IF NOT EXISTS search_volume INTEGER,
+        ADD COLUMN IF NOT EXISTS catalog_supply INTEGER;
+    """, "search_suggestions_cols")
 
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS learned_keywords (
