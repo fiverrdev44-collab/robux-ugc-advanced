@@ -5,7 +5,7 @@ Integrates the 5 roadmap engines directly into the VANTA 73 Prototype bot:
 - 🎯 Search Vacuum Sniper (!vacuum, !snipe)
 - 🛡️ Stealth Description Engine 2.0 (!stealth, !stealth_desc)
 - 📈 Pre-Launch Revenue Simulator (!revsim, !simulator)
-- ⚡ 48-Hour Velocity Radar (!golden, !velocity)
+- ⚡ 48-Hour Velocity Radar (!golden_hour, !golden)
 """
 
 import os
@@ -257,11 +257,11 @@ def register_supercomputer_commands(bot):
         await ctx.send(embed=embed)
 
     # ── 5. ⚡ 48-Hour Velocity Radar ──────────────────────────────────
-    @bot.command(name="velocity", aliases=["golden"])
-    async def velocity_command(ctx, limit: int = 5):
+    @bot.command(name="golden_hour", aliases=["golden"])
+    async def golden_hour_command(ctx, limit: int = 5):
         """
         Scan 48-hour velocity acceleration for items in the golden algorithm testing window.
-        Usage: !velocity [limit]
+        Usage: !golden_hour [limit]
         """
         try:
             conn = get_db()
