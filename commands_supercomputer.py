@@ -165,7 +165,7 @@ def register_supercomputer_commands(bot):
 
             cur.execute(
                 """
-                SELECT suggestion, COUNT(*) AS freq
+                SELECT MIN(suggestion) AS suggestion, COUNT(*) AS freq
                 FROM search_suggestions
                 WHERE suggestion IS NOT NULL
                   AND suggestion ~ '^[a-z]+ [a-z]+'
