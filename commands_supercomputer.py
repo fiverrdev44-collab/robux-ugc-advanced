@@ -601,6 +601,149 @@ def register_supercomputer_commands(bot):
         except Exception as e:
             await ctx.send(f"⚠️ Meta sniper error: {type(e).__name__}: {e}")
 
+    # ── 8. 🧠 Sales Keyword Intelligence (revenue attribution) ───────
+    @bot.command(name="sales_keywords", aliases=["sales_words"])
+    async def sales_keywords_command(ctx, family: str = ""):
+        """
+        Learn which title words actually drive SALES (not favorites), then
+        show which high-lift words your own items are missing.
+        Usage: !sales_keywords [family]  e.g. !sales_keywords emotes
+        """
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Optional family scope.
+            fam_sql, fam_params = "", []
+            if family:
+                try:
+                    from convergence_engine import _family_clause
+                    fam_key = {
+                        "emote": "emotes", "dance": "emotes",
+                        "hat": "hair", "beanie": "hair", "crown": "hair",
+                        "face": "face", "mask": "face", "glasses": "face",
+                        "neck": "neck", "back": "back", "cape": "back",
+                        "wings": "back", "waist": "waist",
+                        "shirt": "classic", "pants": "classic",
+                    }.get(family.lower(), family.lower())
+                    fam_sql, fam_params = _family_clause(fam_key)
+                except Exception:
+                    pass
+
+            cur.execute(f"""
+                SELECT name, COALESCE(total_sales, 0) AS s,
+                       COALESCE(favorite_count, 0) AS f
+                FROM items
+                WHERE name IS NOT NULL {fam_sql}
+                LIMIT 40000
+            """, fam_params)
+            rows = cur.fetchall()
+
+            with_sales = sum(1 for _, s, _ in rows if (s or 0) > 0)
+            basis = "catalog sales" if with_sales >= 50 else "favorites (thin sales data)"
+
+            stop = {
+                "the", "a", "an", "and", "of", "in", "to", "for", "is", "on",
+                "with", "my", "your", "new", "hot", "best", "top", "roblox",
+                "ugc", "item", "cute", "funny", "cool", "trendy", "aesthetic",
+                "viral", "sale", "free", "cheap", "the", "and",
+            }
+
+            def toks(s):
+                return [
+                    w for w in re.findall(r"[a-z0-9]{3,}", (s or "").lower())
+                    if w not in stop and not w.isdigit()
+                ]
+
+            buckets = {}
+            for name, s, f in rows:
+                val = s if basis == "catalog sales" else f
+                for w in set(toks(name)):
+                    buckets.setdefault(w, []).append(val)
+
+            stats = []
+            for w, vals in buckets.items():
+                if len(vals) < 10:
+                    continue
+                vals.sort()
+                med = vals[len(vals) // 2]
+                rate = sum(1 for v in vals if v > 0) / len(vals)
+                stats.append((w, med, rate, len(vals)))
+
+            stats.sort(key=lambda x: (-x[1], -x[2]))
+            top = stats[:15]
+
+            # Your own selling items (from live sales).
+            cur.execute("""
+                SELECT lower(item_name), COUNT(*)
+                FROM my_sales
+                GROUP BY lower(item_name)
+            """)
+            my_sales_rows = cur.fetchall()
+            my_words = set()
+            my_names = []
+            for name, units in my_sales_rows:
+                my_names.append((name, units))
+                my_words.update(toks(name))
+
+            cur.close()
+            conn.close()
+
+            embed = discord.Embed(
+                title="🧠 Sales Keyword Intelligence",
+                description=(
+                    f"Basis: **{basis}** · family: **{family or 'all'}** · "
+                    f"{len(rows):,} items scanned"
+                ),
+                color=0x10B981,
+            )
+
+            if not top:
+                embed.description += "\n\n_Not enough data to compute word lift._"
+                return await ctx.send(embed=embed)
+
+            lines = []
+            for w, med, rate, n in top[:10]:
+                used = "✅" if w in my_words else "▫️"
+                lines.append(
+                    f"{used} **{w}** — median sales **{med:,.0f}** · "
+                    f"seller rate **{rate * 100:.0f}%** · {n:,} items"
+                )
+            embed.add_field(
+                name="Top sales-driving words",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+            missing = [w for w, *_ in top[:10] if w not in my_words]
+            if missing:
+                embed.add_field(
+                    name="Add these to your items",
+                    value="`" + "`, `".join(missing[:6]) + "`",
+                    inline=False,
+                )
+
+            if my_names:
+                sell_lines = [
+                    f"• `{name[:40]}` — {units} sales"
+                    for name, units in sorted(my_names, key=lambda x: -x[1])[:5]
+                ]
+                embed.add_field(
+                    name="Your selling items",
+                    value="\n".join(sell_lines),
+                    inline=False,
+                )
+
+            embed.set_footer(
+                text="✅ = already in your item names · ▫️ = missing"
+            )
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(
+                f"⚠️ Sales keyword error: {type(e).__name__}: {e}"
+            )
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
