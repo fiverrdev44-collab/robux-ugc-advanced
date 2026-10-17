@@ -134,10 +134,10 @@ def register_supercomputer_commands(bot):
             # Hybrid ranking — three demand signals that work even though
             # search_volume is all NULL in this database:
             #
-            # 1. Suggestion FREQUENCY — how many times the phrase appears
-            #    across all 54,397 seed→suggestion rows. A phrase mined
-            #    from many different seeds is genuinely popular; a phrase
-            #    that appears once is noise. This is the real demand proxy.
+            # 1. CROSS-SEED DEMAND — how many DIFFERENT seed keywords
+            #    produced this phrase. A phrase surfaced by many unrelated
+            #    seeds is genuinely popular; a phrase that only appears under
+            #    one seed (even many times) is pagination noise.
             # 2. learned_keywords — 500 vetted keywords with scores. Prioritize
             #    suggestions that match a vetted keyword.
             # 3. Low catalog supply — <= 5 items.
@@ -165,14 +165,18 @@ def register_supercomputer_commands(bot):
 
             cur.execute(
                 """
-                SELECT MIN(suggestion) AS suggestion, COUNT(*) AS freq
+                SELECT MIN(suggestion) AS suggestion,
+                       COUNT(DISTINCT seed_keyword) AS seeds,
+                       COUNT(*) AS freq
                 FROM search_suggestions
                 WHERE suggestion IS NOT NULL
                   AND suggestion ~ '^[a-z]+ [a-z]+'
                   AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
                 GROUP BY lower(suggestion)
-                HAVING COUNT(*) >= 2
-                ORDER BY COUNT(*) DESC, lower(suggestion)
+                HAVING COUNT(DISTINCT seed_keyword) >= 2
+                ORDER BY COUNT(DISTINCT seed_keyword) DESC,
+                         COUNT(*) DESC,
+                         lower(suggestion)
                 LIMIT 400
                 """
             )
@@ -180,15 +184,15 @@ def register_supercomputer_commands(bot):
 
             # Filter misspellings in Python (fast — just set membership).
             spelled = []
-            for sugg, freq in candidates:
+            for sugg, seeds, freq in candidates:
                 words = [w for w in re.split(r'\s+', sugg.lower()) if w]
                 if words and all(w in real_words for w in words):
-                    spelled.append((sugg, freq))
+                    spelled.append((sugg, seeds, freq))
 
             # Compute live supply for each surviving candidate, and rank:
-            # vetted keywords first, then by frequency, then by low supply.
+            # vetted keywords first, then by cross-seed demand, then low supply.
             results = []
-            for sugg, freq in spelled:
+            for sugg, seeds, freq in spelled:
                 # Pass the full pattern as a parameter — no literal '%' in
                 # the SQL string, so no psycopg2 escaping is needed, and the
                 # pg_trgm GIN index on items.name can serve the lookup.
@@ -199,14 +203,14 @@ def register_supercomputer_commands(bot):
                 supply = cur.fetchone()[0] or 0
                 if supply <= 5:
                     is_vetted = sugg.lower() in vetted
-                    results.append((sugg, freq, supply, is_vetted))
+                    results.append((sugg, seeds, freq, supply, is_vetted))
 
             cur.close()
             conn.close()
 
-            # Sort: vetted keywords first, then by frequency (demand), then
-            # by supply (lower is better).
-            results.sort(key=lambda r: (not r[3], -r[1], r[2]))
+            # Sort: vetted keywords first, then cross-seed demand (seeds),
+            # then raw frequency, then lowest supply.
+            results.sort(key=lambda r: (not r[4], -r[1], -r[2], r[3]))
             results = results[:max(limit, 5)]
 
             # Build embeds — cap each at ~5500 chars so Discord's 6000-byte
@@ -225,14 +229,14 @@ def register_supercomputer_commands(bot):
 
             shown = 0
             seen = set()
-            for sugg, freq, supply, is_vetted in results:
+            for sugg, seeds, freq, supply, is_vetted in results:
                 try:
                     key = (sugg or "").strip().lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    # Frequency is the demand proxy (search_volume is NULL).
-                    demand = f"{freq}× mined" if freq else "High Trend"
+                    # Cross-seed count is the demand proxy (search_volume is NULL).
+                    demand = f"{seeds} seeds" if seeds else "High Trend"
                     vetted_tag = " 🧠" if is_vetted else ""
                     field = (
                         f"Demand: **{demand}** · "
