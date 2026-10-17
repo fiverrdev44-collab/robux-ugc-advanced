@@ -29,7 +29,7 @@ def analyze_sales(days=7):
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_time >= now() - interval '24 hours'
+            where sale_time::timestamptz >= now() - interval '24 hours'
         """)
         last24_units, last24_robux = cur.fetchone()
 

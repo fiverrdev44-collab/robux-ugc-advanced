@@ -201,7 +201,7 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS my_sales (
             id SERIAL PRIMARY KEY,
             sale_date DATE,
-            sale_time TIMESTAMP,
+            sale_time TIMESTAMPTZ,
             item_name TEXT,
             buyer TEXT,
             amount_robux INTEGER,
@@ -233,6 +233,35 @@ def setup_database():
     except Exception as e:
         print(
             f"⚠️ [setup] my_sales.sale_date migration failed: "
+            f"{type(e).__name__}: {str(e)[:200]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    # Migrate an existing TEXT sale_time column to TIMESTAMPTZ.
+    try:
+        cur.execute("""
+            SELECT data_type FROM information_schema.columns
+            WHERE table_name = 'my_sales' AND column_name = 'sale_time'
+        """)
+        row = cur.fetchone()
+        if row and str(row[0]).lower() not in (
+            "timestamp with time zone",
+            "timestamp without time zone",
+        ):
+            cur.execute("""
+                ALTER TABLE my_sales
+                ALTER COLUMN sale_time TYPE timestamptz
+                USING sale_time::timestamptz
+            """)
+            conn.commit()
+            print("✅ [setup] my_sales.sale_time migrated TEXT → TIMESTAMPTZ", flush=True)
+    except Exception as e:
+        print(
+            f"⚠️ [setup] my_sales.sale_time migration failed: "
             f"{type(e).__name__}: {str(e)[:200]}",
             flush=True,
         )
