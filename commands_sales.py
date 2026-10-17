@@ -216,9 +216,16 @@ def register_sales_commands(bot, get_db):
         limit = max(1, min(limit, 200))
         scanned = embeds = matched = 0
         samples = []
+        newest_ts = oldest_ts = None
+        sale_dates = {}
 
         async for msg in ch.history(limit=limit):
             scanned += 1
+            ts = msg.created_at
+            if newest_ts is None or ts > newest_ts:
+                newest_ts = ts
+            if oldest_ts is None or ts < oldest_ts:
+                oldest_ts = ts
             for e in (msg.embeds or []):
                 embeds += 1
                 try:
@@ -229,6 +236,8 @@ def register_sales_commands(bot, get_db):
                     continue
                 if sale:
                     matched += 1
+                    d = str(sale["sale_date"])
+                    sale_dates[d] = sale_dates.get(d, 0) + 1
                 elif len(samples) < 5:
                     samples.append((
                         (e.title or "(no title)")[:70],
@@ -240,7 +249,13 @@ def register_sales_commands(bot, get_db):
             f"Channel: <#{ch_id}>",
             f"Messages: **{scanned}** · Embeds: **{embeds}** · "
             f"Matched sales: **{matched}**",
+            f"Msg range: `{oldest_ts}` → `{newest_ts}`",
         ]
+        if sale_dates:
+            recent = sorted(sale_dates.items(), reverse=True)[:7]
+            lines.append("**Parsed sale dates:**")
+            for d, n in recent:
+                lines.append(f"• {d} — {n}")
         if samples:
             lines.append("\n**Unmatched embed samples:**")
             for title, fields in samples:

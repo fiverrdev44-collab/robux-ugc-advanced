@@ -215,6 +215,34 @@ def setup_database():
         ON my_sales (sale_date);
     ''', "idx_my_sales_date")
 
+    # ON CONFLICT (sale_time, item_name, buyer, amount_robux) requires a
+    # matching unique index. A hand-created live table may be missing it,
+    # which makes EVERY sale insert fail silently in the listener.
+    try:
+        cur.execute("""
+            DELETE FROM my_sales a USING my_sales b
+            WHERE a.id > b.id
+              AND a.sale_time = b.sale_time
+              AND a.item_name IS NOT DISTINCT FROM b.item_name
+              AND a.buyer IS NOT DISTINCT FROM b.buyer
+              AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
+        """)
+        conn.commit()
+    except Exception as e:
+        print(
+            f"⚠️ [setup] my_sales dedup failed: {type(e).__name__}: {str(e)[:150]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    _safe_exec(cur, '''
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_my_sales_dedup
+        ON my_sales (sale_time, item_name, buyer, amount_robux);
+    ''', "idx_my_sales_dedup")
+
     # Migrate an existing TEXT sale_date column to a real DATE column.
     try:
         cur.execute("""

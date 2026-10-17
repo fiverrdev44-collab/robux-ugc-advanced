@@ -115,6 +115,34 @@ def _extract_sale_from_embed(embed, message):
     }
 
 
+def _insert_sale(cur, sale):
+    """Insert one sale without relying on an ON CONFLICT unique constraint.
+
+    A hand-created my_sales table may lack the unique index that
+    ON CONFLICT requires, which makes every insert fail silently.
+    """
+    params = (
+        sale["sale_date"], sale["sale_time"], sale["item_name"],
+        sale["buyer"], sale["amount_robux"], sale["status"],
+    )
+    cur.execute("""
+        insert into my_sales
+          (sale_date, sale_time, item_name, buyer, amount_robux, status)
+        select %s, %s, %s, %s, %s, %s
+        where not exists (
+            select 1 from my_sales
+            where sale_time::timestamptz = %s::timestamptz
+              and item_name is not distinct from %s
+              and buyer is not distinct from %s
+              and amount_robux is not distinct from %s
+        )
+    """, params + (
+        sale["sale_time"], sale["item_name"],
+        sale["buyer"], sale["amount_robux"],
+    ))
+    return cur.rowcount > 0
+
+
 def _save_sales_batch(sales_list):
     """
     Insert many sales with ONE connection. Used by backfill.
@@ -135,22 +163,17 @@ def _save_sales_batch(sales_list):
         cur = conn.cursor()
         for sale in sales_list:
             try:
-                cur.execute("""
-                    insert into my_sales
-                      (sale_date, sale_time, item_name, buyer,
-                       amount_robux, status)
-                    values (%s, %s, %s, %s, %s, %s)
-                    on conflict (sale_time, item_name, buyer, amount_robux)
-                    do nothing
-                """, (
-                    sale["sale_date"], sale["sale_time"], sale["item_name"],
-                    sale["buyer"], sale["amount_robux"], sale["status"],
-                ))
-                if cur.rowcount > 0:
+                cur.execute("SAVEPOINT sp_sale")
+                if _insert_sale(cur, sale):
                     inserted += 1
                 else:
                     skipped += 1
+                cur.execute("RELEASE SAVEPOINT sp_sale")
             except Exception as e:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_sale")
+                except Exception:
+                    pass
                 print(f"[sales_listener] row failed for "
                       f"'{sale.get('item_name', '?')[:40]}': "
                       f"{type(e).__name__}: {e}", flush=True)
@@ -187,18 +210,9 @@ def _save_sale_single(sale):
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("""
-            insert into my_sales
-              (sale_date, sale_time, item_name, buyer, amount_robux, status)
-            values (%s, %s, %s, %s, %s, %s)
-            on conflict (sale_time, item_name, buyer, amount_robux)
-            do nothing
-        """, (
-            sale["sale_date"], sale["sale_time"], sale["item_name"],
-            sale["buyer"], sale["amount_robux"], sale["status"],
-        ))
+        is_new = _insert_sale(cur, sale)
         conn.commit()
-        return cur.rowcount > 0
+        return is_new
     except Exception as e:
         print(f"[sales_listener] save failed for "
               f"'{sale.get('item_name', '?')[:40]}': "
