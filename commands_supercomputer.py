@@ -788,6 +788,9 @@ def register_supercomputer_commands(bot):
 
         sid = str(uuid4())
         endpoints = [
+            ("avatar/v2",
+             "https://apis.roblox.com/autocomplete-avatar/v2/suggest",
+             {"prefix": query, "limit": 10, "lang": "en"}),
             ("v1/suggest",
              "https://apis.roblox.com/search-suggestions/v1/suggest",
              {"query": query, "limit": 10, "maxResults": 10, "sessionId": sid}),

@@ -23,5 +23,6 @@ jobs:
       - name: Run suggest scraper
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ROBLOSECURITY_COOKIE_1: ${{ secrets.ROBLOSECURITY_COOKIE_1 }}
           PYTHONUNBUFFERED: "1"
         run: python -u suggest.py

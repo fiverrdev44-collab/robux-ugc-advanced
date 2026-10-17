@@ -6,14 +6,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from database import get_db_connection, setup_database
 
-# Try multiple endpoints — Roblox changes these often
+# Try multiple endpoints — Roblox changes these often.
+# The autocomplete-avatar/v2 endpoint is the one the live Marketplace
+# search bar uses (verified in browser DevTools).
 ENDPOINTS = [
+    "https://apis.roblox.com/autocomplete-avatar/v2/suggest",
     "https://apis.roblox.com/search-suggestions/v1/suggest",
     "https://apis.roblox.com/search-suggestions/v1/omni-suggest/keywords",
     "https://www.roblox.com/search/suggest",
     "https://catalog.roblox.com/v1/search/suggestions",
 ]
 WORKERS = 10
+
+ROBLOSECURITY = (
+    os.getenv("ROBLOSECURITY_COOKIE_1")
+    or os.getenv("ROBLOSECURITY_COOKIE")
+    or ""
+).strip()
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -23,6 +32,8 @@ HEADERS = {
     "Referer": "https://www.roblox.com/",
     "Origin": "https://www.roblox.com",
 }
+if ROBLOSECURITY:
+    HEADERS["Cookie"] = f".ROBLOSECURITY={ROBLOSECURITY}"
 
 UGC_SEEDS = [
     "hat", "hair", "face", "shirt", "pants", "jacket", "shoe", "wing", "tail",
@@ -62,8 +73,15 @@ STOP_WORDS = {
 def try_endpoint(endpoint, seed):
     """Try one endpoint with one seed. Return list of suggestion strings or []."""
     try:
-        for param_name in ["query", "keyword", "q"]:
-            params = {param_name: seed, "limit": 10, "maxResults": 10}
+        # "prefix" is what autocomplete-avatar/v2 uses; the others are
+        # fallbacks for older/alternative endpoints.
+        for param_name in ["prefix", "query", "keyword", "q"]:
+            params = {
+                param_name: seed,
+                "limit": 10,
+                "maxResults": 10,
+                "lang": "en",
+            }
             try:
                 resp = requests.get(endpoint, params=params, headers=HEADERS, timeout=8)
             except Exception:
@@ -93,8 +111,10 @@ def try_endpoint(endpoint, seed):
                 if isinstance(s, str):
                     parsed.append(s.strip().lower())
                 elif isinstance(s, dict):
-                    kw = (s.get("keyword") or s.get("text") 
-                          or s.get("name") or s.get("query"))
+                    kw = (s.get("keyword") or s.get("text")
+                          or s.get("name") or s.get("query")
+                          or s.get("displayName") or s.get("searchTerm")
+                          or s.get("phrase") or s.get("value"))
                     if kw:
                         parsed.append(str(kw).strip().lower())
             if parsed:
