@@ -94,12 +94,16 @@ def try_endpoint(endpoint, seed):
             except Exception:
                 continue
 
-            # Handle different possible shapes
+            # Handle different possible shapes. autocomplete-avatar/v2
+            # returns {"Args": {...}, "Data": [...]} with a capital D.
             items = None
             if isinstance(data, list):
                 items = data
             elif isinstance(data, dict):
-                for key in ["suggestions", "keywords", "data", "results", "items"]:
+                for key in (
+                    "suggestions", "keywords", "data", "results", "items",
+                    "Data", "Results", "Suggestions", "Keywords",
+                ):
                     if key in data and isinstance(data[key], list):
                         items = data[key]
                         break
@@ -111,10 +115,13 @@ def try_endpoint(endpoint, seed):
                 if isinstance(s, str):
                     parsed.append(s.strip().lower())
                 elif isinstance(s, dict):
-                    kw = (s.get("keyword") or s.get("text")
-                          or s.get("name") or s.get("query")
-                          or s.get("displayName") or s.get("searchTerm")
-                          or s.get("phrase") or s.get("value"))
+                    kw = (
+                        s.get("keyword") or s.get("text") or s.get("name")
+                        or s.get("query") or s.get("displayName")
+                        or s.get("searchTerm") or s.get("phrase")
+                        or s.get("value") or s.get("Name") or s.get("Text")
+                        or s.get("Keyword") or s.get("DisplayName")
+                    )
                     if kw:
                         parsed.append(str(kw).strip().lower())
             if parsed:
