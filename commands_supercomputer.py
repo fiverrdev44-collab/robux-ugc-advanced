@@ -345,7 +345,7 @@ def register_supercomputer_commands(bot):
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
         """
-        Owner-only: git pull + restart the bot.
+        Owner-only: force-sync with origin/main and restart the bot.
         Usage: !bot_update
         """
         try:
@@ -354,33 +354,51 @@ def register_supercomputer_commands(bot):
                 await ctx.send("🚫 **Unauthorized.** `!bot_update` is owner-only.")
                 return
 
-            await ctx.send("🔧 **Starting bot update...** Pulling latest from `main`.")
+            await ctx.send("🔧 **Starting bot update...** Syncing with `origin/main`.")
 
-            # Show current commit before the pull
+            cwd = os.getcwd()
+
+            # Show current commit before the sync
             pre = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, cwd=os.getcwd()
+                capture_output=True, text=True, cwd=cwd
             ).stdout.strip() or "unknown"
             await ctx.send(f"📦 Current commit: `{pre}`")
 
-            # Pull latest changes
-            pull = subprocess.run(
-                ["git", "pull", "origin", "main"],
-                capture_output=True, text=True, cwd=os.getcwd()
+            # Force-sync: fetch + hard reset so a divergent local checkout
+            # can never block the update. This is safe because the bot's
+            # working tree has no persistent state (the DB lives on Server 1).
+            fetch = subprocess.run(
+                ["git", "fetch", "origin", "main"],
+                capture_output=True, text=True, cwd=cwd
             )
-            if pull.returncode != 0:
-                await ctx.send(f"⚠️ Git pull failed:\n```\n{(pull.stderr or pull.stdout)[-500:]}\n```")
+            if fetch.returncode != 0:
+                await ctx.send(f"⚠️ Git fetch failed:\n```\n{(fetch.stderr or fetch.stdout)[-500:]}\n```")
                 return
+
+            reset = subprocess.run(
+                ["git", "reset", "--hard", "origin/main"],
+                capture_output=True, text=True, cwd=cwd
+            )
+            if reset.returncode != 0:
+                await ctx.send(f"⚠️ Git reset failed:\n```\n{(reset.stderr or reset.stdout)[-500:]}\n```")
+                return
+
+            # Clear stale bytecode so Python recompiles from the fresh source
+            subprocess.run(
+                ["find", ".", "-name", "__pycache__", "-type", "d", "-exec", "rm", "-rf", "{}", "+"],
+                capture_output=True, text=True, cwd=cwd
+            )
 
             post = subprocess.run(
                 ["git", "rev-parse", "--short", "HEAD"],
-                capture_output=True, text=True, cwd=os.getcwd()
+                capture_output=True, text=True, cwd=cwd
             ).stdout.strip() or "unknown"
 
-            await ctx.send(f"✅ Updated to `{post}`. Restarting bot in 3s...")
+            await ctx.send(f"✅ Synced to `{post}`. Restarting bot in 3s...")
 
             # Give Discord a moment to deliver the success message,
-            # then force a clean restart (Render will relaunch the process).
+            # then force a clean restart (systemd will relaunch the process).
             await asyncio.sleep(3)
             os._exit(1)
 
