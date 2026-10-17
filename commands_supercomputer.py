@@ -472,7 +472,9 @@ def register_supercomputer_commands(bot):
             """, [f"%{niche}%"] + fam_params)
             top = cur.fetchall()
 
-            if not top:
+            # If the exact phrase is too narrow, broaden to any niche term so
+            # the competitor set and coverage numbers are meaningful.
+            if len(top) < 5:
                 terms = [t for t in niche.split() if len(t) >= 3] or [niche]
                 pats = [f"%{t}%" for t in terms]
                 cur.execute(f"""
@@ -530,19 +532,24 @@ def register_supercomputer_commands(bot):
                         continue
                     cand[w] = cand.get(w, 0) + 1
 
-            # Rank gaps: high suggestion coverage, absent from top titles,
-            # and a real word used across the catalog.
+            # Rank gaps: real demand evidence, absent from top titles, and
+            # genuinely used within the SAME family (so "hood" can't show up
+            # for emotes just because it exists somewhere in the catalog).
             ranked = []
             for w, sugg_count in sorted(cand.items(), key=lambda x: -x[1])[:60]:
+                # 1-2 suggestions is noise, not demand.
+                if sugg_count < 3:
+                    continue
                 coverage = top_tokens.get(w, 0)
                 if coverage > 3:
                     continue
+                # Family-scoped catalog usage (proof the word belongs here).
                 cur.execute(
-                    "SELECT COUNT(*) FROM items WHERE name ILIKE %s",
-                    (f"%{w}%",)
+                    f"SELECT COUNT(*) FROM items WHERE name ILIKE %s {fam_sql}",
+                    [f"%{w}%"] + fam_params,
                 )
                 use = cur.fetchone()[0] or 0
-                if use < 20:
+                if use < 5:
                     continue
                 score = (
                     sugg_count
@@ -571,30 +578,35 @@ def register_supercomputer_commands(bot):
                         name=f"🔍 {w}",
                         value=(
                             f"**{sc}** suggestions · "
-                            f"top-20 coverage **{cov}/{len(top)}** · "
-                            f"**{use:,}** catalog items use it"
+                            f"top-{len(top)} coverage **{cov}/{len(top)}** · "
+                            f"**{use:,}** items in this family use it"
                         ),
                         inline=False,
                     )
 
-                title_words = [w for w, *_ in ranked[:3]]
+                # Keep the title short and readable: at most 2 gap words.
+                title_words = [w for w, *_ in ranked[:2]]
                 suggested = " ".join(x.capitalize() for x in title_words)
                 embed.add_field(
                     name="✅ Suggested title",
                     value=(
                         f"`{suggested} {niche.title()}`\n"
-                        f"Tags: `{', '.join(title_words)}`"
+                        f"Tags: `{', '.join(w for w, *_ in ranked[:3])}`"
                     ),
                     inline=False,
                 )
             else:
                 embed.description = (
-                    "No gaps found — the top items already cover the "
-                    "high-demand terms in this niche."
+                    "No strong gaps found. A gap now requires **≥3 suggestions** "
+                    "and **≥5 items in the same family**, so weak 1–2 suggestion "
+                    "terms are no longer reported."
                 )
 
             embed.set_footer(
-                text="Demand = suggestion coverage · gap = absence from top titles"
+                text=(
+                    "Demand = ≥3 suggestions · gap = absent from top titles · "
+                    "relevance = same-family usage"
+                )
             )
             await ctx.send(embed=embed)
 
