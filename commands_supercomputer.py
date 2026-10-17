@@ -133,9 +133,9 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # The live search_suggestions table may predate the
-            # search_volume / catalog_supply columns. Detect the real
-            # columns so the query below always matches the live schema.
+            # Detect the live schema. The search_suggestions table may have
+            # been created by an older migration without search_volume /
+            # catalog_supply, so we adapt the query rather than assume.
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -144,43 +144,32 @@ def register_supercomputer_commands(bot):
             cols = {r[0] for r in cur.fetchall()}
             has_volume = "search_volume" in cols
 
-            # Prefer a precomputed supply column when present; otherwise
-            # compute supply live from the items table.
-            if "catalog_supply" in cols:
-                supply_expr = "COALESCE(s.catalog_supply, 0)"
-                supply_join = ""
-                having = "COALESCE(s.catalog_supply, 0) <= 5"
-            else:
-                supply_expr = "COUNT(i.id)"
-                supply_join = (
-                    "LEFT JOIN items i ON i.name ILIKE '%' || s.suggestion || '%'"
-                )
-                having = "COUNT(i.id) <= 5"
-
+            # Supply is computed LIVE from the items table. The precomputed
+            # catalog_supply column is always NULL/0 in this database, so
+            # trusting it returned garbage like "white" and "hat".
             vol_sel = ", s.search_volume" if has_volume else ""
+            vol_group = ", s.search_volume" if has_volume else ""
             vol_order = "s.search_volume" if has_volume else "s.fetched_at"
-            # GROUP BY must cover every non-aggregated column in the outer SELECT.
-            group_by = "s.suggestion, s.search_volume" if has_volume else "s.suggestion"
-            # Outer SELECT must reference columns the subquery actually exposes.
             outer_vol = "s.search_volume" if has_volume else "NULL"
 
             cur.execute(
                 f"""
                 SELECT s.suggestion,
                        {outer_vol} AS search_volume,
-                       {supply_expr} AS supply
+                       COUNT(i.id) AS supply
                 FROM (
-                    SELECT suggestion{vol_sel}
+                    SELECT suggestion{vol_sel}, fetched_at
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
                       AND (length(suggestion) >= 6 OR suggestion ~ ' ')
                     ORDER BY {vol_order} DESC NULLS LAST
                     LIMIT 200
                 ) s
-                {supply_join}
-                GROUP BY {group_by}
-                HAVING {having}
-                ORDER BY {vol_order} DESC NULLS LAST, {supply_expr} ASC
+                LEFT JOIN items i
+                  ON i.name ILIKE '%' || s.suggestion || '%'
+                GROUP BY s.suggestion{vol_group}, s.fetched_at
+                HAVING COUNT(i.id) <= 5
+                ORDER BY {vol_order} DESC NULLS LAST, COUNT(i.id) ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
