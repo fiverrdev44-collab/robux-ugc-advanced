@@ -131,42 +131,66 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # search_volume is all NULL in this database, so we can't rank
-            # by popularity. Instead order by recency over a wider net so
-            # !vacuum surfaces fresh, real gaps.
+            # Hybrid approach — three filters that work without any
+            # external data (search_volume is all NULL in this DB):
             #
-            # Require multi-word phrases — single generic tokens are never
-            # real vacuum targets, and 2+ words is what actually describes a
-            # niche (e.g. "cyberpunk katana", not "katana").
+            # 1. Multi-word phrases only — single generic tokens are never
+            #    real vacuum targets, and 2+ words is what actually describes
+            #    a niche (e.g. "cyberpunk katana", not "katana").
+            # 2. Misspellings filtered — every word in the phrase must
+            #    appear inside a real item name. "dollette" matches nothing
+            #    so "coquett dollette" is dropped; "coquette" matches real
+            #    items so "coquette" passes.
+            # 3. Low-supply only — <= 5 catalog items.
             #
             # NOTE: the '%' in the ILIKE pattern must be escaped as '%%'
             # because psycopg2 uses %-style parameter binding and would
             # otherwise treat those literal '%' as format specifiers.
+
+            # Real words that actually appear in item names. Used to drop
+            # misspelled suggestions like "dollette" (real word: "coquette").
+            cur.execute("""
+                SELECT DISTINCT word FROM (
+                    SELECT unnest(regexp_split_to_array(lower(name), ' ')) AS word
+                    FROM items
+                    WHERE name IS NOT NULL
+                ) sub
+                WHERE word ~ '^[a-z]{3,}$'
+            """)
+            real_words = {r[0] for r in cur.fetchall()}
+
             cur.execute(
                 """
-                SELECT s.suggestion,
-                       s.search_volume,
-                       COUNT(i.id) AS supply
-                FROM (
-                    SELECT DISTINCT ON (lower(suggestion))
-                        suggestion, search_volume, fetched_at
-                    FROM search_suggestions
-                    WHERE suggestion IS NOT NULL
-                      AND suggestion ~ '^[a-z]+ [a-z]+'
-                      AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is)'
-                    ORDER BY lower(suggestion), fetched_at DESC
-                    LIMIT 400
-                ) s
-                LEFT JOIN items i
-                  ON i.name ILIKE '%%' || s.suggestion || '%%'
-                GROUP BY s.suggestion, s.search_volume, s.fetched_at
-                HAVING COUNT(i.id) <= 5
-                ORDER BY s.fetched_at DESC, COUNT(i.id) ASC
-                LIMIT %s
-                """,
-                (min(limit, 10),)
+                SELECT DISTINCT ON (lower(suggestion))
+                    suggestion, fetched_at
+                FROM search_suggestions
+                WHERE suggestion IS NOT NULL
+                  AND suggestion ~ '^[a-z]+ [a-z]+'
+                  AND suggestion !~ '^(work|got|komi|its|youre|whats|how to|what is|why does)'
+                ORDER BY lower(suggestion), fetched_at DESC
+                LIMIT 400
+                """
             )
-            rows = cur.fetchall()
+            candidates = cur.fetchall()
+
+            # Filter misspellings in Python (fast — just set membership).
+            spelled = []
+            for sugg, fetched in candidates:
+                words = [w for w in re.split(r'\s+', sugg.lower()) if w]
+                if words and all(w in real_words for w in words):
+                    spelled.append((sugg, fetched))
+
+            # Compute live supply for each surviving candidate.
+            results = []
+            for sugg, fetched in spelled:
+                cur.execute(
+                    "SELECT COUNT(*) FROM items WHERE name ILIKE '%%' || %s || '%%'",
+                    (sugg,)
+                )
+                supply = cur.fetchone()[0] or 0
+                if supply <= 5:
+                    results.append((sugg, None, supply, fetched))
+
             cur.close()
             conn.close()
 
@@ -178,21 +202,17 @@ def register_supercomputer_commands(bot):
 
             shown = 0
             seen = set()
-            for r in rows:
+            for query, volume, supply, fetched in results:
                 # Defensive: never let one bad row crash the command,
                 # and skip duplicate suggestions.
                 try:
-                    if not r or len(r) < 3:
+                    key = (query or "").strip().lower()
+                    if not key or key in seen:
                         continue
-                    query = (r[0] or "").strip().lower()
-                    if not query or query in seen:
-                        continue
-                    seen.add(query)
-                    volume = r[1]
-                    supply = r[2]
+                    seen.add(key)
                     vol_str = f"{int(volume):,}/mo" if volume else "High Trend"
                     embed.add_field(
-                        name=f"🔍 \"{r[0]}\"",
+                        name=f"🔍 \"{query}\"",
                         value=f"Search Volume: **{vol_str}** · Catalog Items: ⚠️ **{supply}**",
                         inline=False
                     )
