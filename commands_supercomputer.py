@@ -756,6 +756,83 @@ def register_supercomputer_commands(bot):
                 f"⚠️ Sales keyword error: {type(e).__name__}: {e}"
             )
 
+    # ── 9. 🔎 Autocomplete Probe (uses server-side cookie) ───────────
+    @bot.command(name="suggest_probe", aliases=["probe_suggest"])
+    async def suggest_probe_command(ctx, *, query: str = "aura emote"):
+        """
+        Probe Roblox autocomplete endpoints using the cookie already set on
+        the server. The cookie is never printed or sent to Discord.
+        Usage: !suggest_probe aura emote
+        """
+        import requests
+        from uuid import uuid4
+
+        cookie = (
+            os.getenv("ROBLOSECURITY_COOKIE_1")
+            or os.getenv("ROBLOSECURITY_COOKIE")
+            or os.getenv("ROBLOSECURITY")
+            or ""
+        ).strip()
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.roblox.com/",
+            "Origin": "https://www.roblox.com",
+        }
+        if cookie:
+            headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+
+        sid = str(uuid4())
+        endpoints = [
+            ("v1/suggest",
+             "https://apis.roblox.com/search-suggestions/v1/suggest",
+             {"query": query, "limit": 10, "maxResults": 10, "sessionId": sid}),
+            ("v1/omni",
+             "https://apis.roblox.com/search-suggestions/v1/omni-suggest/keywords",
+             {"query": query, "limit": 10, "sessionId": sid}),
+            ("v2/suggest",
+             "https://apis.roblox.com/search-suggestions/v2/suggest",
+             {"query": query, "limit": 10, "maxResults": 10, "sessionId": sid}),
+            ("web/suggest",
+             "https://www.roblox.com/search/suggest",
+             {"query": query}),
+            ("catalog/suggest",
+             "https://catalog.roblox.com/v1/search/suggestions",
+             {"query": query}),
+        ]
+
+        def _probe():
+            out = []
+            for label, url, params in endpoints:
+                try:
+                    r = requests.get(url, params=params, headers=headers, timeout=10)
+                    body = r.text[:200].replace("\n", " ")
+                    out.append((label, r.status_code, body))
+                except Exception as e:
+                    out.append((label, "ERR",
+                                f"{type(e).__name__}: {e}"[:200]))
+            return out
+
+        results = await asyncio.to_thread(_probe)
+
+        lines = [
+            f"🔎 **SUGGEST PROBE** — `{query}`",
+            f"Cookie: {'✅ set (server-side, never printed)' if cookie else '❌ not set'}",
+            "",
+        ]
+        for label, status, body in results:
+            icon = "✅" if status == 200 else "❌"
+            lines.append(f"{icon} `{label}` → {status}\n`{body}`")
+        lines.append(
+            "\n_If a 200 returns data, that's the live endpoint — I'll wire "
+            "the scraper to it._"
+        )
+        await ctx.send("\n".join(lines)[:1900])
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
