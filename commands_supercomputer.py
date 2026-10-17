@@ -133,43 +133,31 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
 
-            # Detect the live schema. The search_suggestions table may have
-            # been created by an older migration without search_volume /
-            # catalog_supply, so we adapt the query rather than assume.
-            cur.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'search_suggestions'
-            """)
-            cols = {r[0] for r in cur.fetchall()}
-            has_volume = "search_volume" in cols
-
+            # Schema confirmed on the live DB:
+            #   id, seed_keyword, suggestion, fetched_at,
+            #   search_volume, catalog_supply
+            #
             # Supply is computed LIVE from the items table. The precomputed
-            # catalog_supply column is always NULL/0 in this database, so
-            # trusting it returned garbage like "white" and "hat".
-            vol_sel = ", s.search_volume" if has_volume else ""
-            vol_group = ", s.search_volume" if has_volume else ""
-            vol_order = "s.search_volume" if has_volume else "s.fetched_at"
-            outer_vol = "s.search_volume" if has_volume else "NULL"
-
+            # catalog_supply column is all NULL, so trusting it returned
+            # garbage like "white" and "hat".
             cur.execute(
-                f"""
+                """
                 SELECT s.suggestion,
-                       {outer_vol} AS search_volume,
+                       s.search_volume,
                        COUNT(i.id) AS supply
                 FROM (
-                    SELECT suggestion{vol_sel}, fetched_at
+                    SELECT suggestion, search_volume, fetched_at
                     FROM search_suggestions
                     WHERE suggestion IS NOT NULL
                       AND (length(suggestion) >= 6 OR suggestion ~ ' ')
-                    ORDER BY {vol_order} DESC NULLS LAST
+                    ORDER BY search_volume DESC NULLS LAST, fetched_at DESC
                     LIMIT 200
                 ) s
                 LEFT JOIN items i
                   ON i.name ILIKE '%' || s.suggestion || '%'
-                GROUP BY s.suggestion{vol_group}, s.fetched_at
+                GROUP BY s.suggestion, s.search_volume, s.fetched_at
                 HAVING COUNT(i.id) <= 5
-                ORDER BY {vol_order} DESC NULLS LAST, COUNT(i.id) ASC
+                ORDER BY search_volume DESC NULLS LAST, COUNT(i.id) ASC
                 LIMIT %s
                 """,
                 (min(limit, 10),)
@@ -186,7 +174,7 @@ def register_supercomputer_commands(bot):
 
             shown = 0
             for r in rows:
-                # Defensive: skip any malformed row instead of crashing.
+                # Defensive: never let one bad row crash the command.
                 try:
                     if not r or len(r) < 3:
                         continue
