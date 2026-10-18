@@ -284,8 +284,32 @@ def register_sales_commands(bot, get_db):
             "Cookie": f".ROBLOSECURITY={cookie}",
         }
 
+        def _get_csrf():
+            try:
+                r = requests.post(
+                    "https://auth.roblox.com/v2/logout",
+                    headers=headers,
+                    timeout=10,
+                )
+                return (
+                    r.headers.get("x-csrf-token")
+                    or r.headers.get("X-CSRF-Token")
+                )
+            except Exception:
+                return None
+
         def _post():
             r = requests.post(url, json=payload, headers=headers, timeout=15)
+            if r.status_code == 403 and "xsrf" in r.text.lower():
+                token = (
+                    r.headers.get("x-csrf-token")
+                    or r.headers.get("X-CSRF-Token")
+                    or _get_csrf()
+                )
+                if token:
+                    h2 = dict(headers)
+                    h2["X-CSRF-TOKEN"] = token
+                    r = requests.post(url, json=payload, headers=h2, timeout=15)
             return r.status_code, r.text
 
         status, text = await asyncio.to_thread(_post)
