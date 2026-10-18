@@ -375,6 +375,87 @@ def register_sales_commands(bot, get_db):
 
         await ctx.send("\n".join(lines)[:1900])
 
+    @bot.command(name="cookie_check")
+    async def cookie_check_cmd(ctx):
+        """Verify the server-side Roblox cookie and show which account it is."""
+        import json
+        import requests
+
+        cookie = (
+            os.getenv("ROBLOSECURITY_COOKIE_1")
+            or os.getenv("ROBLOSECURITY_COOKIE")
+            or ""
+        ).strip()
+        if not cookie:
+            return await ctx.send("❌ ROBLOSECURITY cookie is not set on the server.")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Cookie": f".ROBLOSECURITY={cookie}",
+        }
+
+        def _check():
+            r = requests.get(
+                "https://users.roblox.com/v1/users/authenticated",
+                headers=headers,
+                timeout=10,
+            )
+            return r.status_code, r.text
+
+        status, text = await asyncio.to_thread(_check)
+        if status != 200:
+            return await ctx.send(
+                f"❌ **Cookie invalid** (status {status}).\n"
+                f"```{text[:200]}```\n"
+                f"Stored cookie length: `{len(cookie)}` — re-paste the full cookie."
+            )
+
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = {}
+
+        name = data.get("name", "?")
+        uid = data.get("id", "?")
+        lines = [
+            "✅ **Cookie valid**",
+            f"Account: **{name}** (id `{uid}`)",
+            f"Stored cookie length: `{len(cookie)}`",
+        ]
+
+        # Best-effort group membership check.
+        try:
+            def _groups():
+                r = requests.get(
+                    f"https://groups.roblox.com/v1/users/{uid}/groups",
+                    headers=headers,
+                    timeout=10,
+                )
+                return r.status_code, r.text
+
+            gs, gt = await asyncio.to_thread(_groups)
+            if gs == 200:
+                gd = json.loads(gt)
+                groups = gd.get("data", gd) if isinstance(gd, dict) else gd
+                ids = set()
+                if isinstance(groups, list):
+                    for g in groups:
+                        grp = g.get("group", g) if isinstance(g, dict) else {}
+                        gid = grp.get("id") if isinstance(grp, dict) else None
+                        if gid:
+                            ids.add(str(gid))
+                lines.append(
+                    f"Groups: **{len(ids)}** · contains 181575178: "
+                    f"{'✅' if '181575178' in ids else '❌'}"
+                )
+        except Exception:
+            pass
+
+        await ctx.send("\n".join(lines)[:1900])
+
     @bot.command(name="sales_debug")
     async def sales_debug_cmd(ctx):
         """Diagnose why sales aren't showing: dates, timezone, channel config."""
