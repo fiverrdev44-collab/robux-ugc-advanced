@@ -571,7 +571,7 @@ def register_supercomputer_commands(bot):
                 pats2 = [f"%{t}%" for t in terms2]
                 cur.execute(f"""
                     SELECT name FROM items
-                    WHERE name ILIKE ANY(%s) AND favorite_count > 0
+                    WHERE name ILIKE ANY(%s)
                     {fam_sql}
                     LIMIT 5000
                 """, [pats2] + fam_params)
