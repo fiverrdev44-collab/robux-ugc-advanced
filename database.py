@@ -334,6 +334,37 @@ def setup_database():
         );
     ''', "my_portfolio")
 
+    # ── launch_ledger ───────────────────────────────────────────────
+    # Records every launch and its real outcomes so the bot can learn
+    # from actual results instead of catalog proxies.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS launch_ledger (
+            item_id BIGINT PRIMARY KEY,
+            launched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            family TEXT,
+            title TEXT,
+            asset_type_id INTEGER,
+            price INTEGER,
+            predicted_score DOUBLE PRECISION,
+            predicted_confidence DOUBLE PRECISION,
+            favs_launch INTEGER,
+            favs_d1 INTEGER,
+            favs_d7 INTEGER,
+            favs_d30 INTEGER,
+            units_d7 INTEGER,
+            units_d30 INTEGER,
+            revenue_d7 INTEGER,
+            revenue_d30 INTEGER,
+            last_synced TIMESTAMP,
+            notes TEXT
+        );
+    ''', "launch_ledger")
+
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_launch_ledger_launched
+        ON launch_ledger (launched_at DESC);
+    ''', "idx_launch_ledger_launched")
+
     try:
         conn.commit()
     except Exception as e:

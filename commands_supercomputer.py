@@ -1001,6 +1001,312 @@ def register_supercomputer_commands(bot):
         except Exception as e:
             await ctx.send(f"⚠️ Enricher failed: {type(e).__name__}: {e}")
 
+    # ── 12. 📒 Launch Ledger ────────────────────────────────────────
+    def _fill_ledger(cur, item_id):
+        from datetime import timedelta
+
+        cur.execute("""
+            SELECT item_id, launched_at, title, family
+            FROM launch_ledger WHERE item_id = %s
+        """, (item_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        iid, launched, title, family = row
+
+        cur.execute("""
+            SELECT favorite_count FROM item_history
+            WHERE item_id = %s AND snapshot_at <= %s
+            ORDER BY snapshot_at DESC LIMIT 1
+        """, (iid, launched))
+        r = cur.fetchone()
+        favs_launch = r[0] if r else None
+
+        def fav_at(days):
+            cur.execute("""
+                SELECT favorite_count FROM item_history
+                WHERE item_id = %s AND snapshot_at >= %s
+                ORDER BY snapshot_at ASC LIMIT 1
+            """, (iid, launched + timedelta(days=days)))
+            r2 = cur.fetchone()
+            return r2[0] if r2 else None
+
+        favs_d1 = fav_at(1)
+        favs_d7 = fav_at(7)
+        favs_d30 = fav_at(30)
+
+        prefix = (title or "")[:20]
+        like = f"%{prefix}%" if prefix else "%"
+
+        def sales_window(days):
+            cur.execute("""
+                SELECT count(*), COALESCE(SUM(amount_robux), 0)
+                FROM my_sales
+                WHERE lower(item_name) LIKE lower(%s)
+                  AND sale_time >= %s
+                  AND sale_time < %s
+            """, (like, launched, launched + timedelta(days=days)))
+            return cur.fetchone()
+
+        units_d7, revenue_d7 = sales_window(7)
+        units_d30, revenue_d30 = sales_window(30)
+
+        cur.execute("""
+            UPDATE launch_ledger SET
+                favs_launch = %s,
+                favs_d1 = %s, favs_d7 = %s, favs_d30 = %s,
+                units_d7 = %s, units_d30 = %s,
+                revenue_d7 = %s, revenue_d30 = %s,
+                last_synced = CURRENT_TIMESTAMP
+            WHERE item_id = %s
+        """, (
+            favs_launch, favs_d1, favs_d7, favs_d30,
+            units_d7 or 0, units_d30 or 0,
+            revenue_d7 or 0, revenue_d30 or 0,
+            iid,
+        ))
+        return True
+
+    @bot.command(name="launch", aliases=["log_launch"])
+    async def launch_command(ctx, item_id: int, *, notes: str = ""):
+        """Record an item as launched so the bot can track its outcomes."""
+        def _do():
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT id, name, favorite_count, price, asset_type_id
+                    FROM items WHERE id = %s
+                """, (item_id,))
+                row = cur.fetchone()
+                if not row:
+                    return {"error": "not_found"}
+
+                iid, name, favs, price, atype = row
+                family = "unknown"
+                try:
+                    from category_configs import detect_family_from_asset_type
+                    family = detect_family_from_asset_type(atype) or "unknown"
+                except Exception:
+                    pass
+
+                score = 0.0
+                confidence = 0.0
+                try:
+                    from title_predictor import predict_title
+                    pred = predict_title(cur, name)
+                    score = float(pred.get("score") or 0)
+                    confidence = float(pred.get("confidence") or 0)
+                except Exception as e:
+                    print(f"[launch] predict failed: {e}", flush=True)
+
+                cur.execute("""
+                    INSERT INTO launch_ledger
+                      (item_id, launched_at, family, title, asset_type_id,
+                       price, predicted_score, predicted_confidence,
+                       favs_launch, notes)
+                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (item_id) DO UPDATE SET
+                      launched_at = EXCLUDED.launched_at,
+                      family = EXCLUDED.family,
+                      title = EXCLUDED.title,
+                      asset_type_id = EXCLUDED.asset_type_id,
+                      price = EXCLUDED.price,
+                      predicted_score = EXCLUDED.predicted_score,
+                      predicted_confidence = EXCLUDED.predicted_confidence,
+                      favs_launch = EXCLUDED.favs_launch,
+                      notes = EXCLUDED.notes
+                """, (
+                    iid, family, name, atype, price or 0,
+                    score, confidence, favs or 0, notes,
+                ))
+                conn.commit()
+                return {
+                    "id": iid, "name": name, "family": family,
+                    "score": score, "confidence": confidence,
+                    "price": price or 0,
+                }
+            finally:
+                cur.close()
+                conn.close()
+
+        result = await asyncio.to_thread(_do)
+        if result.get("error") == "not_found":
+            return await ctx.send(f"❌ Item `{item_id}` not found in the catalog.")
+
+        embed = discord.Embed(
+            title="📒 Launch Logged",
+            description=f"**{result['name'][:60]}**",
+            color=0x3B82F6,
+        )
+        embed.add_field(name="Item ID", value=f"`{result['id']}`", inline=True)
+        embed.add_field(name="Family", value=result["family"], inline=True)
+        embed.add_field(name="Price", value=f"{result['price']} R$", inline=True)
+        embed.add_field(
+            name="Predicted score",
+            value=f"**{result['score']:.1f}** (confidence {result['confidence']:.0f}%)",
+            inline=False,
+        )
+        embed.set_footer(
+            text="D1/D7/D30 favorites and sales fill via !ledger_sync"
+        )
+        await ctx.send(embed=embed)
+
+    @bot.command(name="ledger_sync", aliases=["sync_ledger"])
+    async def ledger_sync_command(ctx):
+        """Fill ledger rows with real favorites (D1/D7/D30) and sales."""
+        def _do():
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT item_id FROM launch_ledger")
+                ids = [r[0] for r in cur.fetchall()]
+                synced = 0
+                for iid in ids:
+                    try:
+                        if _fill_ledger(cur, iid):
+                            synced += 1
+                    except Exception as e:
+                        print(f"[ledger] sync {iid} failed: {e}", flush=True)
+                conn.commit()
+                return synced
+            finally:
+                cur.close()
+                conn.close()
+
+        synced = await asyncio.to_thread(_do)
+        await ctx.send(
+            f"✅ Synced **{synced}** launch rows with favorites + sales."
+        )
+
+    @bot.command(name="hitrate", aliases=["hit_rate"])
+    async def hitrate_command(ctx, days: int = 90):
+        """Show how your launches actually performed vs their niche peers."""
+        days = max(1, min(days, 365))
+
+        def _do():
+            from datetime import timedelta
+
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT item_id FROM launch_ledger
+                    WHERE launched_at >= NOW() - %s
+                """, (timedelta(days=days),))
+                for (iid,) in cur.fetchall():
+                    try:
+                        _fill_ledger(cur, iid)
+                    except Exception:
+                        pass
+                conn.commit()
+
+                cur.execute("""
+                    SELECT item_id, launched_at, family, title,
+                           predicted_score, favs_d7, favs_d30,
+                           units_d30, revenue_d30
+                    FROM launch_ledger
+                    WHERE launched_at >= NOW() - %s
+                    ORDER BY launched_at DESC
+                """, (timedelta(days=days),))
+                rows = cur.fetchall()
+                if not rows:
+                    return {"empty": True}
+
+                results = []
+                for (iid, launched, family, title, score,
+                     f7, f30, u30, r30) in rows:
+                    actual = f7 if f7 is not None else (f30 or 0)
+
+                    peer_median = 0
+                    try:
+                        cur.execute(
+                            "SELECT asset_type_id FROM items WHERE id = %s",
+                            (iid,),
+                        )
+                        at = cur.fetchone()
+                        if at and at[0] is not None:
+                            cur.execute("""
+                                SELECT favorite_count FROM items
+                                WHERE asset_type_id = %s
+                                  AND favorite_count > 0
+                                  AND created_at BETWEEN %s AND %s
+                                ORDER BY favorite_count
+                                LIMIT 2000
+                            """, (
+                                at[0],
+                                launched - timedelta(days=14),
+                                launched + timedelta(days=14),
+                            ))
+                            vals = [v[0] for v in cur.fetchall()]
+                            if vals:
+                                peer_median = vals[len(vals) // 2]
+                    except Exception:
+                        pass
+
+                    hit = peer_median > 0 and actual >= peer_median
+                    results.append({
+                        "id": iid, "title": title or "",
+                        "score": score or 0, "actual": actual,
+                        "peer": peer_median, "hit": hit,
+                        "units": u30 or 0, "revenue": r30 or 0,
+                    })
+
+                return {"results": results}
+            finally:
+                cur.close()
+                conn.close()
+
+        data = await asyncio.to_thread(_do)
+        if data.get("empty"):
+            return await ctx.send(
+                "📒 No launches logged yet. Use `!launch <item_id>` after uploading."
+            )
+
+        results = data["results"]
+        total = len(results)
+        hits = sum(1 for r in results if r["hit"])
+        hit_rate = (hits / total * 100) if total else 0
+        avg_rev = sum(r["revenue"] for r in results) / total if total else 0
+
+        kw_rev = {}
+        for r in results:
+            for w in set(re.findall(r"[a-z]{3,}", r["title"].lower())):
+                kw_rev[w] = kw_rev.get(w, 0) + r["revenue"]
+        best = sorted(kw_rev.items(), key=lambda x: -x[1])[:5]
+
+        embed = discord.Embed(
+            title=f"📈 Hit Rate — last {days} days",
+            description=(
+                f"Launches: **{total}** · Beat peer median: **{hits}** "
+                f"({hit_rate:.0f}%) · Avg revenue: **{avg_rev:,.0f} R$**"
+            ),
+            color=0x8B5CF6,
+        )
+
+        lines = []
+        for r in results[:10]:
+            mark = "✅" if r["hit"] else "❌"
+            lines.append(
+                f"{mark} `{(r['title'] or '')[:32]}` — "
+                f"{r['actual']:,} favs vs peer {r['peer']:,} · "
+                f"R${r['revenue']:,}"
+            )
+        if lines:
+            embed.add_field(name="Launches", value="\n".join(lines), inline=False)
+
+        if best:
+            embed.add_field(
+                name="Best keywords (by revenue)",
+                value=" · ".join(f"`{w}` ({v:,})" for w, v in best),
+                inline=False,
+            )
+
+        embed.set_footer(
+            text="Peer median = same asset type, created within ±14 days of launch"
+        )
+        await ctx.send(embed=embed)
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
