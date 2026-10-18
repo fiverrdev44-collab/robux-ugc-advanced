@@ -958,6 +958,49 @@ def register_supercomputer_commands(bot):
                 f"⚠️ Scraper failed: {type(e).__name__}: {e}"
             )
 
+    # ── 11. 🔭 Run the scanner / enricher on the server ─────────────
+    @bot.command(name="scan_run", aliases=["run_scanner"])
+    async def scan_run_command(ctx):
+        """Owner-only: discover new catalog items now (server-side)."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+        await ctx.send(
+            "🔭 **Scanner started** — discovering new item IDs. "
+            "This can take up to 90 minutes; I'll reply when done."
+        )
+
+        def _run():
+            from scanner import run_scanner
+            run_scanner()
+            return True
+
+        try:
+            await asyncio.to_thread(_run)
+            await ctx.send("✅ **Scanner finished.** New IDs added to `discovered_items`.")
+        except Exception as e:
+            await ctx.send(f"⚠️ Scanner failed: {type(e).__name__}: {e}")
+
+    @bot.command(name="enrich_run", aliases=["run_enricher"])
+    async def enrich_run_command(ctx):
+        """Owner-only: enrich discovered items into the items table now."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+        await ctx.send(
+            "🧪 **Enricher started** — fetching details/favorites for "
+            "un-enriched items. This can take 20+ minutes."
+        )
+
+        def _run():
+            from enricher import enrich_items
+            enrich_items()
+            return True
+
+        try:
+            await asyncio.to_thread(_run)
+            await ctx.send("✅ **Enricher finished.** `items` updated with real favorites.")
+        except Exception as e:
+            await ctx.send(f"⚠️ Enricher failed: {type(e).__name__}: {e}")
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
