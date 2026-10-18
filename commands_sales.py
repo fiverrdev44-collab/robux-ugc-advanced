@@ -231,6 +231,126 @@ def register_sales_commands(bot, get_db):
             lines.append(f"{icon} `{label}` → {status}\n`{body}`")
         await ctx.send("\n".join(lines)[:1900])
 
+    @bot.command(name="group_metrics", aliases=["gmetrics"])
+    async def group_metrics_cmd(
+        ctx,
+        group_id: int,
+        metric: str = "ItemTotalCreatorEarning",
+        days: int = 90,
+        limit: int = 20,
+    ):
+        """Fetch Roblox group analytics (per-item metric) for a group."""
+        import json
+        import requests
+        from datetime import datetime, timedelta, timezone
+        from bot_core import get_db
+
+        cookie = (
+            os.getenv("ROBLOSECURITY_COOKIE_1")
+            or os.getenv("ROBLOSECURITY_COOKIE")
+            or ""
+        ).strip()
+        if not cookie:
+            return await ctx.send("❌ ROBLOSECURITY cookie is not set on the server.")
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(1, min(days, 365)))
+        limit = max(1, min(limit, 100))
+
+        payload = {
+            "resourceType": "RESOURCE_TYPE_GROUP",
+            "resourceId": str(group_id),
+            "query": {
+                "metric": metric,
+                "granularity": "METRIC_GRANULARITY_NONE",
+                "breakdown": [{"dimensions": ["AvatarItemId"]}],
+                "startTime": start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "endTime": end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "limit": limit,
+            },
+        }
+        url = (
+            "https://apis.roblox.com/analytics-query-gateway/v1/metrics/"
+            f"resource/RESOURCE_TYPE_GROUP/id/{group_id}"
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Referer": "https://create.roblox.com/",
+            "Origin": "https://create.roblox.com",
+            "Cookie": f".ROBLOSECURITY={cookie}",
+        }
+
+        def _post():
+            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            return r.status_code, r.text
+
+        status, text = await asyncio.to_thread(_post)
+        if status != 200:
+            return await ctx.send(
+                f"❌ Gateway returned **{status}** for `{metric}`:\n"
+                f"```{text[:400]}```"
+            )
+
+        try:
+            data = json.loads(text)
+        except Exception as e:
+            return await ctx.send(f"❌ Bad JSON: {e}")
+
+        values = (
+            data.get("operation", {})
+                .get("queryResult", {})
+                .get("values", [])
+        )
+        rows = []
+        for v in values:
+            bd = v.get("breakdownValue") or []
+            item_id = bd[0].get("value") if bd else None
+            for dp in (v.get("dataPoints") or []):
+                rows.append((item_id, int(dp.get("value") or 0)))
+
+        if not rows:
+            return await ctx.send(
+                f"📊 No data for `{metric}` (group `{group_id}`). "
+                f"The metric name may be wrong."
+            )
+
+        ids = []
+        for item_id, _ in rows:
+            try:
+                ids.append(int(item_id))
+            except Exception:
+                pass
+        names = {}
+        if ids:
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT id, name FROM items WHERE id = ANY(%s)", (ids,))
+                names = {i: n for i, n in cur.fetchall()}
+            finally:
+                cur.close()
+                conn.close()
+
+        rows.sort(key=lambda x: -x[1])
+        total = sum(v for _, v in rows)
+
+        lines = [
+            f"📊 **GROUP METRICS** — group `{group_id}`",
+            f"Metric: `{metric}` · last **{days}** days",
+            f"Total: **{total:,}**",
+            "",
+        ]
+        for item_id, val in rows[:limit]:
+            nm = names.get(int(item_id), "") if item_id else ""
+            label = f"{nm[:40]} (`{item_id}`)" if nm else f"`{item_id}`"
+            lines.append(f"• {label} — **{val:,}**")
+
+        await ctx.send("\n".join(lines)[:1900])
+
     @bot.command(name="sales_debug")
     async def sales_debug_cmd(ctx):
         """Diagnose why sales aren't showing: dates, timezone, channel config."""
