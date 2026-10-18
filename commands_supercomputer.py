@@ -657,12 +657,15 @@ def register_supercomputer_commands(bot):
                         inline=False,
                     )
                 else:
+                    top_mod = ranked[0][0]
                     embed.add_field(
                         name="⚠️ Use with care",
                         value=(
                             "Co-occurrence is **not** proof of demand. Only add "
                             "a word if it accurately describes your item — never "
-                            "stuff sales or type words."
+                            "stuff sales or type words.\n"
+                            f"**Possible title:** "
+                            f"`{top_mod.capitalize()} {niche.title()}`"
                         ),
                         inline=False,
                     )
