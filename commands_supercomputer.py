@@ -1068,8 +1068,31 @@ def register_supercomputer_commands(bot):
         return True
 
     @bot.command(name="launch", aliases=["log_launch"])
-    async def launch_command(ctx, item_id: int, *, notes: str = ""):
-        """Record an item as launched so the bot can track its outcomes."""
+    async def launch_command(ctx, item_id: int, launched: str = "", *, notes: str = ""):
+        """
+        Record an item as launched.
+        Usage: !launch <item_id>
+               !launch <item_id> 2026-09-01        (existing item)
+        """
+        from datetime import datetime, timezone
+
+        launch_dt = None
+        if launched:
+            parsed = None
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+                try:
+                    parsed = datetime.strptime(launched, fmt)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                return await ctx.send(
+                    "❌ Date must be `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`."
+                )
+            launch_dt = parsed
+        if launch_dt is None:
+            launch_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+
         def _do():
             conn = get_db()
             cur = conn.cursor()
@@ -1105,7 +1128,7 @@ def register_supercomputer_commands(bot):
                       (item_id, launched_at, family, title, asset_type_id,
                        price, predicted_score, predicted_confidence,
                        favs_launch, notes)
-                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (item_id) DO UPDATE SET
                       launched_at = EXCLUDED.launched_at,
                       family = EXCLUDED.family,
@@ -1117,7 +1140,7 @@ def register_supercomputer_commands(bot):
                       favs_launch = EXCLUDED.favs_launch,
                       notes = EXCLUDED.notes
                 """, (
-                    iid, family, name, atype, price or 0,
+                    iid, launch_dt, family, name, atype, price or 0,
                     score, confidence, favs or 0, notes,
                 ))
                 conn.commit()
