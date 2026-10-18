@@ -135,6 +135,102 @@ def register_sales_commands(bot, get_db):
             await ctx.send(report[i:i+1900])
             await asyncio.sleep(0.2)
 
+    @bot.command(name="sales_probe")
+    async def sales_probe_cmd(ctx, *, item: str = ""):
+        """Probe Roblox sales APIs for an item (diagnostic)."""
+        import requests
+        from bot_core import get_db
+
+        if not item.strip():
+            return await ctx.send(
+                "Usage: `!sales_probe Smooth 360 flip Rizz` or `!sales_probe <item_id>`"
+            )
+
+        item_id = None
+        item_name = item
+        if item.strip().isdigit():
+            item_id = int(item.strip())
+        else:
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT id, name FROM items
+                    WHERE lower(name) LIKE lower(%s)
+                    ORDER BY favorite_count DESC
+                    LIMIT 1
+                """, (f"%{item.strip()[:40]}%",))
+                row = cur.fetchone()
+                if row:
+                    item_id, item_name = row
+            finally:
+                cur.close()
+                conn.close()
+
+        if not item_id:
+            return await ctx.send(f"❌ Could not resolve `{item}` to an item ID.")
+
+        cookie = (
+            os.getenv("ROBLOSECURITY_COOKIE_1")
+            or os.getenv("ROBLOSECURITY_COOKIE")
+            or ""
+        ).strip()
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.roblox.com/",
+            "Origin": "https://www.roblox.com",
+        }
+        if cookie:
+            headers["Cookie"] = f".ROBLOSECURITY={cookie}"
+
+        urls = [
+            ("economy/v1",
+             f"https://economy.roblox.com/v1/assets/{item_id}/sales",
+             {"limit": 100}),
+            ("economy/v2",
+             f"https://economy.roblox.com/v2/assets/{item_id}/sales",
+             {"limit": 100}),
+            ("creator-analytics",
+             f"https://apis.roblox.com/creator-analytics/v1/items/{item_id}/sales",
+             {"limit": 100}),
+            ("creator-analytics-metrics",
+             f"https://apis.roblox.com/creator-analytics/v1/items/{item_id}/metrics",
+             {}),
+            ("analytics",
+             f"https://apis.roblox.com/analytics/v1/items/{item_id}/sales",
+             {"limit": 100}),
+            ("transactions",
+             f"https://apis.roblox.com/transactions/v1/assets/{item_id}/sales",
+             {"limit": 100}),
+        ]
+
+        def _probe():
+            out = []
+            for label, url, params in urls:
+                try:
+                    r = requests.get(url, params=params, headers=headers, timeout=10)
+                    body = r.text[:240].replace("\n", " ")
+                    out.append((label, r.status_code, body))
+                except Exception as e:
+                    out.append((label, "ERR", f"{type(e).__name__}: {e}"[:240]))
+            return out
+
+        results = await asyncio.to_thread(_probe)
+
+        lines = [
+            f"🔎 **SALES PROBE** — `{item_name}` (id `{item_id}`)",
+            f"Cookie: {'✅ set' if cookie else '❌ not set'}",
+            "",
+        ]
+        for label, status, body in results:
+            icon = "✅" if status == 200 else "❌"
+            lines.append(f"{icon} `{label}` → {status}\n`{body}`")
+        await ctx.send("\n".join(lines)[:1900])
+
     @bot.command(name="sales_debug")
     async def sales_debug_cmd(ctx):
         """Diagnose why sales aren't showing: dates, timezone, channel config."""
