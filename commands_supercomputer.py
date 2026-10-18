@@ -584,19 +584,26 @@ def register_supercomputer_commands(bot):
                             continue
                         co[w] = co.get(w, 0) + 1
 
-                # Never recommend sales attributes or conflicting emote
-                # sub-types — adding them is false advertising / stuffing.
-                blocked = {
-                    "limited", "sale", "free", "cheap", "new", "hot",
-                    "trending", "recent", "updated", "original", "reupload",
-                    "copy", "price", "robux", "ugc", "item", "asset",
-                    "idle", "sit", "walk", "run", "pose", "dance", "float",
-                    "fly", "spin", "flip", "kick", "punch", "animation",
+                # Only recommend curated UGC aesthetic modifiers. Raw
+                # co-occurrence alone surfaces noise like "farming",
+                # "profile" and "headless", which are not title modifiers.
+                modifiers = {
+                    "pink", "blue", "red", "black", "white", "purple",
+                    "green", "gold", "silver", "neon", "glow", "glowing",
+                    "gradient", "glitter", "sparkle", "sparkly", "y2k",
+                    "cyber", "cyberpunk", "gothic", "goth", "emo", "grunge",
+                    "coquette", "preppy", "kawaii", "anime", "pastel",
+                    "fluffy", "cute", "dark", "light", "effect", "particle",
+                    "magic", "magical", "fire", "ice", "shadow", "rainbow",
+                    "chrome", "metallic", "holographic", "crystal", "galaxy",
+                    "cosmic", "vintage", "retro", "futuristic",
+                    "fantasy", "angel", "demon", "heart", "star", "moon",
+                    "sun", "cloud", "flame", "frost", "toxic", "radioactive",
                 }
 
                 co_cands = []
-                for w, freq in sorted(co.items(), key=lambda x: -x[1])[:120]:
-                    if w in blocked or freq < 20:
+                for w, freq in sorted(co.items(), key=lambda x: -x[1])[:200]:
+                    if w not in modifiers or freq < 5:
                         continue
                     cov = top_tokens.get(w, 0)
                     if cov > 3:
