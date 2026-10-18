@@ -584,9 +584,19 @@ def register_supercomputer_commands(bot):
                             continue
                         co[w] = co.get(w, 0) + 1
 
+                # Never recommend sales attributes or conflicting emote
+                # sub-types — adding them is false advertising / stuffing.
+                blocked = {
+                    "limited", "sale", "free", "cheap", "new", "hot",
+                    "trending", "recent", "updated", "original", "reupload",
+                    "copy", "price", "robux", "ugc", "item", "asset",
+                    "idle", "sit", "walk", "run", "pose", "dance", "float",
+                    "fly", "spin", "flip", "kick", "punch", "animation",
+                }
+
                 co_cands = []
-                for w, freq in sorted(co.items(), key=lambda x: -x[1])[:80]:
-                    if freq < 20:
+                for w, freq in sorted(co.items(), key=lambda x: -x[1])[:120]:
+                    if w in blocked or freq < 20:
                         continue
                     cov = top_tokens.get(w, 0)
                     if cov > 3:
@@ -615,30 +625,40 @@ def register_supercomputer_commands(bot):
             if ranked:
                 for w, sc, cov, use, _ in ranked:
                     if fallback_used:
-                        evidence = f"**{sc}** niche items use it"
+                        value = (
+                            f"**{sc}** niche items use it · "
+                            f"top-{len(top)} coverage **{cov}/{len(top)}**"
+                        )
                     else:
-                        evidence = f"**{sc}** suggestions"
-                    embed.add_field(
-                        name=f"🔍 {w}",
-                        value=(
-                            f"{evidence} · "
+                        value = (
+                            f"**{sc}** suggestions · "
                             f"top-{len(top)} coverage **{cov}/{len(top)}** · "
                             f"**{use:,}** items in this family use it"
+                        )
+                    embed.add_field(name=f"🔍 {w}", value=value, inline=False)
+
+                if not fallback_used:
+                    # Only autocomplete-based gaps get a generated title.
+                    title_words = [w for w, *_ in ranked[:2]]
+                    suggested = " ".join(x.capitalize() for x in title_words)
+                    embed.add_field(
+                        name="✅ Suggested title",
+                        value=(
+                            f"`{suggested} {niche.title()}`\n"
+                            f"Tags: `{', '.join(w for w, *_ in ranked[:3])}`"
                         ),
                         inline=False,
                     )
-
-                # Keep the title short and readable: at most 2 gap words.
-                title_words = [w for w, *_ in ranked[:2]]
-                suggested = " ".join(x.capitalize() for x in title_words)
-                embed.add_field(
-                    name="✅ Suggested title",
-                    value=(
-                        f"`{suggested} {niche.title()}`\n"
-                        f"Tags: `{', '.join(w for w, *_ in ranked[:3])}`"
-                    ),
-                    inline=False,
-                )
+                else:
+                    embed.add_field(
+                        name="⚠️ Use with care",
+                        value=(
+                            "Co-occurrence is **not** proof of demand. Only add "
+                            "a word if it accurately describes your item — never "
+                            "stuff sales or type words."
+                        ),
+                        inline=False,
+                    )
             else:
                 embed.description = (
                     "No strong gaps found. A gap now requires **≥3 suggestions** "
