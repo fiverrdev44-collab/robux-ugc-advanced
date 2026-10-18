@@ -339,18 +339,29 @@ def setup_database():
     except Exception as e:
         print(f"⚠️ [setup] commit failed: {e}", flush=True)
 
-    # Backfill missing or zero favorite counts with realistic estimates.
-    # Runs BEFORE the cursor is closed, on its own connection so a failure
-    # here can never take down the rest of setup.
+    # The old backfill invented favorite counts with
+    #   (ABS(id) % 8500) + 150
+    # which corrupts medians, percentiles, velocity and title lift used by
+    # !chain, !converge, !vacuum and !sales_keywords. Clear those synthetic
+    # values; enricher.py restores the real FavoriteCount on its next run.
     try:
-        _safe_exec(cur, """
+        cur.execute("""
             UPDATE items
-            SET favorite_count = (ABS(id) % 8500) + 150
-            WHERE favorite_count IS NULL OR favorite_count = 0;
-        """, "favorite_count_backfill")
+            SET favorite_count = NULL
+            WHERE favorite_count = (ABS(id) % 8500) + 150
+        """)
         conn.commit()
+        print("✅ [setup] synthetic favorite_count values cleared", flush=True)
     except Exception as e:
-        print(f"⚠️ [setup] favorite_count_backfill failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
+        print(
+            f"⚠️ [setup] synthetic favorites cleanup failed: "
+            f"{type(e).__name__}: {str(e)[:200]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
     try:
         cur.close()
