@@ -1420,6 +1420,65 @@ def register_supercomputer_commands(bot):
             await ctx.send(f"```\n{chunk}\n```")
             await asyncio.sleep(0.2)
 
+    @bot.command(name="launch_sync", aliases=["sync_launches"])
+    async def launch_sync_command(ctx, *, groups: str = ""):
+        """
+        Auto-log every item from your groups into the ledger.
+        Usage: !launch_sync Group One,Group Two,Group Three
+               or set MY_GROUP_NAMES in the bot environment.
+        """
+        names = (groups or os.getenv("MY_GROUP_NAMES", "")).strip()
+        if not names:
+            return await ctx.send(
+                "Usage: `!launch_sync Group One,Group Two`\n"
+                "Or set `MY_GROUP_NAMES` in the bot environment."
+            )
+
+        name_list = [n.strip().lower() for n in names.split(",") if n.strip()]
+
+        def _do():
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT id, name, favorite_count, price, asset_type_id,
+                           created_at, fetched_at
+                    FROM items
+                    WHERE lower(creator_name) = ANY(%s)
+                """, (name_list,))
+                rows = cur.fetchall()
+
+                added = 0
+                for (iid, name, favs, price, atype, created, fetched) in rows:
+                    launched = created or fetched
+                    family = "unknown"
+                    try:
+                        from category_configs import detect_family_from_asset_type
+                        family = detect_family_from_asset_type(atype) or "unknown"
+                    except Exception:
+                        pass
+
+                    cur.execute("""
+                        INSERT INTO launch_ledger
+                          (item_id, launched_at, family, title, asset_type_id,
+                           price, favs_launch)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (item_id) DO NOTHING
+                    """, (iid, launched, family, name, atype, price or 0, favs))
+                    added += cur.rowcount
+
+                conn.commit()
+                return len(rows), added
+            finally:
+                cur.close()
+                conn.close()
+
+        total, added = await asyncio.to_thread(_do)
+        await ctx.send(
+            f"📒 Found **{total}** items for your groups · "
+            f"**{added}** newly logged in the ledger."
+        )
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
