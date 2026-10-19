@@ -23,7 +23,7 @@ DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 FAVORITES_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 AUTH_URL = "https://auth.roblox.com/v2/logout"
 
-BATCH_SIZE = 1500
+BATCH_SIZE = int(os.getenv("ENRICH_BATCH_SIZE", "300"))
 REFRESH_EXISTING = os.getenv("REFRESH_MODE", "false").lower() == "true"
 PRIORITY = os.getenv("PRIORITY", "newest").lower()
 
@@ -255,6 +255,10 @@ def enrich_items():
             """, (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt))
 
             enriched += 1
+            # Commit in small chunks so a restart can't wipe the batch.
+            if enriched % 100 == 0:
+                conn.commit()
+                log(f"  💾 committed {enriched} rows")
         except Exception as e:
             db_errors += 1
             log(f"  DB error {item_id}: {e}")

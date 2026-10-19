@@ -988,8 +988,8 @@ def register_supercomputer_commands(bot):
 
         batches = max(1, min(batches, 20))
         await ctx.send(
-            f"🧪 **Enricher started** — **{batches}** batch(es) of ~1,500 items. "
-            f"Expect ~20–40 min per batch."
+            f"🧪 **Enricher started** — **{batches}** batch(es) of ~300 items. "
+            f"Expect ~5–10 min per batch. Progress commits every 100 rows."
         )
 
         def _run():
