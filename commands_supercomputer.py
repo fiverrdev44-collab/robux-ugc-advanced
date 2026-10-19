@@ -1035,14 +1035,17 @@ def register_supercomputer_commands(bot):
         favs_d7 = fav_at(7)
         favs_d30 = fav_at(30)
 
-        prefix = (title or "")[:20]
+        # Normalize both sides: item names often include emoji/prefixes
+        # (e.g. "⭐Smooth 360 flip Rizz"), which breaks a plain LIKE.
+        prefix = re.sub(r"[^a-z0-9 ]", "", (title or "").lower())
+        prefix = re.sub(r"\s+", " ", prefix).strip()[:24]
         like = f"%{prefix}%" if prefix else "%"
 
         def sales_window(days):
             cur.execute("""
                 SELECT count(*), COALESCE(SUM(amount_robux), 0)
                 FROM my_sales
-                WHERE lower(item_name) LIKE lower(%s)
+                WHERE regexp_replace(lower(item_name), '[^a-z0-9]+', ' ', 'g') LIKE %s
                   AND sale_time >= %s
                   AND sale_time < %s
             """, (like, launched, launched + timedelta(days=days)))
@@ -1239,7 +1242,8 @@ def register_supercomputer_commands(bot):
                 results = []
                 for (iid, launched, family, title, score,
                      f7, f30, u30, r30) in rows:
-                    actual = f7 if f7 is not None else (f30 or 0)
+                    has_data = f7 is not None or f30 is not None
+                    actual = f7 if f7 is not None else (f30 if f30 is not None else 0)
 
                     peer_median = 0
                     try:
@@ -1267,11 +1271,16 @@ def register_supercomputer_commands(bot):
                     except Exception:
                         pass
 
-                    hit = peer_median > 0 and actual >= peer_median
+                    hit = (
+                        has_data
+                        and peer_median > 0
+                        and actual >= peer_median
+                    )
                     results.append({
                         "id": iid, "title": title or "",
                         "score": score or 0, "actual": actual,
                         "peer": peer_median, "hit": hit,
+                        "has_data": has_data,
                         "units": u30 or 0, "revenue": r30 or 0,
                     })
 
@@ -1288,12 +1297,17 @@ def register_supercomputer_commands(bot):
 
         results = data["results"]
         total = len(results)
-        hits = sum(1 for r in results if r["hit"])
-        hit_rate = (hits / total * 100) if total else 0
-        avg_rev = sum(r["revenue"] for r in results) / total if total else 0
+        measured = [r for r in results if r["has_data"]]
+        total_measured = len(measured)
+        hits = sum(1 for r in measured if r["hit"])
+        hit_rate = (hits / total_measured * 100) if total_measured else 0
+        avg_rev = (
+            sum(r["revenue"] for r in measured) / total_measured
+            if total_measured else 0
+        )
 
         kw_rev = {}
-        for r in results:
+        for r in measured:
             for w in set(re.findall(r"[a-z]{3,}", r["title"].lower())):
                 kw_rev[w] = kw_rev.get(w, 0) + r["revenue"]
         best = sorted(kw_rev.items(), key=lambda x: -x[1])[:5]
@@ -1301,18 +1315,24 @@ def register_supercomputer_commands(bot):
         embed = discord.Embed(
             title=f"📈 Hit Rate — last {days} days",
             description=(
-                f"Launches: **{total}** · Beat peer median: **{hits}** "
-                f"({hit_rate:.0f}%) · Avg revenue: **{avg_rev:,.0f} R$**"
+                f"Launches: **{total}** · Measured: **{total_measured}** · "
+                f"Beat peer median: **{hits}** ({hit_rate:.0f}%) · "
+                f"Avg revenue: **{avg_rev:,.0f} R$**"
             ),
             color=0x8B5CF6,
         )
 
         lines = []
         for r in results[:10]:
-            mark = "✅" if r["hit"] else "❌"
+            if not r["has_data"]:
+                mark = "⏳"
+                actual_str = "no snapshot data"
+            else:
+                mark = "✅" if r["hit"] else "❌"
+                actual_str = f"{r['actual']:,} favs"
             lines.append(
                 f"{mark} `{(r['title'] or '')[:32]}` — "
-                f"{r['actual']:,} favs vs peer {r['peer']:,} · "
+                f"{actual_str} vs peer {r['peer']:,} · "
                 f"R${r['revenue']:,}"
             )
         if lines:
