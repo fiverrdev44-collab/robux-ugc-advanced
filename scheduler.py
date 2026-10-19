@@ -94,6 +94,36 @@ def _run_post_monitor():
         traceback.print_exc()
 
 
+def _run_launch_sync():
+    """Auto-log group items and refresh ledger outcomes daily."""
+    _log("📒 [scheduler] Launch sync triggered.")
+    try:
+        from launch_ledger import configured_groups, sync_group_items, sync_all
+        from bot_core import get_db
+
+        groups = configured_groups()
+        if not groups:
+            _log("⚠️ [scheduler] MY_GROUP_NAMES not set — skipping launch sync.")
+            return
+
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            total, added = sync_group_items(cur, groups)
+            synced = sync_all(cur)
+            conn.commit()
+            _log(
+                f"✅ [scheduler] Launch sync — found {total} group items, "
+                f"{added} new, {synced} outcomes synced."
+            )
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        _log(f"❌ [scheduler] Launch sync failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -114,14 +144,18 @@ def start_scheduler():
         hour=POST_MONITOR_HOUR_UTC, minute=0,
         id="post_monitor", replace_existing=True, misfire_grace_time=3600)
 
+    _scheduler.add_job(_run_launch_sync, "cron",
+        hour=7, minute=30,
+        id="launch_sync", replace_existing=True, misfire_grace_time=3600)
+
     _scheduler.start()
 
     for job in _scheduler.get_jobs():
         _log(f"🕐 [scheduler] '{job.id}' next run: {job.next_run_time}")
 
     _log(f"✅ [scheduler] Started — snapshot 03:30 UTC, "
-         f"ML train 04:00 UTC, post-monitor 18:00 UTC "
-         f"(scanner/suggest run via GitHub → Server 2)")
+         f"ML train 04:00 UTC, launch sync 07:30 UTC, "
+         f"post-monitor 18:00 UTC (scanner/suggest via GitHub → Server 2)")
 
     return _scheduler
 

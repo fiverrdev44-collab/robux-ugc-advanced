@@ -18,6 +18,12 @@ import discord
 from collections import Counter, defaultdict
 
 from bot_core import get_db, rollback_quietly
+from launch_ledger import (
+    fill_ledger,
+    sync_all,
+    sync_group_items,
+    configured_groups,
+)
 
 # Owner-only Discord IDs that may invoke !bot_update.
 # Hardcoded owners + any configured via env vars (BOT_OWNER_ID / DISCORD_OWNER_ID).
@@ -1043,74 +1049,6 @@ def register_supercomputer_commands(bot):
         )
 
     # ── 12. 📒 Launch Ledger ────────────────────────────────────────
-    def _fill_ledger(cur, item_id):
-        from datetime import timedelta
-
-        cur.execute("""
-            SELECT item_id, launched_at, title, family
-            FROM launch_ledger WHERE item_id = %s
-        """, (item_id,))
-        row = cur.fetchone()
-        if not row:
-            return False
-        iid, launched, title, family = row
-
-        cur.execute("""
-            SELECT favorite_count FROM item_history
-            WHERE item_id = %s AND snapshot_at <= %s
-            ORDER BY snapshot_at DESC LIMIT 1
-        """, (iid, launched))
-        r = cur.fetchone()
-        favs_launch = r[0] if r else None
-
-        def fav_at(days):
-            cur.execute("""
-                SELECT favorite_count FROM item_history
-                WHERE item_id = %s AND snapshot_at >= %s
-                ORDER BY snapshot_at ASC LIMIT 1
-            """, (iid, launched + timedelta(days=days)))
-            r2 = cur.fetchone()
-            return r2[0] if r2 else None
-
-        favs_d1 = fav_at(1)
-        favs_d7 = fav_at(7)
-        favs_d30 = fav_at(30)
-
-        # Normalize both sides: item names often include emoji/prefixes
-        # (e.g. "⭐Smooth 360 flip Rizz"), which breaks a plain LIKE.
-        prefix = re.sub(r"[^a-z0-9 ]", "", (title or "").lower())
-        prefix = re.sub(r"\s+", " ", prefix).strip()[:24]
-        like = f"%{prefix}%" if prefix else "%"
-
-        def sales_window(days):
-            cur.execute("""
-                SELECT count(*), COALESCE(SUM(amount_robux), 0)
-                FROM my_sales
-                WHERE regexp_replace(lower(item_name), '[^a-z0-9]+', ' ', 'g') LIKE %s
-                  AND sale_time >= %s
-                  AND sale_time < %s
-            """, (like, launched, launched + timedelta(days=days)))
-            return cur.fetchone()
-
-        units_d7, revenue_d7 = sales_window(7)
-        units_d30, revenue_d30 = sales_window(30)
-
-        cur.execute("""
-            UPDATE launch_ledger SET
-                favs_launch = %s,
-                favs_d1 = %s, favs_d7 = %s, favs_d30 = %s,
-                units_d7 = %s, units_d30 = %s,
-                revenue_d7 = %s, revenue_d30 = %s,
-                last_synced = CURRENT_TIMESTAMP
-            WHERE item_id = %s
-        """, (
-            favs_launch, favs_d1, favs_d7, favs_d30,
-            units_d7 or 0, units_d30 or 0,
-            revenue_d7 or 0, revenue_d30 or 0,
-            iid,
-        ))
-        return True
-
     @bot.command(name="launch", aliases=["log_launch"])
     async def launch_command(ctx, item_id: int, launched: str = "", *, notes: str = ""):
         """
@@ -1228,15 +1166,7 @@ def register_supercomputer_commands(bot):
             conn = get_db()
             cur = conn.cursor()
             try:
-                cur.execute("SELECT item_id FROM launch_ledger")
-                ids = [r[0] for r in cur.fetchall()]
-                synced = 0
-                for iid in ids:
-                    try:
-                        if _fill_ledger(cur, iid):
-                            synced += 1
-                    except Exception as e:
-                        print(f"[ledger] sync {iid} failed: {e}", flush=True)
+                synced = sync_all(cur)
                 conn.commit()
                 return synced
             finally:
@@ -1265,7 +1195,7 @@ def register_supercomputer_commands(bot):
                 """, (timedelta(days=days),))
                 for (iid,) in cur.fetchall():
                     try:
-                        _fill_ledger(cur, iid)
+                        fill_ledger(cur, iid)
                     except Exception:
                         pass
                 conn.commit()
@@ -1427,48 +1357,24 @@ def register_supercomputer_commands(bot):
         Usage: !launch_sync Group One,Group Two,Group Three
                or set MY_GROUP_NAMES in the bot environment.
         """
-        names = (groups or os.getenv("MY_GROUP_NAMES", "")).strip()
-        if not names:
+        if groups.strip():
+            name_list = [n.strip() for n in groups.split(",") if n.strip()]
+        else:
+            name_list = configured_groups()
+
+        if not name_list:
             return await ctx.send(
                 "Usage: `!launch_sync Group One,Group Two`\n"
                 "Or set `MY_GROUP_NAMES` in the bot environment."
             )
 
-        name_list = [n.strip().lower() for n in names.split(",") if n.strip()]
-
         def _do():
             conn = get_db()
             cur = conn.cursor()
             try:
-                cur.execute("""
-                    SELECT id, name, favorite_count, price, asset_type_id,
-                           created_at, fetched_at
-                    FROM items
-                    WHERE lower(creator_name) = ANY(%s)
-                """, (name_list,))
-                rows = cur.fetchall()
-
-                added = 0
-                for (iid, name, favs, price, atype, created, fetched) in rows:
-                    launched = created or fetched
-                    family = "unknown"
-                    try:
-                        from category_configs import detect_family_from_asset_type
-                        family = detect_family_from_asset_type(atype) or "unknown"
-                    except Exception:
-                        pass
-
-                    cur.execute("""
-                        INSERT INTO launch_ledger
-                          (item_id, launched_at, family, title, asset_type_id,
-                           price, favs_launch)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (item_id) DO NOTHING
-                    """, (iid, launched, family, name, atype, price or 0, favs))
-                    added += cur.rowcount
-
+                total, added = sync_group_items(cur, name_list)
                 conn.commit()
-                return len(rows), added
+                return total, added
             finally:
                 cur.close()
                 conn.close()
