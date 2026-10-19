@@ -1161,7 +1161,9 @@ def register_supercomputer_commands(bot):
                 confidence = 0.0
                 try:
                     from title_predictor import predict_title
-                    pred = predict_title(cur, name)
+                    # auto_train=False: never block the launch command on a
+                    # multi-minute model training run.
+                    pred = predict_title(cur, name, auto_train=False)
                     score = float(pred.get("score") or 0)
                     confidence = float(pred.get("confidence") or 0)
                 except Exception as e:
