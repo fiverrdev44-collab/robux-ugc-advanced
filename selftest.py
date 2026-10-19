@@ -415,3 +415,225 @@ def run_selftest(bot=None):
         add("workflows", wf, os.path.exists(os.path.join(base, wf)))
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────
+# Live command harness — executes menu buttons and safe commands
+# with mock Discord objects and captures their responses.
+# ─────────────────────────────────────────────────────────────────
+
+class _MockPermissions:
+    administrator = True
+    manage_guild = True
+    manage_messages = True
+    manage_channels = True
+
+
+class _MockAuthor:
+    id = 1210571583559835709
+    display_name = "selftest"
+    mention = "<@selftest>"
+    bot = False
+    guild_permissions = _MockPermissions()
+
+
+class _MockMessage:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def edit(self, content=None, *, embed=None, **kwargs):
+        self._sink.append({"content": content, "embed": embed})
+        return self
+
+    async def delete(self):
+        return None
+
+    async def add_reaction(self, *a, **k):
+        return None
+
+
+class _MockGuild:
+    id = 0
+    name = "selftest"
+    member_count = 1
+    owner_id = 1210571583559835709
+    me = _MockAuthor()
+
+    def get_member(self, *a, **k):
+        return None
+
+    def get_channel(self, *a, **k):
+        return None
+
+
+class _MockChannel:
+    id = 0
+    name = "selftest"
+    mention = "#selftest"
+
+    async def send(self, *a, **k):
+        return None
+
+
+class _MockMessageObj:
+    id = 0
+    content = ""
+    created_at = datetime.utcnow()
+    attachments = []
+    embeds = []
+
+
+class _AsyncNull:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _MockCtx:
+    def __init__(self):
+        self.author = _MockAuthor()
+        self.guild = _MockGuild()
+        self.channel = _MockChannel()
+        self.message = _MockMessageObj()
+        self.sent = []
+
+    async def send(self, content=None, *, embed=None, **kwargs):
+        self.sent.append({"content": content, "embed": embed})
+        return _MockMessage(self.sent)
+
+    async def reply(self, content=None, *, embed=None, **kwargs):
+        return await self.send(content, embed=embed, **kwargs)
+
+    def typing(self):
+        return _AsyncNull()
+
+
+class _MockResponse:
+    def __init__(self, parent):
+        self.parent = parent
+
+    async def send_message(self, content=None, *, embed=None, **kwargs):
+        self.parent.sent.append({"content": content, "embed": embed})
+        return _MockMessage(self.parent.sent)
+
+    async def defer(self, **kwargs):
+        return None
+
+    async def edit_message(self, **kwargs):
+        return None
+
+
+class _MockFollowup:
+    def __init__(self, sink):
+        self._sink = sink
+
+    async def send(self, content=None, *, embed=None, **kwargs):
+        self._sink.append({"content": content, "embed": embed})
+        return _MockMessage(self._sink)
+
+
+class _MockInteraction:
+    def __init__(self):
+        self.sent = []
+        self.response = _MockResponse(self)
+        self.followup = _MockFollowup(self.sent)
+        self.user = _MockAuthor()
+        self.guild = _MockGuild()
+        self.channel = _MockChannel()
+        self.message = _MockMessageObj()
+
+
+SAFE_COMMANDS = [
+    ("dbtest", [], {}),
+    ("scan_status", [], {}),
+    ("guide", [], {"idea": None}),
+    ("playbook", [], {"topic": "naming"}),
+    ("path", [], {}),
+    ("vacuum", [5], {}),
+    ("meta_sniper", [], {"niche": "aura emote"}),
+    ("sales_keywords", ["emotes"], {}),
+    ("early", [7], {}),
+    ("momentum", [7], {}),
+    ("oracle", [], {"keyword": "anime"}),
+    ("predict", [], {"idea": "kawaii aura emote"}),
+    ("gap", [], {"keyword": "anime"}),
+    ("xray", [], {}),
+    ("patterns", ["emotes"], {}),
+    ("failures", ["emotes"], {}),
+    ("trends", [], {}),
+    ("golden_hour", [5], {}),
+    ("whales", [], {}),
+    ("sales_report", [7], {}),
+    ("sales_debug", [], {}),
+    ("sales_scan", [5], {}),
+    ("sales_for", [], {"item_name": "Smooth 360 flip Rizz"}),
+    ("hitrate", [365], {}),
+    ("ledger_sync", [], {}),
+    ("launch_sync", [], {"groups": "Ami Berloga,Motion Works Inc.,eroseris"}),
+    ("suggest_probe", [], {"query": "aura"}),
+    ("cookie_check", [], {}),
+    ("history", [], {}),
+    ("watchlist", [], {}),
+    ("tags", [], {"args": "kawaii aura emote"}),
+    ("logs", [20], {}),
+]
+
+
+async def run_command_harness(bot):
+    """Execute menu buttons + safe commands with mocks. Async on main loop."""
+    results = []
+
+    def add(group, name, ok, detail="", warning=False):
+        results.append({
+            "group": group,
+            "name": name,
+            "ok": bool(ok),
+            "warning": bool(warning),
+            "detail": str(detail)[:180],
+        })
+
+    # Menu buttons
+    try:
+        from menu import MenuView
+        from bot_core import get_db
+
+        view = MenuView(bot, get_db)
+        for child in view.children:
+            label = getattr(child, "label", "button")
+            inter = _MockInteraction()
+            try:
+                try:
+                    await child.callback(inter)
+                except TypeError:
+                    await child.callback(inter, child)
+                add(
+                    "menu_live", label,
+                    bool(inter.sent),
+                    f"{len(inter.sent)} responses",
+                )
+            except Exception as e:
+                add("menu_live", label, False, f"{type(e).__name__}: {e}")
+    except Exception as e:
+        add("menu_live", "menu", False, f"{type(e).__name__}: {e}")
+
+    # Commands
+    for name, args, kwargs in SAFE_COMMANDS:
+        cmd = bot.get_command(name)
+        if not cmd:
+            add("commands_live", name, False, "not registered")
+            continue
+        ctx = _MockCtx()
+        try:
+            await cmd.callback(ctx, *args, **kwargs)
+            add(
+                "commands_live", name,
+                bool(ctx.sent),
+                f"{len(ctx.sent)} responses",
+            )
+        except Exception as e:
+            add("commands_live", name, False, f"{type(e).__name__}: {e}")
+
+    return results
+

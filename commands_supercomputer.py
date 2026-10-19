@@ -1751,8 +1751,18 @@ def register_supercomputer_commands(bot):
 
         await ctx.send("🏅 **GOLD CERTIFICATION** — running every check...")
 
-        from selftest import run_selftest
+        from selftest import run_selftest, run_command_harness
         results = await asyncio.to_thread(run_selftest, bot)
+        try:
+            results.extend(await run_command_harness(bot))
+        except Exception as e:
+            results.append({
+                "group": "commands_live",
+                "name": "harness",
+                "ok": False,
+                "warning": False,
+                "detail": f"{type(e).__name__}: {e}",
+            })
 
         passed = sum(1 for r in results if r["ok"])
         total = len(results)
