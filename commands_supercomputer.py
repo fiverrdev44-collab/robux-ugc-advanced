@@ -1560,8 +1560,8 @@ def register_supercomputer_commands(bot):
         )
         await ctx.send(embed=embed)
 
-    @bot.command(name="selftest", aliases=["healthcheck"])
-    async def selftest_command(ctx):
+    @bot.command(name="selftest_db", aliases=["healthcheck_db"])
+    async def selftest_db_command(ctx):
         """Owner-only: full automated health check with a pass score."""
         if ctx.author.id not in BOT_OWNERS:
             return await ctx.send("🚫 Owner-only command.")
@@ -1741,6 +1741,64 @@ def register_supercomputer_commands(bot):
                 value="Database, pipeline, services, backups, env, commands.",
                 inline=False,
             )
+        await ctx.send(embed=embed)
+
+    @bot.command(name="selftest", aliases=["certify"])
+    async def selftest_command(ctx):
+        """Owner-only: aggressive gold-standard certification of every component."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+
+        await ctx.send("🏅 **GOLD CERTIFICATION** — running every check...")
+
+        from selftest import run_selftest
+        results = await asyncio.to_thread(run_selftest, bot)
+
+        passed = sum(1 for r in results if r["ok"])
+        total = len(results)
+        warnings = [r for r in results if not r["ok"] and r.get("warning")]
+        fails = [r for r in results if not r["ok"] and not r.get("warning")]
+        pct = (passed / total * 100) if total else 0
+
+        color = 0x22C55E if pct >= 95 else (0xF59E0B if pct >= 80 else 0xEF4444)
+        embed = discord.Embed(
+            title="🏅 GOLD CERTIFICATION",
+            description=(
+                f"**{passed}/{total}** passed · **{pct:.0f}%** · "
+                f"{len(fails)} failed · {len(warnings)} warnings"
+            ),
+            color=color,
+        )
+        if fails:
+            embed.add_field(
+                name="❌ Failed",
+                value="\n".join(
+                    f"`{r['group']}/{r['name']}` — {r['detail']}"
+                    for r in fails[:18]
+                )[:1000],
+                inline=False,
+            )
+        if warnings:
+            embed.add_field(
+                name="⚠️ Warnings",
+                value="\n".join(
+                    f"`{r['group']}/{r['name']}` — {r['detail']}"
+                    for r in warnings[:12]
+                )[:1000],
+                inline=False,
+            )
+        groups = {}
+        for r in results:
+            g = groups.setdefault(r["group"], [0, 0])
+            g[1] += 1
+            if r["ok"]:
+                g[0] += 1
+        embed.add_field(
+            name="Groups",
+            value=" · ".join(f"{k}: {v[0]}/{v[1]}" for k, v in groups.items()),
+            inline=False,
+        )
+        embed.set_footer(text="Paste this report to fix failures.")
         await ctx.send(embed=embed)
 
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
