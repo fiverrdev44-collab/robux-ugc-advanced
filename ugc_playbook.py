@@ -121,6 +121,25 @@ TOPICS = {
         "Copying a saturated item instead of improving it.",
         "Trusting small samples and random variation.",
     ],
+    "economics": [
+        "Roblox keeps roughly 70% of UGC sales; creators keep roughly 30%.",
+        "DevEx: 100,000 Robux ≈ $350; minimum cash-out is 30,000 Robux.",
+        "$100/month ≈ 28,571 Robux net.",
+        "$1,000/month ≈ 285,714 Robux net.",
+        "$10,000/month ≈ 2,857,143 Robux net.",
+        "At R$20 net/unit, $1,000/month needs ~14,300 units/month (~475/day).",
+        "At R$50 net/unit, $1,000/month needs ~5,700 units/month (~190/day).",
+        "Volume and price are the only two revenue levers; both need traffic.",
+        "No bot can guarantee virality or income. These are platform mechanics, not promises.",
+    ],
+    "path": [
+        "Stage 0 (under R$5k/mo): fix data, 10–20 items, clone the top 2, one clip per launch.",
+        "Stage 1 (R$5k–50k/mo): 20–50 items, two niches, retire dead stock, A/B titles.",
+        "Stage 2 (R$50k–300k/mo): 50–100 items, systemized production, brand aesthetic.",
+        "Stage 3 (R$300k–1M/mo): studio operations, multiple groups, paid promotion.",
+        "Stage 4 (R$1M+/mo): team, licensing, collaborations, platform diversification.",
+        "Move one stage at a time; do not skip the catalog scale step.",
+    ],
 }
 
 TOPIC_ALIASES = {

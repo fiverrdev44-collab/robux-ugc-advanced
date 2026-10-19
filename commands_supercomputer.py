@@ -1455,6 +1455,111 @@ def register_supercomputer_commands(bot):
         for i in range(0, len(text), 1900):
             await ctx.send(text[i:i + 1900])
 
+    @bot.command(name="path", aliases=["roadmap"])
+    async def path_command(ctx):
+        """Show your current UGC stage and next milestones from real data."""
+        from launch_ledger import configured_groups
+
+        groups = configured_groups()
+
+        def _do():
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                if groups:
+                    cur.execute(
+                        "SELECT count(*) FROM items WHERE lower(creator_name) = ANY(%s)",
+                        ([g.lower() for g in groups],),
+                    )
+                else:
+                    cur.execute("SELECT count(*) FROM launch_ledger")
+                items_count = cur.fetchone()[0] or 0
+
+                cur.execute("""
+                    SELECT count(*), COALESCE(SUM(amount_robux), 0)
+                    FROM my_sales
+                    WHERE sale_time >= NOW() - interval '30 days'
+                """)
+                units, revenue = cur.fetchone()
+                return items_count, int(units or 0), int(revenue or 0)
+            finally:
+                cur.close()
+                conn.close()
+
+        items_count, units, revenue = await asyncio.to_thread(_do)
+
+        if revenue < 5000:
+            stage, name = 0, "Foundation"
+        elif revenue < 50000:
+            stage, name = 1, "Traction"
+        elif revenue < 300000:
+            stage, name = 2, "Scale"
+        elif revenue < 1000000:
+            stage, name = 3, "Business"
+        else:
+            stage, name = 4, "Studio"
+
+        embed = discord.Embed(
+            title=f"🗺️ Your UGC Path — Stage {stage}: {name}",
+            description=(
+                f"Items tracked: **{items_count}** · "
+                f"30-day net revenue: **R${revenue:,}** "
+                f"(~${revenue * 0.0035:,.0f}) · Units: **{units:,}**"
+            ),
+            color=0x22C55E,
+        )
+
+        actions = {
+            0: [
+                "Clear the enrichment backlog so rankings are honest.",
+                "Clone your top 2 items into 3–5 variants.",
+                "Reach 10–20 items before judging results.",
+                "Post one TikTok/Shorts per launch.",
+            ],
+            1: [
+                "Reach 20–50 items across two related niches.",
+                "Double down on the top 2 sellers; retire dead stock.",
+                "Run A/B title tests and keep winners.",
+                "Post 3–5 external clips per week.",
+            ],
+            2: [
+                "50–100 items; systemize production.",
+                "Build a recognizable brand aesthetic.",
+                "Cross-promote winners into every launch.",
+                "Add premium/limited items for margin.",
+            ],
+            3: [
+                "Treat it as a studio: batching, scheduling, analytics.",
+                "Expand to multiple groups/accounts.",
+                "Pay for promotion and creator seeding.",
+                "License trends and collaborate.",
+            ],
+            4: [
+                "Scale the team and production pipeline.",
+                "Protect the brand; diversify platforms.",
+                "Reinvest into hits and marketing.",
+            ],
+        }[stage]
+
+        embed.add_field(
+            name="Do next",
+            value="\n".join(f"• {a}" for a in actions),
+            inline=False,
+        )
+        embed.add_field(
+            name="Revenue milestones (net)",
+            value=(
+                "R$28,571 ≈ $100/mo · "
+                "R$285,714 ≈ $1,000/mo · "
+                "R$2,857,143 ≈ $10,000/mo"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text="Net estimate uses 100,000 R$ ≈ $350 DevEx · no guarantees"
+        )
+        await ctx.send(embed=embed)
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
