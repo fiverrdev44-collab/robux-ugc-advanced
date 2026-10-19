@@ -14,36 +14,65 @@ SERVICE="/etc/systemd/system/ugc-enrich.service"
 
 sudo mkdir -p "$ENV_DIR"
 
-echo "==> Extracting DATABASE_URL from ugc-bot.service"
-DB_URL="$(sudo systemctl show ugc-bot -p Environment --value \
-  | python3 -c "
+if [ -f "$ENV_FILE" ]; then
+  echo "==> Using existing $ENV_FILE"
+else
+  echo "==> Extracting DATABASE_URL from ugc-bot.service"
+  DB_URL="$(sudo systemctl show ugc-bot -p Environment --value \
+    | python3 -c "
 import sys, shlex
 for item in shlex.split(sys.stdin.read()):
     if item.startswith('DATABASE_URL='):
         print(item.split('=', 1)[1])
         break
-")"
+" || true)"
 
-if [ -z "${DB_URL:-}" ]; then
-  echo "ERROR: could not find DATABASE_URL in the bot service environment."
-  echo "Run: sudo systemctl show ugc-bot -p Environment"
-  exit 1
-fi
-
-echo "==> Extracting ROBLOSECURITY_COOKIE_1 from the drop-in"
-COOKIE="$(sudo sed -n 's/.*ROBLOSECURITY_COOKIE_1=\(.*\)"/\1/p' \
-  /etc/systemd/system/ugc-bot.service.d/roblox.conf 2>/dev/null | head -1 || true)"
-
-echo "==> Writing $ENV_FILE"
-{
-  echo "DATABASE_URL=$DB_URL"
-  if [ -n "${COOKIE:-}" ]; then
-    echo "ROBLOSECURITY_COOKIE_1=$COOKIE"
+  # Fallback: read the running bot process's environment.
+  if [ -z "${DB_URL:-}" ]; then
+    PID="$(pgrep -f discord_ugc_bot.py | head -1 || true)"
+    if [ -n "${PID:-}" ]; then
+      echo "==> Falling back to /proc/$PID/environ"
+      DB_URL="$(sudo tr '\0' '\n' < "/proc/$PID/environ" \
+        | sed -n 's/^DATABASE_URL=//p' | head -1)"
+      COOKIE="$(sudo tr '\0' '\n' < "/proc/$PID/environ" \
+        | sed -n 's/^ROBLOSECURITY_COOKIE_1=//p' | head -1)"
+    fi
   fi
-  echo "ENRICH_BATCH_SIZE=300"
-  echo "PYTHONUNBUFFERED=1"
-} | sudo tee "$ENV_FILE" >/dev/null
-sudo chmod 600 "$ENV_FILE"
+
+  if [ -z "${DB_URL:-}" ]; then
+    echo
+    echo "ERROR: could not find DATABASE_URL automatically."
+    echo
+    echo "Create the env file manually, then re-run this script:"
+    echo
+    echo "  sudo tee $ENV_FILE >/dev/null <<'EOF'"
+    echo "  DATABASE_URL=postgresql://ugc_user:UgcSuper2026!@10.0.0.171:5432/ugc_db"
+    echo "  ROBLOSECURITY_COOKIE_1=<paste cookie here>"
+    echo "  ENRICH_BATCH_SIZE=300"
+    echo "  PYTHONUNBUFFERED=1"
+    echo "  EOF"
+    echo "  sudo chmod 600 $ENV_FILE"
+    echo
+    exit 1
+  fi
+
+  if [ -z "${COOKIE:-}" ]; then
+    echo "==> Extracting ROBLOSECURITY_COOKIE_1 from the drop-in"
+    COOKIE="$(sudo sed -n 's/.*ROBLOSECURITY_COOKIE_1=\(.*\)"/\1/p' \
+      /etc/systemd/system/ugc-bot.service.d/roblox.conf 2>/dev/null | head -1 || true)"
+  fi
+
+  echo "==> Writing $ENV_FILE"
+  {
+    echo "DATABASE_URL=$DB_URL"
+    if [ -n "${COOKIE:-}" ]; then
+      echo "ROBLOSECURITY_COOKIE_1=$COOKIE"
+    fi
+    echo "ENRICH_BATCH_SIZE=300"
+    echo "PYTHONUNBUFFERED=1"
+  } | sudo tee "$ENV_FILE" >/dev/null
+  sudo chmod 600 "$ENV_FILE"
+fi
 
 echo "==> Writing $SERVICE"
 sudo tee "$SERVICE" >/dev/null <<EOF
