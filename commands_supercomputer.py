@@ -1391,6 +1391,33 @@ def register_supercomputer_commands(bot):
         )
         await ctx.send(embed=embed)
 
+    @bot.command(name="logs", aliases=["log"])
+    async def logs_command(ctx, lines: int = 50):
+        """Owner-only: show the last N bot log lines (Render-style)."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+
+        lines = max(10, min(lines, 200))
+        try:
+            out = subprocess.check_output(
+                [
+                    "journalctl", "-u", "ugc-bot",
+                    "-n", str(lines), "-o", "cat", "--no-pager",
+                ],
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            return await ctx.send(
+                f"⚠️ Could not read logs: {type(e).__name__}: {e}"
+            )
+
+        out = out.strip() or "(no log lines)"
+        chunks = [out[i:i + 1850] for i in range(0, len(out), 1850)][-5:]
+        for chunk in chunks:
+            await ctx.send(f"```\n{chunk}\n```")
+            await asyncio.sleep(0.2)
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
