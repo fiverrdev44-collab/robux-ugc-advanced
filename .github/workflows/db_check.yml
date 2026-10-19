@@ -1,0 +1,49 @@
+name: DB Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install psycopg2
+        run: pip install psycopg2-binary
+      - name: Show DB host and counts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          import urllib.parse as u
+          import psycopg2
+
+          url = os.environ.get("DATABASE_URL", "")
+          p = u.urlparse(url)
+          print("DB host:", p.hostname)
+          print("DB name:", p.path.lstrip("/"))
+          print("DB user:", p.username)
+
+          try:
+              conn = psycopg2.connect(url, sslmode="require", connect_timeout=10)
+              cur = conn.cursor()
+              cur.execute("SELECT count(*) FROM discovered_items")
+              print("discovered:", cur.fetchone()[0])
+              cur.execute("SELECT count(*) FROM items")
+              print("items:", cur.fetchone()[0])
+              cur.execute("SELECT max(fetched_at) FROM items")
+              print("last enriched:", cur.fetchone()[0])
+              cur.execute("SELECT max(snapshot_at) FROM item_history")
+              print("last snapshot:", cur.fetchone()[0])
+              cur.execute("SELECT now()")
+              print("db now:", cur.fetchone()[0])
+              cur.close()
+              conn.close()
+          except Exception as e:
+              print("CONNECTION FAILED:", type(e).__name__, str(e)[:300])
+          PY
