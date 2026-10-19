@@ -6,6 +6,10 @@ on:
       - main
       - master
 
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     name: Auto-Deploy to Oracle Server 2
@@ -18,16 +22,18 @@ jobs:
           username: ubuntu
           key: ${{ secrets.ORACLE_SSH_KEY }}
           script: |
-            echo "🚀 [Auto-Deploy] Pulling latest code into ~/robux-ugc-advanced..."
+            echo "🚀 [Auto-Deploy] Syncing latest code into ~/robux-ugc-advanced..."
             cd ~/robux-ugc-advanced
-            git pull origin main
-            
+            git fetch origin
+            git reset --hard origin/main
+            find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+
             echo "📦 [Auto-Deploy] Checking dependencies..."
             source ~/ugc_env/bin/activate
             pip install -q asyncpg aiohttp discord.py google-genai 2>/dev/null || true
-            
+
             echo "🔄 [Auto-Deploy] Restarting ugc-bot service..."
             sudo systemctl restart ugc-bot
             sudo systemctl status ugc-bot --no-pager
-            
+
             echo "✅ [Auto-Deploy] Successfully deployed like Render!"

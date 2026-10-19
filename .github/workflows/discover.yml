@@ -14,14 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Run keyword discovery on Oracle
+        uses: appleboy/ssh-action@master
         with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run keyword discovery
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          PYTHONUNBUFFERED: "1"
-        run: python -u discover_keywords.py
+          host: 129.213.137.177
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          command_timeout: 55m
+          script: bash /home/ubuntu/robux-ugc-advanced/deploy/run_on_oracle.sh discover_keywords.py

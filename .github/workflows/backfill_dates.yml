@@ -2,7 +2,7 @@ name: Backfill Dates
 
 on:
   schedule:
-    - cron: '30 6 * * *'   # 6:30 AM UTC daily
+    - cron: '30 6 * * *'
   workflow_dispatch:
     inputs:
       batch_size:
@@ -19,15 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Run date backfill on Oracle
+        uses: appleboy/ssh-action@master
         with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run backfill
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size || '3000' }}
-          PYTHONUNBUFFERED: "1"
-        run: python -u backfill_dates.py
+          host: 129.213.137.177
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          command_timeout: 110m
+          script: bash /home/ubuntu/robux-ugc-advanced/deploy/run_on_oracle.sh backfill_dates.py BATCH_SIZE=${{ github.event.inputs.batch_size || '3000' }}

@@ -14,22 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Refresh top items on Oracle
+        uses: appleboy/ssh-action@master
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Refresh top items
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          ROBLOSECURITY_COOKIE_1: ${{ secrets.ROBLOSECURITY_COOKIE_1 }}
-          ROBLOSECURITY_COOKIE_2: ${{ secrets.ROBLOSECURITY_COOKIE_2 }}
-          REFRESH_MODE: "true"
-          PYTHONUNBUFFERED: "1"
-        run: python -u enricher.py refresh
+          host: 129.213.137.177
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          command_timeout: 110m
+          script: bash /home/ubuntu/robux-ugc-advanced/deploy/run_on_oracle.sh enricher.py REFRESH_MODE=true

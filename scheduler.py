@@ -68,30 +68,6 @@ def _run_ml_train():
         _log(f"❌ [scheduler] ML train failed: {type(e).__name__}: {e}")
 
 
-def _run_scanner():
-    _log("🔭 [scheduler] Scanner job triggered.")
-    start = time.time()
-    try:
-        from scanner import run_scanner
-        run_scanner()
-        _log(f"✅ [scheduler] Scanner finished in {time.time()-start:.1f}s")
-    except Exception as e:
-        _log(f"❌ [scheduler] Scanner failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
-
-
-def _run_suggest():
-    _log("💬 [scheduler] Suggest job triggered.")
-    start = time.time()
-    try:
-        from suggest import run_suggest
-        run_suggest()
-        _log(f"✅ [scheduler] Suggest finished in {time.time()-start:.1f}s")
-    except Exception as e:
-        _log(f"❌ [scheduler] Suggest failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
-
-
 def _run_post_monitor():
     """Daily sales report → ALERT_CHANNEL_ID."""
     try:
@@ -138,23 +114,14 @@ def start_scheduler():
         hour=POST_MONITOR_HOUR_UTC, minute=0,
         id="post_monitor", replace_existing=True, misfire_grace_time=3600)
 
-    # Full data pipeline on the bot server (was GitHub Actions only).
-    _scheduler.add_job(_run_scanner, "cron",
-        hour=2, minute=0,
-        id="scanner", replace_existing=True, misfire_grace_time=3600)
-
-    _scheduler.add_job(_run_suggest, "cron",
-        hour="4,10,16,22", minute=30,
-        id="suggest", replace_existing=True, misfire_grace_time=3600)
-
     _scheduler.start()
 
     for job in _scheduler.get_jobs():
         _log(f"🕐 [scheduler] '{job.id}' next run: {job.next_run_time}")
 
-    _log(f"✅ [scheduler] Started — scanner 02:00 UTC, "
-         f"suggest 4/10/16/22:30 UTC, snapshot 03:30 UTC, "
-         f"ML train 04:00 UTC, post-monitor 18:00 UTC")
+    _log(f"✅ [scheduler] Started — snapshot 03:30 UTC, "
+         f"ML train 04:00 UTC, post-monitor 18:00 UTC "
+         f"(scanner/suggest run via GitHub → Server 2)")
 
     return _scheduler
 
