@@ -1203,7 +1203,8 @@ def register_supercomputer_commands(bot):
                 cur.execute("""
                     SELECT item_id, launched_at, family, title,
                            predicted_score, favs_d7, favs_d30,
-                           units_d30, revenue_d30
+                           units_d30, revenue_d30,
+                           recent_units_30d, recent_revenue_30d
                     FROM launch_ledger
                     WHERE launched_at >= NOW() - %s
                     ORDER BY launched_at DESC
@@ -1214,17 +1215,30 @@ def register_supercomputer_commands(bot):
 
                 results = []
                 for (iid, launched, family, title, score,
-                     f7, f30, u30, r30) in rows:
-                    has_data = f7 is not None or f30 is not None
-                    actual = f7 if f7 is not None else (f30 if f30 is not None else 0)
-
-                    peer_median = 0
+                     f7, f30, u30, r30, recent_u, recent_r) in rows:
+                    at = None
+                    current_favs = None
                     try:
                         cur.execute(
-                            "SELECT asset_type_id FROM items WHERE id = %s",
+                            "SELECT asset_type_id, favorite_count "
+                            "FROM items WHERE id = %s",
                             (iid,),
                         )
                         at = cur.fetchone()
+                        if at:
+                            current_favs = at[1]
+                    except Exception:
+                        pass
+
+                    launch_relative = f7 is not None or f30 is not None
+                    actual = (
+                        f7 if f7 is not None
+                        else (f30 if f30 is not None else current_favs)
+                    )
+                    has_data = actual is not None and actual > 0
+
+                    peer_median = 0
+                    try:
                         if at and at[0] is not None:
                             cur.execute("""
                                 SELECT favorite_count FROM items
@@ -1254,7 +1268,9 @@ def register_supercomputer_commands(bot):
                         "score": score or 0, "actual": actual,
                         "peer": peer_median, "hit": hit,
                         "has_data": has_data,
-                        "units": u30 or 0, "revenue": r30 or 0,
+                        "recent": not launch_relative,
+                        "units": u30 or recent_u or 0,
+                        "revenue": r30 if (r30 or 0) > 0 else (recent_r or 0),
                     })
 
                 return {"results": results}
@@ -1299,14 +1315,17 @@ def register_supercomputer_commands(bot):
         for r in results[:10]:
             if not r["has_data"]:
                 mark = "⏳"
-                actual_str = "no snapshot data"
+                actual_str = "no favorite data"
             else:
                 mark = "✅" if r["hit"] else "❌"
-                actual_str = f"{r['actual']:,} favs"
+                label = "current favs" if r.get("recent") else "favs"
+                actual_str = f"{r['actual']:,} {label}"
+            rev = f"R${r['revenue']:,}"
+            if r.get("recent") and r["revenue"]:
+                rev += " (last 30d)"
             lines.append(
                 f"{mark} `{(r['title'] or '')[:32]}` — "
-                f"{actual_str} vs peer {r['peer']:,} · "
-                f"R${r['revenue']:,}"
+                f"{actual_str} vs peer {r['peer']:,} · {rev}"
             )
         if lines:
             embed.add_field(name="Launches", value="\n".join(lines), inline=False)
@@ -1319,7 +1338,10 @@ def register_supercomputer_commands(bot):
             )
 
         embed.set_footer(
-            text="Peer median = same asset type, created within ±14 days of launch"
+            text=(
+                "Peer median = same asset type, created within ±14 days of launch · "
+                "legacy items fall back to current favorites + last 30d revenue"
+            )
         )
         await ctx.send(embed=embed)
 

@@ -366,10 +366,18 @@ def setup_database():
             units_d30 INTEGER,
             revenue_d7 INTEGER,
             revenue_d30 INTEGER,
+            recent_units_30d INTEGER,
+            recent_revenue_30d INTEGER,
             last_synced TIMESTAMP,
             notes TEXT
         );
     ''', "launch_ledger")
+
+    _safe_exec(cur, """
+        ALTER TABLE launch_ledger
+        ADD COLUMN IF NOT EXISTS recent_units_30d INTEGER,
+        ADD COLUMN IF NOT EXISTS recent_revenue_30d INTEGER;
+    """, "launch_ledger_cols")
 
     _safe_exec(cur, '''
         CREATE INDEX IF NOT EXISTS idx_launch_ledger_launched

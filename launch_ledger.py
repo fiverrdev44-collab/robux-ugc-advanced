@@ -96,18 +96,30 @@ def fill_ledger(cur, item_id):
     units_d7, revenue_d7 = sales_window(7)
     units_d30, revenue_d30 = sales_window(30)
 
+    # Last 30 days regardless of launch date — useful for legacy items
+    # whose launch window predates the sales/snapshot coverage.
+    cur.execute("""
+        SELECT count(*), COALESCE(SUM(amount_robux), 0)
+        FROM my_sales
+        WHERE regexp_replace(lower(item_name), '[^a-z0-9]+', ' ', 'g') LIKE %s
+          AND sale_time >= NOW() - interval '30 days'
+    """, (like,))
+    recent_units, recent_revenue = cur.fetchone()
+
     cur.execute("""
         UPDATE launch_ledger SET
             favs_launch = %s,
             favs_d1 = %s, favs_d7 = %s, favs_d30 = %s,
             units_d7 = %s, units_d30 = %s,
             revenue_d7 = %s, revenue_d30 = %s,
+            recent_units_30d = %s, recent_revenue_30d = %s,
             last_synced = CURRENT_TIMESTAMP
         WHERE item_id = %s
     """, (
         favs_launch, favs_d1, favs_d7, favs_d30,
         units_d7 or 0, units_d30 or 0,
         revenue_d7 or 0, revenue_d30 or 0,
+        recent_units or 0, recent_revenue or 0,
         iid,
     ))
     return True
