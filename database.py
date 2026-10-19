@@ -44,6 +44,17 @@ def setup_database():
         );
     ''', "discovered_items")
 
+    # IDs that permanently fail enrichment (400/404). They are retried a
+    # few times, then skipped so they don't waste every batch.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS failed_items (
+            id BIGINT PRIMARY KEY,
+            reason TEXT,
+            attempts INTEGER DEFAULT 1,
+            last_tried TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''', "failed_items")
+
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS items (
             id BIGINT PRIMARY KEY,

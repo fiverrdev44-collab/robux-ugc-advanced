@@ -30,7 +30,7 @@ PRIORITY = os.getenv("PRIORITY", "newest").lower()
 MIN_VALID_ID = 1_000_000
 MAX_VALID_ID = 100_000_000_000_000_000
 
-SESSION_DELAY = 1.6
+SESSION_DELAY = float(os.getenv("ENRICH_SESSION_DELAY", "2.5"))
 
 MAX_SANE_PRICE = 1_000_000
 MAX_SANE_SALES = 100_000_000
@@ -95,6 +95,7 @@ def fetch_favorites(session, item_id):
 
 def fetch_worker(session, ids, worker_id):
     results = {}
+    failed = {}
     for idx, item_id in enumerate(ids):
         for attempt in range(3):
             try:
@@ -107,8 +108,9 @@ def fetch_worker(session, ids, worker_id):
                         data["FavoriteCount"] = favs
                     results[item_id] = data
                     break
-                if code == 404:
-                    _fail_codes[404] = _fail_codes.get(404, 0) + 1
+                if code in (400, 404):
+                    _fail_codes[code] = _fail_codes.get(code, 0) + 1
+                    failed[item_id] = str(code)
                     break
                 if code == 429:
                     _fail_codes[429] = _fail_codes.get(429, 0) + 1
@@ -129,7 +131,7 @@ def fetch_worker(session, ids, worker_id):
         if (idx + 1) % 100 == 0:
             log(f"  [worker {worker_id}] {idx+1}/{len(ids)} done, "
                 f"{len(results)} ok")
-    return results
+    return results, failed
 
 
 def _safe_int(val, max_val, default=0):
@@ -174,6 +176,10 @@ def enrich_items():
         cur.execute(f"""
             SELECT d.id FROM discovered_items d
             WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = d.id)
+            AND NOT EXISTS (
+                SELECT 1 FROM failed_items f
+                WHERE f.id = d.id AND f.attempts >= 3
+            )
             AND d.id BETWEEN %s AND %s
             ORDER BY d.id {order} LIMIT %s
         """, (MIN_VALID_ID, MAX_VALID_ID, BATCH_SIZE))
@@ -193,6 +199,7 @@ def enrich_items():
         slices[i % len(SESSIONS)].append(iid)
 
     results = {}
+    failed_ids = {}
     with ThreadPoolExecutor(max_workers=len(SESSIONS)) as ex:
         futures = {
             ex.submit(fetch_worker, SESSIONS[i], slices[i], i + 1): i
@@ -202,8 +209,9 @@ def enrich_items():
         for fut in as_completed(futures):
             done += 1
             try:
-                r = fut.result(timeout=3600)
+                r, f = fut.result(timeout=3600)
                 results.update(r)
+                failed_ids.update(f)
             except Exception as e:
                 log(f"  worker {done} error: {e}")
             elapsed = time.time() - start
@@ -268,10 +276,25 @@ def enrich_items():
             except Exception:
                 pass
 
+    # Record permanent failures (400/404) so they are skipped after 3 tries.
+    for fid, reason in failed_ids.items():
+        try:
+            cur.execute("""
+                INSERT INTO failed_items (id, reason, attempts, last_tried)
+                VALUES (%s, %s, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT (id) DO UPDATE SET
+                    attempts = failed_items.attempts + 1,
+                    reason = EXCLUDED.reason,
+                    last_tried = CURRENT_TIMESTAMP
+            """, (fid, reason))
+        except Exception:
+            pass
+
     conn.commit()
     cur.close(); conn.close()
     log(f"✅ Enriched {enriched} items ({emote_count} emotes, "
-        f"{dates_filled} dates) in {time.time()-start:.1f}s — {db_errors} DB errors")
+        f"{dates_filled} dates) in {time.time()-start:.1f}s — {db_errors} DB errors · "
+        f"{len(failed_ids)} permanently failed")
 
 
 if __name__ == "__main__":
