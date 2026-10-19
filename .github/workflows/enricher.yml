@@ -1,8 +1,8 @@
 name: Enricher
 
 on:
-  schedule:
-    - cron: '30 2,8,14,20 * * *'
+  # Schedule disabled — the continuous ugc-enrich service on Server 2
+  # handles enrichment. Running both doubled the API load and caused 429s.
   workflow_dispatch:
 
 concurrency:

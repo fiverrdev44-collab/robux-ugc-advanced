@@ -1,8 +1,8 @@
 name: Daily Enrichment
 
 on:
-  schedule:
-    - cron: '0 7 * * *'
+  # Schedule disabled — the continuous ugc-enrich service handles this.
+  # Keep workflow_dispatch for an occasional manual refresh.
   workflow_dispatch:
 
 concurrency:
