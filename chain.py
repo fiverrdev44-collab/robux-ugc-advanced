@@ -727,6 +727,22 @@ def format_chain(result):
     if s.get("price_avg"):
         final_lines.append(f"**5. Price:** R${s.get('price_avg', 0)}")
 
+    # Apply the encoded UGC playbook to the chosen title/price.
+    try:
+        from ugc_playbook import audit_title, audit_price
+        if scored:
+            issues = audit_title(scored[0]["title"])
+            if issues:
+                final_lines.append(
+                    "**Playbook check:** " + "; ".join(issues[:3])
+                )
+        if s.get("price_avg"):
+            note = audit_price(s.get("price_avg"))
+            if note:
+                final_lines.append(f"**Pricing note:** {note}")
+    except Exception:
+        pass
+
     final_lines.append("**6. Post 1 TikTok today** with the name as overlay")
     final_lines.append("**7. In 14 days:** run `!verdict <new_item_id>`")
 

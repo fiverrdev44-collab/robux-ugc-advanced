@@ -1337,6 +1337,23 @@ def register_supercomputer_commands(bot):
                 inline=False,
             )
 
+        try:
+            from ugc_playbook import next_actions
+            actions = next_actions({
+                "launches": total,
+                "measured": total_measured,
+                "hits": hits,
+                "revenue": sum(r["revenue"] for r in results),
+            })
+            if actions:
+                embed.add_field(
+                    name="Next actions",
+                    value="\n".join(f"• {a}" for a in actions),
+                    inline=False,
+                )
+        except Exception:
+            pass
+
         embed.set_footer(
             text=(
                 "Peer median = same asset type, created within ±14 days of launch · "
@@ -1406,6 +1423,37 @@ def register_supercomputer_commands(bot):
             f"📒 Found **{total}** items for your groups · "
             f"**{added}** newly logged in the ledger."
         )
+
+    @bot.command(name="playbook", aliases=["tactics"])
+    async def playbook_command(ctx, *, topic: str = ""):
+        """UGC playbook: proven tactics for niche, naming, pricing, launch, etc."""
+        from ugc_playbook import TOPICS, format_topic
+
+        if not topic.strip():
+            embed = discord.Embed(
+                title="📘 UGC Playbook",
+                description="Proven tactics from top creators, applied by the bot:",
+                color=0x6366F1,
+            )
+            embed.add_field(
+                name="Topics",
+                value=" · ".join(f"`{t}`" for t in sorted(TOPICS.keys())),
+                inline=False,
+            )
+            embed.add_field(
+                name="Usage",
+                value="`!playbook naming` · `!playbook pricing` · `!playbook launch`",
+                inline=False,
+            )
+            return await ctx.send(embed=embed)
+
+        text = format_topic(topic)
+        if not text:
+            return await ctx.send(
+                f"❌ Unknown topic. Try: `{'`, `'.join(sorted(TOPICS.keys()))}`"
+            )
+        for i in range(0, len(text), 1900):
+            await ctx.send(text[i:i + 1900])
 
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
