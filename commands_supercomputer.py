@@ -1560,6 +1560,189 @@ def register_supercomputer_commands(bot):
         )
         await ctx.send(embed=embed)
 
+    @bot.command(name="selftest", aliases=["healthcheck"])
+    async def selftest_command(ctx):
+        """Owner-only: full automated health check with a pass score."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+
+        await ctx.send("🧪 Running full self-test...")
+
+        def _do():
+            from datetime import datetime
+            import glob
+            import os as _os
+
+            results = []
+
+            def check(name, ok, detail=""):
+                results.append((name, bool(ok), str(detail)[:120]))
+
+            conn = cur = None
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+
+                for table in [
+                    "items", "discovered_items", "item_history",
+                    "search_suggestions", "my_sales", "launch_ledger",
+                    "failed_items", "learned_keywords",
+                ]:
+                    try:
+                        cur.execute(f"SELECT count(*) FROM {table}")
+                        n = cur.fetchone()[0]
+                        check(f"table:{table}", True, f"{n:,} rows")
+                    except Exception as e:
+                        check(f"table:{table}", False, str(e)[:80])
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+
+                cur.execute("""
+                    SELECT count(*) FROM discovered_items d
+                    WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = d.id)
+                """)
+                backlog = cur.fetchone()[0] or 0
+                check("backlog", True, f"{backlog:,} pending")
+
+                cur.execute("""
+                    SELECT count(*) FILTER (WHERE favorite_count IS NULL),
+                           count(*)
+                    FROM items
+                """)
+                null_favs, total = cur.fetchone()
+                pct = (int(null_favs or 0) / total * 100) if total else 100
+                check(
+                    "favorites coverage",
+                    pct < 20,
+                    f"{100 - pct:.1f}% with favorites",
+                )
+
+                cur.execute("""
+                    SELECT count(*) FROM (
+                        SELECT id FROM items GROUP BY id HAVING count(*) > 1
+                    ) t
+                """)
+                check("dup items", cur.fetchone()[0] == 0)
+
+                cur.execute("""
+                    SELECT count(*) FROM (
+                        SELECT item_id, date(snapshot_at) FROM item_history
+                        GROUP BY 1,2 HAVING count(*) > 1
+                    ) t
+                """)
+                check("dup history days", cur.fetchone()[0] == 0)
+
+                cur.execute("SELECT max(fetched_at) FROM items")
+                last = cur.fetchone()[0]
+                fresh = (
+                    last is not None
+                    and (datetime.utcnow() - last.replace(tzinfo=None)).total_seconds()
+                    < 86400
+                )
+                check("recent enrichment", fresh, last)
+
+                cur.execute("SELECT max(snapshot_at) FROM item_history")
+                last_snap = cur.fetchone()[0]
+                fresh_snap = (
+                    last_snap is not None
+                    and (datetime.utcnow() - last_snap.replace(tzinfo=None)).total_seconds()
+                    < 172800
+                )
+                check("recent snapshot", fresh_snap, last_snap)
+
+                for idx in [
+                    "idx_items_name_trgm",
+                    "idx_search_suggestions_unique",
+                    "idx_my_sales_dedup",
+                    "idx_launch_ledger_launched",
+                ]:
+                    cur.execute(
+                        "SELECT 1 FROM pg_indexes WHERE indexname = %s", (idx,)
+                    )
+                    check(f"index:{idx}", cur.fetchone() is not None)
+
+                cur.execute("SELECT count(*), max(sale_date) FROM my_sales")
+                sales_n, last_sale = cur.fetchone()
+                check("sales rows", (sales_n or 0) > 0, f"{sales_n:,}, last {last_sale}")
+
+                cur.execute("SELECT count(*) FROM launch_ledger")
+                check("ledger rows", cur.fetchone()[0] > 0)
+            except Exception as e:
+                check("db", False, f"{type(e).__name__}: {e}")
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+            cookie_count = sum(
+                1 for i in range(1, 6) if _os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
+            )
+            check("DATABASE_URL", bool(_os.getenv("DATABASE_URL")))
+            check("cookies", cookie_count > 0, f"{cookie_count} loaded")
+            check("MY_GROUP_NAMES", bool(_os.getenv("MY_GROUP_NAMES")))
+
+            try:
+                files = sorted(glob.glob("/home/ubuntu/backups/ugc_db_*.sql.gz"))
+                check("backup exists", len(files) > 0, files[-1] if files else "none")
+            except Exception:
+                check("backup exists", False, "cannot read")
+
+            import subprocess as _sp
+            for svc in ["ugc-bot", "ugc-enrich"]:
+                try:
+                    out = _sp.check_output(
+                        ["systemctl", "is-active", svc], text=True, timeout=5
+                    ).strip()
+                    check(f"service:{svc}", out == "active", out)
+                except Exception:
+                    check(f"service:{svc}", False, "cannot query")
+
+            expected = [
+                "vacuum", "meta_sniper", "sales_keywords", "launch",
+                "launch_sync", "ledger_sync", "hitrate", "playbook",
+                "path", "scan_run", "enrich_run", "suggest_run",
+                "suggest_probe", "cookie_check", "sales_report",
+                "sales_post_now", "converge", "chain", "verdict",
+                "autopsy", "whales", "golden_hour", "bot_update", "logs",
+            ]
+            names = {c.name for c in bot.commands}
+            missing = [c for c in expected if c not in names]
+            check(
+                "commands registered",
+                not missing,
+                f"{len(names)} total" + (f", missing {missing}" if missing else ""),
+            )
+
+            return results
+
+        results = await asyncio.to_thread(_do)
+        passed = sum(1 for _, ok, _ in results if ok)
+        total = len(results)
+        pct = (passed / total * 100) if total else 0
+
+        embed = discord.Embed(
+            title="🧪 FULL SELF-TEST",
+            description=f"**{passed}/{total}** checks passed · **{pct:.0f}%**",
+            color=0x22C55E if pct >= 90 else (0xF59E0B if pct >= 70 else 0xEF4444),
+        )
+        fails = [(n, d) for n, ok, d in results if not ok]
+        if fails:
+            embed.add_field(
+                name="Failed checks",
+                value="\n".join(f"❌ `{n}` — {d}" for n, d in fails[:15]),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="All checks passed",
+                value="Database, pipeline, services, backups, env, commands.",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
