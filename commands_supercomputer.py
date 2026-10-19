@@ -981,25 +981,66 @@ def register_supercomputer_commands(bot):
             await ctx.send(f"⚠️ Scanner failed: {type(e).__name__}: {e}")
 
     @bot.command(name="enrich_run", aliases=["run_enricher"])
-    async def enrich_run_command(ctx):
-        """Owner-only: enrich discovered items into the items table now."""
+    async def enrich_run_command(ctx, batches: int = 1):
+        """Owner-only: enrich discovered items. Each batch is ~1,500 items."""
         if ctx.author.id not in BOT_OWNERS:
             return await ctx.send("🚫 Owner-only command.")
+
+        batches = max(1, min(batches, 20))
         await ctx.send(
-            "🧪 **Enricher started** — fetching details/favorites for "
-            "un-enriched items. This can take 20+ minutes."
+            f"🧪 **Enricher started** — **{batches}** batch(es) of ~1,500 items. "
+            f"Expect ~20–40 min per batch."
         )
 
         def _run():
             from enricher import enrich_items
-            enrich_items()
+            for i in range(batches):
+                print(f"[enrich_run] batch {i+1}/{batches}", flush=True)
+                enrich_items()
             return True
 
         try:
             await asyncio.to_thread(_run)
-            await ctx.send("✅ **Enricher finished.** `items` updated with real favorites.")
+            await ctx.send(
+                f"✅ **Enricher finished** — {batches} batch(es) done. "
+                f"`items` updated with real favorites."
+            )
         except Exception as e:
             await ctx.send(f"⚠️ Enricher failed: {type(e).__name__}: {e}")
+
+    @bot.command(name="train", aliases=["retrain"])
+    async def train_command(ctx):
+        """Owner-only: train the title predictor on current catalog data."""
+        if ctx.author.id not in BOT_OWNERS:
+            return await ctx.send("🚫 Owner-only command.")
+
+        await ctx.send("🧠 Training the title predictor on current data...")
+
+        def _do():
+            from title_predictor import train_model
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                return train_model(cur)
+            finally:
+                cur.close()
+                conn.close()
+
+        try:
+            res = await asyncio.to_thread(_do)
+        except Exception as e:
+            return await ctx.send(f"⚠️ Training failed: {type(e).__name__}: {e}")
+
+        if not res:
+            return await ctx.send(
+                "⚠️ Training returned no model — not enough labelled items. "
+                "Clear more of the enrichment backlog first."
+            )
+
+        await ctx.send(
+            f"✅ Trained on **{res.get('n_samples', 0):,}** items · "
+            f"accuracy **{res.get('accuracy', 0) * 100:.1f}%**"
+        )
 
     # ── 12. 📒 Launch Ledger ────────────────────────────────────────
     def _fill_ledger(cur, item_id):
