@@ -116,6 +116,27 @@ def register_market_commands(bot):
                 lines.append(f"\n📝 Descriptions: **{with_desc:,}** of **{total:,}** items")
             except Exception:
                 rollback_quietly(cur)
+
+            # Growth diagnostics — timestamps prove whether the pipeline
+            # is actually writing to THIS database.
+            try:
+                cur.execute("""
+                    SELECT
+                      (SELECT COUNT(*) FROM discovered_items d
+                        WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.id = d.id)),
+                      (SELECT MAX(fetched_at) FROM items),
+                      (SELECT MAX(snapshot_at) FROM item_history),
+                      (SELECT MAX(fetched_at) FROM search_suggestions),
+                      NOW()
+                """)
+                backlog, last_enrich, last_snap, last_sugg, now_ts = cur.fetchone()
+                lines.append(f"\n⏳ Enrichment backlog: **{backlog or 0:,}**")
+                lines.append(f"🕒 Last item enrichment: `{last_enrich}`")
+                lines.append(f"🕒 Last favorite snapshot: `{last_snap}`")
+                lines.append(f"🕒 Last suggestion scrape: `{last_sugg}`")
+                lines.append(f"🕒 DB now: `{now_ts}`")
+            except Exception:
+                rollback_quietly(cur)
             cur.close(); conn.close()
             embed = discord.Embed(title="🔬 Database Diagnostic",
                                   description="\n".join(lines), color=0x00ff88)
