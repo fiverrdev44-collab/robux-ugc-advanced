@@ -1,5 +1,5 @@
 """
-snapshot.py — Fast snapshot from Render's trusted IP.
+snapshot.py — Fast favorites snapshot from the bot server.
 """
 import os
 import time

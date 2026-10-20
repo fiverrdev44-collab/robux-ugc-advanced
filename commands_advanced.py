@@ -106,8 +106,8 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="snapshot_now")
     async def snapshot_now_cmd(ctx):
-        """Manually trigger snapshot from the bot's own IP (Render)."""
-        progress = await ctx.send("📸 **Running snapshot from Render's IP...**")
+        """Manually trigger a favorites snapshot from the bot server."""
+        progress = await ctx.send("📸 **Running snapshot from the Oracle bot server...**")
 
         def _run():
             import importlib
@@ -124,7 +124,7 @@ def register_advanced_commands(bot, get_db):
 
         try:
             await progress.edit(
-                content="✅ **Snapshot complete!** Check Render logs."
+                content="✅ **Snapshot complete!** Check the bot logs if anything looks off."
             )
         except Exception:
             pass
@@ -427,7 +427,7 @@ def register_advanced_commands(bot, get_db):
             lines.append(f"• Recent: {s['recent']}")
         else:
             lines.append("**❌ REJECTED even with loosest gates**")
-            lines.append("Check Render logs for the `[conv-debug]` rejection reason.")
+            lines.append("Check Server 2 logs for the `[conv-debug]` rejection reason.")
 
         body = "\n".join(lines)
         for i in range(0, len(body), 1900):

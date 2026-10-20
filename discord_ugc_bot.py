@@ -235,6 +235,6 @@ if __name__ == "__main__":
         bot.run(TOKEN)
     except Exception as e:
         print(f"❌ bot.run() failed: {type(e).__name__}: {e}", flush=True)
-        print("⏳ Exiting for Render restart in 30s...", flush=True)
+        print("⏳ Exiting for service restart in 30s...", flush=True)
         time.sleep(30)
         os._exit(1)
