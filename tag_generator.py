@@ -722,7 +722,6 @@ def format_tags(result):
         return [f"❌ {result['error']}"]
 
     tags = result["tags"]
-    tag_line = ", ".join(tags)
     src = result["sources"]
 
     chunks = []
@@ -737,9 +736,12 @@ def format_tags(result):
         f"{len(tags)} tags generated_"
     )
 
+    top5 = ", ".join(tags[:5])
     chunks.append(
-        f"**📋 Copy this into your Roblox description:**\n"
-        f"```\n{tag_line}\n```"
+        "**🏷️ Roblox gives you 5 tag slots — use the top 5:**\n"
+        f"```\n{top5}\n```\n"
+        "**📝 Optional:** weave 2–3 more naturally into the description. "
+        "Do not paste all 45 as a comma list — that reads as keyword stuffing."
     )
 
     if result.get("top_weighted"):
