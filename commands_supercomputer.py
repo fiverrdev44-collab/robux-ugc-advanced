@@ -1797,22 +1797,21 @@ def register_supercomputer_commands(bot):
         def progress(stage, results):
             done.add(stage)
             try:
-                asyncio.run_coroutine_threadsafe(
+                fut = asyncio.run_coroutine_threadsafe(
                     status.edit(embed=status_embed(stage, results)),
                     loop,
                 )
+                fut.result(timeout=10)
             except Exception:
                 pass
 
         from selftest import run_selftest, run_command_harness
         results = await asyncio.to_thread(run_selftest, bot, progress)
 
-        def progress_async(stage, res):
+        async def progress_async(stage, res):
             done.add(stage)
             try:
-                asyncio.create_task(
-                    status.edit(embed=status_embed(stage, res))
-                )
+                await status.edit(embed=status_embed(stage, res))
             except Exception:
                 pass
 
@@ -1885,7 +1884,12 @@ def register_supercomputer_commands(bot):
             inline=False,
         )
         embed.set_footer(text="Paste this report to fix failures.")
-        await status.edit(embed=embed)
+        await asyncio.sleep(1.2)
+        try:
+            await status.edit(embed=embed)
+        except Exception:
+            # Never lose the report if the edit is rate-limited.
+            await ctx.send(embed=embed)
 
         # ── Certificate ──────────────────────────────────────────
         effective = ((passed + len(warnings)) / total * 100) if total else 0

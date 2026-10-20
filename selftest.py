@@ -734,13 +734,17 @@ async def run_command_harness(bot, progress=None):
 
         if progress and (idx % 4 == 0 or idx == total_cmds):
             try:
-                progress("COMMAND HARNESS", results)
+                res = progress("COMMAND HARNESS", results)
+                if asyncio.iscoroutine(res):
+                    await res
             except Exception:
                 pass
 
     if progress:
         try:
-            progress("COMMAND HARNESS", results)
+            res = progress("COMMAND HARNESS", results)
+            if asyncio.iscoroutine(res):
+                await res
         except Exception:
             pass
 
