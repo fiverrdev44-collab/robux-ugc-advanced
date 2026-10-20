@@ -48,6 +48,182 @@ def _apply_gif(embed, gif_url):
             print(f"[menu] GIF embed failed: {e}", flush=True)
 
 
+# ══════════════════════════════════════════════════════════════════
+# EASY MANUAL — sectioned guide
+# ══════════════════════════════════════════════════════════════════
+MANUAL_SECTIONS = {
+    "start": (
+        "🛰️ START HERE",
+        "**What this bot does:** finds niches, names items, checks the market, "
+        "tracks sales, and measures whether your launches actually beat peers.\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "**THE LOOP — do this in order**\n"
+        "**1.** `!converge emotes` — find a niche\n"
+        "**2.** `!meta_sniper <niche>` — find missing words\n"
+        "**3.** `!chain \"<concept>\"` — build the item\n"
+        "**4.** Upload it to Roblox\n"
+        "**5.** `!launch <item_id>` — log it\n"
+        "**6.** `!hitrate` — measure after 20 launches\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Open this menu anytime with `!start`.\n"
+        "Pick a section from the dropdown below to go deeper.",
+    ),
+    "buttons": (
+        "🎛️ EVERY BUTTON",
+        "**🚀 FIRE — Launch New Item**\n`!chain <concept>` → full launch kit\n"
+        "**⭐ STRIKE — Variant of Winner**\n`!chain variant <id> <theme>` → clone a winner\n"
+        "**🔧 INSPECT — Check Live Item**\n`!verdict <id>` → KEEP / RENAME / KILL\n"
+        "**📡 SCAN — Find Trending Niche**\n`!converge <family>` e.g. `emotes`, `hair`, `face`, `tops`\n"
+        "**🖼️ RECON — Analyze Idea**\n`!brainstorm <description>` (image vision is not enabled)\n"
+        "**🏷️ LOAD — Generate Tags**\n`!tags <item name>` → 45 tags\n"
+        "**🐋 WHALE — Studio Radar**\n`!whales [studio]` → top studios' drops\n"
+        "**🎯 VACUUM — Search Sniper**\n`!vacuum` → low-supply phrases\n"
+        "**📈 REVSIM — Revenue Forecast**\n`!revsim <price> [favs] [promo]`\n"
+        "**⚡ VELOCITY — 48h Radar**\n`!golden_hour`\n"
+        "**ℹ️ MANUAL — Full Guide**\nthis menu",
+    ),
+    "niche": (
+        "📡 FIND A NICHE",
+        "**`!converge emotes`**\n"
+        "Ranks niches by demand, velocity, supply, freshness and competition.\n"
+        "Look for **🔥 SNIPE ZONE** and **low supply**.\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "**`!gap anime`** — golden / sweet / saturated gaps\n"
+        "**`!early 7`** — items rising fast this week\n"
+        "**`!opportunities`** — daily ranked feed\n"
+        "**`!rising_gaps`** — emerging keywords\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "**How to read:** high score + low supply = good entry.\n"
+        "High supply + old items = crowded; skip it.",
+    ),
+    "naming": (
+        "🏷️ NAME & DESCRIBE",
+        "**`!chain \"kawaii aura emote\"`**\n"
+        "Returns: champion title, backup title, description, 45 tags, price, "
+        "and a final **DO THIS** block.\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "**`!tags <name>`** — 45 sales-weighted tags\n"
+        "**`!playbook naming`** — naming rules\n"
+        "**`!playbook pricing`** — pricing rules\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "**Rules:** 3–5 words, one aesthetic modifier, no keyword stuffing, "
+        "include the item type. Never say *limited* or *free* unless true.",
+    ),
+    "market": (
+        "🔬 CHECK THE MARKET",
+        "**`!xray`** — full market dashboard\n"
+        "**`!patterns emotes`** — words that lift favorites\n"
+        "**`!failures emotes`** — words linked to flops\n"
+        "**`!trends`** — top words across titles\n"
+        "**`!momentum`** — keyword velocity\n"
+        "**`!oracle anime`** — trend forecast\n"
+        "**`!predict <idea>`** — success probability\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Use these to confirm a niche before building.",
+    ),
+    "item": (
+        "🔧 CHECK YOUR ITEM",
+        "**`!verdict <id>`** — after 14 days\n"
+        "Returns: 🔥 DOUBLE_DOWN · ✅ KEEP · 🔧 RENAME · 🪦 KILL · ⏳ TOO_NEW\n"
+        "**`!autopsy <id>`** — why it failed + pivot plan\n"
+        "**`!sales_for <name>`** — sales for one item\n"
+        "**`!history`** — past verdicts\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "If RENAME → run `!autopsy`, then update the title/description.",
+    ),
+    "sales": (
+        "💰 SALES & MONEY",
+        "**`!sales_report 30`** — units, Robux, top items, daily trend\n"
+        "**`!sales_post_now`** — post the report now\n"
+        "**`!sales_debug`** — why numbers look off (dates, channel)\n"
+        "**`!revsim <price> [favs] [promo]`** — 30-day revenue forecast\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "Reminder: Roblox keeps ~70%; creators keep ~30%.\n"
+        "Revenue in the bot is your **net** creator share.",
+    ),
+    "learn": (
+        "📈 LEARN & IMPROVE",
+        "**`!launch <id>`** — log a new launch\n"
+        "**`!launch_sync`** — auto-log all your group items\n"
+        "**`!ledger_sync`** — fill D1/D7/D30 favorites + sales\n"
+        "**`!hitrate 365`** — did your launches beat peers?\n"
+        "**`!path`** — your current stage + next milestones\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "The ledger is how the bot learns from **your** results, not generic data.",
+    ),
+    "rules": (
+        "📜 GOLDEN RULES",
+        "**1.** More of what works — clone your top 2 items first.\n"
+        "**2.** Launch 3–5 items per week, not 30 at once.\n"
+        "**3.** One modifier per title. No stuffing.\n"
+        "**4.** Never say *limited* or *free* unless true.\n"
+        "**5.** Post one TikTok/Short per launch.\n"
+        "**6.** Log every launch with `!launch`.\n"
+        "**7.** Wait for 20 launches before trusting the hit rate.\n"
+        "**8.** Don't sell R$2 items — they signal a cheap catalog.\n"
+        "**9.** Don't launch into saturated niches.\n"
+        "**10.** Data improves decisions; production and marketing make sales.",
+    ),
+    "trouble": (
+        "🧯 TROUBLESHOOTING",
+        "**Command not found** → `!bot_update`, wait 30s\n"
+        "**No data / weird numbers** → `!scan_status`, `!dbtest`\n"
+        "**`!vacuum` empty** → enrichment still filling favorites\n"
+        "**Sales show 0** → `!sales_debug`, then `!sales_backfill`\n"
+        "**Bot not certified** → `!selftest`, read the Failed section\n"
+        "**Need tactics** → `!playbook <topic>`\n"
+        "**Need a roadmap** → `!path`\n"
+        "**Need this menu** → `!start`",
+    ),
+    "certify": (
+        "🏅 CERTIFICATION & HELP",
+        "**`!selftest`** — full NASA-grade audit + certificate\n"
+        "**`!playbook`** — every tactic by topic\n"
+        "**`!path`** — your stage and next milestones\n"
+        "**`!guide`** — interactive consultation\n"
+        "**`!start`** — this menu\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "The certificate is an internal audit — it proves the bot is reliable, "
+        "not that sales are guaranteed.",
+    ),
+}
+
+
+class ManualSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label=title[:100],
+                value=key,
+                description=body.splitlines()[0][:100],
+            )
+            for key, (title, body) in MANUAL_SECTIONS.items()
+        ]
+        super().__init__(
+            placeholder="Pick a manual section…",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        key = self.values[0]
+        title, body = MANUAL_SECTIONS[key]
+        embed = discord.Embed(
+            title=title,
+            description=body,
+            color=COLOR_STEALTH,
+        )
+        embed.set_footer(text="VANTA 73 · easy manual · pick another section below")
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class ManualView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.add_item(ManualSelect())
+
+
 class MenuView(discord.ui.View):
     def __init__(self, bot, get_db):
         super().__init__(timeout=300)
@@ -360,49 +536,14 @@ class MenuView(discord.ui.View):
 
     @discord.ui.button(label="ℹ️ MANUAL — Full Guide", style=discord.ButtonStyle.secondary, row=4)
     async def workflow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        title, body = MANUAL_SECTIONS["start"]
         embed = discord.Embed(
-            title="⚓ VANTA 73 — COMBAT MANUAL",
-            description=(
-                "**THE LOOP — 3 PHASES, IN ORDER**\n"
-                "_\u200b_\n"
-                "**PHASE 1 — SCAN FOR NICHES**  (`!converge`)\n"
-                "Radar sweep across the whole catalog. Ranks every keyword by real signals.\n"
-                "• Fire: `!converge emotes` (or `hair`, `face`, `tops`, `classic`, `gear`)\n"
-                "• Lock onto the top 🔥 SNIPE ZONE or 🟢 GOLD contact\n"
-                "_\u200b_\n"
-                "**PHASE 2 — FIRE MAIN WARHEAD**  (`!chain`)\n"
-                "Builds a full launch kit for that keyword.\n"
-                "• Fire: `!chain <keyword from Phase 1>`\n"
-                "• You get: champion name, description, 45 tags, price\n"
-                "• Deploy: Upload to Roblox. Post 1 TikTok.\n"
-                "_\u200b_\n"
-                "**PHASE 3 — AFTER-ACTION REPORT**  (`!verdict`)\n"
-                "14 days post-launch. Damage assessment vs real peers.\n"
-                "• Fire: `!verdict <your new item id>`\n"
-                "• You get ONE of:\n"
-                "    🔥 **DOUBLE_DOWN** → ship a cluster strike this week\n"
-                "    ✅ **KEEP** → hold position, post 3 TikToks\n"
-                "    🔧 **RENAME** → fire `!autopsy <id>` for diagnostics\n"
-                "    🪦 **KILL** → abandon, re-scan\n"
-                "    ⏳ **TOO_NEW** → wait for sensor lock\n"
-                "_\u200b_\n"
-                "**FLEET RHYTHM**\n"
-                "• Weekly: `!converge` → `!chain` → launch 1 new ship\n"
-                "• Daily: `!verdict` on every live ship\n"
-                "• Every winner: `!chain variant <id> <theme>`\n"
-                "_\u200b_\n"
-                "**SECONDARY WEAPONS**\n"
-                "• `!tags <name>` — 45 SEO warheads\n"
-                "• `!desc_forge <keyword>` — style-matched description\n"
-                "• `!autopsy <id>` — deep failure analysis\n"
-                "• `!brainstorm <concept>` — deep strategy strike\n"
-                "_\u200b_\n"
-                "**MOTTO:** *Kills on contact. Never misses. Never sleeps.*"
-            ),
+            title=title,
+            description=body,
             color=COLOR_STEALTH,
         )
-        _apply_gif(embed, GIF_MANUAL)
-        await interaction.response.send_message(embed=embed)
+        embed.set_footer(text="Pick a section from the dropdown below")
+        await interaction.response.send_message(embed=embed, view=ManualView())
 
 
 def register_menu_commands(bot, get_db):
@@ -427,25 +568,25 @@ def register_menu_commands(bot, get_db):
                 "**📡 SCAN — Find Trending Niche**\n"
                 "Radar sweep of the whole market. Find weak spots to attack.\n"
                 "_\u200b_\n"
-                "**🖼️ RECON — Analyze Image**\n"
-                "Upload a design picture. Get keywords + concept back.\n"
+                "**🖼️ RECON — Analyze Idea**\n"
+                "Describe a design idea. Get keywords + concept back (`!brainstorm`).\n"
                 "_\u200b_\n"
                 "**🏷️ LOAD — Generate Tags**\n"
                 "45 SEO tags mined from real top-sellers. Copy-paste ready.\n"
                 "_\u200b_\n"
                 "**🐋 WHALE — Studio Radar**\n"
-                "Surveils top 50 studios & drops within 15m (`!whales`).\n"
+                "Surveils top studios & recent drops (`!whales`).\n"
                 "_\u200b_\n"
                 "**🎯 VACUUM — Search Sniper**\n"
-                "Zero-supply gaps from 54,397 search suggestions (`!vacuum`).\n"
+                "Low-supply gaps from the search-suggestion corpus (`!vacuum`).\n"
                 "_\u200b_\n"
                 "**📈 REVSIM — Revenue Simulator**\n"
                 "30-day unit and 70% Robux creator forecast (`!revsim`).\n"
                 "_\u200b_\n"
                 "**⚡ VELOCITY — 48h Radar**\n"
-                "Golden window algorithmic acceleration (`!velocity`).\n"
+                "Early acceleration radar (`!golden_hour`).\n"
                 "_\u200b_\n"
-                "**ℹ️ Click MANUAL for the full 3-phase combat guide.**"
+                "**ℹ️ Click MANUAL for the easy step-by-step guide.**"
             ),
             color=COLOR_STEALTH,
         )
@@ -453,7 +594,7 @@ def register_menu_commands(bot, get_db):
         _apply_gif(embed, GIF_MAIN)
 
         embed.set_footer(
-            text="VANTA 73 · Stealth UGC Hunter · Absorbs 99.96% of competition"
+            text="VANTA 73 · UGC intelligence · reliable data, measured results"
         )
 
         view = MenuView(bot, get_db)
