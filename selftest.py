@@ -82,7 +82,7 @@ def run_selftest(bot=None):
 
     # ── Database + pipeline ─────────────────────────────────────
     cur = conn = None
-    sample_id = sample_name = sample_favs = sample_price = None
+    samples = []
     ledger_id = None
     try:
         from bot_core import get_db
@@ -181,13 +181,12 @@ def run_selftest(bot=None):
 
         # Sample rows for engine + live tests
         cur.execute("""
-            SELECT id, name, favorite_count, price
+            SELECT id, name, favorite_count, price, creator_name
             FROM items WHERE favorite_count > 0
-            ORDER BY random() LIMIT 1
+            ORDER BY random() LIMIT 3
         """)
-        row = cur.fetchone()
-        if row:
-            sample_id, sample_name, sample_favs, sample_price = row
+        samples = cur.fetchall()
+        sample_id = samples[0][0] if samples else None
 
         cur.execute("SELECT item_id FROM launch_ledger LIMIT 1")
         row = cur.fetchone()
@@ -301,6 +300,45 @@ def run_selftest(bot=None):
             add("engines", "playbook rules", True)
         except Exception as e:
             add("engines", "playbook rules", False, f"{type(e).__name__}: {e}")
+
+        # Determinism: same input must produce the same output twice.
+        try:
+            from convergence_engine import _score_keyword as _sc
+            a = _sc(cur, "anime", "emotes", 0, 0)
+            b = _sc(cur, "anime", "emotes", 0, 0)
+            add("determinism", "convergence", a == b)
+        except Exception as e:
+            add("determinism", "convergence", False, f"{type(e).__name__}: {e}")
+
+        try:
+            from oracle import forecast_trend as _ft
+            a = _ft(cur, "anime", days=14)
+            b = _ft(cur, "anime", days=14)
+            add("determinism", "oracle", a == b)
+        except Exception as e:
+            add("determinism", "oracle", False, f"{type(e).__name__}: {e}")
+
+        # Cross-check the sales report against a direct SQL sum.
+        try:
+            from post_monitor import analyze_sales
+            data = analyze_sales(7)
+            cur.execute("""
+                SELECT count(*), COALESCE(SUM(amount_robux), 0)
+                FROM my_sales
+                WHERE sale_date = (now() AT TIME ZONE 'UTC')::date
+            """)
+            u, r = cur.fetchone()
+            ok = (
+                int(data.get("today_units", 0)) == int(u or 0)
+                and int(data.get("today_robux", 0)) == int(r or 0)
+            )
+            add(
+                "crosscheck", "sales today", ok,
+                f"report={data.get('today_units')}/{data.get('today_robux')} "
+                f"sql={u}/{r}",
+            )
+        except Exception as e:
+            add("crosscheck", "sales today", False, f"{type(e).__name__}: {e}")
     except Exception as e:
         add("engines", "db", False, f"{type(e).__name__}: {e}")
     finally:
@@ -317,34 +355,52 @@ def run_selftest(bot=None):
     except Exception as e:
         add("engines", "sales report", False, f"{type(e).__name__}: {e}")
 
-    # ── Live Roblox cross-reference ─────────────────────────────
+    # ── Live Roblox cross-reference (3 items) ───────────────────
     try:
         from recovery_brain import fetch_item_from_roblox
-        if sample_id:
-            live = fetch_item_from_roblox(
-                sample_id, os.getenv("ROBLOSECURITY_COOKIE_1")
-            )
-            if live:
+        cookie = os.getenv("ROBLOSECURITY_COOKIE_1")
+        if samples:
+            for idx, (sid, sname, sfavs, sprice, screator) in enumerate(samples, 1):
+                live = fetch_item_from_roblox(sid, cookie)
+                if not live:
+                    add("live", f"item{idx}", False, "fetch returned None", warning=True)
+                    continue
                 name_ok = (
                     (live.get("name") or "").strip().lower()
-                    == (sample_name or "").strip().lower()
+                    == (sname or "").strip().lower()
                 )
                 add(
-                    "live", "name match", name_ok,
-                    f"db={(sample_name or '')[:40]} live={(live.get('name') or '')[:40]}",
+                    "live", f"item{idx} name", name_ok,
+                    f"db={(sname or '')[:36]} live={(live.get('name') or '')[:36]}",
                 )
+                if (screator or "").strip():
+                    creator_ok = (
+                        (live.get("creator_name") or "").strip().lower()
+                        == (screator or "").strip().lower()
+                    )
+                    add(
+                        "live", f"item{idx} creator", creator_ok,
+                        f"db={screator} live={live.get('creator_name')}",
+                    )
+                else:
+                    add(
+                        "live", f"item{idx} creator", True,
+                        "db creator empty", warning=True,
+                    )
                 add(
-                    "live", "favorites",
-                    True,
-                    f"db={sample_favs} live={live.get('favorite_count')}",
+                    "live", f"item{idx} favorites", True,
+                    f"db={sfavs} live={live.get('favorite_count')}",
                     warning=True,
                 )
-            else:
-                add("live", "item fetch", False, "returned None", warning=True)
+                add(
+                    "live", f"item{idx} price", True,
+                    f"db={sprice} live={live.get('price')}",
+                    warning=True,
+                )
         else:
-            add("live", "item fetch", False, "no sample item", warning=True)
+            add("live", "items", False, "no sample items", warning=True)
     except Exception as e:
-        add("live", "item fetch", False, f"{type(e).__name__}: {e}", warning=True)
+        add("live", "items", False, f"{type(e).__name__}: {e}", warning=True)
 
     # ── Commands ────────────────────────────────────────────────
     if bot is not None:
