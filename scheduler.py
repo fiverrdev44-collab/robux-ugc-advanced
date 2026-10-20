@@ -14,6 +14,7 @@ import os
 import asyncio
 import time
 import traceback
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
@@ -134,7 +135,7 @@ def start_scheduler():
 
     _scheduler.add_job(_run_snapshot, "cron",
         hour=SNAPSHOT_HOUR_UTC, minute=SNAPSHOT_MINUTE_UTC,
-        id="daily_snapshot", replace_existing=True, misfire_grace_time=3600)
+        id="daily_snapshot", replace_existing=True, misfire_grace_time=21600)
 
     _scheduler.add_job(_run_ml_train, "cron",
         hour=SNAPSHOT_HOUR_UTC + 1, minute=0,
@@ -147,6 +148,34 @@ def start_scheduler():
     _scheduler.add_job(_run_launch_sync, "cron",
         hour=7, minute=30,
         id="launch_sync", replace_existing=True, misfire_grace_time=3600)
+
+    # Catch up if the daily snapshot was missed (bot restarted at 03:30,
+    # long downtime, or a failed run). Prevents 24h+ gaps in item_history,
+    # which would break velocity/oracle/ledger windows.
+    try:
+        from bot_core import get_db
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT max(snapshot_at) FROM item_history")
+        last_snap = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+
+        now = datetime.now(timezone.utc)
+        stale = (
+            last_snap is None
+            or (now - last_snap.replace(tzinfo=timezone.utc)).total_seconds() > 86400
+        )
+        if stale:
+            _scheduler.add_job(
+                _run_snapshot, "date",
+                run_date=now + timedelta(seconds=30),
+                id="snapshot_catchup", replace_existing=True,
+            )
+            _log("📸 [scheduler] Snapshot stale — catch-up scheduled in 30s")
+    except Exception as e:
+        _log(f"⚠️ [scheduler] snapshot catch-up check failed: {e}")
 
     _scheduler.start()
 
