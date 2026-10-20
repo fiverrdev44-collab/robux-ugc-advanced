@@ -60,8 +60,15 @@ REQUIRED_WORKFLOWS = [
 ]
 
 
-def run_selftest(bot=None):
+def run_selftest(bot=None, progress=None):
     results = []
+
+    def stage(name):
+        if progress:
+            try:
+                progress(name, results)
+            except Exception:
+                pass
 
     def add(group, name, ok, detail="", warning=False):
         results.append({
@@ -79,6 +86,7 @@ def run_selftest(bot=None):
     )
     add("env", "cookies", cookie_count > 0, f"{cookie_count} loaded")
     add("env", "MY_GROUP_NAMES", bool(os.getenv("MY_GROUP_NAMES")))
+    stage("ENVIRONMENT")
 
     # ── Database + pipeline ─────────────────────────────────────
     cur = conn = None
@@ -199,6 +207,7 @@ def run_selftest(bot=None):
             cur.close()
         if conn:
             conn.close()
+    stage("DATABASE")
 
     # ── Every core module imports ───────────────────────────────
     for mod in CORE_MODULES:
@@ -207,6 +216,7 @@ def run_selftest(bot=None):
             add("modules", mod, True)
         except Exception as e:
             add("modules", mod, False, f"{type(e).__name__}: {e}")
+    stage("MODULES")
 
     # ── Engines ─────────────────────────────────────────────────
     try:
@@ -354,6 +364,7 @@ def run_selftest(bot=None):
         add("engines", "sales report", isinstance(report, str) and len(report) > 20)
     except Exception as e:
         add("engines", "sales report", False, f"{type(e).__name__}: {e}")
+    stage("ENGINES")
 
     # ── Live Roblox cross-reference (3 items) ───────────────────
     try:
@@ -401,6 +412,7 @@ def run_selftest(bot=None):
             add("live", "items", False, "no sample items", warning=True)
     except Exception as e:
         add("live", "items", False, f"{type(e).__name__}: {e}", warning=True)
+    stage("LIVE MARKETPLACE")
 
     # ── Commands ────────────────────────────────────────────────
     if bot is not None:
@@ -423,6 +435,7 @@ def run_selftest(bot=None):
             ", ".join(no_help[:10]) if no_help else "all documented",
             warning=True,
         )
+    stage("COMMANDS")
 
     # ── Start menu ──────────────────────────────────────────────
     try:
@@ -438,6 +451,7 @@ def run_selftest(bot=None):
             add("menu", "load", True, "class imported", warning=True)
     except Exception as e:
         add("menu", "load", False, f"{type(e).__name__}: {e}")
+    stage("START MENU")
 
     # ── Services ────────────────────────────────────────────────
     for svc in ["ugc-bot", "ugc-enrich"]:
@@ -448,6 +462,7 @@ def run_selftest(bot=None):
             add("services", svc, out == "active", out, warning=(svc == "ugc-enrich"))
         except Exception:
             add("services", svc, False, "cannot query", warning=True)
+    stage("SERVICES")
 
     # ── Backups ─────────────────────────────────────────────────
     try:
@@ -464,11 +479,13 @@ def run_selftest(bot=None):
             add("backups", "latest", False, "no backup found")
     except Exception as e:
         add("backups", "latest", False, f"{type(e).__name__}: {e}")
+    stage("BACKUPS")
 
     # ── Workflows present ───────────────────────────────────────
     base = "/home/ubuntu/robux-ugc-advanced/.github/workflows"
     for wf in REQUIRED_WORKFLOWS:
         add("workflows", wf, os.path.exists(os.path.join(base, wf)))
+    stage("WORKFLOWS")
 
     return results
 
@@ -637,7 +654,7 @@ SAFE_COMMANDS = [
 ]
 
 
-async def run_command_harness(bot):
+async def run_command_harness(bot, progress=None):
     """Execute menu buttons + safe commands with mocks. Async on main loop."""
     results = []
 
@@ -690,6 +707,12 @@ async def run_command_harness(bot):
             )
         except Exception as e:
             add("commands_live", name, False, f"{type(e).__name__}: {e}")
+
+    if progress:
+        try:
+            progress("COMMAND HARNESS", results)
+        except Exception:
+            pass
 
     return results
 

@@ -1749,12 +1749,75 @@ def register_supercomputer_commands(bot):
         if ctx.author.id not in BOT_OWNERS:
             return await ctx.send("🚫 Owner-only command.")
 
-        await ctx.send("🏅 **GOLD CERTIFICATION** — running every check...")
+        # NASA-style live progress display
+        stages = [
+            "ENVIRONMENT", "DATABASE", "MODULES", "ENGINES",
+            "LIVE MARKETPLACE", "COMMANDS", "START MENU",
+            "SERVICES", "BACKUPS", "WORKFLOWS", "COMMAND HARNESS",
+        ]
+        done = set()
+
+        def status_embed(stage, results):
+            passed_n = sum(1 for r in results if r["ok"])
+            fail_n = sum(
+                1 for r in results
+                if not r["ok"] and not r.get("warning")
+            )
+            filled = int(14 * len(done) / len(stages))
+            bar = "■" * filled + "□" * (14 - filled)
+            lines = []
+            for s in stages:
+                if s in done:
+                    lines.append(f"✅ {s}")
+                elif s == stage:
+                    lines.append(f"⏳ **{s}** · scanning telemetry…")
+                else:
+                    lines.append(f"⬜ {s}")
+            progress_embed = discord.Embed(
+                title="🛰️ NASA-GRADE AUDIT — VANTA 73",
+                description=(
+                    f"```\n[{bar}] {len(done)}/{len(stages)}\n```"
+                    + "\n".join(lines)
+                ),
+                color=0x0B3D91,
+            )
+            progress_embed.add_field(
+                name="📡 Telemetry",
+                value=f"✅ **{passed_n}** passed · ❌ **{fail_n}** failed",
+                inline=False,
+            )
+            progress_embed.set_footer(
+                text="Orbital certification in progress…"
+            )
+            return progress_embed
+
+        status = await ctx.send(embed=status_embed("INITIALIZING", []))
+        loop = asyncio.get_running_loop()
+
+        def progress(stage, results):
+            done.add(stage)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    status.edit(embed=status_embed(stage, results)),
+                    loop,
+                )
+            except Exception:
+                pass
 
         from selftest import run_selftest, run_command_harness
-        results = await asyncio.to_thread(run_selftest, bot)
+        results = await asyncio.to_thread(run_selftest, bot, progress)
+
+        def progress_async(stage, res):
+            done.add(stage)
+            try:
+                asyncio.create_task(
+                    status.edit(embed=status_embed(stage, res))
+                )
+            except Exception:
+                pass
+
         try:
-            results.extend(await run_command_harness(bot))
+            results.extend(await run_command_harness(bot, progress_async))
         except Exception as e:
             results.append({
                 "group": "commands_live",
@@ -1772,7 +1835,7 @@ def register_supercomputer_commands(bot):
 
         color = 0x22C55E if pct >= 95 else (0xF59E0B if pct >= 80 else 0xEF4444)
         embed = discord.Embed(
-            title="🏅 GOLD CERTIFICATION",
+            title="🛰️ NASA-GRADE AUDIT — RESULTS",
             description=(
                 f"**{passed}/{total}** passed · **{pct:.0f}%** · "
                 f"{len(fails)} failed · {len(warnings)} warnings"
@@ -1809,7 +1872,7 @@ def register_supercomputer_commands(bot):
             inline=False,
         )
         embed.set_footer(text="Paste this report to fix failures.")
-        await ctx.send(embed=embed)
+        await status.edit(embed=embed)
 
         # ── Certificate ──────────────────────────────────────────
         effective = ((passed + len(warnings)) / total * 100) if total else 0
