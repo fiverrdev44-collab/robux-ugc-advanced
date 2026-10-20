@@ -1817,7 +1817,20 @@ def register_supercomputer_commands(bot):
                 pass
 
         try:
-            results.extend(await run_command_harness(bot, progress_async))
+            results.extend(
+                await asyncio.wait_for(
+                    run_command_harness(bot, progress_async),
+                    timeout=420,
+                )
+            )
+        except asyncio.TimeoutError:
+            results.append({
+                "group": "commands_live",
+                "name": "harness",
+                "ok": False,
+                "warning": False,
+                "detail": "harness timeout after 7 min",
+            })
         except Exception as e:
             results.append({
                 "group": "commands_live",

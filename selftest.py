@@ -7,6 +7,7 @@ services, backups, workflows, and a live Roblox cross-reference.
 Returns a list of result dicts: {group, name, ok, warning, detail}.
 This module can be deleted later without touching the bot's features.
 """
+import asyncio
 import glob
 import importlib
 import os
@@ -676,37 +677,66 @@ async def run_command_harness(bot, progress=None):
         for child in view.children:
             label = getattr(child, "label", "button")
             inter = _MockInteraction()
+            print(f"[selftest] menu {label} start", flush=True)
             try:
                 try:
-                    await child.callback(inter)
+                    await asyncio.wait_for(child.callback(inter), timeout=20)
                 except TypeError:
-                    await child.callback(inter, child)
+                    await asyncio.wait_for(
+                        child.callback(inter, child), timeout=20
+                    )
                 add(
                     "menu_live", label,
                     bool(inter.sent),
                     f"{len(inter.sent)} responses",
                 )
+                print(f"[selftest] menu {label} ok", flush=True)
+            except asyncio.TimeoutError:
+                add("menu_live", label, False, "timeout after 20s")
+                print(f"[selftest] menu {label} TIMEOUT", flush=True)
             except Exception as e:
                 add("menu_live", label, False, f"{type(e).__name__}: {e}")
+                print(
+                    f"[selftest] menu {label} error {type(e).__name__}",
+                    flush=True,
+                )
     except Exception as e:
         add("menu_live", "menu", False, f"{type(e).__name__}: {e}")
 
     # Commands
-    for name, args, kwargs in SAFE_COMMANDS:
+    total_cmds = len(SAFE_COMMANDS)
+    for idx, (name, args, kwargs) in enumerate(SAFE_COMMANDS, 1):
         cmd = bot.get_command(name)
         if not cmd:
             add("commands_live", name, False, "not registered")
             continue
         ctx = _MockCtx()
+        print(f"[selftest] {name} start", flush=True)
         try:
-            await cmd.callback(ctx, *args, **kwargs)
+            await asyncio.wait_for(
+                cmd.callback(ctx, *args, **kwargs), timeout=45
+            )
             add(
                 "commands_live", name,
                 bool(ctx.sent),
                 f"{len(ctx.sent)} responses",
             )
+            print(f"[selftest] {name} ok", flush=True)
+        except asyncio.TimeoutError:
+            add("commands_live", name, False, "timeout after 45s")
+            print(f"[selftest] {name} TIMEOUT", flush=True)
         except Exception as e:
             add("commands_live", name, False, f"{type(e).__name__}: {e}")
+            print(
+                f"[selftest] {name} error {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+        if progress and (idx % 4 == 0 or idx == total_cmds):
+            try:
+                progress("COMMAND HARNESS", results)
+            except Exception:
+                pass
 
     if progress:
         try:
