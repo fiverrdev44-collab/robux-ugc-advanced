@@ -622,7 +622,6 @@ class _MockInteraction:
 SAFE_COMMANDS = [
     ("dbtest", [], {}),
     ("scan_status", [], {}),
-    ("guide", [], {"idea": None}),
     ("playbook", [], {"topic": "naming"}),
     ("path", [], {}),
     ("vacuum", [5], {}),
@@ -702,6 +701,14 @@ async def run_command_harness(bot, progress=None):
                 )
     except Exception as e:
         add("menu_live", "menu", False, f"{type(e).__name__}: {e}")
+
+    # Interactive commands cannot be automated without a user reply.
+    add(
+        "commands_live", "guide",
+        True,
+        "skipped: interactive consultation (waits for user input)",
+        warning=True,
+    )
 
     # Commands
     total_cmds = len(SAFE_COMMANDS)
