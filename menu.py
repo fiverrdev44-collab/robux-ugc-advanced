@@ -189,6 +189,141 @@ MANUAL_SECTIONS = {
 }
 
 
+SIMPLE_MANUAL = {
+    "beginner": (
+        "🟢 START HERE — 5 STEPS",
+        "**Do these in order. Ignore everything else.**\n"
+        "━━━━━━━━━━━━━━\n"
+        "**1. Find what to make**\n"
+        "Type: `!converge emotes`\n"
+        "Pick one that says **🔥 SNIPE ZONE**.\n\n"
+        "**2. Make the name and description**\n"
+        "Type: `!chain \"the thing you picked\"`\n"
+        "Example: `!chain \"cute cat beanie\"`\n"
+        "Copy the **champion name**, **description**, and **tags**.\n\n"
+        "**3. Upload it to Roblox**\n"
+        "Use the name, description, and tags from step 2.\n\n"
+        "**4. Tell the bot**\n"
+        "Type: `!launch <item id>`\n"
+        "The item id is the number at the end of the item link.\n\n"
+        "**5. Check it later**\n"
+        "After 14 days, type: `!verdict <item id>`\n"
+        "It says: keep it, rename it, or kill it.\n"
+        "━━━━━━━━━━━━━━\n"
+        "That's the whole bot. Everything else is optional.",
+    ),
+    "buttons": (
+        "🎛️ THE BUTTONS — SIMPLE",
+        "**You only need these at first:**\n"
+        "🚀 **FIRE** → builds a new item. Type `!chain <idea>`.\n"
+        "⭐ **STRIKE** → copies a winner. Type `!chain variant <id> <theme>`.\n"
+        "🔧 **INSPECT** → checks an item. Type `!verdict <id>`.\n"
+        "ℹ️ **MANUAL** → this guide.\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Ignore these until you've launched a few items:**\n"
+        "📡 SCAN · 🖼️ RECON · 🏷️ LOAD · 🐋 WHALE · 🎯 VACUUM · 📈 REVSIM · ⚡ VELOCITY\n"
+        "They are extra tools, not steps.",
+    ),
+    "find": (
+        "📡 STEP 1 — FIND WHAT TO MAKE",
+        "**Type:** `!converge emotes`\n"
+        "You get a ranked list.\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Pick one that has:**\n"
+        "• a high score\n"
+        "• **🔥 SNIPE ZONE**\n"
+        "• low supply (not many items)\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Example:**\n"
+        "`!converge emotes`\n"
+        "→ `#1 kawaii aura 🔥 SNIPE ZONE`\n"
+        "People want it, few items exist. Make that.\n"
+        "━━━━━━━━━━━━━━\n"
+        "Other families: `hair`, `face`, `neck`, `back`, `waist`, `tops`, `classic`.",
+    ),
+    "make": (
+        "🏷️ STEP 2 — MAKE THE NAME",
+        "**Type:** `!chain \"your idea\"`\n"
+        "**Example:** `!chain \"cute cat beanie\"`\n"
+        "━━━━━━━━━━━━━━\n"
+        "You get:\n"
+        "• 🥇 **Champion name** — copy this\n"
+        "• 📝 **Description** — copy this\n"
+        "• 🏷️ **45 tags** — copy these\n"
+        "• 💰 **Price** — use this\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Rules:**\n"
+        "• 3–5 words\n"
+        "• one style word (kawaii, y2k, gothic)\n"
+        "• no keyword spam\n"
+        "• never say *limited* or *free* unless true",
+    ),
+    "upload": (
+        "🚀 STEP 3 — PUT IT ON ROBLOX",
+        "1. Open the Roblox Creator Dashboard.\n"
+        "2. Upload your 3D item.\n"
+        "3. Paste the **name**, **description**, and **tags** from `!chain`.\n"
+        "4. Set the price the bot gave you.\n"
+        "5. Publish it.\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Then tell the bot:**\n"
+        "`!launch <item id>`\n"
+        "The item id is the number at the end of the item link.\n"
+        "Example: `!launch 92364796546749`\n"
+        "━━━━━━━━━━━━━━\n"
+        "Why? So the bot can track how it performs.",
+    ),
+    "check": (
+        "🔧 STEP 4 — CHECK HOW IT DID",
+        "**Wait 14 days.** Then type:\n"
+        "`!verdict <item id>`\n"
+        "━━━━━━━━━━━━━━\n"
+        "You get one answer:\n"
+        "🔥 **DOUBLE_DOWN** → make more like it\n"
+        "✅ **KEEP** → leave it alone\n"
+        "🔧 **RENAME** → run `!autopsy <id>` first\n"
+        "🪦 **KILL** → stop making that type\n"
+        "⏳ **TOO_NEW** → wait longer\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Golden rule:** if it says DOUBLE_DOWN, make 3 variants this week.",
+    ),
+    "money": (
+        "💰 SEE YOUR MONEY",
+        "**Type:** `!sales_report 30`\n"
+        "Shows: units sold, Robux, top items, daily trend.\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Remember:** Roblox keeps ~70%. You keep ~30%.\n"
+        "The bot shows your **net** share.\n"
+        "━━━━━━━━━━━━━━\n"
+        "**Type:** `!sales_debug` if a number looks wrong.",
+    ),
+    "advanced": (
+        "🧰 WHEN YOU'RE READY",
+        "**Only after you've launched a few items:**\n"
+        "`!vacuum` — phrases with almost no items\n"
+        "`!meta_sniper <niche>` — words competitors miss\n"
+        "`!sales_keywords` — words that actually sell\n"
+        "`!whales` — what top studios are dropping\n"
+        "`!golden_hour` — items rising fast\n"
+        "`!xray` — market dashboard\n"
+        "`!autopsy <id>` — why an item failed\n"
+        "`!hitrate` — did launches beat peers?\n"
+        "`!path` — your next milestone\n"
+        "`!playbook` — tactics by topic\n"
+        "`!selftest` — certify the bot",
+    ),
+    "help": (
+        "🧯 IF SOMETHING BREAKS",
+        "**Command not found** → `!bot_update`, wait 30 seconds\n"
+        "**Weird numbers** → `!dbtest`\n"
+        "**Sales show 0** → `!sales_debug`, then `!sales_backfill`\n"
+        "**`!vacuum` empty** → data still loading; try later\n"
+        "**Bot offline** → SSH Server 2: `sudo systemctl restart ugc-bot`\n"
+        "**Need this menu** → `!start`",
+    ),
+}
+
+
 class ManualSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -197,7 +332,7 @@ class ManualSelect(discord.ui.Select):
                 value=key,
                 description=body.splitlines()[0][:100],
             )
-            for key, (title, body) in MANUAL_SECTIONS.items()
+            for key, (title, body) in SIMPLE_MANUAL.items()
         ]
         super().__init__(
             placeholder="Pick a manual section…",
@@ -208,7 +343,7 @@ class ManualSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         key = self.values[0]
-        title, body = MANUAL_SECTIONS[key]
+        title, body = SIMPLE_MANUAL[key]
         embed = discord.Embed(
             title=title,
             description=body,
@@ -534,9 +669,9 @@ class MenuView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed)
 
-    @discord.ui.button(label="ℹ️ MANUAL — Full Guide", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="ℹ️ MANUAL — Easy Guide", style=discord.ButtonStyle.secondary, row=4)
     async def workflow(self, interaction: discord.Interaction, button: discord.ui.Button):
-        title, body = MANUAL_SECTIONS["start"]
+        title, body = SIMPLE_MANUAL["beginner"]
         embed = discord.Embed(
             title=title,
             description=body,
@@ -589,6 +724,19 @@ def register_menu_commands(bot, get_db):
                 "**ℹ️ Click MANUAL for the easy step-by-step guide.**"
             ),
             color=COLOR_STEALTH,
+        )
+
+        embed.add_field(
+            name="🟢 NEW? DO ONLY THIS",
+            value=(
+                "1. `!converge emotes`\n"
+                "2. Pick a **🔥 SNIPE ZONE**\n"
+                "3. `!chain \"what you picked\"`\n"
+                "4. Upload to Roblox\n"
+                "5. `!launch <item id>`\n"
+                "Ignore every button until you've done this once."
+            ),
+            inline=False,
         )
 
         _apply_gif(embed, GIF_MAIN)
