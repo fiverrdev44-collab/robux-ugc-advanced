@@ -126,6 +126,13 @@ def register_sales_commands(bot, get_db):
         from post_monitor import analyze_sales, format_report
 
         try:
+            from sales_listener import auto_backfill
+            progress = await ctx.send("🧾 Syncing recent sales, then building report...")
+            await auto_backfill(bot, limit=500)
+        except Exception as e:
+            return await ctx.send(f"❌ Backfill failed: {e}")
+
+        try:
             data = await asyncio.to_thread(analyze_sales, 7)
         except Exception as e:
             return await ctx.send(f"❌ {e}")
@@ -134,6 +141,10 @@ def register_sales_commands(bot, get_db):
         for i in range(0, len(report), 1900):
             await ctx.send(report[i:i+1900])
             await asyncio.sleep(0.2)
+        try:
+            await progress.edit(content="✅ Report posted above (sales synced first).")
+        except Exception:
+            pass
 
     @bot.command(name="sales_probe")
     async def sales_probe_cmd(ctx, *, item: str = ""):

@@ -8,6 +8,7 @@ Posts report to ALERT_CHANNEL_ID.
 NOT the old API version (that was blocked).
 This version reads CSV data you upload.
 """
+import os
 import asyncio
 from datetime import datetime, timezone
 from bot_core import get_db
@@ -169,6 +170,12 @@ async def send_daily_report(bot, channel_id):
         if not channel:
             print(f"[post_monitor] channel {channel_id} not found", flush=True)
             return
+        # Catch anything the live listener missed before building the report.
+        try:
+            from sales_listener import auto_backfill
+            await auto_backfill(bot, limit=500)
+        except Exception as e:
+            print(f"[post_monitor] pre-report backfill failed: {e}", flush=True)
         data = await asyncio.to_thread(analyze_sales, 7)
         report = format_report(data)
         for i in range(0, len(report), 1900):

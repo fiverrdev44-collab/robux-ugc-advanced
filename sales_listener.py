@@ -5,6 +5,7 @@ saves to my_sales, and provides summary functions.
 All DB writes batch or run via asyncio.to_thread — no event loop blocking.
 Verbose logging so we can trace exactly what happens.
 """
+import os
 import re
 import asyncio
 from datetime import datetime, timezone
@@ -308,6 +309,25 @@ async def backfill_channel(bot, channel_id, limit=200):
         _save_sales_batch, sales_batch
     )
     return scanned, inserted
+
+
+async def auto_backfill(bot, limit=500):
+    """Import sales posted while the bot was offline.
+
+    Runs on startup and right before every report, so nobody has to type
+    !sales_backfill. Inserts are deduped, so repeated calls are harmless.
+    """
+    channel_id = os.getenv("SALES_CHANNEL_ID", "").strip()
+    if not channel_id:
+        print("[auto-backfill] SALES_CHANNEL_ID not set — skipping", flush=True)
+        return 0, 0
+    try:
+        scanned, saved = await backfill_channel(bot, channel_id, limit=limit)
+        print(f"[auto-backfill] scanned {scanned} · imported {saved}", flush=True)
+        return scanned, saved
+    except Exception as e:
+        print(f"[auto-backfill] failed: {type(e).__name__}: {e}", flush=True)
+        return 0, 0
 
 
 # ════════════════════════════════════════════════════════════════════

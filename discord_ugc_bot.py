@@ -64,6 +64,18 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ Table setup failed: {e}", flush=True)
 
+    # Recover sales posted while the bot was offline (restarts/deploys).
+    async def _startup_sales_backfill():
+        try:
+            from sales_listener import auto_backfill
+            scanned, saved = await auto_backfill(bot, limit=1000)
+            print(f"🧾 [startup] sales backfill — scanned {scanned}, "
+                  f"imported {saved}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [startup] sales backfill failed: {e}", flush=True)
+
+    asyncio.create_task(_startup_sales_backfill())
+
 
 @bot.event
 async def on_message(message):
