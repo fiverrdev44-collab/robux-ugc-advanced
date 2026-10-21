@@ -14,12 +14,29 @@ def log(msg):
 
 
 # ── Production settings (1000 items) ──
-TOP_ITEMS_LIMIT = 1000
-MIN_FAVS = 200
-BATCH_SIZE = 500
-WORKERS_PER_SESSION = 3
-DELAY = 0.4
-MAX_RETRIES = 3
+# All tunable from the service environment (.env) — no code edit needed.
+def _env_int(name, default):
+    try:
+        return max(1, int(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name, default):
+    try:
+        return max(0.0, float(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+TOP_ITEMS_LIMIT = _env_int("SNAPSHOT_TOP_ITEMS", 1000)
+MIN_FAVS = _env_int("SNAPSHOT_MIN_FAVS", 200)
+BATCH_SIZE = _env_int("SNAPSHOT_BATCH_SIZE", 500)
+# One worker per session is the sweet spot from a single server IP;
+# Roblox throttles per-IP hard and extra concurrency only adds 429s.
+WORKERS_PER_SESSION = _env_int("SNAPSHOT_WORKERS_PER_SESSION", 1)
+DELAY = _env_float("SNAPSHOT_DELAY", 1.0)
+MAX_RETRIES = _env_int("SNAPSHOT_MAX_RETRIES", 2)
 
 COOKIES = []
 for i in range(1, 6):
@@ -64,9 +81,9 @@ _stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
 # Hard cap on the fetch phase so a slow/rate-limited run can never hold the
 # scheduler (and !snapshot_now) hostage for the rest of the day.
 try:
-    FETCH_DEADLINE_SECONDS = max(30, int(os.getenv("SNAPSHOT_FETCH_DEADLINE", "240")))
+    FETCH_DEADLINE_SECONDS = max(30, int(os.getenv("SNAPSHOT_FETCH_DEADLINE", "600")))
 except ValueError:
-    FETCH_DEADLINE_SECONDS = 240
+    FETCH_DEADLINE_SECONDS = 600
 
 # Only one snapshot may run at a time. The scheduler and !snapshot_now
 # used to overlap, doubling the API load and stalling both.
@@ -97,7 +114,9 @@ def fetch_fresh_favs(item_id, deadline=None):
                         wait = int(r.headers.get("Retry-After", 3))
                     except (TypeError, ValueError):
                         wait = 3
-                    wait = max(1, min(wait, 5))
+                    wait = max(1, min(wait, 10))
+                    if deadline is not None and time.monotonic() + wait >= deadline:
+                        return item_id, None
                     time.sleep(wait + attempt * 2)
                     continue
                 elif r.status_code in (401, 403):
