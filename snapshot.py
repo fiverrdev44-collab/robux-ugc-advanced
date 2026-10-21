@@ -73,7 +73,11 @@ for cookie in COOKIES:
 ANON_SESSION = requests.Session()
 ANON_SESSION.headers.update(HEADERS)
 
-TOTAL_WORKERS = len(SESSIONS) * WORKERS_PER_SESSION
+# Roblox throttles per IP, so rotating accounts does not buy much once the
+# IP is hot. SNAPSHOT_SESSIONS=1 gives the gentlest single stream.
+SESSIONS = SESSIONS[: _env_int("SNAPSHOT_SESSIONS", len(SESSIONS) or 1)]
+
+TOTAL_WORKERS = max(1, len(SESSIONS) * WORKERS_PER_SESSION)
 log(f"🔐 {len(SESSIONS)} sessions → {TOTAL_WORKERS} workers · {DELAY}s delay")
 
 _stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
@@ -114,7 +118,7 @@ def fetch_fresh_favs(item_id, deadline=None):
                         wait = int(r.headers.get("Retry-After", 3))
                     except (TypeError, ValueError):
                         wait = 3
-                    wait = max(1, min(wait, 10))
+                    wait = max(1, min(wait, 30))
                     if deadline is not None and time.monotonic() + wait >= deadline:
                         return item_id, None
                     time.sleep(wait + attempt * 2)

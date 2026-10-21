@@ -140,6 +140,14 @@ def start_scheduler():
         hour=SNAPSHOT_HOUR_UTC, minute=SNAPSHOT_MINUTE_UTC,
         id="daily_snapshot", replace_existing=True, misfire_grace_time=21600)
 
+    # Top-up runs later in the day. The snapshot query skips items already
+    # captured today, so these fill in whatever throttling left behind.
+    for hour in (9, 15, 21):
+        _scheduler.add_job(_run_snapshot, "cron",
+            hour=hour, minute=SNAPSHOT_MINUTE_UTC,
+            id=f"snapshot_topup_{hour}", replace_existing=True,
+            misfire_grace_time=3600)
+
     _scheduler.add_job(_run_ml_train, "cron",
         hour=SNAPSHOT_HOUR_UTC + 1, minute=0,
         id="daily_ml_train", replace_existing=True, misfire_grace_time=3600)
@@ -185,7 +193,8 @@ def start_scheduler():
     for job in _scheduler.get_jobs():
         _log(f"🕐 [scheduler] '{job.id}' next run: {job.next_run_time}")
 
-    _log(f"✅ [scheduler] Started — snapshot 03:30 UTC, "
+    _log(f"✅ [scheduler] Started — snapshot 03:30 UTC "
+         f"(top-ups 09:30/15:30/21:30), "
          f"ML train 04:00 UTC, launch sync 07:30 UTC, "
          f"post-monitor 18:00 UTC (scanner/suggest via GitHub → Server 2)")
 
