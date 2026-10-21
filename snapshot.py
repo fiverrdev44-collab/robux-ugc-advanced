@@ -3,6 +3,7 @@ snapshot.py — Fast favorites snapshot from the bot server.
 """
 import os
 import time
+import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
@@ -60,13 +61,26 @@ log(f"🔐 {len(SESSIONS)} sessions → {TOTAL_WORKERS} workers · {DELAY}s dela
 
 _stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
 
+# Hard cap on the fetch phase so a slow/rate-limited run can never hold the
+# scheduler (and !snapshot_now) hostage for the rest of the day.
+try:
+    FETCH_DEADLINE_SECONDS = max(30, int(os.getenv("SNAPSHOT_FETCH_DEADLINE", "240")))
+except ValueError:
+    FETCH_DEADLINE_SECONDS = 240
 
-def fetch_fresh_favs(item_id):
+# Only one snapshot may run at a time. The scheduler and !snapshot_now
+# used to overlap, doubling the API load and stalling both.
+_RUN_LOCK = threading.Lock()
+
+
+def fetch_fresh_favs(item_id, deadline=None):
     # Try authenticated sessions first, then the anonymous session.
     for session in SESSIONS + [ANON_SESSION]:
         for attempt in range(MAX_RETRIES):
+            if deadline is not None and time.monotonic() >= deadline:
+                return item_id, None
             try:
-                r = session.get(FAV_URL.format(item_id), timeout=10)
+                r = session.get(FAV_URL.format(item_id), timeout=6)
                 if r.status_code == 200:
                     favs = r.json().get("favoriteCount")
                     if favs is not None:
@@ -77,7 +91,13 @@ def fetch_fresh_favs(item_id):
                         return item_id, None
                 elif r.status_code == 429:
                     _stats["429"] += 1
-                    wait = int(r.headers.get("Retry-After", 3))
+                    # Roblox sometimes sends Retry-After: 60+; never sleep
+                    # that long inside a single item — the run deadline wins.
+                    try:
+                        wait = int(r.headers.get("Retry-After", 3))
+                    except (TypeError, ValueError):
+                        wait = 3
+                    wait = max(1, min(wait, 5))
                     time.sleep(wait + attempt * 2)
                     continue
                 elif r.status_code in (401, 403):
@@ -98,7 +118,20 @@ def fetch_fresh_favs(item_id):
 
 
 def snapshot_top_items():
+    """Public entry point — refuses concurrent runs."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        log("⚠️ Snapshot already running — skipping this trigger.")
+        return False
+    try:
+        return _snapshot_top_items_inner()
+    finally:
+        _RUN_LOCK.release()
+
+
+def _snapshot_top_items_inner():
     log("📸 Snapshot job started.")
+    for key in _stats:
+        _stats[key] = 0
     start = time.time()
 
     conn = get_db_connection()
@@ -122,7 +155,7 @@ def snapshot_top_items():
     if not rows:
         log("✅ Nothing to snapshot.")
         cur.close(); conn.close()
-        return
+        return True
 
     log(f"🔄 Fetching with {TOTAL_WORKERS} workers, {DELAY}s delay...")
     id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
@@ -130,17 +163,22 @@ def snapshot_top_items():
 
     fresh_favs = {}
     completed = [0]
+    deadline = time.monotonic() + FETCH_DEADLINE_SECONDS
 
     def _worker(worker_ids):
         out = {}
         for iid in worker_ids:
-            _, favs = fetch_fresh_favs(iid)
+            if time.monotonic() >= deadline:
+                log("⏱️ Snapshot fetch deadline reached — stopping early.")
+                break
+            _, favs = fetch_fresh_favs(iid, deadline=deadline)
             if favs is not None:
                 out[iid] = favs
             completed[0] += 1
-            if completed[0] % 200 == 0:
+            if completed[0] % 25 == 0:
                 log(f"   {completed[0]}/{len(ids)} fetched · "
-                    f"ok={_stats['ok']} 429={_stats['429']}")
+                    f"ok={_stats['ok']} 403={_stats['403']} "
+                    f"429={_stats['429']} exc={_stats['exc']}")
             time.sleep(DELAY)
         return out
 
@@ -157,6 +195,9 @@ def snapshot_top_items():
                 log(f"   worker error: {e}")
 
     log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items")
+    if len(fresh_favs) < len(ids):
+        log(f"⚠️ {len(ids) - len(fresh_favs)} items skipped "
+            f"(deadline/rate limit) — next run will retry them.")
     log(f"📊 Stats: {_stats}")
 
     for iid, favs in fresh_favs.items():
@@ -194,6 +235,7 @@ def snapshot_top_items():
 
     cur.close(); conn.close()
     log(f"✅ Snapshot complete: {inserted} rows in {time.time()-start:.1f}s")
+    return True
 
 
 if __name__ == "__main__":

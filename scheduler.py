@@ -34,7 +34,10 @@ def _run_snapshot():
     start = time.time()
     try:
         from snapshot import snapshot_top_items
-        snapshot_top_items()
+        result = snapshot_top_items()
+        if result is False:
+            _log("⚠️ [scheduler] Snapshot already running — skipped this trigger.")
+            return
         _log(f"✅ [scheduler] Snapshot finished in {time.time()-start:.1f}s")
     except Exception as e:
         _log(f"❌ [scheduler] Snapshot failed: {type(e).__name__}: {e}")

@@ -110,16 +110,21 @@ def register_advanced_commands(bot, get_db):
         progress = await ctx.send("📸 **Running snapshot from the Oracle bot server...**")
 
         def _run():
-            import importlib
-            import snapshot as snap_mod
-            importlib.reload(snap_mod)
-            snap_mod.snapshot_top_items()
-            return True
+            # Do NOT reload the module — reloading bypasses the run lock
+            # and can start a second snapshot while one is still running.
+            from snapshot import snapshot_top_items
+            return snapshot_top_items()
 
         try:
-            await asyncio.to_thread(_run)
+            ok = await asyncio.to_thread(_run)
         except Exception as e:
             await progress.edit(content=f"❌ Snapshot failed: `{e}`")
+            return
+
+        if ok is False:
+            await progress.edit(
+                content="⚠️ **A snapshot is already running** — skipped this trigger."
+            )
             return
 
         try:
