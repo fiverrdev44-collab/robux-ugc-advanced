@@ -50,6 +50,11 @@ for cookie in COOKIES:
     s.headers.update(HEADERS)
     SESSIONS.append(s)
 
+# Public fallback: the catalog details endpoint works anonymously even
+# when a stored .ROBLOSECURITY cookie is expired/invalid.
+ANON_SESSION = requests.Session()
+ANON_SESSION.headers.update(HEADERS)
+
 TOTAL_WORKERS = len(SESSIONS) * WORKERS_PER_SESSION
 log(f"🔐 {len(SESSIONS)} sessions → {TOTAL_WORKERS} workers · {DELAY}s delay")
 
@@ -57,7 +62,8 @@ _stats = {"ok": 0, "429": 0, "403": 0, "404": 0, "other": 0, "exc": 0}
 
 
 def fetch_fresh_favs(item_id):
-    for session in SESSIONS:
+    # Try authenticated sessions first, then the anonymous session.
+    for session in SESSIONS + [ANON_SESSION]:
         for attempt in range(MAX_RETRIES):
             try:
                 r = session.get(FAV_URL.format(item_id), timeout=10)
@@ -74,10 +80,11 @@ def fetch_fresh_favs(item_id):
                     wait = int(r.headers.get("Retry-After", 3))
                     time.sleep(wait + attempt * 2)
                     continue
-                elif r.status_code == 403:
+                elif r.status_code in (401, 403):
+                    # Bad/expired cookie — move on to the next session
+                    # (the anonymous session is the last resort).
                     _stats["403"] += 1
-                    time.sleep(2)
-                    continue
+                    break
                 elif r.status_code == 404:
                     _stats["404"] += 1
                     return item_id, None

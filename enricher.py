@@ -52,6 +52,12 @@ for cookie in COOKIES:
     s.headers.update(HEADERS)
     SESSIONS.append(s)
 
+# Public fallback: the catalog favorites endpoint works anonymously even
+# when a stored .ROBLOSECURITY cookie is expired/invalid. This is what
+# left ~78k items with NULL favorites.
+ANON_SESSION = requests.Session()
+ANON_SESSION.headers.update(HEADERS)
+
 _fail_codes = {}
 
 
@@ -72,25 +78,32 @@ def get_csrf_token(session):
 
 
 def fetch_favorites(session, item_id):
-    """Second call: catalog endpoint returns favoriteCount."""
-    try:
-        resp = session.get(FAVORITES_URL.format(item_id), timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            favs = data.get("favoriteCount")
-            if favs is None:
-                return None
-            try:
-                return int(favs)
-            except (TypeError, ValueError):
-                return None
-        if resp.status_code == 429:
-            _fail_codes[429] = _fail_codes.get(429, 0) + 1
-            time.sleep(2)
-        return None
-    except Exception:
-        _fail_codes["exc_fav"] = _fail_codes.get("exc_fav", 0) + 1
-        return None
+    """Catalog endpoint returns favoriteCount. Falls back to anonymous."""
+    for s in (session, ANON_SESSION):
+        try:
+            resp = s.get(FAVORITES_URL.format(item_id), timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                favs = data.get("favoriteCount")
+                if favs is None:
+                    return None
+                try:
+                    return int(favs)
+                except (TypeError, ValueError):
+                    return None
+            if resp.status_code == 429:
+                _fail_codes[429] = _fail_codes.get(429, 0) + 1
+                time.sleep(2)
+                continue
+            if resp.status_code in (401, 403):
+                # Invalid cookie — retry anonymously.
+                _fail_codes[403] = _fail_codes.get(403, 0) + 1
+                continue
+            return None
+        except Exception:
+            _fail_codes["exc_fav"] = _fail_codes.get("exc_fav", 0) + 1
+            continue
+    return None
 
 
 def fetch_worker(session, ids, worker_id):
