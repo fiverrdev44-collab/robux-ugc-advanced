@@ -1955,6 +1955,60 @@ def register_supercomputer_commands(bot):
                 f"{len(warnings)} warning(s). Fix failures and re-run."
             )
 
+    # ── 5c. 🏷️ Version Check ────────────────────────────────────────
+    @bot.command(name="version", aliases=["ver", "about"])
+    async def version_command(ctx):
+        """Show the running git commit and whether origin/main is ahead."""
+        cwd = os.getcwd()
+
+        def _git(*args):
+            try:
+                return subprocess.run(
+                    ["git", *args], capture_output=True, text=True,
+                    cwd=cwd, timeout=10,
+                )
+            except Exception:
+                return None
+
+        head = _git("rev-parse", "--short", "HEAD")
+        subject = _git("log", "-1", "--format=%s")
+        when = _git("log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M %Z")
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        origin = _git("rev-parse", "--short", "origin/main")
+        counts = _git("rev-list", "--left-right", "--count", "HEAD...origin/main")
+
+        commit = head.stdout.strip() if head and head.returncode == 0 else "unknown"
+        lines = [f"# 🤖 Bot version — `{commit}`"]
+
+        if subject and subject.returncode == 0 and subject.stdout.strip():
+            lines.append(f"📝 {subject.stdout.strip()[:120]}")
+        if when and when.returncode == 0 and when.stdout.strip():
+            lines.append(f"🕒 {when.stdout.strip()}")
+        if branch and branch.returncode == 0:
+            lines.append(f"🌿 Branch: `{branch.stdout.strip()}`")
+
+        origin_sha = origin.stdout.strip() if origin and origin.returncode == 0 else ""
+        if not origin_sha:
+            lines.append("⚠️ `origin/main` ref not found — run `!bot_update`.")
+        elif counts and counts.returncode == 0:
+            try:
+                ahead, behind = (int(x) for x in counts.stdout.split())
+            except ValueError:
+                ahead = behind = 0
+            if behind:
+                lines.append(
+                    f"⬆️ **{behind} commit(s) behind** `origin/main` "
+                    f"(`{origin_sha}`) — run `!bot_update`."
+                )
+            elif ahead:
+                lines.append(f"✏️ {ahead} local commit(s) not pushed to `origin/main`.")
+            else:
+                lines.append(f"✅ Up to date with `origin/main` (`{origin_sha}`).")
+        else:
+            lines.append(f"ℹ️ `origin/main` is at `{origin_sha}`.")
+
+        await ctx.send("\n".join(lines))
+
     # ── 6. 🔧 Bot Self-Update ────────────────────────────────────────
     @bot.command(name="bot_update", aliases=["update_bot", "selfupdate"])
     async def bot_update_command(ctx):
