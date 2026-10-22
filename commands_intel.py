@@ -1400,3 +1400,45 @@ description_seo, description_hype, description_short
             "and price don't move favourites in 7 days, the concept is the problem._",
         ]
         await ctx.send("\n".join(plan)[:1900])
+
+    # =========================================================
+    # !creator_brain — systematic review of the creator cohort
+    # =========================================================
+    @bot.command(name="creator_brain", aliases=["meta", "cohort"])
+    async def creator_brain_cmd(ctx):
+        """Study notable creators from your own data and show their patterns."""
+        progress = await ctx.send("🧠 Studying the creator cohort...")
+
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                from creator_brain import learn, save, load_findings
+                findings = learn(cur)
+                if findings:
+                    save(cur, findings)
+                    conn.commit()
+                    return findings
+                return load_findings(cur)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            findings = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await progress.edit(content=f"❌ {e}")
+
+        if not findings:
+            return await progress.edit(
+                content=("❌ Not enough creator history yet — each creator "
+                         "needs at least 5 items with favorites.")
+            )
+
+        from creator_brain import format_report
+        report = format_report(findings)
+        if len(report) > 1900:
+            await progress.edit(content=report[:1900])
+            for i in range(1900, len(report), 1900):
+                await ctx.send(report[i:i+1900])
+                await asyncio.sleep(0.2)
+        else:
+            await progress.edit(content=report)

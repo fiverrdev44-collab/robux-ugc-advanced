@@ -44,6 +44,35 @@ def _run_snapshot():
         traceback.print_exc()
 
 
+def _run_creator_brain():
+    """Nightly systematic review of the creator cohort."""
+    _log("🧠 [scheduler] Creator brain refresh triggered.")
+    start = time.time()
+    try:
+        from creator_brain import learn, save
+        from bot_core import get_db
+
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            findings = learn(cur)
+            if findings:
+                save(cur, findings)
+                conn.commit()
+                _log(
+                    f"✅ [scheduler] Creator brain — {findings['cohort_size']} "
+                    f"creators · {findings['items']} items · "
+                    f"{time.time()-start:.1f}s"
+                )
+            else:
+                _log("⚠️ [scheduler] Creator brain — not enough history yet.")
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        _log(f"❌ [scheduler] Creator brain failed: {type(e).__name__}: {e}")
+
+
 def _run_ml_train():
     _log("🧠 [scheduler] ML train job triggered.")
     try:
@@ -151,6 +180,10 @@ def start_scheduler():
     _scheduler.add_job(_run_ml_train, "cron",
         hour=SNAPSHOT_HOUR_UTC + 1, minute=0,
         id="daily_ml_train", replace_existing=True, misfire_grace_time=3600)
+
+    _scheduler.add_job(_run_creator_brain, "cron",
+        hour=5, minute=0,
+        id="daily_creator_brain", replace_existing=True, misfire_grace_time=3600)
 
     _scheduler.add_job(_run_post_monitor, "cron",
         hour=POST_MONITOR_HOUR_UTC, minute=0,

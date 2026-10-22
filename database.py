@@ -384,6 +384,16 @@ def setup_database():
         ON launch_ledger (launched_at DESC);
     ''', "idx_launch_ledger_launched")
 
+    # Findings from creator_brain.py — stored so commands can show the last
+    # cohort study without re-running it.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS creator_patterns (
+            pattern_key TEXT PRIMARY KEY,
+            pattern_value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''', "creator_patterns")
+
     try:
         conn.commit()
     except Exception as e:
