@@ -10,7 +10,7 @@ hours without tripping rate limits.
 """
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -207,6 +207,41 @@ def mark_scanned(cur, creator_id):
     """, (creator_id,))
 
 
+COOLDOWN_KEY = "crawl_cooldown_until"
+
+
+def _cooldown_remaining(cur):
+    try:
+        cur.execute(
+            "SELECT pattern_value FROM creator_patterns WHERE pattern_key = %s",
+            (COOLDOWN_KEY,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return 0
+        until = datetime.fromisoformat(row[0])
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return max(0, int((until - datetime.now(timezone.utc)).total_seconds()))
+    except Exception:
+        return 0
+
+
+def _set_cooldown(cur, minutes=30):
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    try:
+        cur.execute("""
+            INSERT INTO creator_patterns (pattern_key, pattern_value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (pattern_key) DO UPDATE SET
+                pattern_value = EXCLUDED.pattern_value,
+                updated_at = CURRENT_TIMESTAMP
+        """, (COOLDOWN_KEY, until.isoformat()))
+        cur.connection.commit()
+    except Exception:
+        pass
+
+
 def run_batch(cur, limit=10):
     """Scan one batch.
 
@@ -215,13 +250,19 @@ def run_batch(cur, limit=10):
     """
     global LAST_ERROR
     LAST_ERROR = None
+
+    remaining = _cooldown_remaining(cur)
+    if remaining > 0:
+        return 0, 0, 0, f"cooling down for {remaining // 60}m {remaining % 60}s"
+
     s = _session()
 
     try:
         discovered = discover_verified(s)
     except RateLimited:
+        _set_cooldown(cur, 30)
         print("[creator-tracker] rate limited during discovery — stopping", flush=True)
-        return 0, 0, 0, LAST_ERROR or "rate limited"
+        return 0, 0, 0, "rate limited — cooling down 30m"
 
     new_creators = ensure_creators(cur, discovered)
     cur.connection.commit()
@@ -250,6 +291,8 @@ def run_batch(cur, limit=10):
                 break
             time.sleep(DELAY)
     except RateLimited:
+        _set_cooldown(cur, 30)
         print("[creator-tracker] rate limited — stopping batch early", flush=True)
+        return scanned, upserted, new_creators, "rate limited — cooling down 30m"
 
     return scanned, upserted, new_creators, LAST_ERROR
