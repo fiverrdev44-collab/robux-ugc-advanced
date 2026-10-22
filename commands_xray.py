@@ -36,6 +36,7 @@ def register_xray_commands(bot, get_db):
 
     @bot.command(name="xray")
     async def xray_cmd(ctx):
+        """X-ray a niche's supply and winners."""
         progress = await ctx.send("🩻 **Rendering full market X-ray...**")
 
         def _run():
@@ -61,6 +62,7 @@ def register_xray_commands(bot, get_db):
 
     @bot.command(name="early")
     async def early_cmd(ctx, days: int = 14):
+        """Show early winners."""
         days = max(3, min(int(days), 30))
         progress = await ctx.send(f"⚡ **Scanning for early winners (last {days}d)...**")
 
@@ -87,6 +89,7 @@ def register_xray_commands(bot, get_db):
 
     @bot.command(name="patterns")
     async def patterns_cmd(ctx, family: str = "emote"):
+        """Show recurring title patterns."""
         target = _resolve_family(family)
         label = "all categories" if target is None else target
         progress = await ctx.send(f"🧪 **Mining statistical patterns in `{label}`...**")
@@ -114,6 +117,7 @@ def register_xray_commands(bot, get_db):
 
     @bot.command(name="failures")
     async def failures_cmd(ctx, family: str = "emote"):
+        """Show failed launches and causes."""
         target = _resolve_family(family)
         label = "all categories" if target is None else target
         progress = await ctx.send(f"⚠️ **Mining failure patterns in `{label}`...**")

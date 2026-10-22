@@ -83,6 +83,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="momentum_debug")
     async def momentum_debug(ctx):
+        """Show momentum engine diagnostics."""
         progress = await ctx.send("🔍 **Running momentum debug...**")
 
         def _run():
@@ -128,6 +129,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="momentum")
     async def momentum_cmd(ctx, days: int = 7):
+        """Rank items by favorites momentum."""
         days = max(3, min(days, 30))
         progress = await ctx.send("🚀 **Scanning momentum...**")
         def _run():
@@ -151,6 +153,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="predict")
     async def predict_cmd(ctx, *, idea: str = ""):
+        """Predict success for a free-form item idea."""
         if not idea.strip():
             await ctx.send("Usage: `!predict hip sway dance emote`"); return
         words = re.findall(r"[a-z]{3,}", idea.lower())
@@ -177,6 +180,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="oracle")
     async def oracle_cmd(ctx, *, keyword: str = ""):
+        """Forecast a keyword's trend."""
         if not keyword.strip():
             await ctx.send("Usage: `!oracle dance`"); return
         kw = keyword.strip().lower().split()[0]
@@ -201,6 +205,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="nextwave")
     async def nextwave_cmd(ctx):
+        """Find emerging next-wave keywords."""
         progress = await ctx.send("🌊 **Scanning for next-wave keywords...**")
         def _run():
             conn = get_db(); cur = conn.cursor()
@@ -220,6 +225,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
     @bot.command(name="opportunities")
     async def opportunities_cmd(ctx):
+        """Show today's ranked opportunity feed."""
         progress = await ctx.send("📅 **Scanning today's best plays...**")
         def _run():
             conn = get_db(); cur = conn.cursor()
@@ -406,6 +412,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
     # =========================================================
     @bot.command(name="autopsy")
     async def autopsy(ctx, item_id: int, *, notes: str = ""):
+        """Diagnose an item and generate verified recovery titles."""
         progress = await ctx.send(f"🔬 **Autopsying item `{item_id}`...**")
         cookie = os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
         user_id = os.getenv("ROBLOX_USER_ID")

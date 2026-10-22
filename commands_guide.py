@@ -51,6 +51,7 @@ def register_guide_commands(bot):
 
     @bot.command(name="guide")
     async def guide(ctx, *, idea: str = None):
+        """Run the interactive UGC consultation."""
         def check(m):
             return m.author == ctx.author and m.channel == ctx.channel
 

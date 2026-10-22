@@ -58,18 +58,25 @@ def fill_ledger(cur, item_id):
 
     cur.execute("""
         SELECT favorite_count FROM item_history
-        WHERE item_id = %s AND snapshot_at <= %s
+        WHERE item_id = %s
+          AND snapshot_at <= %s
+          AND snapshot_at >= %s
         ORDER BY snapshot_at DESC LIMIT 1
-    """, (iid, launched))
+    """, (iid, launched, launched - timedelta(days=7)))
     r = cur.fetchone()
     favs_launch = r[0] if r else None
 
     def fav_at(days):
+        target = launched + timedelta(days=days)
         cur.execute("""
             SELECT favorite_count FROM item_history
-            WHERE item_id = %s AND snapshot_at >= %s
-            ORDER BY snapshot_at ASC LIMIT 1
-        """, (iid, launched + timedelta(days=days)))
+            WHERE item_id = %s
+              AND snapshot_at >= %s
+              AND snapshot_at < %s
+            ORDER BY abs(extract(epoch from (snapshot_at - %s))) ASC
+            LIMIT 1
+        """, (iid, target - timedelta(hours=18),
+              target + timedelta(hours=36), target))
         r2 = cur.fetchone()
         return r2[0] if r2 else None
 

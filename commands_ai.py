@@ -702,6 +702,7 @@ def register_ai_commands(bot):
 
     @bot.command(name="ai_status")
     async def ai_status(ctx):
+        """Show which AI providers are configured and reachable."""
         if is_available():
             gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
             omodel = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
@@ -722,6 +723,7 @@ def register_ai_commands(bot):
 
     @bot.command(name="brainstorm")
     async def brainstorm(ctx, *, description: str = ""):
+        """Generate AI UGC concepts and verified titles."""
         if not description.strip():
             await ctx.send("Usage: `!brainstorm rasputin dance emote from youtube`")
             return
@@ -1159,6 +1161,7 @@ def register_ai_commands(bot):
 
     @bot.command(name="rescue")
     async def rescue(ctx, *, description: str = ""):
+        """Rebuild a failing item with verified alternatives."""
         if not description.strip():
             await ctx.send(
                 "Usage: `!rescue <describe your launched item + stats>`\n"
@@ -1370,6 +1373,7 @@ RULES:
 
     @bot.command(name="analyze_image")
     async def analyze_image(ctx, *, description: str = ""):
+        """Analyze an attached image and suggest UGC titles and tags."""
         if not is_available():
             await ctx.send("AI is offline. Run `!ai_status`.")
             return
@@ -1613,6 +1617,7 @@ RULES:
 
     @bot.command(name="ai_debug")
     async def ai_debug(ctx):
+        """Show AI provider diagnostics."""
         lines = ["**🔬 AI Debug Report**\n"]
 
         gkey = os.getenv("GEMINI_API_KEY", "")

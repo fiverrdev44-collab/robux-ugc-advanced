@@ -18,6 +18,7 @@ def register_market_commands(bot):
 
     @bot.command(name="emote_status")
     async def emote_status(ctx):
+        """Show emote catalog coverage and demand."""
         try:
             conn = get_db(); cur = conn.cursor()
             try:
@@ -56,6 +57,7 @@ def register_market_commands(bot):
 
     @bot.command(name="watchlist")
     async def watchlist_cmd(ctx):
+        """Show your watched items."""
         try:
             conn = get_db(); cur = conn.cursor()
             cur.execute("""SELECT keyword, baseline_favs, added_at FROM watchlist
@@ -75,6 +77,7 @@ def register_market_commands(bot):
 
     @bot.command(name="history")
     async def history_cmd(ctx):
+        """Show your recent saved verdicts."""
         try:
             conn = get_db(); cur = conn.cursor()
             cur.execute("""SELECT seed, verdict_label, verdict_emoji, created_at
@@ -96,6 +99,7 @@ def register_market_commands(bot):
 
     @bot.command(name="dbtest")
     async def dbtest(ctx):
+        """Run a database connectivity check."""
         try:
             conn = get_db(); cur = conn.cursor()
             lines = []
@@ -147,6 +151,7 @@ def register_market_commands(bot):
 
     @bot.command(name="scan_status")
     async def scan_status(ctx):
+        """Show scanner progress and coverage."""
         conn = get_db(); cur = conn.cursor()
         stats = get_db_stats(cur)
         cur.close(); conn.close()
@@ -162,6 +167,7 @@ def register_market_commands(bot):
 
     @bot.command(name="trends")
     async def trends(ctx):
+        """Show keyword trend history."""
         conn = get_db(); cur = conn.cursor()
         cur.execute("""SELECT name, description FROM items WHERE favorite_count > 0 
                        ORDER BY favorite_count DESC LIMIT 1000""")
@@ -181,6 +187,7 @@ def register_market_commands(bot):
 
     @bot.command(name="analyze")
     async def analyze(ctx, *, keyword: str):
+        """Analyze a keyword's market."""
         kw = keyword.strip().lower()
         if not kw:
             await ctx.send("❌ Provide a keyword."); return
@@ -222,6 +229,7 @@ def register_market_commands(bot):
 
     @bot.command(name="desc_analyze")
     async def desc_analyze(ctx, *, keyword: str):
+        """Analyze descriptions in a niche."""
         kw = keyword.strip().lower()
         if not kw:
             await ctx.send("❌ Provide a keyword."); return
@@ -264,6 +272,7 @@ def register_market_commands(bot):
 
     @bot.command(name="opportunity")
     async def opportunity(ctx, *, keyword: str):
+        """Score a keyword opportunity."""
         kw = keyword.strip().lower()
         if not kw:
             await ctx.send("❌ Provide a keyword."); return
@@ -278,6 +287,7 @@ def register_market_commands(bot):
 
     @bot.command(name="emote")
     async def emote(ctx, *, keyword: str):
+        """Show emote market data."""
         kw = keyword.strip().lower()
         if not kw:
             await ctx.send("❌ Provide a keyword."); return
@@ -292,6 +302,7 @@ def register_market_commands(bot):
 
     @bot.command(name="classic")
     async def classic(ctx, *, keyword: str):
+        """Analyze classic-clothing keyword gaps."""
         kw = keyword.strip().lower()
         if not kw:
             await ctx.send("❌ Provide a keyword."); return
@@ -306,6 +317,7 @@ def register_market_commands(bot):
 
     @bot.command(name="gap")
     async def gap(ctx, *, keyword: str = ""):
+        """Show golden, sweet, and saturated keyword gaps."""
         kw = (keyword or "").strip().lower()
         try:
             conn = get_db(); cur = conn.cursor()
@@ -390,6 +402,7 @@ def register_market_commands(bot):
 
     @bot.command(name="velocity")
     async def velocity(ctx, days: int = 30, limit: int = 15):
+        """Show favorites velocity for an item."""
         days = max(1, min(days, 90))
         limit = max(1, min(limit, 25))
         try:
@@ -443,6 +456,7 @@ def register_market_commands(bot):
 
     @bot.command(name="track")
     async def track(ctx, item_id: int):
+        """Track an item's favorites history."""
         conn = get_db(); cur = conn.cursor()
         cur.execute("SELECT name FROM items WHERE id = %s", (item_id,))
         m = cur.fetchone()

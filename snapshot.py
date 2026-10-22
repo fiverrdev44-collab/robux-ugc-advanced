@@ -163,13 +163,23 @@ def _snapshot_top_items_inner():
     cur.execute("""
         SELECT i.id, i.favorite_count, i.total_sales, i.price
         FROM items i
-        WHERE i.favorite_count >= %s
+        WHERE (
+                i.favorite_count >= %s
+                OR EXISTS (
+                    SELECT 1 FROM launch_ledger l
+                    WHERE l.item_id = i.id
+                )
+              )
           AND NOT EXISTS (
               SELECT 1 FROM item_history h
               WHERE h.item_id = i.id
                 AND h.snapshot_at >= CURRENT_DATE
           )
-        ORDER BY i.favorite_count DESC
+        ORDER BY
+          CASE WHEN EXISTS (
+              SELECT 1 FROM launch_ledger l WHERE l.item_id = i.id
+          ) THEN 0 ELSE 1 END,
+          i.favorite_count DESC NULLS LAST
         LIMIT %s
     """, (MIN_FAVS, TOP_ITEMS_LIMIT))
     rows = cur.fetchall()

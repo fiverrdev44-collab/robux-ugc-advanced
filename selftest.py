@@ -239,7 +239,7 @@ def run_selftest(bot=None, progress=None):
 
         try:
             from convergence_engine import _score_keyword
-            r = _score_keyword(cur, "anime", "emotes", min_median=0, min_demand=0)
+            r = _score_keyword(cur, "dance", "emotes", min_median=0, min_demand=0)
             add("engines", "convergence", r is not None, "scored" if r else "no result")
         except Exception as e:
             add("engines", "convergence", False, f"{type(e).__name__}: {e}")
@@ -316,8 +316,8 @@ def run_selftest(bot=None, progress=None):
         # Determinism: same input must produce the same output twice.
         try:
             from convergence_engine import _score_keyword as _sc
-            a = _sc(cur, "anime", "emotes", 0, 0)
-            b = _sc(cur, "anime", "emotes", 0, 0)
+            a = _sc(cur, "dance", "emotes", 0, 0)
+            b = _sc(cur, "dance", "emotes", 0, 0)
             add("determinism", "convergence", a == b)
         except Exception as e:
             add("determinism", "convergence", False, f"{type(e).__name__}: {e}")
