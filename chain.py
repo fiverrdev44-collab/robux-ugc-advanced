@@ -259,6 +259,7 @@ def run_chain(concept, family=None, parent_id=None):
     # ── Best niche keyword ──
     best_niche_kw = None
     best_niche_bucket = None
+    best_obj = None
     if niche_data:
         best_obj = min(niche_data, key=lambda x: (
             1 if x["bucket"] == "GOLD" else
@@ -368,6 +369,43 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
 
+    # ── Stage 10b: Staged verification ──
+    verification_audit = None
+    try:
+        from verification import verify_synth, facts_from_stats
+        niche_extra = {}
+        if best_obj:
+            niche_extra = {
+                "supply": best_obj.get("supply", 0),
+                "demand": best_obj.get("demand", 0),
+                "median_favs": best_obj.get("median_favs", 0),
+            }
+
+        def _verify():
+            conn_v = get_db(); cur_v = conn_v.cursor()
+            try:
+                facts = facts_from_stats(stats, niche_extra)
+                return verify_synth(cur_v, synth, allow_list, family, facts)
+            finally:
+                cur_v.close(); conn_v.close()
+
+        synth, verification_audit = _verify()
+    except Exception as e:
+        print(f"[chain] verification failed: {e}", flush=True)
+        if not isinstance(synth, dict):
+            synth = {}
+        for key in ("titles_safe", "titles_differentiated",
+                    "titles_longtail", "titles_viral"):
+            synth[key] = []
+        verification_audit = {
+            "error": type(e).__name__,
+            "verified": 0,
+            "rejected": [],
+            "metrics": {},
+            "claims": [],
+            "pivots": [],
+        }
+
     # ── Stage 11: Smart pipeline ──
     pipeline_report = None
     try:
@@ -414,6 +452,41 @@ OUTPUT — ONLY JSON:
             scored_titles = score_titles_batch(all_titles, family=family)
     except Exception as e:
         print(f"[chain] title scoring failed: {e}", flush=True)
+
+    try:
+        verified_metrics = (verification_audit or {}).get("metrics") or {}
+        for sc in scored_titles:
+            opp = (verified_metrics.get(sc["title"]) or {}).get("opportunity") or {}
+            sc["opportunity"] = opp
+            ctr = opp.get("ctr_proxy")
+            sc["final_score"] = (
+                round(sc["score"] * (0.5 + float(ctr) / 100.0), 2)
+                if ctr is not None else sc["score"]
+            )
+        scored_titles.sort(key=lambda x: x["final_score"], reverse=True)
+    except Exception as e:
+        print(f"[chain] opportunity rerank failed: {e}", flush=True)
+
+    # ── Stage 12b: 80% confidence intervals ──
+    confidence_data = None
+    try:
+        from confidence import build_confidence
+        conf_phrase = (scored_titles[0]["title"] if scored_titles
+                       else (best_niche_kw or concept))
+        conf_price = (stats.get("price_avg") or 0)
+
+        def _confidence():
+            conn_c = get_db(); cur_c = conn_c.cursor()
+            try:
+                return build_confidence(
+                    cur_c, family=family, phrase=conf_phrase, price=conf_price
+                )
+            finally:
+                cur_c.close(); conn_c.close()
+
+        confidence_data = _confidence()
+    except Exception as e:
+        print(f"[chain] confidence failed: {e}", flush=True)
 
     # ── Stage 13: Description + tags merge ──
     # Uses tag_generator (description_engine was removed).
@@ -491,6 +564,8 @@ OUTPUT — ONLY JSON:
         "scored_titles": scored_titles,
         "merged_description": merged_description,
         "description_audit": description_audit,
+        "verification": verification_audit,
+        "confidence": confidence_data,
     }
 
 
@@ -529,7 +604,10 @@ def format_chain(result):
             lines.append(
                 f"{e} `{k['keyword']}` — **{k['bucket']}** · "
                 f"supply {k['supply']} · median {k['median_favs']}♥ · "
-                f"demand {k['demand']}"
+                f"demand {k.get('demand_live', k['demand'])} "
+                f"({k.get('demand_volume', 0):,} vol)"
+                + ("" if k.get("demand_reliable", True)
+                   else " · low-confidence")
             )
         chunks.append("\n".join(lines))
 
@@ -662,9 +740,16 @@ def format_chain(result):
         for i, sc in enumerate(scored[:5], 1):
             gap_part = f" · gap {sc.get('visibility_gap', 0):.0f}" \
                        if sc.get("visibility_gap", 0) >= 5 else ""
+            opp = sc.get("opportunity") or {}
+            opp_part = (
+                f" · {opp.get('verdict')} · CTR {opp.get('ctr_proxy')}/100"
+                if opp else ""
+            )
             lines.append(
-                f"**#{i} `{sc['title']}`** — score **{sc['score']}**"
-                + gap_part
+                f"**#{i} `{sc['title']}`** — score **{sc.get('final_score', sc['score'])}**"
+                + (f" (raw {sc['score']})" if sc.get('final_score') is not None
+                   and sc.get('final_score') != sc['score'] else "")
+                + gap_part + opp_part
                 + (f" · unique" if sc['exact_matches'] == 0
                    else f" · {sc['exact_matches']} matches")
             )
@@ -672,8 +757,10 @@ def format_chain(result):
                             key=lambda x: x["contribution"],
                             reverse=True)[:4]:
                 if b.get("no_data"):
-                    lines.append(f"   ⚫ `{b['word']}` — no data "
-                                 f"({b['demand']} searches) → +0.0")
+                    vol = b.get("demand_volume", 0)
+                    vol_str = f" · {vol:,} volume" if vol else ""
+                    lines.append(f"   ⚫ `{b['word']}` — no niche data "
+                                 f"({b['demand']} live{vol_str}) → +0.0")
                     continue
                 lift = b["lift"]
                 if lift >= 2.5: emoji = "🟢"
@@ -683,10 +770,12 @@ def format_chain(result):
                 else: emoji = "🔴"
                 gap = b.get("visibility_gap", 0)
                 gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
+                vol = b.get("demand_volume", 0)
+                vol_str = f" · {vol:,} volume" if vol else ""
                 lines.append(
                     f"   {emoji} `{b['word']}` lift {lift}× "
-                    f"({b['sample']} items · {b['demand']} searches{gap_str}) "
-                    f"→ +{b['contribution']}"
+                    f"({b['sample']} items · {b['demand']} live{vol_str}"
+                    f"{gap_str}) → +{b['contribution']}"
                 )
             if sc.get("bigram"):
                 lines.append(f"   🎯 bigram `{sc['bigram']}` → +{sc['bigram_bonus']}")
@@ -695,13 +784,29 @@ def format_chain(result):
         for i in range(0, len(body), 1900):
             chunks.append(body[i:i+1900])
 
+    # ── VERIFICATION + CONFIDENCE ──
+    try:
+        from verification import format_audit
+        body = format_audit(result.get("verification"))
+        if body:
+            chunks.append(body)
+    except Exception:
+        pass
+    try:
+        from confidence import format_confidence
+        body = format_confidence(result.get("confidence"))
+        if body:
+            chunks.append(body)
+    except Exception:
+        pass
+
     # ── FINAL BLOCK ──
     final_lines = ["# ✅ FINAL — DO THIS"]
 
     if scored:
         champion = scored[0]["title"]
         backup = scored[1]["title"] if len(scored) > 1 else None
-        final_lines.append(f"**1. Name:** `{champion}`  ← statistical winner")
+        final_lines.append(f"**1. Name:** `{champion}`  ← verified winner")
         if backup:
             final_lines.append(f"**2. Backup name:** `{backup}`")
     else:
@@ -723,6 +828,15 @@ def format_chain(result):
             f"**4. Niche:** `{result['best_niche_kw']}` = "
             f"{result['best_niche_bucket']}"
         )
+    if scored:
+        champ_opp = scored[0].get("opportunity") or {}
+        if champ_opp:
+            final_lines.append(
+                f"**Verified title lane:** {champ_opp.get('verdict')} · "
+                f"CTR proxy {champ_opp.get('ctr_proxy')}/100 · "
+                f"demand {champ_opp.get('demand_volume', 0):,} · "
+                f"supply {champ_opp.get('supply', 0)}"
+            )
 
     if s.get("price_avg"):
         final_lines.append(f"**5. Price:** R${s.get('price_avg', 0)}")

@@ -99,6 +99,7 @@ def setup_database():
             suggestion TEXT,
             search_volume INTEGER,
             catalog_supply INTEGER,
+            rank INTEGER,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''', "search_suggestions")
@@ -113,7 +114,8 @@ def setup_database():
     _safe_exec(cur, """
         ALTER TABLE search_suggestions
         ADD COLUMN IF NOT EXISTS search_volume INTEGER,
-        ADD COLUMN IF NOT EXISTS catalog_supply INTEGER;
+        ADD COLUMN IF NOT EXISTS catalog_supply INTEGER,
+        ADD COLUMN IF NOT EXISTS rank INTEGER;
     """, "search_suggestions_cols")
 
     # Dedupe and enforce uniqueness so repeated scraper runs don't bloat

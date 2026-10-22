@@ -42,21 +42,37 @@ def _build_per_word_competition(cur, words, cap=6):
     result = []
     for w in words[:cap]:
         try:
+            pattern = rf"\y{re.escape(w)}\y"
             cur.execute("""
                 SELECT
                     COUNT(*) AS comp,
                     COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY favorite_count), 0) AS median_favs,
                     COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY price), 0) AS median_price
                 FROM items
-                WHERE LOWER(name) LIKE %s AND favorite_count > 5
-            """, (f"%{w}%",))
+                WHERE LOWER(name) ~* %s AND favorite_count > 5
+            """, (pattern,))
             row = cur.fetchone()
+            cur.execute("""
+                SELECT count(*),
+                       count(*) filter (where seed_keyword is distinct from %s),
+                       coalesce(sum(search_volume) filter
+                                (where seed_keyword is distinct from %s), 0)
+                FROM search_suggestions
+                WHERE suggestion ~* %s
+            """, ("__db_mined__", "__db_mined__", pattern))
+            demand_row = cur.fetchone() or (0, 0, 0)
             if row:
+                demand_live = int(demand_row[1] or 0)
+                demand_all = int(demand_row[0] or 0)
                 result.append({
                     "keyword": w,
                     "comp": int(row[0] or 0),
                     "median_favs": int(row[1] or 0),
                     "median_price": int(row[2] or 0),
+                    "demand": demand_live or demand_all,
+                    "demand_live": demand_live,
+                    "demand_volume": int(demand_row[2] or 0),
+                    "demand_reliable": demand_live > 0,
                 })
         except Exception as e:
             print(f"[autopsy] per-word query failed for '{w}': {e}", flush=True)
@@ -265,10 +281,25 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 except Exception as e:
                     print(f"[verdict] sales fetch failed: {e}", flush=True)
 
+                opp = None
+                try:
+                    from opportunity_score import score_opportunity
+                    opp = score_opportunity(cur, name, pct["family"])
+                except Exception as e:
+                    print(f"[verdict] opportunity failed: {e}", flush=True)
+
+                sales_ci = None
+                try:
+                    from confidence import sales_history_ci
+                    sales_ci = sales_history_ci(cur, name)
+                except Exception as e:
+                    print(f"[verdict] sales CI failed: {e}", flush=True)
+
                 return {
                     "name": name, "favs": favs or 0, "price": price or 0,
                     "age_days": float(age_days or 0), "pct": pct,
                     "sales_30d": (sales_info["units"] if sales_info else 0),
+                    "opportunity": opp, "sales_ci": sales_ci,
                 }
             finally:
                 cur.close(); conn.close()
@@ -291,10 +322,11 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         )
 
         if verdict == "TOO_NEW":
+            target_day = 30 if data["age_days"] >= 14 else 7
             actions = [
-                f"Wait {max(1, int(7 - data['age_days']))} more days",
+                f"Wait {max(1, int(target_day - data['age_days']))} more days",
                 "Post 1 TikTok per day while you wait",
-                f"Re-run `!verdict {item_id}` on day 7",
+                f"Re-run `!verdict {item_id}` on day {target_day}",
             ]
         elif verdict == "DOUBLE_DOWN":
             actions = [
@@ -324,6 +356,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         sales_line = ""
         if data["sales_30d"] > 0:
             sales_line = f" · 💰 {data['sales_30d']} sales (30d)"
+        sci = data.get("sales_ci") or {}
+        if sci.get("available"):
+            u = sci["units_30d"]
+            sales_line += (
+                f" · 80% CI {u['lo']:g}–{u['hi']:g}/30d"
+                f" ({sci.get('units_observed', 0)} observed/{sci.get('window_days', 90)}d)"
+            )
 
         lines = [
             f"{emoji} **{data['name'][:60]}**",
@@ -332,8 +371,18 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             f"_{data['age_days']:.1f}d old · {data['favs']}♥ · "
             f"{pct['velocity']}/day{sales_line}_\n",
             f"**Why:** {reason}\n",
-            "**3 actions:**",
         ]
+        opp = data.get("opportunity")
+        if opp:
+            lines.append(
+                f"**Name lane:** {opp.get('verdict')} · "
+                f"CTR proxy {opp.get('ctr_proxy')}/100 · "
+                f"demand {opp.get('demand_live', 0)} "
+                f"({opp.get('demand_volume', 0):,} vol) · "
+                f"supply {opp.get('supply', 0)} · "
+                f"exact {opp.get('exact', 0)}\n"
+            )
+        lines.append("**3 actions:**")
         for i, a in enumerate(actions, 1):
             lines.append(f"{i}. {a}")
 
@@ -519,10 +568,11 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             )
 
             if verdict == "TOO_NEW":
+                target_day = 30 if item_stats["age_days"] >= 14 else 7
                 acts = [
-                    f"Wait {max(1, int(7 - item_stats['age_days']))} more days",
+                    f"Wait {max(1, int(target_day - item_stats['age_days']))} more days",
                     "Post 1 TikTok per day while you wait",
-                    f"Re-run `!autopsy {item_id}` on day 7",
+                    f"Re-run `!autopsy {item_id}` on day {target_day}",
                 ]
             elif verdict == "DOUBLE_DOWN":
                 acts = ["Launch a **variant** within 7 days — same motion, new theme.",
@@ -615,7 +665,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         deep_intel = None
         try:
             from gemini_brain import (
-                is_available, extract_keywords, _generate, verify_titles,
+                is_available, extract_keywords, _generate,
                 classify_keyword_intelligence, format_keyword_intel_for_prompt,
             )
             if competition_data:
@@ -637,19 +687,69 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 if fast_class and fast_class.get("classifications"):
                     intel_lines.append(format_keyword_classifications(fast_class))
                     intel_lines.append("")
+                facts = []
+                for cdata in competition_data:
+                    facts.extend([
+                        cdata.get("comp", 0), cdata.get("median_favs", 0),
+                        cdata.get("demand", 0), cdata.get("demand_volume", 0),
+                    ])
+                facts.extend([
+                    item_stats.get("favs", 0), item_stats.get("sales", 0),
+                    item_stats.get("price", 0), item_stats.get("age_days", 0),
+                    item_stats.get("winner_median_favs", 0),
+                ])
+
                 if deep_intel and deep_intel.get("diagnosis"):
+                    from verification import verify_claims_text
+                    diag_clean, diag_drops = verify_claims_text(
+                        deep_intel["diagnosis"], facts, allow_small={7, 14, 30}
+                    )
                     intel_lines.append("## 🎯 DIAGNOSIS")
-                    intel_lines.append(deep_intel["diagnosis"])
+                    intel_lines.append(diag_clean or "(removed: unverifiable claims)")
+                    if diag_drops:
+                        intel_lines.append(
+                            f"_( {len(diag_drops)} unsupported numeric claim(s) "
+                            f"removed )_"
+                        )
                     intel_lines.append("")
                     bp = deep_intel.get("best_pivot") or {}
                     if bp.get("keyword"):
-                        intel_lines.append("## 🚀 BEST PIVOT (from DB, may also be saturated)")
-                        intel_lines.append(
-                            f"**`{bp.get('keyword')}`** — supply={bp.get('supply',0)}, "
-                            f"median_favs={bp.get('median_favs',0)}, bucket={bp.get('bucket','?')}"
-                        )
-                        if bp.get("why_better"):
-                            intel_lines.append(f"> {bp['why_better']}")
+                        def _vp():
+                            conn_v = get_db(); cur_v = conn_v.cursor()
+                            try:
+                                from verification import verify_pivot
+                                return verify_pivot(cur_v, bp, family)
+                            finally:
+                                cur_v.close(); conn_v.close()
+
+                        vp, vp_reason = await asyncio.to_thread(_vp)
+                        if vp:
+                            intel_lines.append(
+                                "## 🚀 BEST PIVOT (verified against DB)"
+                            )
+                            intel_lines.append(
+                                f"**`{vp['keyword']}`** — supply={vp['supply']}, "
+                                f"median_favs={vp['median_favs']}, "
+                                f"demand={vp['demand']} "
+                                f"({vp.get('demand_volume', 0):,} vol), "
+                                f"bucket={vp['bucket']}, "
+                                f"CTR proxy={vp['ctr_proxy']}/100"
+                            )
+                            why_clean, _ = verify_claims_text(
+                                bp.get("why_better"),
+                                [vp.get("supply", 0), vp.get("median_favs", 0),
+                                 vp.get("demand", 0)],
+                                allow_small={7, 14, 30},
+                            )
+                            if why_clean:
+                                intel_lines.append(f"> {why_clean}")
+                        else:
+                            deep_intel["best_pivot"] = {}
+                            intel_lines.append(
+                                f"## 🚀 BEST PIVOT — REJECTED\n"
+                                f"_AI proposed `{bp.get('keyword')}`; "
+                                f"verification failed: {vp_reason}_"
+                            )
 
                 intel_body = "\n".join(intel_lines)
                 try: await intel_msg.edit(content=intel_body[:1900])
@@ -662,7 +762,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         # ── AI helpers ──
         try:
-            from gemini_brain import is_available, extract_keywords, _generate, verify_titles
+            from gemini_brain import is_available, extract_keywords, _generate
         except Exception:
             return
         if not is_available():
@@ -857,33 +957,111 @@ description_seo, description_hype, description_short
 
             forbidden_first_set = {w.lower() for w in forbidden_first}
 
+            def _deep_verify_groups():
+                from verification import verify_titles_deep
+                conn_v = get_db(); cur_v = conn_v.cursor()
+                try:
+                    out = {}
+                    rejected_all = []
+                    all_metrics = {}
+                    for gname, gtitles in all_groups.items():
+                        v, r, gmetrics = verify_titles_deep(
+                            cur_v, gtitles, allow_list, family
+                        )
+                        all_metrics.update(gmetrics)
+                        kept = []
+                        for title in v:
+                            first = (title.lower().split() or [""])[0]
+                            if first in forbidden_first_set:
+                                rejected_all.append(
+                                    (gname, title,
+                                     ["starts with a SATURATED keyword"])
+                                )
+                            else:
+                                kept.append(title)
+                        if kept:
+                            out[gname] = kept
+                        rejected_all.extend(
+                            (gname, title, reasons) for title, reasons in r
+                        )
+                    return out, rejected_all, all_metrics
+                finally:
+                    cur_v.close(); conn_v.close()
+
             verified_groups = {}
-            rejected_count = 0
-            for gname, gtitles in all_groups.items():
-                v, r = verify_titles(gtitles, allow_list)
-                v_clean = []
-                for t in v:
-                    toks = t.lower().split()
-                    if toks and toks[0] in forbidden_first_set:
-                        rejected_count += 1
-                        continue
-                    v_clean.append(t)
-                if v_clean:
-                    verified_groups[gname] = v_clean
+            deep_rejected = []
+            deep_metrics = {}
+            verification_error = None
+            try:
+                verified_groups, deep_rejected, deep_metrics = (
+                    await asyncio.to_thread(_deep_verify_groups)
+                )
+            except Exception as e:
+                verification_error = type(e).__name__
+                print(f"[autopsy] deep verification failed: {e}", flush=True)
+                deep_rejected = []
+                deep_metrics = {}
+
+            claim_drops = []
+            try:
+                from verification import verify_claims_text
+                facts = [
+                    item_stats.get("favs", 0), item_stats.get("sales", 0),
+                    item_stats.get("price", 0), item_stats.get("age_days", 0),
+                    item_stats.get("winner_median_favs", 0),
+                    stats.get("count", 0), stats.get("avg_favs", 0),
+                    stats.get("median_favs", 0), stats.get("price_avg", 0),
+                ]
+                for cdata in competition_data:
+                    facts.extend([
+                        cdata.get("comp", 0), cdata.get("median_favs", 0),
+                        cdata.get("demand", 0), cdata.get("demand_volume", 0),
+                    ])
+                for key in ("what_was_wrong", "edit_reasoning",
+                            "description_seo", "description_hype",
+                            "description_short"):
+                    cleaned, dropped = verify_claims_text(
+                        data.get(key), facts, allow_small={7, 14, 30}
+                    )
+                    if dropped:
+                        data[key] = cleaned
+                        claim_drops.extend({"field": key, **d} for d in dropped)
+            except Exception as e:
+                print(f"[autopsy] claim check failed: {e}", flush=True)
+
+            rejected_count = len(deep_rejected)
 
             lines = ["# 🧠 10 RECOVERY TITLES\n"]
+            if verification_error:
+                lines.append(
+                    "⚠️ **Verification unavailable** — AI titles are withheld "
+                    f"until the database check succeeds (`{verification_error}`).\n"
+                )
+            if claim_drops:
+                lines.append(
+                    f"_({len(claim_drops)} unsupported numeric claim(s) "
+                    f"removed from the AI copy.)_\n"
+                )
             if verified_groups:
                 for gname, titles in verified_groups.items():
+                    if not titles:
+                        continue
                     lines.append(f"**{gname}**")
                     for t in titles:
                         lines.append(f"• `{t}`")
                     lines.append("")
                 if rejected_count:
                     lines.append(
-                        f"_({rejected_count} title(s) rejected for starting with "
-                        f"a SATURATED keyword.)_\n"
+                        f"_({rejected_count} title(s) rejected by token, "
+                        f"saturation, or forbidden-first-word checks.)_\n"
                     )
-            else:
+                    for gname, title, reasons in deep_rejected[:6]:
+                        lines.append(
+                            f"• ❌ `{title[:60]}` — "
+                            f"{'; '.join(reasons)[:140]}"
+                        )
+                    lines.append("")
+            elif not verification_error:
                 lines.append("⚠️ All titles failed verification.")
 
             lines.append("---\n")
@@ -932,22 +1110,41 @@ description_seo, description_hype, description_short
             try:
                 from title_scorer import score_titles_batch, pick_champion
                 all_titles = []
-                for k in ("titles_safe", "titles_differentiated",
-                          "titles_longtail", "titles_viral"):
-                    all_titles.extend(data.get(k) or [])
+                for titles in verified_groups.values():
+                    all_titles.extend(titles)
                 if all_titles:
                     scored_recovery = await asyncio.to_thread(
                         score_titles_batch, all_titles, family
+                    )
+                    for sc in scored_recovery:
+                        opp = ((deep_metrics.get(sc["title"]) or {})
+                               .get("opportunity") or {})
+                        sc["opportunity"] = opp
+                        ctr = opp.get("ctr_proxy")
+                        sc["final_score"] = (
+                            round(sc["score"] * (0.5 + float(ctr) / 100.0), 2)
+                            if ctr is not None else sc["score"]
+                        )
+                    scored_recovery.sort(
+                        key=lambda x: x["final_score"], reverse=True
                     )
                     champion, backup, _ = pick_champion(scored_recovery)
 
                     stat_lines = ["# 📊 STATISTICAL RECOVERY RANKING\n",
                                   "_Real word-lift × search-demand from DB._\n"]
                     for i, sc in enumerate(scored_recovery[:5], 1):
+                        opp = sc.get("opportunity") or {}
+                        opp_part = (
+                            f" · {opp.get('verdict')} · "
+                            f"CTR {opp.get('ctr_proxy')}/100"
+                            if opp else ""
+                        )
                         stat_lines.append(
-                            f"**#{i} `{sc['title']}`** — score **{sc['score']}**"
+                            f"**#{i} `{sc['title']}`** — score "
+                            f"**{sc.get('final_score', sc['score'])}**"
                             + (f" · gap {sc.get('visibility_gap', 0):.0f}"
                                if sc.get("visibility_gap", 0) >= 5 else "")
+                            + opp_part
                             + (f" · unique" if sc['exact_matches'] == 0
                                else f" · {sc['exact_matches']} matches")
                         )
@@ -959,10 +1156,12 @@ description_seo, description_hype, description_short
                             lift = b["lift"]
                             emoji = "🟢" if lift >= 2.5 else "🔵" if lift >= 1.5 \
                                     else "⚪" if lift >= 1.0 else "🟠" if lift >= 0.5 else "🔴"
+                            vol = b.get("demand_volume", 0)
+                            vol_str = f" · {vol:,} volume" if vol else ""
                             stat_lines.append(
                                 f"   {emoji} `{b['word']}` lift {lift}× "
-                                f"({b['sample']} items · {b['demand']} searches) "
-                                f"→ +{b['contribution']}"
+                                f"({b['sample']} items · {b['demand']} live"
+                                f"{vol_str}) → +{b['contribution']}"
                             )
                         stat_lines.append("")
 
@@ -973,6 +1172,29 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] title scoring failed: {e}", flush=True)
 
+            # COHORT EVIDENCE — comparable cohort, not a guarantee
+            try:
+                from confidence import build_confidence, format_confidence
+
+                def _conf():
+                    conn_c = get_db(); cur_c = conn_c.cursor()
+                    try:
+                        return build_confidence(
+                            cur_c, family=family,
+                            phrase=champion["title"] if champion else name,
+                            price=price or 0,
+                        )
+                    finally:
+                        cur_c.close(); conn_c.close()
+
+                conf_data = await asyncio.to_thread(_conf)
+                conf_body = format_confidence(conf_data)
+                for i in range(0, len(conf_body), 1900):
+                    await ctx.send(conf_body[i:i+1900])
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"[autopsy] confidence failed: {e}", flush=True)
+
             # TAGS MERGE — uses tag_generator (not description_engine)
             merged_desc = None
             try:
@@ -981,8 +1203,6 @@ description_seo, description_hype, description_short
                 tag_seed = None
                 if champion and champion.get("title"):
                     tag_seed = champion["title"]
-                elif data.get("titles_safe"):
-                    tag_seed = data["titles_safe"][0]
                 elif name:
                     tag_seed = name
 
@@ -1039,14 +1259,16 @@ description_seo, description_hype, description_short
                 name_label = ("**1. Name for the new upload:**" if kill
                               else "**1. New name:**")
                 final_lines.append(
-                    f"{name_label} `{champion['title']}`  ← statistical winner"
+                    f"{name_label} `{champion['title']}`  ← verified winner"
                 )
                 if backup:
                     final_lines.append(
                         f"**2. Backup name:** `{backup['title']}`"
                     )
-            elif data.get("titles_safe"):
-                final_lines.append(f"**1. New name:** `{data['titles_safe'][0]}`")
+            else:
+                final_lines.append(
+                    "**1. New name:** none — no AI title passed verification."
+                )
 
             if merged_desc:
                 desc_label = ("**3. Description for the new upload:** (block above)"
@@ -1071,7 +1293,7 @@ description_seo, description_hype, description_short
                 )
             elif too_new:
                 final_lines.append(
-                    "**5. Today:** nothing. Give it another week of traffic."
+                    "**5. Today:** nothing. Judge it again on day 30."
                 )
             else:
                 final_lines.append(

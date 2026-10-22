@@ -83,13 +83,21 @@ def classify_keyword(cur, keyword, family=None):
     supply = row[0] or 0
     median_favs = min(float(row[1] or 0), 5000)  # cap outlier skew
 
-    # Demand (word-boundary matched)
-    cur.execute(
-        f"select count(*) from search_suggestions "
-        f"where suggestion {match_op} %s",
-        (pat,)
-    )
-    demand = cur.fetchone()[0] or 0
+    # Demand (word-boundary matched, live suggestions preferred)
+    cur.execute(f"""
+        select count(*),
+               count(*) filter (where seed_keyword is distinct from %s),
+               coalesce(sum(search_volume) filter
+                        (where seed_keyword is distinct from %s), 0)
+        from search_suggestions
+        where suggestion {match_op} %s
+    """, ("__db_mined__", "__db_mined__", pat))
+    demand_row = cur.fetchone()
+    demand_all = int(demand_row[0] or 0)
+    demand_live = int(demand_row[1] or 0)
+    demand_volume = int(demand_row[2] or 0)
+    demand_reliable = demand_live > 0
+    demand = demand_live if demand_reliable else demand_all
 
     if supply == 0 and demand == 0:
         bucket = "GHOST"
@@ -110,6 +118,9 @@ def classify_keyword(cur, keyword, family=None):
         "supply": supply,
         "median_favs": round(median_favs, 1),
         "demand": demand,
+        "demand_live": demand_live,
+        "demand_volume": demand_volume,
+        "demand_reliable": demand_reliable,
         "bucket": bucket,
     }
 
@@ -253,15 +264,23 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
             return ("KILL", "🪦",
                     f"{age:.0f}d · {f}♥. Peer median is higher. "
                     f"Move on.{low_conf}")
-        if age >= 14 and f < 5:
+        if age >= 21 and f < 5:
             return ("KILL", "🪦",
                     f"{age:.0f}d · {f}♥. Not being discovered.{low_conf}")
-        if age >= 7 and f < 3:
+        if age >= 14 and f < 3:
             return ("KILL", "🪦",
-                    f"{age:.0f}d · {f}♥. Zero traction after a week.{low_conf}")
+                    f"{age:.0f}d · {f}♥. Zero traction after two weeks.{low_conf}")
 
-    # PRIORITY 4: FREEFALLER
-    if (v < 0.3 and age is not None and age >= 14
+    # PRIORITY 4: GRACE WINDOW — slow starters get 30 days before a velocity kill.
+    # Roblox discovery often needs a few weeks; killing at 14d was too eager.
+    if (v < 0.3 and age is not None and 14 <= age < 30
+            and f is not None and f < 50):
+        return ("TOO_NEW", "⏳",
+                f"{age:.0f}d · {f}♥ · {v}/day. Too early to bury it — "
+                f"judge again at 30d.{low_conf}")
+
+    # PRIORITY 4b: FREEFALLER (post-grace)
+    if (v < 0.3 and age is not None and age >= 30
             and f is not None and f < 50):
         return ("KILL", "🪦",
                 f"{v}/day at {age:.0f}d · {f}♥. Trajectory has "

@@ -10,6 +10,7 @@ FIXES in this version:
 - 3-tier median fallback: 25 → 20 → 15 (never empty).
 - Bulletproof family clause.
 """
+import math
 import re
 from collections import Counter
 from bot_core import get_db
@@ -33,6 +34,22 @@ ASSET_TO_FAMILY = {}
 for fam, ids in FAMILIES.items():
     for aid in ids:
         ASSET_TO_FAMILY[aid] = fam
+
+
+def resolve_family_ids(family):
+    if not family or family == "all":
+        return None
+    key = str(family).lower()
+    if key == "accessory":
+        return [43, 44, 45, 46, 47]
+    try:
+        from category_configs import to_convergence_family
+        key = to_convergence_family(key)
+    except Exception:
+        pass
+    if key == "accessory":
+        return [43, 44, 45, 46, 47]
+    return FAMILIES.get(key)
 
 
 # ── Generic words that are NEVER niche keywords ────────────────
@@ -242,11 +259,23 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     if median_favs > 50_000:       return None
     if median_favs < min_median:   return None
 
-    cur.execute(
-        f"select count(*) from search_suggestions where suggestion {match_op} %s",
-        (pat,)
-    )
-    demand = cur.fetchone()[0] or 0
+    cur.execute(f"""
+        select count(*),
+               coalesce(sum(search_volume), 0),
+               count(*) filter (where seed_keyword is distinct from %s),
+               coalesce(sum(search_volume) filter
+                        (where seed_keyword is distinct from %s), 0)
+        from search_suggestions
+        where suggestion {match_op} %s
+    """, ("__db_mined__", "__db_mined__", pat))
+    demand_row = cur.fetchone()
+    demand_all = int(demand_row[0] or 0)
+    volume_all = int(demand_row[1] or 0)
+    demand_live = int(demand_row[2] or 0)
+    volume_live = int(demand_row[3] or 0)
+    demand_reliable = demand_live > 0
+    demand = demand_live if demand_reliable else demand_all
+    volume = volume_live if demand_reliable else volume_all
     if demand < min_demand:        return None
 
     cur.execute(f"""
@@ -296,7 +325,17 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     if concentration > 0.65:
         return None
 
-    demand_score   = min(demand / 30.0, 1.0)
+    if demand_reliable:
+        count_score = min(math.log1p(demand) / math.log1p(30.0), 1.0)
+        if volume > 0:
+            volume_score = min(
+                math.log1p(volume) / math.log1p(1_000_000), 1.0
+            )
+            demand_score = 0.6 * volume_score + 0.4 * count_score
+        else:
+            demand_score = count_score
+    else:
+        demand_score = min(demand / 30.0, 1.0) * 0.25
     velocity_score = min(velocity / 5.0, 1.0)
 
     if supply <= 5:      supply_score = 0.3
@@ -318,6 +357,9 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
         "family": family or "all",
         "score": round(score, 1),
         "demand": demand,
+        "demand_live": demand_live,
+        "demand_reliable": demand_reliable,
+        "demand_volume": volume,
         "velocity": round(velocity, 2),
         "supply": supply,
         "recent": recent,
@@ -356,10 +398,14 @@ def format_brief(r):
            if r.get("family") and r["family"] != "all" else "")
     return (
         f"**🎯 `{r['keyword']}`{fam} — [{r['score']}]**{zone}\n"
-        f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d · "
+        f"  📈 demand {r['demand']} live / "
+        f"{r.get('demand_volume', 0):,} volume · "
+        f"⚡ vel {r['velocity']}/d · "
         f"📦 supply {r['supply']} · 🆕 recent {r['recent']} · "
         f"🎯 median {r['avg_favs']}♥ · "
         f"👑 top {int(r['concentration']*100)}%"
+        + ("" if r.get("demand_reliable", True)
+           else " · _demand low-confidence_")
     )
 
 

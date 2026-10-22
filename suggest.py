@@ -113,17 +113,26 @@ def try_endpoint(endpoint, seed):
             parsed = []
             for s in items:
                 if isinstance(s, str):
-                    parsed.append(s.strip().lower())
+                    parsed.append((s.strip().lower(), None))
                 elif isinstance(s, dict):
                     kw = (
-                        s.get("keyword") or s.get("text") or s.get("name")
-                        or s.get("query") or s.get("displayName")
+                        s.get("Query") or s.get("query") or s.get("keyword")
+                        or s.get("Keyword") or s.get("text") or s.get("Text")
+                        or s.get("name") or s.get("Name")
+                        or s.get("displayName") or s.get("DisplayName")
                         or s.get("searchTerm") or s.get("phrase")
-                        or s.get("value") or s.get("Name") or s.get("Text")
-                        or s.get("Keyword") or s.get("DisplayName")
+                        or s.get("value")
+                    )
+                    score = (
+                        s.get("Score") or s.get("score")
+                        or s.get("searchVolume") or s.get("volume")
                     )
                     if kw:
-                        parsed.append(str(kw).strip().lower())
+                        try:
+                            score = int(score) if score is not None else None
+                        except (TypeError, ValueError):
+                            score = None
+                        parsed.append((str(kw).strip().lower(), score))
             if parsed:
                 return parsed
         return []
@@ -219,7 +228,7 @@ def run_suggest():
         for i, future in enumerate(as_completed(futures), 1):
             seed, suggs, endpoint = future.result()
             if suggs:
-                results.append((seed, suggs))
+                results.append((seed, suggs, endpoint))
                 if not working_endpoint:
                     working_endpoint = endpoint
                     print(f"  ✅ Working endpoint: {endpoint}")
@@ -231,14 +240,19 @@ def run_suggest():
     cur = conn.cursor()
 
     if results:
-        real_suggestions = sum(len(s) for _, s in results)
+        real_suggestions = sum(len(s) for _, s, _ in results)
         print(f"💾 Saving {real_suggestions} real suggestions from {len(results)} seeds...")
-        for seed, suggs in results:
-            for s in suggs:
+        for seed, suggs, _endpoint in results:
+            for rank, (s, score) in enumerate(suggs, 1):
                 cur.execute(
-                    "INSERT INTO search_suggestions (seed_keyword, suggestion) "
-                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                    (seed, s)
+                    "INSERT INTO search_suggestions "
+                    "(seed_keyword, suggestion, rank, search_volume) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (seed_keyword, lower(suggestion)) DO UPDATE SET "
+                    "rank = EXCLUDED.rank, "
+                    "search_volume = EXCLUDED.search_volume, "
+                    "fetched_at = CURRENT_TIMESTAMP",
+                    (seed, s, rank, score)
                 )
                 total += 1
         conn.commit()
@@ -249,8 +263,9 @@ def run_suggest():
         fallback = mine_database_keywords()
         for phrase, count in fallback:
             cur.execute(
-                "INSERT INTO search_suggestions (seed_keyword, suggestion) "
-                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                "INSERT INTO search_suggestions "
+                "(seed_keyword, suggestion, rank) "
+                "VALUES (%s, %s, NULL) ON CONFLICT DO NOTHING",
                 ("__db_mined__", phrase)
             )
             total += 1

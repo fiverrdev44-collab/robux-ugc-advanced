@@ -31,7 +31,8 @@ CORE_MODULES = [
     "bot_ui", "tag_generator", "desc_forge", "recovery_brain",
     "creative_pivot", "creative_expand", "peer_autopsy", "algo_brain",
     "gemini_brain", "pivot_history", "live_enrich",
-    "discover_keywords", "backfill_dates",
+    "discover_keywords", "backfill_dates", "confidence",
+    "verification", "opportunity_score",
 ]
 
 EXPECTED_COMMANDS = [

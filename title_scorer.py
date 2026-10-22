@@ -9,7 +9,7 @@ FIXES in this version:
 """
 import re
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from bot_core import get_db
 from convergence_engine import FAMILIES
 
@@ -160,17 +160,21 @@ def compute_search_demand(cur, words):
         return {}
     patterns = [rf"\y{re.escape(w)}\y" for w in words]
     cur.execute("""
-        select suggestion from search_suggestions
+        select suggestion, seed_keyword, search_volume
+        from search_suggestions
         where suggestion ~* any(%s) limit 5000
     """, (patterns,))
     rows = cur.fetchall()
 
-    demand = Counter()
-    for (s,) in rows:
+    demand = defaultdict(lambda: {"count": 0, "live": 0, "volume": 0})
+    for s, seed, volume in rows:
         sl = (s or "").lower()
         for w in words:
             if re.search(rf"\b{re.escape(w)}\b", sl):
-                demand[w] += 1
+                demand[w]["count"] += 1
+                if seed != "__db_mined__":
+                    demand[w]["live"] += 1
+                    demand[w]["volume"] += int(volume or 0)
     return dict(demand)
 
 
@@ -211,9 +215,16 @@ def score_title(cur, title, family=None, word_stats=None, demand_map=None):
     for w in words:
         st = word_stats.get(w, {})
         if not st:
+            dval = demand_map.get(w, 0)
+            if isinstance(dval, dict):
+                dem_live = int(dval.get("live") or 0)
+                dem_vol = int(dval.get("volume") or 0)
+            else:
+                dem_live, dem_vol = int(dval or 0), 0
             breakdown.append({
                 "word": w, "lift": 1.0, "sample": 0,
-                "demand": demand_map.get(w, 0), "freshness": 1.0,
+                "demand": dem_live, "demand_volume": dem_vol,
+                "demand_reliable": bool(dem_live), "freshness": 1.0,
                 "contribution": 0.0, "visibility_gap": 0.0,
                 "no_data": True,
             })
@@ -222,9 +233,24 @@ def score_title(cur, title, family=None, word_stats=None, demand_map=None):
         lift = st.get("lift", 1.0)
         cnt = st.get("count", 0)
         fresh = st.get("freshness", 1.0)
-        dem = demand_map.get(w, 0)
+        demand_raw = demand_map.get(w, 0)
+        if isinstance(demand_raw, dict):
+            dem = int(demand_raw.get("live") or demand_raw.get("count") or 0)
+            dem_volume = int(demand_raw.get("volume") or 0)
+            dem_reliable = bool(demand_raw.get("live"))
+        else:
+            dem = int(demand_raw or 0)
+            dem_volume = 0
+            dem_reliable = False
 
-        dem_mult = 1 + math.log1p(dem) / 3.0
+        if dem_reliable and dem_volume > 0:
+            dem_mult = 1 + (0.5 * math.log1p(dem) / 3.0
+                            + 0.5 * math.log1p(dem_volume)
+                            / math.log1p(1_000_000))
+        elif dem_reliable:
+            dem_mult = 1 + math.log1p(dem) / 3.0
+        else:
+            dem_mult = 1 + 0.1 * math.log1p(dem) / 3.0
         conf = min(1.0, cnt / CONFIDENCE_CAP)
         fresh_mult = 1 + (fresh - 1) * 0.3
 
@@ -237,7 +263,8 @@ def score_title(cur, title, family=None, word_stats=None, demand_map=None):
 
         breakdown.append({
             "word": w, "lift": lift, "sample": cnt,
-            "demand": dem, "freshness": fresh,
+            "demand": dem, "demand_volume": dem_volume,
+            "demand_reliable": dem_reliable, "freshness": fresh,
             "contribution": round(contribution, 2),
             "visibility_gap": round(visibility_gap, 2),
         })
@@ -318,7 +345,12 @@ def format_report(s, show_all_words=False):
     ranked = sorted(s["breakdown"], key=lambda x: x["contribution"], reverse=True)
     for b in ranked:
         if b.get("no_data"):
-            lines.append(f"  ⚫ `{b['word']}` — no data ({b['demand']} searches) → +0.0")
+            vol = b.get("demand_volume", 0)
+            vol_str = f" · {vol:,} volume" if vol else ""
+            lines.append(
+                f"  ⚫ `{b['word']}` — no niche data "
+                f"({b['demand']} live{vol_str}) → +0.0"
+            )
             continue
         lift = b["lift"]
         if lift >= 2.5: emoji = "🟢"
@@ -328,9 +360,11 @@ def format_report(s, show_all_words=False):
         else: emoji = "🔴"
         gap = b.get("visibility_gap", 0)
         gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
+        vol = b.get("demand_volume", 0)
+        vol_str = f" · {vol:,} volume" if vol else ""
         lines.append(
             f"  {emoji} `{b['word']}` lift {lift}× "
-            f"({b['sample']} items · {b['demand']} searches{gap_str}) "
+            f"({b['sample']} items · {b['demand']} live{vol_str}{gap_str}) "
             f"→ +{b['contribution']}"
         )
     if s.get("bigram"):

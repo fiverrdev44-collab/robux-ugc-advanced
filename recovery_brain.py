@@ -95,7 +95,8 @@ ESCALATION_LADDER = {
 # ============================================================
 # 🧠 NEW — KEYWORD HEALTH CLASSIFICATION (SUPERCOMPUTER LAYER)
 # ============================================================
-def classify_keyword_health(comp_count, median_favs, median_age_days=None):
+def classify_keyword_health(comp_count, median_favs, median_age_days=None,
+                            demand=None, demand_reliable=True):
     """
     Classify a keyword using BOTH supply and demand (never supply alone).
 
@@ -118,18 +119,24 @@ def classify_keyword_health(comp_count, median_favs, median_age_days=None):
         vel = favs / median_age_days
         vel_note = f" (~{vel:.1f} favs/day)"
 
+    demand_note = (f", demand={demand}" if demand is not None else "")
+    if demand is not None and not demand_reliable:
+        demand_note += " (low-confidence)"
     if favs < 15:
         return ("DEAD", "🔴",
-                f"Only {favs:,} median favs{vel_note} — no meaningful demand")
+                f"Only {favs:,} median favs{vel_note}{demand_note} — no meaningful demand")
+    if demand is not None and demand == 0 and demand_reliable:
+        return ("WEAK", "🟠",
+                f"{comp} competitors but zero live search demand{vel_note} — no pull")
     if comp < 20 and favs >= 150:
         return ("GOLD", "🟢",
-                f"Only {comp} competitors with {favs:,} median favs{vel_note} — rare opportunity")
+                f"Only {comp} competitors with {favs:,} median favs{vel_note}{demand_note} — rare opportunity")
     if comp < 50 and favs >= 80:
         return ("OPPORTUNITY", "🔵",
-                f"{comp} competitors, {favs:,} median favs{vel_note} — strong entry point")
+                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} — strong entry point")
     if comp >= 50 and favs >= 80:
         return ("SATURATED", "🟡",
-                f"{comp} competitors, {favs:,} median favs{vel_note} — HIGH DEMAND but saturated")
+                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} — HIGH DEMAND but saturated")
     if comp < 20 and favs < 50:
         return ("WEAK", "🟠",
                 f"Only {comp} competitors but just {favs:,} median favs{vel_note} — low demand")
@@ -169,11 +176,17 @@ def classify_competition_batch(competition_data):
         comp = d.get("comp") or d.get("competitors") or 0
         favs = d.get("median_favs") or d.get("median") or 0
         age = d.get("median_age_days")
-        bucket, emoji, reasoning = classify_keyword_health(comp, favs, age)
+        demand = d.get("demand")
+        reliable = d.get("demand_reliable", True)
+        bucket, emoji, reasoning = classify_keyword_health(
+            comp, favs, age, demand=demand, demand_reliable=reliable
+        )
         classifications.append({
             "keyword": kw,
             "supply": comp,
             "median_favs": favs,
+            "demand": demand,
+            "demand_reliable": reliable,
             "bucket": bucket,
             "emoji": emoji,
             "reasoning": reasoning,
@@ -236,8 +249,13 @@ def format_keyword_classifications(classification_result):
         lines.append("")
     lines.append("**ALL KEYWORDS:**")
     for c in classification_result.get("classifications", []):
+        demand_part = (f" · demand={c['demand']}"
+                       if c.get("demand") is not None else "")
+        if c.get("demand") is not None and not c.get("demand_reliable", True):
+            demand_part += " (low-confidence)"
         lines.append(f"{c['emoji']} `{c['keyword']}` — {c['bucket']} "
-                     f"· supply={c['supply']} · median_favs={c['median_favs']}")
+                     f"· supply={c['supply']} · median_favs={c['median_favs']}"
+                     f"{demand_part}")
     pivot = classification_result.get("best_pivot")
     if pivot:
         lines.append("")

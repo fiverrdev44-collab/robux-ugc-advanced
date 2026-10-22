@@ -18,7 +18,7 @@ import discord
 from collections import Counter, defaultdict
 
 from gemini_brain import (
-    extract_keywords, all_terms, synthesize_hybrid, verify_titles,
+    extract_keywords, all_terms, synthesize_hybrid,
     is_available, expand_search_terms, analyze_image_for_ugc,
 )
 from algo_brain import build_algo_context
@@ -415,6 +415,17 @@ def _find_gap_alternatives(terms, top_n=5):
         try:
             if conn: conn.close()
         except Exception: pass
+
+
+def _verify_titles_deep_sync(titles, allow_list, family):
+    from verification import verify_titles_deep
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        return verify_titles_deep(cur, titles, allow_list, family)
+    finally:
+        cur.close()
+        conn.close()
 
 
 def _build_allow_list(intent, max_keywords=60, gap_words=None, family=None):
@@ -988,6 +999,21 @@ def register_ai_commands(bot):
             print(f"[brainstorm] synth failed: {e}", flush=True)
             synth = None
 
+        if synth:
+            try:
+                from verification import verify_claims_text, facts_from_stats
+                facts = facts_from_stats(stats)
+                for key in ("search_diagnosis", "positioning",
+                            "market_diagnosis", "winner_blueprint",
+                            "saturation_verdict"):
+                    cleaned, dropped = verify_claims_text(
+                        synth.get(key), facts, allow_small={7, 14, 30}
+                    )
+                    if dropped:
+                        synth[key] = cleaned
+            except Exception as e:
+                print(f"[brainstorm] claim check failed: {e}", flush=True)
+
         if not synth:
             try:
                 await progress.delete()
@@ -1077,8 +1103,16 @@ def register_ai_commands(bot):
         verified_groups = {}
         total_verified = 0
         total_rejected = 0
+        deep_metrics = {}
         for group_name, group_titles in all_groups.items():
-            v, r = verify_titles(group_titles, allow_list)
+            try:
+                v, r, m = await asyncio.to_thread(
+                    _verify_titles_deep_sync, group_titles, allow_list, family
+                )
+                deep_metrics.update(m)
+            except Exception as e:
+                print(f"[brainstorm] deep verification failed: {e}", flush=True)
+                v, r = [], []
             if v:
                 verified_groups[group_name] = v
                 total_verified += len(v)
@@ -1087,6 +1121,17 @@ def register_ai_commands(bot):
         body = _fmt_ai_result(synth, verified_groups, [], stats, family,
                               total_verified=total_verified,
                               total_rejected=total_rejected)
+        opps = [(t, m.get("opportunity")) for t, m in deep_metrics.items()
+                if m.get("opportunity")]
+        if opps:
+            title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
+            body += (
+                f"\n## 🎯 CTR proxy\n"
+                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
+                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"demand {opp.get('demand_volume', 0):,} · "
+                f"supply {opp.get('supply', 0)}"
+            )
 
         try:
             await progress.delete()
@@ -1204,6 +1249,19 @@ RULES:
             print(f"[rescue] failed: {e}", flush=True)
             synth = None
 
+        if synth:
+            try:
+                from verification import verify_claims_text, facts_from_stats
+                facts = facts_from_stats(stats)
+                for key in ("diagnosis", "what_winners_do"):
+                    cleaned, dropped = verify_claims_text(
+                        synth.get(key), facts, allow_small={7, 14, 30}
+                    )
+                    if dropped:
+                        synth[key] = cleaned
+            except Exception as e:
+                print(f"[rescue] claim check failed: {e}", flush=True)
+
         if not synth:
             try:
                 await progress.delete()
@@ -1248,9 +1306,17 @@ RULES:
 
         lines.append("## 📝 New Titles — Grouped by Strategy\n")
         total_verified = 0; total_rejected = 0
+        deep_metrics = {}
         for group_name, group_titles in groups:
             if not group_titles: continue
-            verified, rejected = verify_titles(group_titles, allow_list)
+            try:
+                verified, rejected, m = await asyncio.to_thread(
+                    _verify_titles_deep_sync, group_titles, allow_list, family
+                )
+                deep_metrics.update(m)
+            except Exception as e:
+                print(f"[rescue] deep verification failed: {e}", flush=True)
+                verified, rejected = [], []
             total_verified += len(verified)
             total_rejected += len(rejected)
             if verified:
@@ -1259,6 +1325,17 @@ RULES:
                     lines.append(f"• `{t}`")
                 lines.append("")
         lines.append(f"_Total verified: **{total_verified}** · rejected: **{total_rejected}**_\n")
+        opps = [(t, m.get("opportunity")) for t, m in deep_metrics.items()
+                if m.get("opportunity")]
+        if opps:
+            title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
+            lines.append("## 🎯 CTR proxy")
+            lines.append(
+                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
+                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"demand {opp.get('demand_volume', 0):,} · "
+                f"supply {opp.get('supply', 0)}\n"
+            )
 
         if synth.get("new_description"):
             lines.append("## 📝 New Description (copy-paste)"); lines.append(synth["new_description"]); lines.append("")
@@ -1471,8 +1548,16 @@ RULES:
 
         verified_groups = {}
         total_verified = 0; total_rejected = 0
+        deep_metrics = {}
         for group_name, group_titles in all_groups.items():
-            v, r = verify_titles(group_titles, allow_list)
+            try:
+                v, r, m = await asyncio.to_thread(
+                    _verify_titles_deep_sync, group_titles, allow_list, family
+                )
+                deep_metrics.update(m)
+            except Exception as e:
+                print(f"[vision] deep verification failed: {e}", flush=True)
+                v, r = [], []
             if v:
                 verified_groups[group_name] = v
                 total_verified += len(v)
@@ -1482,6 +1567,17 @@ RULES:
                               family,
                               total_verified=total_verified,
                               total_rejected=total_rejected)
+        opps = [(t, m.get("opportunity")) for t, m in deep_metrics.items()
+                if m.get("opportunity")]
+        if opps:
+            title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
+            body += (
+                f"\n## 🎯 CTR proxy\n"
+                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
+                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"demand {opp.get('demand_volume', 0):,} · "
+                f"supply {opp.get('supply', 0)}"
+            )
 
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
