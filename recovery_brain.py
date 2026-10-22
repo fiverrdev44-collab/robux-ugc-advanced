@@ -401,13 +401,31 @@ def fetch_item_from_roblox(item_id, cookie=None):
         print(f"[live-fetch] details exception: {e}", flush=True)
         return None
 
-    favs = 0
+    # Favorites: the dedicated count endpoint is current; the catalog details
+    # endpoint is CDN-cached and often hours behind (that's how items showed
+    # 11♥ when the site said 27). Fall back to details, then to None.
+    favs = None
     try:
-        r2 = requests.get(fav_url, headers=headers, timeout=10)
+        r2 = requests.get(
+            f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count",
+            headers=headers, timeout=10,
+        )
         if r2.status_code == 200:
-            favs = r2.json().get("favoriteCount") or 0
+            payload = r2.json()
+            if isinstance(payload, dict):
+                favs = payload.get("favoriteCount")
+            elif isinstance(payload, (int, float)):
+                favs = int(payload)
     except Exception as e:
-        print(f"[live-fetch] favs exception: {e}", flush=True)
+        print(f"[live-fetch] fav count exception: {e}", flush=True)
+
+    if favs is None:
+        try:
+            r2 = requests.get(fav_url, headers=headers, timeout=10)
+            if r2.status_code == 200:
+                favs = r2.json().get("favoriteCount")
+        except Exception as e:
+            print(f"[live-fetch] favs exception: {e}", flush=True)
 
     creator_obj = d.get("Creator") or {}
     creator_name = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
@@ -433,7 +451,8 @@ def save_item_to_db(cur, item):
                                description, creator_name, asset_type_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
-                favorite_count = EXCLUDED.favorite_count,
+                favorite_count = COALESCE(EXCLUDED.favorite_count,
+                                          items.favorite_count),
                 total_sales = EXCLUDED.total_sales,
                 price = EXCLUDED.price,
                 description = EXCLUDED.description,

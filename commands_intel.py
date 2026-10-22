@@ -233,6 +233,20 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         def _run():
             conn = get_db(); cur = conn.cursor()
             try:
+                # Refresh from Roblox first: the DB row is only as fresh as
+                # the last snapshot/enrichment, and favorites move daily.
+                try:
+                    live = fetch_item_from_roblox(
+                        item_id,
+                        os.getenv("ROBLOSECURITY_COOKIE_1")
+                        or os.getenv("ROBLOSECURITY_COOKIE"),
+                    )
+                    if live:
+                        save_item_to_db(cur, live)
+                        conn.commit()
+                except Exception as e:
+                    print(f"[verdict] live refresh failed: {e}", flush=True)
+
                 cur.execute("""
                     select name, favorite_count, price,
                            extract(epoch from (now() - coalesce(created_at, fetched_at)))/86400.0
