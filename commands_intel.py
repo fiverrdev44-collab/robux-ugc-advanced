@@ -337,6 +337,20 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         for i, a in enumerate(actions, 1):
             lines.append(f"{i}. {a}")
 
+        try:
+            from ugc_playbook import tactics_for
+            tips = tactics_for(
+                sales=data.get("sales_30d", 0),
+                favs=data.get("favs", 0),
+                age_days=data.get("age_days", 0),
+                velocity=pct.get("velocity", 0),
+            )
+            lines.append("\n**📘 Playbook:**")
+            for tip in tips:
+                lines.append(f"• {tip}")
+        except Exception as e:
+            print(f"[verdict] playbook failed: {e}", flush=True)
+
         await ctx.send("\n".join(lines)[:1900])
 
     # =========================================================

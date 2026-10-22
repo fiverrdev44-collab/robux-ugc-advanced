@@ -190,6 +190,38 @@ def topic_list():
     return sorted(TOPICS.keys())
 
 
+def tactics_for(sales=0, favs=0, age_days=0, velocity=0.0, price=0):
+    """Return 3 concrete next moves based on the item's actual state."""
+    sales = int(sales or 0)
+    favs = int(favs or 0)
+    age_days = float(age_days or 0)
+    velocity = float(velocity or 0)
+
+    if sales > 0:
+        return [
+            "Ship a variant within 7 days — keep the winning keywords, change one theme word.",
+            "Cross-link the winner in the description of your 3 weakest items.",
+            "Raise the price in small steps only while units hold; never discount a seller.",
+        ]
+    if favs >= 10:
+        return [
+            "Likes but no sales: test one ±20% price move before touching the title.",
+            "Swap the thumbnail to a clear motion frame — item readable at 100px.",
+            "Put the item name on screen in the first second of a short clip.",
+        ]
+    if age_days < 30:
+        return [
+            "Too new to judge: one clip per day for a week, then compare favs/day.",
+            "Group shout + Discord post now — favorites in the first 48h matter most.",
+            "Do not rename yet; edits reset the velocity counter.",
+        ]
+    return [
+        "No sales after 30 days: stop editing it — the concept or the traffic is wrong.",
+        "Clone your top 2 items into 3–5 variants instead of polishing this one.",
+        "If you retry the concept, launch it as a new item with a keyword-first name.",
+    ]
+
+
 def audit_title(title, max_len=50):
     """Return a short list of concrete issues with a proposed title."""
     issues = []

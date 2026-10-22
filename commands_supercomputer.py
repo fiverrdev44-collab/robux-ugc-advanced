@@ -348,9 +348,41 @@ def register_supercomputer_commands(bot):
         Example: !revsim 115 2000 aggressive
         """
         multiplier = 2.4 if promo_level.lower() == "aggressive" else 1.5 if promo_level.lower() == "moderate" else 1.0
-        projected_sales = int(initial_favs * 0.14 * multiplier)
+
+        # Calibrate favorites→sales conversion from your own captured sales
+        # instead of a magic constant.
+        def _calibration():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                cur.execute("SELECT lower(item_name), count(*) FROM my_sales GROUP BY 1")
+                sales_by_name = dict(cur.fetchall())
+                if not sales_by_name:
+                    return None, 0, 0
+                cur.execute(
+                    "SELECT lower(name), favorite_count FROM items WHERE lower(name) = ANY(%s)",
+                    (list(sales_by_name.keys()),),
+                )
+                total_favs = 0
+                total_sales = 0
+                for nm, favs in cur.fetchall():
+                    total_favs += (favs or 0)
+                    total_sales += sales_by_name.get(nm, 0)
+                return (total_sales / total_favs if total_favs else None,
+                        total_sales, total_favs)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            conv, obs_sales, obs_favs = await asyncio.to_thread(_calibration)
+        except Exception as e:
+            print(f"[revsim] calibration failed: {e}", flush=True)
+            conv, obs_sales, obs_favs = None, 0, 0
+
+        conv = max(0.01, min(0.35, conv or 0.08))
+        projected_sales = int(initial_favs * conv * multiplier)
         gross_robux = projected_sales * price
-        creator_net_robux = int(gross_robux * 0.70)
+        # Roblox keeps 70% of UGC sales; creators keep 30%.
+        creator_net_robux = int(gross_robux * 0.30)
 
         day3_favs = int(initial_favs * (1.8 * multiplier))
         day7_favs = int(initial_favs * (2.8 * multiplier))
@@ -363,7 +395,7 @@ def register_supercomputer_commands(bot):
         )
         embed.add_field(name="30d Estimated Sales", value=f"📦 **{projected_sales:,} units**", inline=True)
         embed.add_field(name="Gross Robux Volume", value=f"💰 **{gross_robux:,} R$**", inline=True)
-        embed.add_field(name="Creator Net (70%)", value=f"💎 **{creator_net_robux:,} R$**", inline=True)
+        embed.add_field(name="Creator Net (30%)", value=f"💎 **{creator_net_robux:,} R$**", inline=True)
 
         embed.add_field(
             name="Favorite Trajectory Curve",
@@ -375,7 +407,10 @@ def register_supercomputer_commands(bot):
             ),
             inline=False
         )
-        embed.set_footer(text="Calibrated against 43,877 item_history snapshots · Oracle Cluster")
+        embed.set_footer(
+            text=(f"Conversion {conv:.1%} from {obs_sales:,} recorded sales / "
+                  f"{obs_favs:,} favs · curve is heuristic, not a promise")
+        )
         await ctx.send(embed=embed)
 
     # ── 5. ⚡ 48-Hour Velocity Radar ──────────────────────────────────
