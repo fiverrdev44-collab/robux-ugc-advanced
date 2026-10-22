@@ -14,7 +14,9 @@ import re
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 STOPWORDS = {"a", "an", "the", "of", "and", "or", "for", "to", "in", "on",
-             "with", "my", "your", "at", "by", "is", "it", "as"}
+             "with", "my", "your", "at", "by", "is", "it", "as",
+             "i", "you", "we", "me", "our", "us", "he", "she", "they",
+             "im", "ive", "dont", "cant", "aint", "got", "that", "this"}
 ITEM_TYPE_WORDS = {
     "emote", "dance", "hat", "beanie", "crown", "cap", "hair", "face", "mask",
     "shirt", "pants", "jacket", "shoes", "wing", "wings", "tail", "ears",
@@ -22,10 +24,21 @@ ITEM_TYPE_WORDS = {
     "pet", "bag", "scarf", "bandana", "beret", "visor", "lens", "head",
     "snapback", "bonnet", "balaclava",
 }
-CLAIM_FIELDS = (
-    "search_diagnosis", "positioning", "market_diagnosis", "winner_blueprint",
-    "saturation_verdict", "diagnosis", "what_winners_do", "cultural_ammo",
-    "cross_promotion_play", "social_playbook",
+TITLE_FIELDS = (
+    "titles_safe", "titles_differentiated", "titles_longtail", "titles_viral",
+)
+GUARANTEE_PATTERNS = (
+    (r"\bguarantee(d|s)?\b", "guarantee"),
+    (r"\b100\s*%\b", "100% claim"),
+    (r"\bwill (go viral|blow up|sell out|moon)\b", "certain virality"),
+    (r"\binstant (hit|winner)\b", "instant hit"),
+    (r"\bbest[- ]?seller\b", "best seller"),
+    (r"\brisk[- ]?free\b", "risk-free"),
+    (r"\bno risk\b", "no risk"),
+    (r"\balways (works|wins|sells)\b", "always works"),
+    (r"\bnever fails\b", "never fails"),
+    (r"\bdefinitely\b", "certainty"),
+    (r"\bproven to (sell|work|go viral)\b", "causal claim"),
 )
 
 
@@ -65,9 +78,10 @@ def _token_reasons(title, allowed, seen_lower):
         reasons.append("duplicate title")
     bad = []
     for tok in toks:
-        if tok in STOPWORDS or tok.isdigit() or tok in allowed:
+        if (tok in STOPWORDS or tok.isdigit() or len(tok) == 1
+                or tok in allowed):
             continue
-        if any(tok.startswith(a) and len(tok) <= len(a) + 3
+        if any(tok in (a, a + "s", a + "es", a + "ed", a + "ing")
                for a in allowed if len(a) >= 4):
             continue
         bad.append(tok)
@@ -179,17 +193,20 @@ def verify_title_deep(cur, title, allow_list, family=None, seen=None):
     flags = []
     opp = metrics.get("opportunity") or {}
     if opp.get("verdict") == "SATURATED":
-        reasons.append(
+        flags.append(
             f"competition is SATURATED "
-            f"(CTR proxy {opp.get('ctr_proxy')}/100, "
-            f"anchor {opp.get('anchor') or opp.get('phrase')})"
+            f"(anchor {opp.get('anchor') or opp.get('phrase')}, "
+            f"visibility proxy (unvalidated) {opp.get('ctr_proxy')}/100)"
         )
     if metrics["exact_matches"] >= 10:
-        reasons.append(f"exact name used {metrics['exact_matches']} times")
+        flags.append(
+            f"exact name used {metrics['exact_matches']} times — "
+            f"proven demand, but a clone"
+        )
     if metrics["max_token_supply"] >= 2000:
-        reasons.append(
+        flags.append(
             f"token '{metrics['max_token']}' is in "
-            f"{metrics['max_token_supply']:,} items (saturated)"
+            f"{metrics['max_token_supply']:,} items (broad word)"
         )
     if metrics["token_supply"] == 0:
         flags.append("new phrase combination (no exact item uses all tokens)")
@@ -253,6 +270,18 @@ def verify_claims_text(text, facts, allow_small=None):
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     kept, dropped = [], []
     for sentence in sentences:
+        guarantee = None
+        for pattern, label in GUARANTEE_PATTERNS:
+            if re.search(pattern, sentence, re.I):
+                guarantee = label
+                break
+        if guarantee:
+            dropped.append({
+                "text": sentence.strip(),
+                "unsupported": [],
+                "claim": guarantee,
+            })
+            continue
         nums = []
         for raw in NUMBER_RE.findall(sentence):
             try:
@@ -270,6 +299,39 @@ def verify_claims_text(text, facts, allow_small=None):
         else:
             kept.append(sentence.strip())
     return " ".join(kept).strip(), dropped
+
+
+def clean_text_fields(data, facts, allow_small=None, skip=None):
+    """Clean every prose string/list field in an AI payload."""
+    drops = []
+    skip = set(skip or ())
+    for key, value in list(data.items()):
+        if key in skip:
+            continue
+        if isinstance(value, str):
+            cleaned, dropped = verify_claims_text(
+                value, facts, allow_small=allow_small
+            )
+            if dropped:
+                data[key] = cleaned
+                drops.extend({"field": key, **d} for d in dropped)
+        elif isinstance(value, list):
+            kept = []
+            for item in value:
+                if isinstance(item, str):
+                    cleaned, dropped = verify_claims_text(
+                        item, facts, allow_small=allow_small
+                    )
+                    if dropped:
+                        drops.extend({"field": key, **d} for d in dropped)
+                        if cleaned:
+                            kept.append(cleaned)
+                    else:
+                        kept.append(item)
+                else:
+                    kept.append(item)
+            data[key] = kept
+    return drops
 
 
 def verify_pivot(cur, pivot, family=None):
@@ -316,6 +378,7 @@ def verify_synth(cur, synth, allow_list, family, facts):
                 kept.append(title)
                 verified += 1
                 metrics[title] = result.get("metrics") or {}
+                metrics[title]["flags"] = result.get("flags") or []
             else:
                 rejected.append({
                     "title": title,
@@ -340,14 +403,22 @@ def verify_synth(cur, synth, allow_list, family, facts):
                 kept_killers.append(kw)
         synth["killer_keywords"] = kept_killers
 
-    claims = []
-    for field in CLAIM_FIELDS:
-        cleaned, dropped = verify_claims_text(
-            synth.get(field), facts, allow_small={7, 14, 30}
+    rejected_keywords = []
+    primary = synth.get("primary_keyword")
+    if isinstance(primary, str) and primary.strip():
+        toks = tokens(primary)
+        valid = bool(toks) and all(
+            t in allowed or t in STOPWORDS or t.isdigit() or len(t) == 1
+            for t in toks
         )
-        if dropped:
-            synth[field] = cleaned
-            claims.extend({"field": field, **d} for d in dropped)
+        if not valid:
+            rejected_keywords.append(primary)
+            synth["primary_keyword"] = ""
+
+    claims = clean_text_fields(
+        synth, facts, allow_small={7, 14, 30},
+        skip=set(TITLE_FIELDS) | {"best_pivot", "killer_keywords"},
+    )
 
     pivots = []
     for key in ("best_pivot",):
@@ -384,6 +455,7 @@ def verify_synth(cur, synth, allow_list, family, facts):
         "metrics": metrics,
         "claims": claims,
         "pivots": pivots,
+        "rejected_keywords": rejected_keywords,
     }
 
 
@@ -400,15 +472,26 @@ def format_audit(audit):
         f"• Titles passed: **{audit.get('verified', 0)}** · "
         f"rejected: **{len(audit.get('rejected', []))}**"
     )
+    warned = 0
+    for title, m in (audit.get("metrics") or {}).items():
+        flags = m.get("flags") or []
+        if flags and warned < 3:
+            lines.append(
+                f"• ⚠️ `{title[:60]}` — {'; '.join(flags)[:150]}"
+            )
+            warned += 1
     for item in (audit.get("rejected") or [])[:6]:
         reasons = "; ".join(item.get("reasons") or [])[:140]
         lines.append(f"• ❌ `{item.get('title', '')[:60]}` — {reasons}")
     for item in (audit.get("claims") or [])[:4]:
         nums = ", ".join(f"{n:g}" for n in item.get("unsupported", []))
+        reason = (f"numbers: {nums}" if nums
+                  else f"claim: {item.get('claim', 'unsupported')}")
         lines.append(
-            f"• 🗑️ dropped unsupported claim in `{item.get('field')}` "
-            f"(numbers: {nums})"
+            f"• 🗑️ dropped unsupported {reason} in `{item.get('field')}`"
         )
+    for kw in (audit.get("rejected_keywords") or [])[:3]:
+        lines.append(f"• ❌ primary keyword unverified: `{kw[:60]}`")
     for pivot in (audit.get("pivots") or []):
         if pivot.get("accepted"):
             info = pivot.get("verified") or {}

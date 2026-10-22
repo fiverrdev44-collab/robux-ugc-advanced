@@ -376,7 +376,6 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         if opp:
             lines.append(
                 f"**Name lane:** {opp.get('verdict')} · "
-                f"CTR proxy {opp.get('ctr_proxy')}/100 · "
                 f"demand {opp.get('demand_live', 0)} "
                 f"({opp.get('demand_volume', 0):,} vol) · "
                 f"supply {opp.get('supply', 0)} · "
@@ -733,7 +732,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                                 f"demand={vp['demand']} "
                                 f"({vp.get('demand_volume', 0):,} vol), "
                                 f"bucket={vp['bucket']}, "
-                                f"CTR proxy={vp['ctr_proxy']}/100"
+                                f"visibility proxy (unvalidated)={vp['ctr_proxy']}/100"
                             )
                             why_clean, _ = verify_claims_text(
                                 bp.get("why_better"),
@@ -1004,7 +1003,7 @@ description_seo, description_hype, description_short
 
             claim_drops = []
             try:
-                from verification import verify_claims_text
+                from verification import clean_text_fields, TITLE_FIELDS
                 facts = [
                     item_stats.get("favs", 0), item_stats.get("sales", 0),
                     item_stats.get("price", 0), item_stats.get("age_days", 0),
@@ -1017,15 +1016,21 @@ description_seo, description_hype, description_short
                         cdata.get("comp", 0), cdata.get("median_favs", 0),
                         cdata.get("demand", 0), cdata.get("demand_volume", 0),
                     ])
-                for key in ("what_was_wrong", "edit_reasoning",
-                            "description_seo", "description_hype",
-                            "description_short"):
-                    cleaned, dropped = verify_claims_text(
-                        data.get(key), facts, allow_small={7, 14, 30}
-                    )
-                    if dropped:
-                        data[key] = cleaned
-                        claim_drops.extend({"field": key, **d} for d in dropped)
+                claim_drops = clean_text_fields(
+                    data, facts, allow_small={7, 14, 30},
+                    skip=set(TITLE_FIELDS) | {"primary_keyword"},
+                )
+                pk = data.get("primary_keyword")
+                if pk:
+                    from verification import allow_set, tokens, STOPWORDS
+                    allowed = allow_set(allow_list)
+                    toks = tokens(pk)
+                    if not toks or any(
+                        t not in allowed and t not in STOPWORDS
+                        and not t.isdigit() and len(t) != 1
+                        for t in toks
+                    ):
+                        data["primary_keyword"] = ""
             except Exception as e:
                 print(f"[autopsy] claim check failed: {e}", flush=True)
 
@@ -1120,11 +1125,7 @@ description_seo, description_hype, description_short
                         opp = ((deep_metrics.get(sc["title"]) or {})
                                .get("opportunity") or {})
                         sc["opportunity"] = opp
-                        ctr = opp.get("ctr_proxy")
-                        sc["final_score"] = (
-                            round(sc["score"] * (0.5 + float(ctr) / 100.0), 2)
-                            if ctr is not None else sc["score"]
-                        )
+                        sc["final_score"] = sc["score"]
                     scored_recovery.sort(
                         key=lambda x: x["final_score"], reverse=True
                     )
@@ -1136,7 +1137,7 @@ description_seo, description_hype, description_short
                         opp = sc.get("opportunity") or {}
                         opp_part = (
                             f" · {opp.get('verdict')} · "
-                            f"CTR {opp.get('ctr_proxy')}/100"
+                            f"visibility {opp.get('ctr_proxy')}/100 (unvalidated)"
                             if opp else ""
                         )
                         stat_lines.append(

@@ -458,11 +458,7 @@ OUTPUT — ONLY JSON:
         for sc in scored_titles:
             opp = (verified_metrics.get(sc["title"]) or {}).get("opportunity") or {}
             sc["opportunity"] = opp
-            ctr = opp.get("ctr_proxy")
-            sc["final_score"] = (
-                round(sc["score"] * (0.5 + float(ctr) / 100.0), 2)
-                if ctr is not None else sc["score"]
-            )
+            sc["final_score"] = sc["score"]
         scored_titles.sort(key=lambda x: x["final_score"], reverse=True)
     except Exception as e:
         print(f"[chain] opportunity rerank failed: {e}", flush=True)
@@ -742,7 +738,7 @@ def format_chain(result):
                        if sc.get("visibility_gap", 0) >= 5 else ""
             opp = sc.get("opportunity") or {}
             opp_part = (
-                f" · {opp.get('verdict')} · CTR {opp.get('ctr_proxy')}/100"
+                f" · {opp.get('verdict')} · visibility proxy (unvalidated) {opp.get('ctr_proxy')}/100"
                 if opp else ""
             )
             lines.append(
@@ -833,9 +829,9 @@ def format_chain(result):
         if champ_opp:
             final_lines.append(
                 f"**Verified title lane:** {champ_opp.get('verdict')} · "
-                f"CTR proxy {champ_opp.get('ctr_proxy')}/100 · "
                 f"demand {champ_opp.get('demand_volume', 0):,} · "
-                f"supply {champ_opp.get('supply', 0)}"
+                f"supply {champ_opp.get('supply', 0)} · "
+                f"exact {champ_opp.get('exact', 0)}"
             )
 
     if s.get("price_avg"):

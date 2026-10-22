@@ -417,6 +417,23 @@ def _find_gap_alternatives(terms, top_n=5):
         except Exception: pass
 
 
+def _filter_keywords(synth, allow_list):
+    kws = synth.get("killer_keywords")
+    if not isinstance(kws, list):
+        return
+    from verification import allow_set, tokens, STOPWORDS
+    allowed = allow_set(allow_list)
+    kept = []
+    for kw in kws:
+        toks = tokens(str(kw))
+        if toks and all(
+            t in allowed or t in STOPWORDS or t.isdigit() or len(t) == 1
+            for t in toks
+        ):
+            kept.append(kw)
+    synth["killer_keywords"] = kept
+
+
 def _verify_titles_deep_sync(titles, allow_list, family):
     from verification import verify_titles_deep
     conn = get_db()
@@ -1001,16 +1018,14 @@ def register_ai_commands(bot):
 
         if synth:
             try:
-                from verification import verify_claims_text, facts_from_stats
+                from verification import (clean_text_fields, facts_from_stats,
+                                          TITLE_FIELDS)
                 facts = facts_from_stats(stats)
-                for key in ("search_diagnosis", "positioning",
-                            "market_diagnosis", "winner_blueprint",
-                            "saturation_verdict"):
-                    cleaned, dropped = verify_claims_text(
-                        synth.get(key), facts, allow_small={7, 14, 30}
-                    )
-                    if dropped:
-                        synth[key] = cleaned
+                clean_text_fields(
+                    synth, facts, allow_small={7, 14, 30},
+                    skip=set(TITLE_FIELDS),
+                )
+                _filter_keywords(synth, allow_list)
             except Exception as e:
                 print(f"[brainstorm] claim check failed: {e}", flush=True)
 
@@ -1126,11 +1141,11 @@ def register_ai_commands(bot):
         if opps:
             title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
             body += (
-                f"\n## 🎯 CTR proxy\n"
-                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
-                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"\n## 🎯 Best verified title (DB demand)\n"
+                f"• `{title}` — {opp.get('verdict')} · "
                 f"demand {opp.get('demand_volume', 0):,} · "
-                f"supply {opp.get('supply', 0)}"
+                f"supply {opp.get('supply', 0)} · "
+                f"exact {opp.get('exact', 0)}"
             )
 
         try:
@@ -1251,14 +1266,14 @@ RULES:
 
         if synth:
             try:
-                from verification import verify_claims_text, facts_from_stats
+                from verification import (clean_text_fields, facts_from_stats,
+                                          TITLE_FIELDS)
                 facts = facts_from_stats(stats)
-                for key in ("diagnosis", "what_winners_do"):
-                    cleaned, dropped = verify_claims_text(
-                        synth.get(key), facts, allow_small={7, 14, 30}
-                    )
-                    if dropped:
-                        synth[key] = cleaned
+                clean_text_fields(
+                    synth, facts, allow_small={7, 14, 30},
+                    skip=set(TITLE_FIELDS),
+                )
+                _filter_keywords(synth, allow_list)
             except Exception as e:
                 print(f"[rescue] claim check failed: {e}", flush=True)
 
@@ -1329,12 +1344,12 @@ RULES:
                 if m.get("opportunity")]
         if opps:
             title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
-            lines.append("## 🎯 CTR proxy")
+            lines.append("## 🎯 Best verified title (DB demand)")
             lines.append(
-                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
-                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"• `{title}` — {opp.get('verdict')} · "
                 f"demand {opp.get('demand_volume', 0):,} · "
-                f"supply {opp.get('supply', 0)}\n"
+                f"supply {opp.get('supply', 0)} · "
+                f"exact {opp.get('exact', 0)}\n"
             )
 
         if synth.get("new_description"):
@@ -1497,6 +1512,19 @@ RULES:
         except Exception:
             pass
 
+        try:
+            from verification import (clean_text_fields, facts_from_stats,
+                                      TITLE_FIELDS)
+            facts = facts_from_stats(stats)
+            if synth:
+                clean_text_fields(
+                    synth, facts, allow_small={7, 14, 30},
+                    skip=set(TITLE_FIELDS),
+                )
+                _filter_keywords(synth, allow_list)
+        except Exception as e:
+            print(f"[analyze_image] claim check failed: {e}", flush=True)
+
         vision_lines = ["# 🖼️ IMAGE + CULTURE ANALYSIS\n"]
         vision_lines.append("## 👁️ What I See")
         vision_lines.append(vision.get("visual_summary", "—"))
@@ -1572,11 +1600,11 @@ RULES:
         if opps:
             title, opp = max(opps, key=lambda x: x[1].get("ctr_proxy", 0))
             body += (
-                f"\n## 🎯 CTR proxy\n"
-                f"• Best verified title: `{title}` — {opp.get('verdict')} · "
-                f"CTR **{opp.get('ctr_proxy')}/100** · "
+                f"\n## 🎯 Best verified title (DB demand)\n"
+                f"• `{title}` — {opp.get('verdict')} · "
                 f"demand {opp.get('demand_volume', 0):,} · "
-                f"supply {opp.get('supply', 0)}"
+                f"supply {opp.get('supply', 0)} · "
+                f"exact {opp.get('exact', 0)}"
             )
 
         for i in range(0, len(body), 1900):
