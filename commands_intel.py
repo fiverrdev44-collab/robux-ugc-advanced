@@ -1065,6 +1065,11 @@ description_seo, description_hype, description_short
                     "post 1 TikTok."
                 )
             final_lines.append(f"**6. In 14 days:** `!verdict {item_id}`")
+            if kill:
+                final_lines.append(
+                    f"\n_Still want to fight for it? `!revive {item_id}` runs the "
+                    "full rebuild — gaps, pivots, peer autopsy, 14-day plan._"
+                )
 
             await ctx.send("\n".join(final_lines))
 
@@ -1092,3 +1097,116 @@ description_seo, description_hype, description_short
             print(f"[autopsy] AI recovery failed: {e}", flush=True)
             try: await ai_msg.edit(content=f"⚠️ Recovery failed: `{e}`")
             except Exception: pass
+
+    # =========================================================
+    # !revive — the long-shot full rebuild
+    # =========================================================
+    @bot.command(name="revive", aliases=["revive_item"])
+    async def revive_cmd(ctx, item_id: int):
+        """Full revive run: live stats, niche scan, variant chain, peer autopsy, 14-day plan."""
+        progress = await ctx.send(
+            "🧟 **REVIVE MODE** — this is the long one. Live stats, gap scan, "
+            "then name scoring. Give it a few minutes."
+        )
+        cookie = os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
+
+        def _load():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                live = fetch_item_from_roblox(item_id, cookie)
+                if live:
+                    save_item_to_db(cur, live)
+                    conn.commit()
+                cur.execute("""
+                    select name, favorite_count, price, asset_type_id,
+                           total_sales,
+                           extract(epoch from (now() - coalesce(created_at, fetched_at)))/86400.0
+                    from items where id = %s
+                """, (item_id,))
+                return cur.fetchone()
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            row = await asyncio.to_thread(_load)
+        except Exception as e:
+            return await progress.edit(content=f"❌ Live fetch failed: `{e}`")
+        if not row:
+            return await progress.edit(content=f"❌ Item `{item_id}` not found.")
+
+        name, favs, price, atype, sales, age_days = row
+        favs = favs or 0
+        age_days = float(age_days or 0)
+        family = detect_family_from_asset_type(atype)
+
+        await progress.edit(content=(
+            f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
+            f"_{favs}♥ · R${price or 0} · {age_days:.0f}d · {family}_\n"
+            "**Step 1/3** — niche + gap scan (the slow part)..."
+        ))
+
+        result = {}
+        try:
+            from chain import run_chain, format_chain
+            result = await asyncio.wait_for(
+                asyncio.to_thread(run_chain, name, family, item_id), timeout=900
+            )
+        except Exception as e:
+            result = {"error": str(e)}
+
+        if result.get("error"):
+            await ctx.send(f"⚠️ Chain scan failed: `{result['error']}`")
+        else:
+            try:
+                for ch in format_chain(result):
+                    await ctx.send(ch[:1900])
+                    await asyncio.sleep(0.2)
+            except Exception as e:
+                await ctx.send(f"⚠️ Couldn't render chain: `{e}`")
+
+        await progress.edit(content=(
+            f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
+            "**Step 2/3** — peer autopsy..."
+        ))
+        try:
+            from peer_autopsy import peer_autopsy
+            for ch in await asyncio.to_thread(peer_autopsy, item_id, 5):
+                await ctx.send(ch[:1900])
+                await asyncio.sleep(0.2)
+        except Exception as e:
+            await ctx.send(f"⚠️ Peer autopsy failed: `{e}`")
+
+        await progress.edit(content=(
+            f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
+            "**Step 3/3** — writing the plan..."
+        ))
+
+        odds = "long shot" if age_days >= 120 and favs < 50 else "realistic"
+        plan = [
+            f"## 🧟 REVIVE PLAN — `{(name or '?')[:50]}`",
+            f"_Odds: **{odds}** — {favs}♥ at {age_days:.0f}d, "
+            f"{sales or 0} sales on record._",
+            "",
+            "**Day 0 (today)**",
+            "1. Rename using the #1 title from the chain above.",
+            "2. New thumbnail: motion frame, no text clutter.",
+            "3. Paste the SEO description + tags from above.",
+            "4. Price: hold. Drop 5 only if nothing moves in 7 days.",
+            "",
+            "**Days 1-7**",
+            "5. Two TikToks a day: 1.5s hook, name on screen.",
+            "6. Reply to every comment within an hour.",
+            "7. Shout it in your group + Discord.",
+            "",
+            "**Day 7 checkpoint**",
+            f"8. Re-run `!verdict {item_id}`. If favourites/day is still under "
+            "0.5, stop spending time here.",
+            "",
+            "**Day 14**",
+            f"9. `!verdict {item_id}` again. Still flat = let it die and launch "
+            "the backup name as a new item.",
+            "",
+            "_Straight talk: a rename can't invent demand. If title, thumbnail "
+            "and price don't move favourites in 7 days, the concept is the problem._",
+        ]
+        await ctx.send("\n".join(plan)[:1900])
