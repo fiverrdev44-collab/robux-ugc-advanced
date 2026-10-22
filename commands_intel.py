@@ -1143,7 +1143,8 @@ description_seo, description_hype, description_short
                 except Exception:
                     cat_ids = None
 
-                gaps = run_gap_engine(cur, terms) if terms else {}
+                gaps = (run_gap_engine(cur, terms, asset_ids=cat_ids)
+                        if terms else {})
                 conv = scan_convergence(family, limit=5) or []
 
                 kw_list = [g.get("word") for g in (gaps.get("golden") or [])][:3]
@@ -1318,6 +1319,11 @@ description_seo, description_hype, description_short
         if age_days >= 120 and favs < 50:
             score -= 10
             details.append("old & flat -10")
+
+        own_velocity = favs / max(age_days, 1)
+        if own_velocity < 0.2:
+            score -= 10
+            details.append(f"own velocity {own_velocity:.2f}/d -10")
 
         score = max(0, min(100, score))
         score_txt = ("niche is alive — go" if score >= 70

@@ -49,7 +49,7 @@ def _relevance(word, intent_terms):
     return min(1.0, 0.4 + 0.3 * hits)
 
 
-def find_candidate_terms(cur, user_terms, max_scan=4000):
+def find_candidate_terms(cur, user_terms, max_scan=4000, asset_ids=None):
     if not user_terms:
         return Counter(), []
 
@@ -57,13 +57,20 @@ def find_candidate_terms(cur, user_terms, max_scan=4000):
     if not patterns:
         return Counter(), []
 
-    cur.execute("""
+    fam_clause = " AND asset_type_id = ANY(%s)" if asset_ids else ""
+    params = [patterns, patterns]
+    if asset_ids:
+        params.append(list(asset_ids))
+    params.append(max_scan)
+
+    cur.execute(f"""
         SELECT LOWER(name), COALESCE(LOWER(description), ''), favorite_count
         FROM items
         WHERE favorite_count > 0
           AND (LOWER(name) LIKE ANY(%s) OR COALESCE(LOWER(description),'') LIKE ANY(%s))
+          {fam_clause}
         LIMIT %s
-    """, (patterns, patterns, max_scan))
+    """, params)
     rows = cur.fetchall()
 
     user_set = {t.lower() for t in user_terms}
@@ -87,18 +94,24 @@ def find_candidate_terms(cur, user_terms, max_scan=4000):
     return merged, rows
 
 
-def score_candidates(cur, candidates, user_terms, top_k=120):
+def score_candidates(cur, candidates, user_terms, top_k=120, asset_ids=None):
     top_words = [w for w, _ in candidates.most_common(top_k)]
     if not top_words:
         return []
 
     like_patterns = [f"%{w}%" for w in top_words]
-    cur.execute("""
+    fam_clause = " AND asset_type_id = ANY(%s)" if asset_ids else ""
+    params = [like_patterns]
+    if asset_ids:
+        params.append(list(asset_ids))
+
+    cur.execute(f"""
         SELECT LOWER(name), favorite_count
         FROM items
         WHERE favorite_count > 0
           AND LOWER(name) LIKE ANY(%s)
-    """, (like_patterns,))
+          {fam_clause}
+    """, params)
     global_rows = cur.fetchall()
 
     comp = defaultdict(int)
@@ -139,24 +152,29 @@ def score_candidates(cur, candidates, user_terms, top_k=120):
     return scored
 
 
-def find_combo_gaps(cur, proven_words, user_terms, limit=8):
+def find_combo_gaps(cur, proven_words, user_terms, limit=8, asset_ids=None):
     if len(proven_words) < 2:
         return []
 
+    fam_clause = " AND asset_type_id = ANY(%s)" if asset_ids else ""
     pool = [w["word"] for w in proven_words[:20]]
     combos = []
     for i, a in enumerate(pool):
         for b in pool[i+1:]:
             combo = f"{a} {b}"
+            params = [f"%{combo}%"]
+            if asset_ids:
+                params.append(list(asset_ids))
             try:
-                cur.execute("""
+                cur.execute(f"""
                     SELECT COUNT(*), COALESCE(AVG(favorite_count), 0),
                            COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP
                                     (ORDER BY favorite_count), 0)
                     FROM items
                     WHERE favorite_count > 0
                       AND LOWER(name) LIKE %s
-                """, (f"%{combo}%",))
+                      {fam_clause}
+                """, params)
                 c, avg_f, med_f = cur.fetchone()
             except Exception:
                 try:
@@ -187,16 +205,21 @@ def find_combo_gaps(cur, proven_words, user_terms, limit=8):
     return combos[:limit]
 
 
-def find_pivots(cur, user_terms, saturated_words, limit=6):
+def find_pivots(cur, user_terms, saturated_words, limit=6, asset_ids=None):
     if not saturated_words:
         return []
 
     patterns = [f"%{w}%" for w in saturated_words[:5]]
-    cur.execute("""
+    fam_clause = " AND asset_type_id = ANY(%s)" if asset_ids else ""
+    params = [patterns]
+    if asset_ids:
+        params.append(list(asset_ids))
+    cur.execute(f"""
         SELECT LOWER(name), favorite_count FROM items
         WHERE favorite_count > 0 AND LOWER(name) LIKE ANY(%s)
+        {fam_clause}
         LIMIT 2000
-    """, (patterns,))
+    """, params)
     rows = cur.fetchall()
 
     sat_set = {w.lower() for w in saturated_words}
@@ -280,8 +303,10 @@ def build_gap_titles(golden_gaps, combo_gaps, user_terms, max_titles=3):
     return titles[:max_titles]
 
 
-def run_gap_engine(cur, user_terms, max_scan=4000):
-    candidates, matched_rows = find_candidate_terms(cur, user_terms, max_scan)
+def run_gap_engine(cur, user_terms, max_scan=4000, asset_ids=None):
+    candidates, matched_rows = find_candidate_terms(
+        cur, user_terms, max_scan, asset_ids=asset_ids
+    )
     if not candidates:
         return {
             "golden": [], "sweet": [], "saturated": [],
@@ -289,14 +314,18 @@ def run_gap_engine(cur, user_terms, max_scan=4000):
             "matched": 0,
         }
 
-    scored = score_candidates(cur, candidates, user_terms, top_k=120)
+    scored = score_candidates(cur, candidates, user_terms, top_k=120,
+                              asset_ids=asset_ids)
     golden, sweet, saturated = classify_gaps(scored)
-    combo_gaps = find_combo_gaps(cur, golden + sweet, user_terms, limit=8)
+    combo_gaps = find_combo_gaps(cur, golden + sweet, user_terms, limit=8,
+                                 asset_ids=asset_ids)
 
     saturated_user = [t for t in user_terms if any(
         s["word"] == t.lower() and s["comp"] > 300 for s in scored
     )]
-    pivots = find_pivots(cur, user_terms, saturated_user, limit=6) if saturated_user else []
+    pivots = (find_pivots(cur, user_terms, saturated_user, limit=6,
+                          asset_ids=asset_ids)
+              if saturated_user else [])
 
     gap_titles = build_gap_titles(golden, combo_gaps, user_terms, max_titles=3)
 
