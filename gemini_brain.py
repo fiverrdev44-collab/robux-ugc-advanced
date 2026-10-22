@@ -359,10 +359,16 @@ def expand_search_terms(intent, db_vocab_sample, failed_terms):
             "reasoning": str(data.get("reasoning", ""))[:200]}
 
 
-_KEYWORD_INTEL_PROMPT = """You are the world's most sophisticated Roblox UGC keyword intelligence analyst.
+_KEYWORD_INTEL_PROMPT = """You read Roblox UGC numbers and talk like a blunt seller, not a consultant.
 
 Your ONLY job: classify keywords based on BOTH supply AND demand AND velocity.
 You do NOT guess. You do NOT call a keyword "weak" without checking demand.
+
+=== HOW TO TALK ===
+Write like you're texting a friend who sells UGC. Short sentences. Plain words.
+No corporate filler: never use "leverage", "signaling", "landscape", "optimal",
+"capture buyer intent", "demonstrates", "vastly outperforms", "necessary to".
+Say the number, then say what to do about it.
 
 === INPUT ===
 SEED KEYWORD (the one that failed): {seed}
@@ -395,7 +401,7 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
     "median_favs": <int>,
     "bucket": "<GOLD|OPPORTUNITY|SATURATED|WEAK|DEAD|NEUTRAL>",
     "emoji": "<one of 🟢🔵🟡🟠🔴⚪>",
-    "reasoning": "<1-2 sentences. State supply AND demand.>"
+    "reasoning": "<1-2 short sentences. State supply AND demand. Talk like a person.>"
   }},
   "all_classifications": [
     {{
@@ -404,7 +410,7 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
       "median_favs": <int>,
       "bucket": "<bucket>",
       "emoji": "<emoji>",
-      "reasoning": "<1 sentence>"
+      "reasoning": "<1 short sentence, plain words>"
     }}
   ],
   "best_pivot": {{
@@ -412,9 +418,9 @@ Classify each keyword into EXACTLY ONE bucket. You MUST weigh BOTH supply and de
     "supply": <int>,
     "median_favs": <int>,
     "bucket": "<bucket>",
-    "why_better": "<1-2 sentences comparing to the seed.>"
+    "why_better": "<1-2 short sentences comparing to the seed. Casual.>"
   }},
-  "diagnosis": "<3-4 sentences. If seed was saturated, USE THE WORD 'SATURATED' not 'weak'.>"
+  "diagnosis": "<2-3 short sentences. Why the seed flopped and what to do next. If the seed is saturated, say SATURATED. Sound like a person, not a report.>"
 }}
 """
 

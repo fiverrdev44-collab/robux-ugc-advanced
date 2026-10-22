@@ -248,8 +248,7 @@ def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
     if age is not None and f is not None:
         if age >= 60 and f < 20:
             return ("KILL", "🪦",
-                    f"{age:.0f}d · only {f}♥. High probability of "
-                    f"unrecoverable.{low_conf}")
+                    f"{age:.0f}d and only {f}♥. That one's not coming back.{low_conf}")
         if age >= 30 and f < 10:
             return ("KILL", "🪦",
                     f"{age:.0f}d · {f}♥. Peer median is higher. "

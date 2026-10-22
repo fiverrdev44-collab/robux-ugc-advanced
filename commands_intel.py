@@ -732,7 +732,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             )
         pivot_hint = "".join(hint_parts)
 
-        recovery_prompt = f"""You are the #1 Roblox UGC naming strategist. A creator's item is FAILING. Fix it.
+        recovery_prompt = f"""You're a Roblox UGC seller who fixes dead items. Talk like a blunt friend, not a consultant.
+
+=== VOICE ===
+Short sentences. Plain words. Say the number, then the move.
+Never use "leverage", "signaling", "landscape", "optimal", "capture buyer intent",
+"demonstrates", "vastly outperforms", "necessary to". No report-speak.
 
 === THE FAILING ITEM ===
 Current name: {name}
@@ -787,8 +792,8 @@ description_seo, description_hype, description_short
   "description_hype": "...",
   "description_short": "...",
   "primary_keyword": "best first word — MUST be the mandatory starting token",
-  "edit_reasoning": "3-4 sentences.",
-  "what_was_wrong": "3-4 sentences. Use SATURATED, not weak."
+  "edit_reasoning": "2-3 short sentences. Why these titles work. Talk like a person.",
+  "what_was_wrong": "2-3 short sentences. Say SATURATED if that's it. No filler."
 }}
 """
 
@@ -979,17 +984,34 @@ description_seo, description_hype, description_short
 
             # FINAL BLOCK
             final_lines = ["# ✅ FINAL — DO THIS FOR THIS ITEM"]
+            kill = verdict == "KILL"
+            too_new = verdict == "TOO_NEW"
+
+            if kill:
+                final_lines.append(
+                    "**Let it go.** Don't rename it, don't re-upload it, don't touch "
+                    "the price. A fresh title won't save a dead item."
+                )
+            elif too_new:
+                final_lines.append(
+                    "**Too early to call.** Leave it alone for now — editing this "
+                    "early just resets the velocity counter."
+                )
 
             if pivot_kw:
+                label = ("**🎯 Pivot for the next upload:**" if kill
+                         else "**🎯 Pivot:**")
                 final_lines.append(
-                    f"**🎯 Pivot:** `{pivot_kw}` "
+                    f"{label} `{pivot_kw}` "
                     f"(confidence **{pivot_conf:.0%}**)\n"
                     f"  _Reason: {pivot_reason}_"
                 )
 
             if champion:
+                name_label = ("**1. Name for the new upload:**" if kill
+                              else "**1. New name:**")
                 final_lines.append(
-                    f"**1. New name:** `{champion['title']}`  ← statistical winner"
+                    f"{name_label} `{champion['title']}`  ← statistical winner"
                 )
                 if backup:
                     final_lines.append(
@@ -999,7 +1021,9 @@ description_seo, description_hype, description_short
                 final_lines.append(f"**1. New name:** `{data['titles_safe'][0]}`")
 
             if merged_desc:
-                final_lines.append("**3. Paste description** (from above block)")
+                desc_label = ("**3. Description for the new upload:** (block above)"
+                              if kill else "**3. Paste description** (from above block)")
+                final_lines.append(desc_label)
             elif data.get("description_seo"):
                 final_lines.append(
                     f"**3. Description:**\n```\n{data['description_seo'][:400]}\n```"
@@ -1007,14 +1031,25 @@ description_seo, description_hype, description_short
 
             if item_stats.get("price"):
                 final_lines.append(
-                    f"**4. Price:** keep at R${item_stats['price']} — "
-                    f"test -5 after 14d if flat"
+                    f"**4. Price:** leave it at R${item_stats['price']}" if kill
+                    else f"**4. Price:** keep at R${item_stats['price']} — "
+                         f"test -5 after 14d if flat"
                 )
 
-            final_lines.append(
-                "**5. Today:** Rename on Roblox. Change thumbnail to motion frame. "
-                "Post 1 TikTok."
-            )
+            if kill:
+                final_lines.append(
+                    "**5. Today:** skip the rename. Start the new item with the "
+                    "name above."
+                )
+            elif too_new:
+                final_lines.append(
+                    "**5. Today:** nothing. Give it another week of traffic."
+                )
+            else:
+                final_lines.append(
+                    "**5. Today:** rename it, swap the thumbnail to a motion frame, "
+                    "post 1 TikTok."
+                )
             final_lines.append(f"**6. In 14 days:** `!verdict {item_id}`")
 
             await ctx.send("\n".join(final_lines))
