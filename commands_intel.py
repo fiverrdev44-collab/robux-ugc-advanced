@@ -1413,7 +1413,9 @@ description_seo, description_hype, description_short
             conn = get_db(); cur = conn.cursor()
             try:
                 from creator_brain import learn, save, load_findings
-                findings = learn(cur)
+                cur.execute("SELECT count(*) FROM items WHERE creator_verified IS TRUE")
+                has_verified = (cur.fetchone()[0] or 0) > 0
+                findings = learn(cur, verified_only=has_verified)
                 if findings:
                     save(cur, findings)
                     conn.commit()
@@ -1442,3 +1444,33 @@ description_seo, description_hype, description_short
                 await asyncio.sleep(0.2)
         else:
             await progress.edit(content=report)
+
+    # =========================================================
+    # !verified_scan — crawl verified creators' catalogs
+    # =========================================================
+    @bot.command(name="verified_scan", aliases=["scan_verified"])
+    async def verified_scan_cmd(ctx, limit: int = 10):
+        """Monitor verified creators (throttled, resumable). Run again to continue."""
+        limit = max(1, min(limit, 30))
+        progress = await ctx.send(f"🔎 Scanning up to **{limit}** verified creators...")
+
+        def _run():
+            from creator_tracker import run_batch
+            conn = get_db(); cur = conn.cursor()
+            try:
+                return run_batch(cur, limit=limit)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            scanned, upserted, discovered = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await progress.edit(content=f"❌ {e}")
+
+        await progress.edit(content=(
+            "✅ **Verified creator scan**\n"
+            f"• Creators scanned: **{scanned}**\n"
+            f"• New verified creators found: **{discovered}**\n"
+            f"• Marketplace items upserted: **{upserted}**\n"
+            "_Run `!verified_scan` again to continue the queue._"
+        ))

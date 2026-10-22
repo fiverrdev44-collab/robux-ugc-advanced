@@ -29,9 +29,10 @@ def _median(values):
     return vals[len(vals) // 2]
 
 
-def build_cohort(cur, min_items=5, top_n=50):
+def build_cohort(cur, min_items=5, top_n=50, verified_only=False):
     """Creators with a real track record, ranked by median favorites."""
-    cur.execute("""
+    verified_clause = " AND creator_verified IS TRUE" if verified_only else ""
+    cur.execute(f"""
         SELECT lower(creator_name),
                count(*) AS n,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY favorite_count) AS med,
@@ -39,6 +40,7 @@ def build_cohort(cur, min_items=5, top_n=50):
         FROM items
         WHERE creator_name IS NOT NULL AND creator_name <> ''
           AND favorite_count > 0
+          {verified_clause}
         GROUP BY 1
         HAVING count(*) >= %s
         ORDER BY med DESC NULLS LAST
@@ -47,14 +49,15 @@ def build_cohort(cur, min_items=5, top_n=50):
     return cur.fetchall()
 
 
-def learn(cur, min_items=5, top_n=50):
+def learn(cur, min_items=5, top_n=50, verified_only=False):
     """Measure the cohort and return a findings dict."""
-    cohort = build_cohort(cur, min_items, top_n)
+    cohort = build_cohort(cur, min_items, top_n, verified_only=verified_only)
     if not cohort:
         return None
 
     names = [c[0] for c in cohort]
-    cur.execute("""
+    verified_clause = " AND creator_verified IS TRUE" if verified_only else ""
+    cur.execute(f"""
         SELECT lower(creator_name), lower(name), favorite_count,
                COALESCE(price, 0),
                EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0 AS age_days
@@ -62,6 +65,7 @@ def learn(cur, min_items=5, top_n=50):
         WHERE lower(creator_name) = ANY(%s)
           AND favorite_count > 0
           AND created_at IS NOT NULL
+          {verified_clause}
     """, (names,))
     rows = cur.fetchall()
     if not rows:

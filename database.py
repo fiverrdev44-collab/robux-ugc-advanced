@@ -394,6 +394,29 @@ def setup_database():
         );
     ''', "creator_patterns")
 
+    # Verified creators monitored by creator_tracker.py.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS tracked_creators (
+            creator_id BIGINT PRIMARY KEY,
+            creator_type TEXT DEFAULT 'User',
+            creator_name TEXT,
+            verified BOOLEAN DEFAULT TRUE,
+            last_scanned TIMESTAMP,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''', "tracked_creators")
+
+    _safe_exec(cur, '''
+        ALTER TABLE items
+        ADD COLUMN IF NOT EXISTS creator_id BIGINT,
+        ADD COLUMN IF NOT EXISTS creator_verified BOOLEAN;
+    ''', "items_creator_cols")
+
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_items_creator
+        ON items (creator_id);
+    ''', "idx_items_creator")
+
     try:
         conn.commit()
     except Exception as e:

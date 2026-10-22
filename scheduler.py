@@ -73,6 +73,30 @@ def _run_creator_brain():
         _log(f"❌ [scheduler] Creator brain failed: {type(e).__name__}: {e}")
 
 
+def _run_verified_scan():
+    """Rolling scan of verified creators (throttled by creator_tracker)."""
+    _log("🔎 [scheduler] Verified creator scan triggered.")
+    start = time.time()
+    try:
+        from creator_tracker import run_batch
+        from bot_core import get_db
+
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            scanned, upserted, discovered = run_batch(cur, limit=20)
+        finally:
+            cur.close()
+            conn.close()
+
+        _log(
+            f"✅ [scheduler] Verified scan — {scanned} creators · "
+            f"{upserted} items · {discovered} new · {time.time()-start:.1f}s"
+        )
+    except Exception as e:
+        _log(f"❌ [scheduler] Verified scan failed: {type(e).__name__}: {e}")
+
+
 def _run_ml_train():
     _log("🧠 [scheduler] ML train job triggered.")
     try:
@@ -184,6 +208,12 @@ def start_scheduler():
     _scheduler.add_job(_run_creator_brain, "cron",
         hour=5, minute=0,
         id="daily_creator_brain", replace_existing=True, misfire_grace_time=3600)
+
+    for hour in (1, 7, 13, 19):
+        _scheduler.add_job(_run_verified_scan, "cron",
+            hour=hour, minute=15,
+            id=f"verified_scan_{hour}", replace_existing=True,
+            misfire_grace_time=3600)
 
     _scheduler.add_job(_run_post_monitor, "cron",
         hour=POST_MONITOR_HOUR_UTC, minute=0,
