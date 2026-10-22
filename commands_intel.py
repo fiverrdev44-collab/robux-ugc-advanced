@@ -1463,14 +1463,22 @@ description_seo, description_hype, description_short
                 cur.close(); conn.close()
 
         try:
-            scanned, upserted, discovered = await asyncio.to_thread(_run)
+            scanned, upserted, discovered, note = await asyncio.to_thread(_run)
         except Exception as e:
             return await progress.edit(content=f"❌ {e}")
 
-        await progress.edit(content=(
-            "✅ **Verified creator scan**\n"
-            f"• Creators scanned: **{scanned}**\n"
-            f"• New verified creators found: **{discovered}**\n"
-            f"• Marketplace items upserted: **{upserted}**\n"
-            "_Run `!verified_scan` again to continue the queue._"
-        ))
+        lines = [
+            "✅ **Verified creator scan**",
+            f"• Creators scanned: **{scanned}**",
+            f"• New verified creators found: **{discovered}**",
+            f"• Marketplace items upserted: **{upserted}**",
+        ]
+        if note:
+            lines.append(f"⚠️ Source said: `{note}`")
+        elif scanned == 0 and discovered == 0:
+            lines.append(
+                "⚠️ Nothing returned — search may be throttled or the "
+                "verified queue is empty."
+            )
+        lines.append("_Run `!verified_scan` again to continue the queue._")
+        await progress.edit(content="\n".join(lines))

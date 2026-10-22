@@ -68,17 +68,23 @@ def _to_item(d):
     }
 
 
+LAST_ERROR = None
+
+
 def _get_json(s, params):
     """One request with one polite retry on 429."""
+    global LAST_ERROR
     for attempt in range(2):
         try:
             r = s.get(SEARCH_URL, params=params, timeout=15)
         except Exception as e:
+            LAST_ERROR = f"request failed: {type(e).__name__}"
             print(f"[creator-tracker] request failed: {e}", flush=True)
             return None
 
         if r.status_code == 200:
             return r.json()
+        LAST_ERROR = f"HTTP {r.status_code}"
         if r.status_code == 429 and attempt == 0:
             try:
                 wait = int(r.headers.get("Retry-After", 15))
@@ -87,6 +93,7 @@ def _get_json(s, params):
             time.sleep(min(max(wait, 5), 60))
             continue
         if r.status_code == 429:
+            LAST_ERROR = "rate limited (429)"
             raise RateLimited()
         if r.status_code != 200:
             print(f"[creator-tracker] HTTP {r.status_code}", flush=True)
@@ -201,21 +208,30 @@ def mark_scanned(cur, creator_id):
 
 
 def run_batch(cur, limit=10):
-    """Scan one batch. Returns (creators_scanned, items_upserted, discovered)."""
+    """Scan one batch.
+
+    Returns (creators_scanned, items_upserted, new_creators, note) where note
+    explains a zero result (HTTP error, rate limit) or is None.
+    """
+    global LAST_ERROR
+    LAST_ERROR = None
     s = _session()
 
     try:
         discovered = discover_verified(s)
     except RateLimited:
         print("[creator-tracker] rate limited during discovery — stopping", flush=True)
-        return 0, 0, 0
+        return 0, 0, 0, LAST_ERROR or "rate limited"
 
     new_creators = ensure_creators(cur, discovered)
     cur.connection.commit()
 
     batch = pick_batch(cur, limit)
     if not batch:
-        return 0, 0, new_creators
+        note = None
+        if not new_creators and not discovered:
+            note = LAST_ERROR or "no verified creators returned by search"
+        return 0, 0, new_creators, note
 
     scanned = 0
     upserted = 0
@@ -236,4 +252,4 @@ def run_batch(cur, limit=10):
     except RateLimited:
         print("[creator-tracker] rate limited — stopping batch early", flush=True)
 
-    return scanned, upserted, new_creators
+    return scanned, upserted, new_creators, LAST_ERROR

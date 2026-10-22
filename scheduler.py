@@ -84,7 +84,7 @@ def _run_verified_scan():
         conn = get_db()
         cur = conn.cursor()
         try:
-            scanned, upserted, discovered = run_batch(cur, limit=20)
+            scanned, upserted, discovered, note = run_batch(cur, limit=20)
         finally:
             cur.close()
             conn.close()
@@ -92,6 +92,7 @@ def _run_verified_scan():
         _log(
             f"✅ [scheduler] Verified scan — {scanned} creators · "
             f"{upserted} items · {discovered} new · {time.time()-start:.1f}s"
+            + (f" · {note}" if note else "")
         )
     except Exception as e:
         _log(f"❌ [scheduler] Verified scan failed: {type(e).__name__}: {e}")
