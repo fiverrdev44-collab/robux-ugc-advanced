@@ -18,6 +18,11 @@ SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 PAGE_SIZE = 30
 DELAY = 1.0          # seconds between requests — be polite
 MAX_PAGES = 2        # 60 items per creator per run
+MAX_REQUESTS = 150   # hard budget per batch, so one run can't dig a hole
+
+
+class RateLimited(Exception):
+    """Raised when Roblox keeps rejecting us — stop the batch, resume later."""
 
 
 def _headers():
@@ -81,6 +86,8 @@ def _get_json(s, params):
                 wait = 15
             time.sleep(min(max(wait, 5), 60))
             continue
+        if r.status_code == 429:
+            raise RateLimited()
         if r.status_code != 200:
             print(f"[creator-tracker] HTTP {r.status_code}", flush=True)
         return None
@@ -197,7 +204,12 @@ def run_batch(cur, limit=10):
     """Scan one batch. Returns (creators_scanned, items_upserted, discovered)."""
     s = _session()
 
-    discovered = discover_verified(s)
+    try:
+        discovered = discover_verified(s)
+    except RateLimited:
+        print("[creator-tracker] rate limited during discovery — stopping", flush=True)
+        return 0, 0, 0
+
     new_creators = ensure_creators(cur, discovered)
     cur.connection.commit()
 
@@ -207,12 +219,21 @@ def run_batch(cur, limit=10):
 
     scanned = 0
     upserted = 0
-    for cid, ctype, _name in batch:
-        items = search_creator(s, cid, ctype or "User")
-        upserted += upsert_items(cur, items)
-        mark_scanned(cur, cid)
-        cur.connection.commit()
-        scanned += 1
-        time.sleep(DELAY)
+    budget = MAX_REQUESTS
+
+    try:
+        for cid, ctype, _name in batch:
+            items = search_creator(s, cid, ctype or "User")
+            upserted += upsert_items(cur, items)
+            mark_scanned(cur, cid)
+            cur.connection.commit()
+            scanned += 1
+            budget -= MAX_PAGES + 1
+            if budget <= 0:
+                print("[creator-tracker] request budget reached — pausing", flush=True)
+                break
+            time.sleep(DELAY)
+    except RateLimited:
+        print("[creator-tracker] rate limited — stopping batch early", flush=True)
 
     return scanned, upserted, new_creators
