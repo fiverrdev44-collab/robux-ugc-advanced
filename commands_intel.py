@@ -1127,6 +1127,49 @@ description_seo, description_hype, description_short
             finally:
                 cur.close(); conn.close()
 
+        def _deep():
+            """Heavy math: gap engine, convergence, velocity, forecast, predictor."""
+            from gap_engine import run_gap_engine
+            from convergence_engine import scan_convergence
+            from market_velocity import build_niche_intel
+            from oracle import forecast_trend
+            from predictor import predict_success
+
+            conn = get_db(); cur = conn.cursor()
+            try:
+                terms = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:5]
+                try:
+                    cat_ids = get_category_config(family).get("asset_type_ids") or None
+                except Exception:
+                    cat_ids = None
+
+                gaps = run_gap_engine(cur, terms) if terms else {}
+                conv = scan_convergence(family, limit=5) or []
+
+                kw_list = [g.get("word") for g in (gaps.get("golden") or [])][:3]
+                if not kw_list:
+                    kw_list = [p.get("word") for p in (gaps.get("pivots") or [])][:3]
+                if not kw_list:
+                    kw_list = terms[:3]
+                intel = build_niche_intel(cur, kw_list, asset_ids=cat_ids) if kw_list else {}
+
+                forecasts = {}
+                for kw in (intel or {}).get("keywords", [])[:3]:
+                    try:
+                        f = forecast_trend(cur, kw, days=14)
+                        if f:
+                            forecasts[kw] = f
+                    except Exception:
+                        pass
+
+                pred = predict_success(cur, terms) if terms else None
+                return {
+                    "gaps": gaps, "conv": conv, "intel": intel,
+                    "forecasts": forecasts, "pred": pred,
+                }
+            finally:
+                cur.close(); conn.close()
+
         try:
             row = await asyncio.to_thread(_load)
         except Exception as e:
@@ -1166,7 +1209,134 @@ description_seo, description_hype, description_short
 
         await progress.edit(content=(
             f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
-            "**Step 2/3** — peer autopsy..."
+            "**Step 2/4** — deep scan: gaps, velocity, forecast..."
+        ))
+
+        deep = {}
+        try:
+            deep = await asyncio.to_thread(_deep)
+        except Exception as e:
+            await ctx.send(f"⚠️ Deep scan failed: `{e}`")
+
+        gaps = deep.get("gaps") or {}
+        conv = deep.get("conv") or []
+        intel = deep.get("intel") or {}
+        forecasts = deep.get("forecasts") or {}
+        pred = deep.get("pred") or {}
+
+        dlines = ["## 🧠 DEEP SCAN — gaps, velocity, forecast"]
+        if gaps:
+            dlines.append(
+                f"Matched **{gaps.get('matched', 0)}** items in this niche · "
+                f"golden **{len(gaps.get('golden') or [])}** · "
+                f"sweet **{len(gaps.get('sweet') or [])}**"
+            )
+            for g in (gaps.get("golden") or [])[:4]:
+                dlines.append(
+                    f"🟢 `{g['word']}` — {g['comp']} comp · "
+                    f"median {g['median_favs']:,}♥"
+                )
+            for g in (gaps.get("sweet") or [])[:3]:
+                dlines.append(
+                    f"🔵 `{g['word']}` — {g['comp']} comp · "
+                    f"median {g['median_favs']:,}♥"
+                )
+            for pv in (gaps.get("pivots") or [])[:3]:
+                dlines.append(
+                    f"🎯 pivot `{pv['word']}` — {pv['comp']} comp · "
+                    f"median {pv['median_favs']:,}♥"
+                )
+            for cb in (gaps.get("combo_gaps") or [])[:3]:
+                dlines.append(
+                    f"🧩 combo `{cb['combo']}` — {cb['comp']} items · "
+                    f"median {cb['median_favs']:,}♥"
+                )
+        else:
+            dlines.append("_No gap data — the name is too generic to split._")
+
+        if conv:
+            dlines.append("\n**Family convergence:**")
+            try:
+                from convergence_engine import format_brief
+                for r in conv[:3]:
+                    dlines.append(format_brief(r))
+            except Exception:
+                pass
+
+        if intel.get("keywords"):
+            dlines.append("\n**Velocity / trend / creator grip:**")
+            for kw in intel["keywords"][:3]:
+                v = (intel.get("velocity") or {}).get(kw) or {}
+                tr = (intel.get("trajectory") or {}).get(kw) or {}
+                cc = (intel.get("concentration") or {}).get(kw) or {}
+                dlines.append(
+                    f"`{kw}` — {v.get('avg_favs_per_day', 0)} favs/day "
+                    f"({v.get('sample_size', 0)} items) · "
+                    f"{tr.get('direction', '?')} "
+                    f"{(tr.get('pct_change') or 0):+}% · "
+                    f"top3 {cc.get('top3_share', 0)}%"
+                )
+
+        if forecasts:
+            dlines.append("\n**14-day forecast:**")
+            for kw, f in list(forecasts.items())[:3]:
+                dlines.append(
+                    f"`{kw}` — {f.get('trajectory', '?')} "
+                    f"(accel {f.get('avg_acceleration', '?')}, "
+                    f"supply {f.get('saturation', '?')})"
+                )
+
+        if pred and pred.get("probability") is not None:
+            dlines.append(
+                f"\n**Success model:** **{pred.get('probability')}%** — "
+                f"{pred.get('verdict', '?')} · {pred.get('reason', '')}"
+            )
+
+        score = 10
+        details = ["no gap +10"]
+        if gaps.get("golden"):
+            score = 35; details = ["golden gap +35"]
+        elif gaps.get("sweet"):
+            score = 25; details = ["sweet gap +25"]
+
+        best_conv = max([(r or {}).get("score") or 0 for r in conv], default=0)
+        add = min(25, round(best_conv / 4))
+        score += add
+        details.append(f"convergence +{add}")
+
+        if pred.get("probability"):
+            add = round(0.25 * pred["probability"])
+            score += add
+            details.append(f"model +{add}")
+
+        dirs = [(t or {}).get("direction")
+                for t in (intel.get("trajectory") or {}).values()]
+        if "HEATING" in dirs:
+            score += 15
+            details.append("heating +15")
+
+        if age_days >= 120 and favs < 50:
+            score -= 10
+            details.append("old & flat -10")
+
+        score = max(0, min(100, score))
+        score_txt = ("niche is alive — go" if score >= 70
+                     else "worth one cheap test" if score >= 45
+                     else "niche is the problem — new concept")
+        dlines.append(
+            f"\n## 🧮 REVIVE SCORE — **{score}/100**\n"
+            f"_{score_txt}_\n"
+            f"`{' · '.join(details)}`"
+        )
+
+        dbody = "\n".join(dlines)
+        for i in range(0, len(dbody), 1900):
+            await ctx.send(dbody[i:i+1900])
+            await asyncio.sleep(0.2)
+
+        await progress.edit(content=(
+            f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
+            "**Step 3/4** — peer autopsy..."
         ))
         try:
             from peer_autopsy import peer_autopsy
@@ -1178,7 +1348,7 @@ description_seo, description_hype, description_short
 
         await progress.edit(content=(
             f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
-            "**Step 3/3** — writing the plan..."
+            "**Step 4/4** — writing the plan..."
         ))
 
         odds = "long shot" if age_days >= 120 and favs < 50 else "realistic"
