@@ -119,6 +119,10 @@ try:
     from commands_experiments import register_experiment_commands
     register_experiment_commands(bot, get_db)
     print("✅ Experiment commands loaded.", flush=True)
+
+    from commands_visibility import register_visibility_commands
+    register_visibility_commands(bot, get_db)
+    print("✅ Visibility commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 

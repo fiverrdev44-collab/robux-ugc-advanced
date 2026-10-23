@@ -116,9 +116,13 @@ what happened → measure at 7/14/30 days.
 | `!launch_sync` | Auto-log every item from your groups |
 | `!ledger_sync` | Fill D1/D7/D30 favorites and sales |
 | `!hitrate` | Your launches vs niche peers |
-| `!experiments` | Show recommendation outcomes; measures anything due |
+| `!experiments` | Show recommendation outcomes, matched-control DiD, and measure due rows |
 | `!applied [id\|last]` | Mark advice as applied; starts the 7/14/30-day measurement |
 | `!ignored [id\|last]` | Mark advice as skipped |
+| `!data_audit` | Read-only audit: favorites states, duplicate sales/snapshots, ledger gaps, experiment coverage |
+| `!visibility` | Search-visibility coverage and freshness |
+| `!visibility_seed [n]` | Seed visibility queries from live suggestions |
+| `!visibility_run [n]` | Collect due search-visibility observations now |
 
 Recommendations are stored in `recommendation_ledger`. A 15-minute watcher auto-detects
 renames and price changes; `!applied last` is only needed for “keep + promote” advice with
@@ -165,6 +169,11 @@ Every AI output passes these gates before display:
 
 Verification proves the words and claims are real. It does **not** prove the item will sell.
 
+Matched-control experiments compare treated items with similar untreated items using
+pre-intervention family, age, price and velocity. The result is an observational
+difference-in-differences estimate with 80% and 95% intervals. Fewer than five controls
+is labeled **exploratory** — never causal proof.
+
 ---
 
 ## Accuracy status (2026-10-23)
@@ -183,7 +192,7 @@ present its ranking as a probability.
 
 Known data gaps:
 
-- 60% of catalog items currently have favorites (`favorites_backfill.py` runs nightly).
+- 60% of catalog items have a non-NULL favorite count, but only **26.3% have positive favorites**; 66k zeros are ambiguous and 78k are NULL (`favorites_backfill.py` runs nightly).
 - `launch_ledger`: 9 rows; 0 D30 favorites; 0 measured experiments.
 - Gear is thin; bundles are not true asset-table support.
 - Verified-creator discovery is sampled, not exhaustive.
@@ -209,6 +218,9 @@ Known data gaps:
 | `confidence.py` | Bootstrap/prediction intervals, cohort evidence, sales history |
 | `opportunity_score.py` | Demand-vs-competition score and visibility proxy |
 | `experiments.py` | Recommendation ledger, auto-apply, 7/14/30 measurement |
+| `matched_experiments.py` | Pre-intervention matching and observational DiD with 80% interval |
+| `search_visibility.py` | Normalized queries, timestamped search runs and observations |
+| `data_audit.py` | Read-only data-integrity report |
 | `live_market.py` | Paginated live exact/relevance checks |
 | `revsim.py` | Ledger-calibrated revenue scenarios |
 | `creator_tracker.py` | Verified-creator discovery and live badge checks |
@@ -240,6 +252,8 @@ Known data gaps:
 | `launch_sync` | 07:30 UTC | Auto-log group items |
 | `experiment_measure` | 08:00 UTC | Measure due 7/14/30 checkpoints |
 | `experiment_watch` | Every 15 min | Auto-detect renames/prices and measure |
+| `favorites_backfill` | 02:30 UTC | Fill NULL and ambiguous-zero favorites, 500/day, ledger items first |
+| `visibility` | 04:30 and 16:30 UTC | Sample marketplace search positions and store observations |
 | `sales_listener.py` | Live | Parse sale notifications into `my_sales` |
 
 ---
@@ -254,7 +268,9 @@ Known data gaps:
 | `learned_keywords` | Vetted keyword scores |
 | `my_sales` | Recorded sales events |
 | `launch_ledger` | Launches, D1/D7/D30 favorites, units, revenue, features, labels |
-| `recommendation_ledger` | Advice, baseline, applied/ignored, outcome history |
+| `recommendation_ledger` | Advice, baseline, applied/ignored, outcome history, model version, DiD |
+| `experiment_controls` | Matched control items and pre-intervention distances |
+| `search_queries`, `search_runs`, `search_observations` | Search-visibility history |
 | `tracked_creators` | Verified creator queue |
 | `my_portfolio`, `watchlist`, `item_tracker` | Portfolio and tracking |
 
@@ -266,6 +282,8 @@ Known data gaps:
 ---
 
 ## Setup
+
+Schema migrations and rollback: see `MIGRATIONS.md`.
 
 Requirements: Python 3.12, PostgreSQL, Discord bot token, Gemini/OpenAI key, Roblox cookie.
 

@@ -57,7 +57,7 @@ def _to_item(d):
         "id": d.get("id"),
         "name": (d.get("name") or "")[:500],
         "description": (d.get("description") or "")[:5000],
-        "favorite_count": d.get("favoriteCount") or 0,
+        "favorite_count": d.get("favoriteCount"),
         "price": d.get("price") or 0,
         "creator_name": (d.get("creatorName") or "")[:200],
         "creator_id": d.get("creatorTargetId"),
@@ -229,12 +229,17 @@ def upsert_items(cur, items):
         cur.execute("""
             INSERT INTO items (id, name, description, favorite_count, price,
                                creator_name, creator_id, creator_verified,
-                               asset_type_id, created_at, fetched_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                               asset_type_id, created_at, fetched_at,
+                               favorite_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
             ON CONFLICT (id) DO UPDATE SET
                 name = EXCLUDED.name,
                 description = EXCLUDED.description,
                 favorite_count = EXCLUDED.favorite_count,
+                favorite_status = CASE
+                    WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+                    ELSE 'known'
+                END,
                 price = EXCLUDED.price,
                 creator_name = EXCLUDED.creator_name,
                 creator_id = EXCLUDED.creator_id,
@@ -246,6 +251,7 @@ def upsert_items(cur, items):
             it["price"], it["creator_name"], it.get("creator_id"),
             it.get("creator_verified", False), it["asset_type_id"],
             it.get("created_at"),
+            ("known" if it.get("favorite_count") is not None else "missing"),
         ))
         inserted += 1
     return inserted

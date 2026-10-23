@@ -113,6 +113,8 @@ def _extract_sale_from_embed(embed, message):
         "amount_robux": revenue,
         "status": "Complete",
         "group_name": group_name,
+        "source_event_id": f"discord:{message.id}:{item_name}:{revenue}",
+        "source": "discord",
     }
 
 
@@ -125,22 +127,15 @@ def _insert_sale(cur, sale):
     params = (
         sale["sale_date"], sale["sale_time"], sale["item_name"],
         sale["buyer"], sale["amount_robux"], sale["status"],
+        sale.get("source_event_id"), sale.get("source"),
     )
     cur.execute("""
         insert into my_sales
-          (sale_date, sale_time, item_name, buyer, amount_robux, status)
-        select %s, %s, %s, %s, %s, %s
-        where not exists (
-            select 1 from my_sales
-            where sale_time::timestamptz = %s::timestamptz
-              and item_name is not distinct from %s
-              and buyer is not distinct from %s
-              and amount_robux is not distinct from %s
-        )
-    """, params + (
-        sale["sale_time"], sale["item_name"],
-        sale["buyer"], sale["amount_robux"],
-    ))
+          (sale_date, sale_time, item_name, buyer, amount_robux, status,
+           source_event_id, source)
+        values (%s, %s, %s, %s, %s, %s, %s, %s)
+        on conflict do nothing
+    """, params)
     return cur.rowcount > 0
 
 

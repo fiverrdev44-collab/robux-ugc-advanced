@@ -67,20 +67,28 @@ def register_experiment_commands(bot, get_db):
             try:
                 from experiments import (auto_apply_changes, measure_due,
                                          summary, format_summary)
+                from matched_experiments import evaluate_due, recent_lines
                 auto_applied = auto_apply_changes(cur)
                 measured = measure_due(cur)
+                did_done = evaluate_due(cur)
                 conn.commit()
                 data = summary(cur, limit=limit)
-                return auto_applied, measured, data, format_summary(data)
+                body = format_summary(data)
+                extra = recent_lines(cur)
+                if extra:
+                    body += extra
+                return auto_applied, measured, did_done, body
             finally:
                 cur.close(); conn.close()
 
-        auto_applied, measured, data, body = await asyncio.to_thread(_do)
+        auto_applied, measured, did_done, body = await asyncio.to_thread(_do)
         notes = []
         if auto_applied:
             notes.append(f"auto-applied {auto_applied} changed item(s)")
         if measured:
             notes.append(f"measured {measured} due experiment(s)")
+        if did_done:
+            notes.append(f"evaluated {did_done} matched comparison(s)")
         if notes:
             body = "_" + "; ".join(notes) + "._\n\n" + body
         for i in range(0, len(body), 1900):

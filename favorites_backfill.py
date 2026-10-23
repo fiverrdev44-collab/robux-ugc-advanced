@@ -23,6 +23,15 @@ def pick_ids(cur, limit):
             LIMIT %s
         """, (remaining,))
         ids.extend(r[0] for r in cur.fetchall())
+    remaining = max(0, limit - len(ids))
+    if remaining:
+        cur.execute("""
+            SELECT id FROM items
+            WHERE favorite_count = 0
+            ORDER BY created_at DESC NULLS LAST, id DESC
+            LIMIT %s
+        """, (remaining,))
+        ids.extend(r[0] for r in cur.fetchall())
     return list(dict.fromkeys(ids))[:limit]
 
 

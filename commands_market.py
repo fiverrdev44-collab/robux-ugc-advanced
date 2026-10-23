@@ -1,6 +1,7 @@
 """
 commands_market.py — market data commands.
 """
+import asyncio
 import math
 import re
 import discord
@@ -472,3 +473,23 @@ def register_market_commands(bot):
             embed.add_field(name=f"🕐 {when.strftime('%m/%d %H:%M')}",
                             value=f"Favs: **{favs:,}** | Price: **{price} R$**", inline=False)
         await ctx.send(embed=embed)
+
+    @bot.command(name="data_audit", aliases=["integrity"])
+    async def data_audit_cmd(ctx):
+        """Audit favorites, sales, snapshots, ledger, and experiments."""
+        def _run():
+            conn = get_db(); cur = conn.cursor()
+            try:
+                from data_audit import build_report, format_report
+                report = build_report(cur)
+                return format_report(report)
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            body = await asyncio.to_thread(_run)
+        except Exception as e:
+            return await ctx.send(f"❌ Data audit failed: `{type(e).__name__}`")
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i+1900])
+            await asyncio.sleep(0.2)

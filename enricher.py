@@ -262,10 +262,15 @@ def enrich_items():
 
             cur.execute("""
                 INSERT INTO items (id, name, favorite_count, price, total_sales,
-                                   description, creator_name, asset_type_id, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   description, creator_name, asset_type_id, created_at,
+                                   favorite_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     favorite_count = EXCLUDED.favorite_count,
+                    favorite_status = CASE
+                        WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+                        ELSE 'known'
+                    END,
                     total_sales = EXCLUDED.total_sales,
                     price = EXCLUDED.price,
                     description = EXCLUDED.description,
@@ -273,7 +278,8 @@ def enrich_items():
                     asset_type_id = EXCLUDED.asset_type_id,
                     created_at = COALESCE(items.created_at, EXCLUDED.created_at),
                     fetched_at = CURRENT_TIMESTAMP
-            """, (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt))
+            """, (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt,
+             ("known" if favs is not None else "missing")))
 
             enriched += 1
             # Commit in small chunks so a restart can't wipe the batch.

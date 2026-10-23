@@ -253,6 +253,7 @@ def _snapshot_top_items_inner():
             cur.executemany("""
                 INSERT INTO item_history (item_id, favorite_count, total_sales, price)
                 VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
             """, batch)
             conn.commit()
             inserted += len(batch)
@@ -262,6 +263,7 @@ def _snapshot_top_items_inner():
         cur.executemany("""
             INSERT INTO item_history (item_id, favorite_count, total_sales, price)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
         """, batch)
         conn.commit()
         inserted += len(batch)

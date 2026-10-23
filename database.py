@@ -277,11 +277,6 @@ def setup_database():
         except Exception:
             pass
 
-    _safe_exec(cur, '''
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_my_sales_dedup
-        ON my_sales (sale_time, item_name, buyer, amount_robux);
-    ''', "idx_my_sales_dedup")
-
     # Migrate an existing TEXT sale_date column to a real DATE column.
     try:
         cur.execute("""
@@ -475,6 +470,123 @@ def setup_database():
         CREATE INDEX IF NOT EXISTS idx_items_creator
         ON items (creator_id);
     ''', "idx_items_creator")
+
+    # ── Data integrity migrations ──────────────────────────────────────
+    _safe_exec(cur, """
+        ALTER TABLE items
+        ADD COLUMN IF NOT EXISTS favorite_status TEXT;
+    """, "items_favorite_status")
+    _safe_exec(cur, """
+        UPDATE items SET favorite_status =
+          CASE
+            WHEN favorite_count IS NULL THEN 'missing'
+            WHEN favorite_count = 0 THEN 'ambiguous_zero'
+            ELSE 'known'
+          END
+        WHERE favorite_status IS NULL;
+    """, "items_favorite_status_backfill")
+
+    _safe_exec(cur, """
+        ALTER TABLE my_sales
+        ADD COLUMN IF NOT EXISTS source_event_id TEXT,
+        ADD COLUMN IF NOT EXISTS source TEXT;
+    """, "my_sales_event_cols")
+    _safe_exec(cur, """
+        ALTER TABLE my_sales
+        DROP CONSTRAINT IF EXISTS my_sales_sale_time_item_name_buyer_amount_robux_key;
+    """, "my_sales_drop_fingerprint_constraint")
+    _safe_exec(cur, """
+        DROP INDEX IF EXISTS idx_my_sales_dedup;
+    """, "my_sales_drop_dup_index")
+    _safe_exec(cur, """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_my_sales_event_id
+        ON my_sales (source_event_id)
+        WHERE source_event_id IS NOT NULL;
+    """, "idx_my_sales_event_id")
+    _safe_exec(cur, """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_my_sales_fingerprint_fallback
+        ON my_sales (sale_time, item_name, buyer, amount_robux)
+        WHERE source_event_id IS NULL;
+    """, "idx_my_sales_fingerprint_fallback")
+
+    _safe_exec(cur, """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_item_history_daily
+        ON item_history (item_id, (snapshot_at::date));
+    """, "idx_item_history_daily")
+
+    # ── Search visibility history ───────────────────────────────────────
+    _safe_exec(cur, """
+        CREATE TABLE IF NOT EXISTS search_queries (
+            id SERIAL PRIMARY KEY,
+            query TEXT NOT NULL UNIQUE,
+            family TEXT,
+            enabled BOOLEAN DEFAULT TRUE,
+            weight REAL DEFAULT 1.0,
+            source TEXT,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        );
+    """, "search_queries")
+    _safe_exec(cur, """
+        CREATE TABLE IF NOT EXISTS search_runs (
+            id BIGSERIAL PRIMARY KEY,
+            query_id INTEGER REFERENCES search_queries(id) ON DELETE CASCADE,
+            started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMPTZ,
+            status TEXT DEFAULT 'running',
+            endpoint TEXT,
+            sort_type TEXT,
+            filters JSONB,
+            pages INTEGER DEFAULT 0,
+            results_seen INTEGER DEFAULT 0,
+            error TEXT,
+            source TEXT DEFAULT 'catalog_api'
+        );
+    """, "search_runs")
+    _safe_exec(cur, """
+        CREATE TABLE IF NOT EXISTS search_observations (
+            id BIGSERIAL PRIMARY KEY,
+            run_id BIGINT REFERENCES search_runs(id) ON DELETE CASCADE,
+            query_id INTEGER REFERENCES search_queries(id) ON DELETE CASCADE,
+            item_id BIGINT,
+            position INTEGER,
+            page INTEGER,
+            cursor TEXT,
+            name TEXT,
+            favorite_count INTEGER,
+            price INTEGER,
+            is_exact BOOLEAN DEFAULT FALSE,
+            observed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (run_id, item_id)
+        );
+    """, "search_observations")
+    _safe_exec(cur, """
+        CREATE INDEX IF NOT EXISTS idx_search_obs_query_time
+        ON search_observations (query_id, observed_at DESC);
+    """, "idx_search_obs_query_time")
+
+    # ── Matched-control experiments ────────────────────────────────────
+    _safe_exec(cur, """
+        ALTER TABLE recommendation_ledger
+        ADD COLUMN IF NOT EXISTS model_version TEXT,
+        ADD COLUMN IF NOT EXISTS evidence_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS control_method TEXT,
+        ADD COLUMN IF NOT EXISTS match_quality REAL,
+        ADD COLUMN IF NOT EXISTS control_n INTEGER,
+        ADD COLUMN IF NOT EXISTS did_estimate JSONB,
+        ADD COLUMN IF NOT EXISTS assumptions TEXT,
+        ADD COLUMN IF NOT EXISTS evaluated_at TIMESTAMPTZ;
+    """, "recommendation_control_cols")
+    _safe_exec(cur, """
+        CREATE TABLE IF NOT EXISTS experiment_controls (
+            rec_id INTEGER REFERENCES recommendation_ledger(id) ON DELETE CASCADE,
+            control_item_id BIGINT NOT NULL,
+            distance REAL,
+            features JSONB,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (rec_id, control_item_id)
+        );
+    """, "experiment_controls")
 
     try:
         conn.commit()

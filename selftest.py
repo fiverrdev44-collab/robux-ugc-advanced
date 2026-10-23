@@ -33,7 +33,9 @@ CORE_MODULES = [
     "gemini_brain", "pivot_history", "live_enrich",
     "discover_keywords", "backfill_dates", "confidence",
     "verification", "opportunity_score", "revsim", "live_market",
-    "experiments", "commands_experiments",
+    "experiments", "commands_experiments", "data_audit",
+    "search_visibility", "commands_visibility", "matched_experiments",
+    "favorites_backfill",
 ]
 
 EXPECTED_COMMANDS = [
@@ -119,17 +121,17 @@ def run_selftest(bot=None, progress=None):
         add("pipeline", "backlog", True, f"{backlog:,} pending")
 
         cur.execute("""
-            SELECT count(*) FILTER (WHERE favorite_count IS NULL), count(*)
+            SELECT count(*) FILTER (WHERE favorite_count > 0), count(*)
             FROM items
         """)
-        null_favs, total_items = cur.fetchone()
-        null_favs = int(null_favs or 0)
+        positive_favs, total_items = cur.fetchone()
+        positive_favs = int(positive_favs or 0)
         total_items = int(total_items or 0)
-        pct_null = (null_favs / total_items * 100) if total_items else 100
+        pct_positive = (positive_favs / total_items * 100) if total_items else 0
         add(
             "pipeline", "favorites coverage",
-            pct_null < 20,
-            f"{100 - pct_null:.1f}% with favorites",
+            pct_positive >= 30,
+            f"{pct_positive:.1f}% positive favorites",
             warning=True,
         )
 
@@ -631,6 +633,8 @@ SAFE_COMMANDS = [
     ("sales_keywords", ["emotes"], {}),
     ("early", [7], {}),
     ("experiments", [], {}),
+    ("data_audit", [], {}),
+    ("visibility", [], {}),
     ("momentum", [7], {}),
     ("oracle", [], {"keyword": "anime"}),
     ("predict", [], {"idea": "kawaii aura emote"}),

@@ -466,11 +466,19 @@ def save_item_to_db(cur, item):
     try:
         cur.execute("""
             INSERT INTO items (id, name, favorite_count, price, total_sales,
-                               description, creator_name, asset_type_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                               description, creator_name, asset_type_id,
+                               favorite_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 favorite_count = COALESCE(EXCLUDED.favorite_count,
                                           items.favorite_count),
+                favorite_status = CASE
+                    WHEN EXCLUDED.favorite_count IS NULL
+                         AND items.favorite_count IS NULL THEN 'missing'
+                    WHEN EXCLUDED.favorite_count IS NULL
+                         THEN COALESCE(items.favorite_status, 'known')
+                    ELSE 'known'
+                END,
                 total_sales = EXCLUDED.total_sales,
                 price = EXCLUDED.price,
                 description = EXCLUDED.description,
@@ -481,6 +489,7 @@ def save_item_to_db(cur, item):
             item["id"], item["name"], item["favorite_count"],
             item["price"], item["total_sales"], item["description"],
             item["creator_name"], item["asset_type_id"],
+            ("known" if item.get("favorite_count") is not None else "missing"),
         ))
         return True
     except Exception as e:

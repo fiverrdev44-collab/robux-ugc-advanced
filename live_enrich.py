@@ -309,10 +309,15 @@ def live_enrich_keyword(keyword, category_ids=None, max_items=100):
                         continue
                     cur.execute("""
                         INSERT INTO items (id, name, favorite_count, price, total_sales,
-                                           description, creator_name, asset_type_id, created_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                           description, creator_name, asset_type_id, created_at,
+                                           favorite_status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE SET
                             favorite_count = EXCLUDED.favorite_count,
+                            favorite_status = CASE
+                                WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+                                ELSE 'known'
+                            END,
                             total_sales = EXCLUDED.total_sales,
                             price = EXCLUDED.price,
                             description = EXCLUDED.description,
@@ -324,6 +329,7 @@ def live_enrich_keyword(keyword, category_ids=None, max_items=100):
                         data["id"], data["name"], data["favorite_count"],
                         data["price"], data["total_sales"], data["description"],
                         data["creator_name"], data["asset_type_id"], data["created_at"],
+                        ("known" if data.get("favorite_count") is not None else "missing"),
                     ))
                     saved += 1
                 except Exception as e:

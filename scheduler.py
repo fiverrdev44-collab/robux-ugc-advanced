@@ -203,12 +203,32 @@ def _run_experiment_measure():
              f"{type(e).__name__}: {e}")
 
 
+def _run_visibility():
+    """Twice daily: collect sampled search-visibility observations."""
+    try:
+        from search_visibility import collect, seed_queries
+        from bot_core import get_db
+
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT count(*) FROM search_queries")
+            if not cur.fetchone()[0]:
+                seed_queries(cur, 50)
+            done = collect(cur, limit=20)
+            conn.commit()
+            _log(f"✅ [scheduler] Visibility collected {done} query run(s).")
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        _log(f"❌ [scheduler] Visibility failed: {type(e).__name__}: {e}")
+
+
 def _run_favorites_backfill():
     """Daily: fill missing favorites, ledger items first."""
     _log("⭐ [scheduler] Favorites backfill triggered.")
     try:
         from favorites_backfill import run
-        ok, failed = run(limit=300, sleep=1.0)
+        ok, failed = run(limit=500, sleep=1.0)
         _log(f"✅ [scheduler] Favorites backfill: ok={ok}, failed={failed}")
     except Exception as e:
         _log(f"❌ [scheduler] Favorites backfill failed: "
@@ -290,6 +310,12 @@ def start_scheduler():
         hour=2, minute=30,
         id="favorites_backfill", replace_existing=True,
         misfire_grace_time=3600)
+
+    for hour in (4, 16):
+        _scheduler.add_job(_run_visibility, "cron",
+            hour=hour, minute=30,
+            id=f"visibility_{hour}", replace_existing=True,
+            misfire_grace_time=3600)
 
     # Catch up if the daily snapshot was missed (bot restarted at 03:30,
     # long downtime, or a failed run). Prevents 24h+ gaps in item_history,
