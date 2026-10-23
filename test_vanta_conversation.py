@@ -42,10 +42,12 @@ def test_conversational_glue():
     assert classify_intent("thanks", use_ai=False)["intent"] == "ack"
     assert classify_intent("yo check this item 121930221694467",
                            use_ai=False)["intent"] == "inspect_item"
+    assert classify_intent("check my item", use_ai=False)["intent"] == "list_my_items"
+    assert classify_intent("change title of my old item",
+                           use_ai=False)["intent"] == "list_my_items"
     route = classify_intent("I want to inspect or change title of my item",
                             use_ai=False)
-    assert route["intent"] == "clarify"
-    assert "item ID" in route["question"]
+    assert route["intent"] == "list_my_items"
     print("PASS conversational glue")
 
 
@@ -62,6 +64,10 @@ def test_followups():
     state.last_intent = "inspect_item"
     state.last_item_id = 111111111111
     assert classify_intent("the second one", state=state, use_ai=False)["item_id"] == 222222222222
+    assert classify_intent("the first one", state=state, use_ai=False)["item_id"] == 111111111111
+    changed = classify_intent("change the title of the first one",
+                              state=state, use_ai=False)
+    assert changed["intent"] == "improve_metadata" and changed["item_id"] == 111111111111
     assert classify_intent("go deeper", state=state, use_ai=False)["intent"] == "diagnose_item"
     same = classify_intent("same for this item 333333333333", state=state, use_ai=False)
     assert same["intent"] == "inspect_item" and same["item_id"] == 333333333333

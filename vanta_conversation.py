@@ -47,6 +47,7 @@ INTENTS = {
     "presence": "Confirm the bot is still available",
     "ack": "Acknowledge a short confirmation",
     "cancel": "Cancel the current direction",
+    "list_my_items": "List tracked launch items when no item ID is supplied",
     "clarify": "Ask one short clarifying question",
 }
 
@@ -229,14 +230,34 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("cancel", confidence="high")
 
     # Follow-ups first.
-    if re.search(r"\b(second|2nd|number two|option 2|the other one)\b", low):
-        if len(state.results) >= 2:
-            return _intent(state.last_intent or "inspect_item",
-                           item_id=state.results[1],
-                           concept=state.last_concept,
-                           family=state.last_family,
+    ordinal = re.search(
+        r"\b(first|1st|one|second|2nd|two|third|3rd|three|fourth|4th|four|"
+        r"fifth|5th|five|the other one)\b", low
+    )
+    if ordinal and state.results:
+        words = {
+            "first": 0, "1st": 0, "one": 0,
+            "second": 1, "2nd": 1, "two": 1, "the other one": 1,
+            "third": 2, "3rd": 2, "three": 2,
+            "fourth": 3, "4th": 3, "four": 3,
+            "fifth": 4, "5th": 4, "five": 4,
+        }
+        index = words.get(ordinal.group(1).lower(), 0)
+        if index < len(state.results):
+            if re.search(r"\b(title|description|metadata|improve|better|rewrite)\b", low):
+                intent = "improve_metadata"
+            elif re.search(r"\b(why|fail|diagnos|wrong|dead)\b", low):
+                intent = "diagnose_item"
+            else:
+                intent = state.last_intent or "inspect_item"
+            return _intent(intent, item_id=state.results[index],
+                           concept=state.last_concept, family=state.last_family,
                            confidence="followup")
-        return _intent("clarify", question="Which result do you mean?", confidence="low")
+        return _intent("clarify", question="That number is not in the current list.",
+                       confidence="low")
+    if ordinal and not state.results:
+        return _intent("clarify", question="Which item do you mean? Send the ID or URL.",
+                       confidence="low")
 
     if re.search(r"\b(go deeper|deeper|dig deeper|more detail|explain more)\b", low):
         target = state.last_item_id
@@ -280,6 +301,13 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                            confidence="high")
         return _intent("clarify", question="Send the item ID or Roblox URL.",
                        confidence="low")
+
+    if re.search(r"\b(my|our)\b[^.!?]{0,25}\bitems?\b", low) and not item_id:
+        if state.last_item_id and not re.search(r"\bitems\b", low):
+            return _intent("inspect_item", item_id=state.last_item_id,
+                           concept=state.last_concept, family=family,
+                           confidence="followup")
+        return _intent("list_my_items", confidence="high")
 
     if re.search(
         r"\b(check|chek|chekc|inspect|look at|verdict|keep or kill|how is|"
@@ -472,6 +500,61 @@ async def _run_registry(bot, message, route, state):
         state.results = []
         await message.channel.send("Stopped. Tell me the next thing you want to do.")
         return
+    if intent == "list_my_items":
+        def _fetch():
+            from bot_core import get_db
+            conn = get_db(); cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT l.item_id, COALESCE(l.title, i.name),
+                           COALESCE(i.favorite_count, l.favs_launch, 0)
+                    FROM launch_ledger l
+                    LEFT JOIN items i ON i.id = l.item_id
+                    ORDER BY l.launched_at DESC NULLS LAST
+                    LIMIT 8
+                """)
+                rows = cur.fetchall()
+                if not rows:
+                    names = [x.strip() for x in
+                             (os.getenv("MY_GROUP_NAMES") or "").split(",")
+                             if x.strip()]
+                    if names:
+                        cur.execute("""
+                            SELECT id, name, COALESCE(favorite_count, 0)
+                            FROM items WHERE lower(creator_name) = ANY(%s)
+                            ORDER BY favorite_count DESC NULLS LAST LIMIT 8
+                        """, ([n.lower() for n in names],))
+                        rows = cur.fetchall()
+                return rows
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            rows = await asyncio.to_thread(_fetch)
+        except Exception as e:
+            print(f"[vanta] my items failed: {type(e).__name__}: {e}", flush=True)
+            rows = []
+        if not rows:
+            await message.channel.send(
+                "I don't have a tracked launch list yet. Send an item ID/URL, "
+                "or run `!launch_sync`."
+            )
+            return
+        state.results = [int(r[0]) for r in rows]
+        state.last_intent = "inspect_item"
+        state.history.append({"intent": "list_my_items", "at": time.time()})
+        lines = ["**Your tracked items:**"]
+        for index, (item_id, title, favs) in enumerate(rows, 1):
+            lines.append(
+                f"**{index}.** `{item_id}` — {(title or '?')[:60]} · {int(favs or 0):,}♥"
+            )
+        lines.append(
+            "\nReply with a number or ID. For a title rewrite, say "
+            "`change the title of the first one`."
+        )
+        await message.channel.send("\n".join(lines)[:1900])
+        return
+
     if intent == "analyze_image":
         name = "analyze_image"
         kwargs = {}
