@@ -36,6 +36,19 @@ def test_core_intents():
     print("PASS core intent routing")
 
 
+def test_conversational_glue():
+    assert classify_intent("hi", use_ai=False)["intent"] == "greeting"
+    assert classify_intent("Did u disconnect?", use_ai=False)["intent"] == "presence"
+    assert classify_intent("thanks", use_ai=False)["intent"] == "ack"
+    assert classify_intent("yo check this item 121930221694467",
+                           use_ai=False)["intent"] == "inspect_item"
+    route = classify_intent("I want to inspect or change title of my item",
+                            use_ai=False)
+    assert route["intent"] == "clarify"
+    assert "item ID" in route["question"]
+    print("PASS conversational glue")
+
+
 def test_image_and_help():
     assert classify_intent("yo i made this, how does it look?",
                            has_attachment=True, use_ai=False)["intent"] == "analyze_image"
@@ -145,6 +158,7 @@ def test_invalid_intent_rejected():
 if __name__ == "__main__":
     test_item_extraction()
     test_core_intents()
+    test_conversational_glue()
     test_image_and_help()
     test_followups()
     test_family_and_concept()

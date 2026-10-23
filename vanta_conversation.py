@@ -43,6 +43,10 @@ INTENTS = {
     "check_visibility": "Show search-visibility coverage and freshness",
     "data_audit": "Show data-quality and integrity audit",
     "help": "Explain what VANTA can do",
+    "greeting": "Greet the user and invite the next task",
+    "presence": "Confirm the bot is still available",
+    "ack": "Acknowledge a short confirmation",
+    "cancel": "Cancel the current direction",
     "clarify": "Ask one short clarifying question",
 }
 
@@ -209,6 +213,21 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
     family = detect_family(low)
     state = state or ConversationState(user_id=0)
 
+    # Conversational glue before task routing.
+    if re.search(
+        r"\b(did (you|u) disconnect|are (you|u) there|(you|u) there|"
+        r"still there|(you|u) alive|still online|r u there)\b", low
+    ):
+        return _intent("presence", confidence="high")
+    if re.fullmatch(
+        r"(hi|hey|hello|yo|sup|wassup|good morning|good evening)[!. ]*", low
+    ):
+        return _intent("greeting", confidence="high")
+    if re.fullmatch(r"(thanks|thank you|ty|ok|okay|cool|nice|great|perfect)[!. ]*", low):
+        return _intent("ack", confidence="high")
+    if re.match(r"^(cancel|never ?mind|nvm|stop|forget it)\b", low):
+        return _intent("cancel", confidence="high")
+
     # Follow-ups first.
     if re.search(r"\b(second|2nd|number two|option 2|the other one)\b", low):
         if len(state.results) >= 2:
@@ -271,8 +290,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
             return _intent("inspect_item", item_id=target,
                            concept=state.last_concept, family=family,
                            confidence="high")
-        return _intent("clarify", question="Send the item ID or Roblox URL.",
-                       confidence="low")
+        return _intent(
+            "clarify",
+            question="Send the item ID or Roblox URL. I can run a verdict, "
+                     "or rebuild the title and description from the item data.",
+            confidence="low",
+        )
 
     if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
         return _intent("check_sales", confidence="high")
@@ -427,6 +450,28 @@ async def _run_registry(bot, message, route, state):
     concept = route.get("concept")
     family = route.get("family")
 
+    if intent == "greeting":
+        await message.channel.send(
+            "Hey — what are we working on? Send an item ID/URL, describe a "
+            "concept, or attach an image."
+        )
+        return
+    if intent == "presence":
+        await message.channel.send(
+            "I'm here. Send an item ID/URL, a concept, or an image and I'll "
+            "route it to the right engine."
+        )
+        return
+    if intent == "ack":
+        await message.channel.send(
+            "Anytime. Send the next item or ask for a follow-up."
+        )
+        return
+    if intent == "cancel":
+        state.last_item_id = None
+        state.results = []
+        await message.channel.send("Stopped. Tell me the next thing you want to do.")
+        return
     if intent == "analyze_image":
         name = "analyze_image"
         kwargs = {}
