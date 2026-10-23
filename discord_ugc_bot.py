@@ -91,6 +91,13 @@ async def on_message(message):
         except Exception as e:
             print(f"[on_message] sales handler failed: {e}", flush=True)
 
+    try:
+        from vanta_conversation import maybe_handle
+        if await maybe_handle(bot, message):
+            return
+    except Exception as e:
+        print(f"[on_message] conversation router failed: {e}", flush=True)
+
     await bot.process_commands(message)
 
 

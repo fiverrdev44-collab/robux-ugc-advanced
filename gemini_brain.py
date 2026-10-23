@@ -175,6 +175,17 @@ def _ensure():
     return _client is not None or _openrouter_client is not None
 
 
+_LAST_USAGE = {}
+
+
+def get_last_usage():
+    return dict(_LAST_USAGE)
+
+
+def reset_last_usage():
+    _LAST_USAGE.clear()
+
+
 def is_available():
     return _ensure()
 
@@ -189,6 +200,16 @@ def _gemini_generate(prompt, json_mode=False, temperature=0.7,
             if json_mode: cfg.response_mime_type = "application/json"
             resp = _client.models.generate_content(model=MODEL_NAME,
                                                     contents=prompt, config=cfg)
+            usage = getattr(resp, "usage_metadata", None)
+            if usage is not None:
+                _LAST_USAGE.update({
+                    "provider": "gemini",
+                    "model": MODEL_NAME,
+                    "input_tokens": getattr(usage, "prompt_token_count", None),
+                    "output_tokens": getattr(usage, "candidates_token_count", None),
+                    "total_tokens": getattr(usage, "total_token_count", None),
+                })
+                print(f"[ai-usage] {_LAST_USAGE}", flush=True)
             text = (resp.text or "").strip()
             if text: return text
         except Exception as e:
@@ -214,6 +235,19 @@ def _openrouter_generate(prompt, json_mode=False, temperature=0.7,
                       "temperature": temperature, "max_tokens": max_tokens, "timeout": 90}
             if json_mode: kwargs["response_format"] = {"type": "json_object"}
             resp = _openrouter_client.chat.completions.create(**kwargs)
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                def _u(name):
+                    return (usage.get(name) if isinstance(usage, dict)
+                            else getattr(usage, name, None))
+                _LAST_USAGE.update({
+                    "provider": "openrouter",
+                    "model": OPENROUTER_MODEL,
+                    "input_tokens": _u("prompt_tokens"),
+                    "output_tokens": _u("completion_tokens"),
+                    "total_tokens": _u("total_tokens"),
+                })
+                print(f"[ai-usage] {_LAST_USAGE}", flush=True)
             text = (resp.choices[0].message.content or "").strip()
             if text: return text
         except Exception as e:
@@ -227,6 +261,7 @@ def _openrouter_generate(prompt, json_mode=False, temperature=0.7,
 def _generate(prompt, json_mode=False, temperature=0.7,
               max_tokens=8192, prefer="gemini"):
     if not _ensure(): return None
+    reset_last_usage()
     if _client is not None:
         out = _gemini_generate(prompt, json_mode, temperature, max_tokens)
         if out: return out

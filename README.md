@@ -16,11 +16,25 @@ Current accuracy and limitations are documented below.
 
 ```
 !start
-!converge emotes
-!chain hip sway dance
-!verdict 121930221694467
-!autopsy 121930221694467
 ```
+
+`!start` opens the conversational Command Center. Choose **Talk to VANTA** and a
+thread opens where you can speak normally:
+
+```
+check this item 121930221694467
+why is this item failing?
+find me a niche with low competition
+i made this, what do you think?   (attach an image)
+make a better title and description
+how are my sales doing?
+go deeper
+the second one
+same for this item 92364796546749
+```
+
+VANTA routes to existing engines, not a parallel reimplementation. The old command
+collection remains available with `!`; `!start classic` opens the legacy console.
 
 The daily loop is: find a niche → build/verify a name → judge the launched item → record
 what happened → measure at 7/14/30 days.
@@ -31,7 +45,8 @@ what happened → measure at 7/14/30 days.
 
 | Command | What it does |
 |---|---|
-| `!start` | Interactive menu: scan, recon, tags, whale radar, vacuum, revsim, velocity, manual, labs |
+| `!start` | Conversational Command Center: Talk to VANTA, quick missions, all tools |
+| `!start classic` | Legacy tactical console with the original command buttons |
 | `!converge [family]` | Rank open niches by demand, supply, velocity, recency, and creator concentration |
 | `!converge all_families` | Scan every configured family |
 | `!converge_debug <keyword>` | Diagnose one keyword’s convergence score |
@@ -218,6 +233,7 @@ Known data gaps:
 | `confidence.py` | Bootstrap/prediction intervals, cohort evidence, sales history |
 | `opportunity_score.py` | Demand-vs-competition score and visibility proxy |
 | `experiments.py` | Recommendation ledger, auto-apply, 7/14/30 measurement |
+| `vanta_conversation.py` | Thread/DM-scoped natural-language router, signed ownership, context, follow-ups, AI fallback |
 | `matched_experiments.py` | Pre-intervention matching and observational DiD with 80% interval |
 | `search_visibility.py` | Normalized queries, timestamped search runs and observations |
 | `data_audit.py` | Read-only data-integrity report |
@@ -325,3 +341,13 @@ Deploy: push to `main`; GitHub Actions deploys to Oracle Server 2 and restarts
 - Verified-creator discovery is sampled.
 - Descriptions are creative prose; only claims/numbers/internal language are filtered.
 - The bot cannot create demand or guarantee sales.
+- Conversational public threads are visible to channel members; use **Private (DM)**
+  for sensitive details. Thread ownership is verified with an HMAC-signed name, not
+  the visible user ID alone.
+- Fresh context survives follow-ups in the same thread/DM; the in-memory context
+  resets on bot restart. Thread/DM identity remains verifiable.
+- The router's AI fallback is limited to allow-listed intents, 250 output tokens,
+  a 10-call/hour per-thread cap, deterministic routing first, and a 30s wait.
+- Provider-reported token usage is logged per AI call; if unavailable, only an
+  explicitly labeled input estimate is logged.
+- No mutating operation is routed from casual language.

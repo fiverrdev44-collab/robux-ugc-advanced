@@ -35,7 +35,7 @@ CORE_MODULES = [
     "verification", "opportunity_score", "revsim", "live_market",
     "experiments", "commands_experiments", "data_audit",
     "search_visibility", "commands_visibility", "matched_experiments",
-    "favorites_backfill",
+    "favorites_backfill", "vanta_conversation",
 ]
 
 EXPECTED_COMMANDS = [
@@ -446,7 +446,7 @@ def run_selftest(bot=None, progress=None):
 
     # ── Start menu ──────────────────────────────────────────────
     try:
-        from menu import MenuView
+        from menu import MenuView, CommandCenterView
         if bot is not None:
             from bot_core import get_db as _get_db
             view = MenuView(bot, _get_db)
@@ -456,6 +456,10 @@ def run_selftest(bot=None, progress=None):
             add("menu", "labels", all(labels), ", ".join(labels)[:150])
         else:
             add("menu", "load", True, "class imported", warning=True)
+        cc = CommandCenterView(bot)
+        cc_labels = [getattr(c, "label", "") for c in cc.children]
+        add("menu", "command center", len(cc_labels) >= 5 and all(cc_labels),
+            ", ".join(cc_labels)[:150])
     except Exception as e:
         add("menu", "load", False, f"{type(e).__name__}: {e}")
     stage("START MENU")
@@ -634,6 +638,7 @@ SAFE_COMMANDS = [
     ("meta_sniper", [], {"niche": "aura emote"}),
     ("sales_keywords", ["emotes"], {}),
     ("early", [7], {}),
+    ("start", [], {}),
     ("experiments", [], {}),
     ("data_audit", [], {}),
     ("visibility", [], {}),

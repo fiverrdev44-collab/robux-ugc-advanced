@@ -360,6 +360,84 @@ class ManualView(discord.ui.View):
         self.add_item(ManualSelect())
 
 
+class CommandCenterView(discord.ui.View):
+    """Conversation-first start screen; legacy commands stay available."""
+
+    def __init__(self, bot):
+        super().__init__(timeout=600)
+        self.bot = bot
+
+    async def _start(self, interaction, starter=None):
+        from vanta_conversation import start_conversation
+        await start_conversation(interaction, self.bot, starter=starter)
+
+    @discord.ui.button(label="💬 Talk to VANTA", style=discord.ButtonStyle.primary, row=0)
+    async def talk(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction)
+
+    @discord.ui.button(label="🎯 Find opportunities", style=discord.ButtonStyle.success, row=0)
+    async def find_opportunities(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction, "find me a niche with low competition")
+
+    @discord.ui.button(label="🔍 Analyze an item", style=discord.ButtonStyle.secondary, row=0)
+    async def analyze_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction, "I want to check an item. I will send the ID next.")
+
+    @discord.ui.button(label="📊 Check performance", style=discord.ButtonStyle.secondary, row=1)
+    async def performance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._start(interaction, "show my experiment results")
+
+    @discord.ui.button(label="🔒 Private (DM)", style=discord.ButtonStyle.secondary, row=1)
+    async def private_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        from vanta_conversation import start_dm_conversation
+        await start_dm_conversation(interaction, self.bot)
+
+    @discord.ui.button(label="🧰 All tools", style=discord.ButtonStyle.secondary, row=1)
+    async def all_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🧰 ALL TOOLS",
+            description=(
+                "The conversational thread is the primary interface. "
+                "Every legacy command still works with `!`.\n"
+            ),
+            color=COLOR_STEALTH,
+        )
+        embed.add_field(
+            name="Strategy",
+            value="`!chain` `!converge` `!verdict` `!autopsy` `!revive` "
+                  "`!brainstorm` `!creative` `!desc_forge` `!tags`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Market",
+            value="`!opportunities` `!xray` `!patterns` `!failures` `!early` "
+                  "`!momentum` `!oracle` `!nextwave` `!gap`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Sales + evidence",
+            value="`!sales_report` `!sales_for` `!hitrate` `!revsim` "
+                  "`!experiments` `!data_audit` `!visibility`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Owner / ops",
+            value="`!launch` `!launch_sync` `!ledger_sync` `!enrich_run` "
+                  "`!scan_run` `!selftest` `!version`",
+            inline=False,
+        )
+        embed.set_footer(
+            text="Use !start classic for the old console · !guide for the full manual"
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="ℹ️ Manual", style=discord.ButtonStyle.secondary, row=1)
+    async def manual(self, interaction: discord.Interaction, button: discord.ui.Button):
+        title, body = SIMPLE_MANUAL["beginner"]
+        embed = discord.Embed(title=title, description=body, color=COLOR_STEALTH)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 class MenuView(discord.ui.View):
     def __init__(self, bot, get_db):
         super().__init__(timeout=300)
@@ -724,66 +802,51 @@ class MenuView(discord.ui.View):
 def register_menu_commands(bot, get_db):
 
     @bot.command(name="start")
-    async def start_cmd(ctx):
-        """Opens the tactical console."""
+    async def start_cmd(ctx, mode: str = ""):
+        """Open the VANTA command center."""
+        if mode.lower() in ("classic", "legacy"):
+            embed = discord.Embed(
+                title="VANTA 73 — TACTICAL CONSOLE",
+                description=(
+                    "**LEGACY CONSOLE**\n"
+                    "_The conversational command center is now the default: `!start`_\n"
+                    "\n**Quick commands**\n"
+                    "`!converge emotes` · `!chain <concept>` · `!verdict <id>`\n"
+                    "`!autopsy <id>` · `!sales_report` · `!experiments`\n"
+                    "\nUse `!guide` for the full manual."
+                ),
+                color=COLOR_STEALTH,
+            )
+            await ctx.send(embed=embed, view=MenuView(bot, get_db))
+            return
+
         embed = discord.Embed(
-            title="⚓ VANTA 73 — TACTICAL CONSOLE",
+            title="VANTA 73 — COMMAND CENTER",
             description=(
-                "**STATUS: ALL WEAPONS HOT · ALL SYSTEMS NOMINAL**\n"
-                "_\u200b_\n"
-                "**🚀 FIRE — Launch New Item**\n"
-                "Build a full launch kit (name + description + tags + price).\n"
-                "_\u200b_\n"
-                "**⭐ STRIKE — Variant of Winner**\n"
-                "Copy your best item, add a new theme. Fastest path to sales.\n"
-                "_\u200b_\n"
-                "**🔧 INSPECT — Check Live Item**\n"
-                "Keep it, rename it, or kill it. Runs `!verdict` on any item.\n"
-                "_\u200b_\n"
-                "**📡 SCAN — Find Trending Niche**\n"
-                "Radar sweep of the whole market. Find weak spots to attack.\n"
-                "_\u200b_\n"
-                "**🖼️ RECON — Analyze Idea**\n"
-                "Describe a design idea. Get keywords + concept back (`!brainstorm`).\n"
-                "_\u200b_\n"
-                "**🏷️ LOAD — Generate Tags**\n"
-                "45 SEO tags mined from real top-sellers. Copy-paste ready.\n"
-                "_\u200b_\n"
-                "**🐋 WHALE — Studio Radar**\n"
-                "Surveils top studios & recent drops (`!whales`).\n"
-                "_\u200b_\n"
-                "**🎯 VACUUM — Search Sniper**\n"
-                "Low-supply gaps from the search-suggestion corpus (`!vacuum`).\n"
-                "_\u200b_\n"
-                "**📈 REVSIM — Revenue Simulator**\n"
-                "30-day unit and 70% Robux creator forecast (`!revsim`).\n"
-                "_\u200b_\n"
-                "**⚡ VELOCITY — 48h Radar**\n"
-                "Early acceleration radar (`!golden_hour`).\n"
-                "_\u200b_\n"
-                "**ℹ️ Click MANUAL for the easy step-by-step guide.**"
+                "**Talk to me like a person.** No command names required.\n\n"
+                "Try:\n"
+                "• `check this item 123456789`\n"
+                "• `i made this, what do you think?` + image\n"
+                "• `find me a niche with low competition`\n"
+                "• `why is this item failing? 123456789`\n"
+                "• `make a better title and description for it`\n"
+                "• `how are my sales doing?`\n\n"
+                "I open a dedicated thread for the conversation. Follow-ups like "
+                "`go deeper`, `the second one`, or `same for this item` work there."
             ),
             color=COLOR_STEALTH,
         )
-
         embed.add_field(
-            name="🟢 NEW? DO ONLY THIS",
-            value=(
-                "1. `!converge emotes`\n"
-                "2. Pick a **🔥 SNIPE ZONE**\n"
-                "3. `!chain \"what you picked\"`\n"
-                "4. Upload to Roblox\n"
-                "5. `!launch <item id>`\n"
-                "Ignore every button until you've done this once."
-            ),
+            name="Conversation first",
+            value="Describe the goal. VANTA chooses the existing engine.",
             inline=False,
         )
-
-        _apply_gif(embed, GIF_MAIN)
-
-        embed.set_footer(
-            text="VANTA 73 · UGC intelligence · reliable data, measured results"
+        embed.add_field(
+            name="Verified data",
+            value="No invented stats, sales, rankings, or completion claims.",
+            inline=False,
         )
-
-        view = MenuView(bot, get_db)
-        await ctx.send(embed=embed, view=view)
+        embed.set_footer(
+            text="VANTA 73 · conversational intelligence · legacy commands still work"
+        )
+        await ctx.send(embed=embed, view=CommandCenterView(bot))
