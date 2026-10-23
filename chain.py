@@ -386,7 +386,8 @@ OUTPUT — ONLY JSON:
             try:
                 facts = facts_from_stats(stats, niche_extra)
                 return verify_synth(cur_v, synth, allow_list, family, facts,
-                             actual_bucket=best_niche_bucket)
+                             actual_bucket=best_niche_bucket,
+                             item_name=concept)
             finally:
                 cur_v.close(); conn_v.close()
 

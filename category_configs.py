@@ -384,9 +384,33 @@ CATEGORY_FAMILIES = {
             "fire","ice","storm","shadow","void","arcane","divine","demonic",
         },
     },
+
+    "generic": {
+        "label": "UGC Item",
+        "asset_type_ids": [],
+        "aliases": ["generic", "ugc", "item", "other", "misc"],
+        "type_words": ["item", "accessory", "ugc"],
+        "shape": "theme",
+        "shape_rule": (
+            "Describe the item's theme and type. Use only verified words. "
+            "No brand names, IP references, or invented features."
+        ),
+        "buckets": [],
+        "title_archetypes": [
+            'THEME + TYPE:          "Cyber Wings"',
+            'STYLE + THEME + TYPE:  "Pastel Cyber Wings"',
+        ],
+        "filler_block": {
+            "the","and","for","with","your","you","a","an","of","in","on",
+            "to","my","is","it","as","at","by","roblox","tiktok","viral",
+            "new","best","item","ugc","accessory",
+        },
+        "concept_vocab": set(),
+    },
 }
 
 DEFAULT_FAMILY = "emote"
+
 
 
 # ══════════════════════════════════════════════════════════════
@@ -467,7 +491,7 @@ def detect_family_from_asset_type(asset_type_id):
     for fam_key, cfg in CATEGORY_FAMILIES.items():
         if atid in cfg.get("asset_type_ids", []):
             return fam_key
-    return DEFAULT_FAMILY
+    return "generic"
 
 
 def get_category_config(item_type_or_family):

@@ -1021,11 +1021,14 @@ def register_ai_commands(bot):
         if synth:
             try:
                 from verification import (clean_text_fields, facts_from_stats,
-                                          TITLE_FIELDS)
+                                          fix_descriptions, TITLE_FIELDS)
                 facts = facts_from_stats(stats)
                 clean_text_fields(
                     synth, facts, allow_small={7, 14, 30},
                     skip=set(TITLE_FIELDS),
+                )
+                fix_descriptions(
+                    synth, synth.get("item_name") or "this item"
                 )
                 _filter_keywords(synth, allow_list)
             except Exception as e:
@@ -1270,11 +1273,14 @@ RULES:
         if synth:
             try:
                 from verification import (clean_text_fields, facts_from_stats,
-                                          TITLE_FIELDS)
+                                          fix_descriptions, TITLE_FIELDS)
                 facts = facts_from_stats(stats)
                 clean_text_fields(
                     synth, facts, allow_small={7, 14, 30},
                     skip=set(TITLE_FIELDS),
+                )
+                fix_descriptions(
+                    synth, synth.get("item_name") or "this item"
                 )
                 _filter_keywords(synth, allow_list)
             except Exception as e:
@@ -1518,12 +1524,15 @@ RULES:
 
         try:
             from verification import (clean_text_fields, facts_from_stats,
-                                      TITLE_FIELDS)
+                                      fix_descriptions, TITLE_FIELDS)
             facts = facts_from_stats(stats)
             if synth:
                 clean_text_fields(
                     synth, facts, allow_small={7, 14, 30},
                     skip=set(TITLE_FIELDS),
+                )
+                fix_descriptions(
+                    synth, synth.get("item_name") or "this item"
                 )
                 _filter_keywords(synth, allow_list)
         except Exception as e:

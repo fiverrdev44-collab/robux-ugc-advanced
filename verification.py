@@ -323,6 +323,61 @@ def reconcile_bucket_text(text, actual_bucket):
     return " ".join(kept).strip(), dropped
 
 
+DESC_BAD_RE = re.compile(
+    r"\b(zero sales|no sales|0 sales|brutal|dead|failed|failure|"
+    r"saturated|algorithm|title stack|tags are|tag stack|we are|we're|"
+    r"our |fixing|mess|flex on|guarantee|100\s*%|viral|blow up|"
+    r"instant hit|risk[- ]?free)\b",
+    re.I,
+)
+
+
+def sanitize_description(text, item_name, fallback):
+    """Customer-facing copy only. Drop internal/negative claims."""
+    if not text or not isinstance(text, str):
+        return fallback
+    kept = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        s = sentence.strip()
+        if not s:
+            continue
+        if DESC_BAD_RE.search(s):
+            continue
+        if s.lower().startswith(("we ", "our ")):
+            continue
+        kept.append(s)
+    cleaned = " ".join(kept).strip()
+    if len(cleaned.split()) < 4:
+        return fallback
+    return cleaned
+
+
+def _clean_title_for_copy(item_name):
+    t = re.sub(r"[^A-Za-z0-9 ]+", " ", item_name or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t or "this item"
+
+
+def fix_descriptions(data, item_name):
+    """Replace bad AI descriptions with safe customer-facing copy."""
+    title = _clean_title_for_copy(item_name)
+    fallbacks = {
+        "description_seo": (
+            f"{title} for your avatar. A smooth, playful animation made "
+            f"for your next dance."
+        ),
+        "description_hype": (
+            f"Make your next dance stand out with {title}. A playful motion "
+            f"built for your avatar."
+        ),
+        "description_short": f"{title} for your avatar.",
+    }
+    for key, fallback in fallbacks.items():
+        if data.get(key):
+            data[key] = sanitize_description(data[key], item_name, fallback)
+    return data
+
+
 def clean_text_fields(data, facts, allow_small=None, skip=None):
     """Clean every prose string/list field in an AI payload."""
     drops = []
@@ -381,7 +436,8 @@ def verify_pivot(cur, pivot, family=None):
     }, None
 
 
-def verify_synth(cur, synth, allow_list, family, facts, actual_bucket=None):
+def verify_synth(cur, synth, allow_list, family, facts,
+                 actual_bucket=None, item_name=None):
     if not isinstance(synth, dict):
         return synth, {"verified": 0, "rejected": [], "claims": [],
                        "pivot": None}
@@ -441,8 +497,14 @@ def verify_synth(cur, synth, allow_list, family, facts, actual_bucket=None):
         synth, facts, allow_small={7, 14, 30},
         skip=set(TITLE_FIELDS) | {"best_pivot", "killer_keywords"},
     )
+    fix_descriptions(
+        synth,
+        item_name or synth.get("item_name") or synth.get("concept")
+        or "this item",
+    )
     if actual_bucket:
-        for field in ("saturation_verdict", "search_diagnosis", "diagnosis"):
+        for field in ("saturation_verdict", "search_diagnosis", "diagnosis",
+                  "edit_reasoning", "what_was_wrong"):
             cleaned_b, dropped_b = reconcile_bucket_text(
                 synth.get(field), actual_bucket
             )

@@ -935,6 +935,8 @@ titles_safe (3), titles_differentiated (3), titles_longtail (2), titles_viral (2
 
 === 3 DESCRIPTIONS ===
 description_seo, description_hype, description_short
+CUSTOMER-FACING ONLY. Never mention zero sales, no sales, failure, saturated,
+algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
 
 === OUTPUT — ONLY JSON ===
 {{
@@ -946,8 +948,8 @@ description_seo, description_hype, description_short
   "description_hype": "...",
   "description_short": "...",
   "primary_keyword": "best first word — MUST be the mandatory starting token",
-  "edit_reasoning": "2-3 short sentences. Why these titles work. Talk like a person.",
-  "what_was_wrong": "2-3 short sentences. Say SATURATED if that's it. No filler."
+  "edit_reasoning": "2-3 short sentences. Why these titles work. Use only the verified bucket; never invent SATURATED.",
+  "what_was_wrong": "2-3 short sentences. Use only the verified bucket; never invent SATURATED. No filler."
 }}
 """
 
@@ -1048,7 +1050,7 @@ description_seo, description_hype, description_short
                     skip=set(TITLE_FIELDS) | {"primary_keyword"},
                 )
                 from verification import reconcile_bucket_text
-                for bkey in ("saturation_verdict", "what_was_wrong"):
+                for bkey in ("saturation_verdict", "what_was_wrong", "edit_reasoning"):
                     cleaned_b, dropped_b = reconcile_bucket_text(
                         data.get(bkey), actual_bucket
                     )
@@ -1059,6 +1061,13 @@ description_seo, description_hype, description_short
                              "claim": "bucket mismatch"}
                             for s in dropped_b
                         )
+                from verification import fix_descriptions
+                fix_descriptions(data, name)
+                if not data.get("edit_reasoning") and pivot_kw:
+                    data["edit_reasoning"] = (
+                        f"Verified pivot: `{pivot_kw}`. Keep the name 3–5 "
+                        f"words and lead with that word."
+                    )
                 pk = data.get("primary_keyword")
                 if pk:
                     from verification import allow_set, tokens, STOPWORDS
