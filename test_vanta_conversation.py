@@ -43,6 +43,11 @@ def test_conversational_glue():
     assert classify_intent("yo check this item 121930221694467",
                            use_ai=False)["intent"] == "inspect_item"
     assert classify_intent("check my item", use_ai=False)["intent"] == "list_my_items"
+    bare = classify_intent("99610366014241", use_ai=False)
+    assert bare["intent"] == "inspect_item" and bare["item_id"] == 99610366014241
+    state = ConversationState(user_id=1)
+    state.last_item_id = 99610366014241
+    assert classify_intent("check", state=state, use_ai=False)["item_id"] == 99610366014241
     assert classify_intent("change title of my old item",
                            use_ai=False)["intent"] == "list_my_items"
     route = classify_intent("I want to inspect or change title of my item",

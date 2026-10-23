@@ -229,6 +229,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
     if re.match(r"^(cancel|never ?mind|nvm|stop|forget it)\b", low):
         return _intent("cancel", confidence="high")
 
+    # A bare item ID or URL establishes the item immediately.
+    if item_id and re.fullmatch(r"(?:https?://\S+|\d{6,20})[.! ]*", low.strip()):
+        return _intent("inspect_item", item_id=item_id,
+                       concept=state.last_concept, family=family,
+                       confidence="high")
+
     # Follow-ups first.
     ordinal = re.search(
         r"\b(first|1st|one|second|2nd|two|third|3rd|three|fourth|4th|four|"
