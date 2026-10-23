@@ -55,8 +55,10 @@ REQUIRED_TABLES = [
 REQUIRED_INDEXES = [
     "idx_items_name_trgm",
     "idx_search_suggestions_unique",
-    "idx_my_sales_dedup",
+    "idx_my_sales_event_id",
+    "idx_my_sales_fingerprint_fallback",
     "idx_launch_ledger_launched",
+    "idx_item_history_daily",
 ]
 
 REQUIRED_WORKFLOWS = [
