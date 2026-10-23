@@ -1,198 +1,309 @@
-# Roblox UGC Advanced Analytics Bot
+# VANTA 73 — Roblox UGC Intelligence Bot
 
-A full-catalog intelligence system for Roblox UGC creators. Scans 65k+ items,
-mines statistical signals from titles + descriptions, tracks live sales via
-Discord webhooks, and generates launch-ready names, tags, descriptions, and
-verdicts — all from Discord commands.
+A Discord operations bot for Roblox UGC creators: catalog intelligence, niche scoring,
+verified title/description generation, live marketplace checks, launch tracking, and
+closed-loop experiments.
 
-Every recommendation traces to real data. Zero AI hallucination in outputs.
+**What it is:** a verification and decision-support system. Every AI title, claim, pivot,
+and description is gated against real data before it reaches you.
 
----
-
-## ⚡ The 3-command workflow
-!converge emotes → find open niches
-!chain <concept> → full plan + statistical champion title
-!verdict <item_id> → is it working? (KEEP / RENAME / KILL)
-
-That's the entire daily loop. Everything else is a specialization.
+**What it is not:** a guaranteed sales predictor. The ranking model is still experimental.
+Current accuracy and limitations are documented below.
 
 ---
 
-## 🎯 All Commands
+## Quick start
 
-### Core workflow
+```
+!start
+!converge emotes
+!chain hip sway dance
+!verdict 121930221694467
+!autopsy 121930221694467
+```
 
-| Command | Purpose |
-|---|---|
-| `!start` | Interactive workflow menu with 8 buttons |
-| `!chain <concept>` | **Full pipeline** — niche → market → competitors → descriptions → 10 titles → statistical ranking → FINAL action block |
-| `!chain variant <id> <theme>` | Variant of a proven winner (keeps winner keywords, adds theme) |
-| `!converge <family>` | Rank open niches by 5-signal opportunity score |
-| `!converge all_families` | Scan every category at once |
-| `!verdict <id>` | Multi-signal decision (age · favs · velocity · percentile) |
-| `!titles <concept>` | Standalone statistical title engine (top 10 ranked) |
-| `!tags <name>` | 45 sales-weighted SEO tags mined from real top sellers |
-| `!desc <name>` | Data-driven description: 3-line body + tag block + full audit |
-
-### Intelligence & analysis
-
-| Command | Purpose |
-|---|---|
-| `!brainstorm <concept>` | Deep-dive analysis with 10 titles + market diagnosis + cultural context |
-| `!autopsy <item_id>` | Full failure analysis when verdict says RENAME |
-| `!xray` | Full market dashboard |
-| `!patterns <family>` | Statistical lift mining (words / bigrams / prices) |
-| `!failures <family>` | Words correlated with flops |
-| `!early <days>` | Early winner detection (favs/day + low supply filter) |
-| `!rising_gaps` | Emerging keywords + category gaps |
-| `!momentum <days>` | Trend velocity across keywords |
-| `!predict <keyword>` | 6-factor success probability |
-| `!oracle <keyword>` | Trend forecast + next-wave detection |
-| `!nextwave` | Early trends before they peak |
-| `!opportunities` | Daily ranked feed of best plays |
-
-### Market data
-
-| Command | Purpose |
-|---|---|
-| `!scan_status` | Discovered IDs, analyzed items, description coverage |
-| `!trends` | Top words across titles + descriptions |
-| `!analyze <keyword>` | Deep keyword analysis (titles + descriptions) |
-| `!desc_analyze <keyword>` | Keyword goldmines hidden in descriptions only |
-| `!market_scan <category> <sort>` | Live Roblox catalog scan (favorited / sales / updated) |
-| `!comp <phrase>` | Deep competition check |
-| `!opportunity <keyword>` | Market data for a single keyword |
-| `!dbtest` | Database connection status |
-| `!db_size` | Current DB size + top tables |
-
-### Sales tracking (live webhooks)
-
-| Command | Purpose |
-|---|---|
-| `!sales_report [days]` | Revenue summary: top items, daily trend |
-| `!sales_for <item>` | Sales for a specific item (fuzzy match) |
-| `!sales_backfill [limit]` | Import historical sales from Discord channel |
-| `!sales_post_now` | Trigger today's summary right now |
-
-### AI & utility
-
-| Command | Purpose |
-|---|---|
-| `!analyze_image` (attach) | Vision → keywords → titles |
-| `!rescue <situation>` | Failing item rescue plan |
-| `!ai_status` | Gemini + OpenRouter status |
-| `!ai_debug` | Test both AI provider calls |
-| `!guide` | Built-in help |
-| `!snapshot_now` | Force snapshot from Render IP |
-| `!momentum_debug` | Momentum system diagnostics |
+The daily loop is: find a niche → build/verify a name → judge the launched item → record
+what happened → measure at 7/14/30 days.
 
 ---
 
-## 🏗️ Architecture
+## Core workflow
 
-### Command modules
-
-| File | Purpose |
+| Command | What it does |
 |---|---|
-| `discord_ugc_bot.py` | Orchestrator — watchdog, Flask health, boot backoff |
-| `menu.py` | Interactive `!start` UI with 8 buttons |
-| `commands_ai.py` | `!brainstorm`, `!rescue`, `!analyze_image` |
-| `commands_intel.py` | `!autopsy`, `!verdict`, `!momentum`, `!predict`, `!oracle`, `!nextwave` |
-| `commands_advanced.py` | `!converge`, `!chain`, `!tags`, `!desc`, `!rising_gaps`, `!snapshot_now` |
-| `commands_sales.py` | `!sales_report`, `!sales_for`, `!sales_backfill`, `!sales_post_now` |
-| `commands_xray.py` | `!xray`, `!patterns`, `!failures`, `!early` |
-| `commands_market.py` | `!trends`, `!analyze`, `!desc_analyze`, `!opportunity` |
-| `commands_guide.py` | `!guide` help |
+| `!start` | Interactive menu: scan, recon, tags, whale radar, vacuum, revsim, velocity, manual, labs |
+| `!converge [family]` | Rank open niches by demand, supply, velocity, recency, and creator concentration |
+| `!converge all_families` | Scan every configured family |
+| `!converge_debug <keyword>` | Diagnose one keyword’s convergence score |
+| `!chain <concept>` | Full pipeline: niche → market → competitors → descriptions → AI titles → verification → statistical ranking → final action block |
+| `!chain variant <item_id> [theme]` | Variant of a proven winner |
+| `!chain <family>:<concept>` | Family-scoped chain |
+| `!verdict <item_id>` | KEEP / RENAME / KILL using age, favorites, velocity, percentile, and sales |
+| `!autopsy <item_id>` | Failure diagnosis, peer autopsy, keyword intelligence, recovery titles, live marketplace check, experiment |
+| `!revive <item_id>` | Full rebuild: live stats, niche scan, variant chain, peer autopsy, 14-day plan |
+| `!brainstorm <concept>` | AI concept expansion with verified titles |
+| `!rescue <situation>` | Rebuild a failing item with verified alternatives |
+| `!analyze_image` | Attach an image; vision → keywords → verified titles and tags |
+| `!creative <concept>` | AI fan-out + DB demand gate |
+| `!creative_raw <concept>` | Debug view of anchor phrases and raw AI output |
+| `!desc_forge <keyword>` | Mine top-seller descriptions and generate a matching description |
+| `!tags <name>` | Generate sales-weighted tags from real top sellers |
+| `!playbook` | Proven UGC tactics: niche, naming, pricing, launch, promotion |
+| `!path` | Your current UGC stage and next milestones from real data |
+| `!guide` | Interactive consultation guide |
 
-### Intelligence layer
+---
 
-| File | Purpose |
+## Market and intelligence
+
+| Command | What it does |
 |---|---|
-| `intel_common.py` | Shared classifier · percentile · portfolio · verdict logic |
-| `convergence_engine.py` | Category-aware niche scoring (5 signals) |
-| `chain.py` | Full pipeline orchestrator |
-| `title_scorer.py` | **Statistical title scoring** — word-lift × search-demand × visibility-gap × freshness × uniqueness |
-| `tag_generator.py` | Sales-weighted tag miner from real top sellers |
-| `description_engine.py` | Data-driven description builder with audit |
-| `market_velocity.py` | Velocity · trajectory · concentration |
-| `pattern_forge.py` | Statistical lift mining |
-| `early_winners.py` | Early winner detection |
-| `winner_analysis.py` | Top 10% vs bottom 50% patterns |
-| `smart_pipeline.py` | Parallel comp scan (6 workers, single-writer enrich) |
-| `gemini_brain.py` | All AI prompts + hard promo filter |
-| `algo_brain.py` | Roblox algorithm context for prompts |
-| `category_configs.py` | Category families + vocab + shape rules |
-| `bot_core.py` | DB access + shared helpers |
-| `bot_ui.py` | Paginators + navigation views |
+| `!xray <niche>` | Supply, winners, pricing, and concentration for a niche |
+| `!patterns [family]` | Recurring title patterns and word lift |
+| `!failures [family]` | Words and patterns correlated with flops |
+| `!early [days]` | Early winner detection by favorites velocity |
+| `!rising_gaps` | Rising, low-competition keywords |
+| `!momentum [days]` | Favorites momentum ranking |
+| `!momentum_debug` | Momentum engine diagnostics |
+| `!predict <idea>` | Six-factor success score |
+| `!oracle <keyword>` | Trend forecast and next-wave detection |
+| `!nextwave` | Emerging keywords before they peak |
+| `!opportunities` | Daily ranked opportunity feed |
+| `!gap` | Golden, sweet, and saturated keyword gaps |
+| `!classic` | Classic-clothing keyword gaps |
+| `!emote` | Emote market data |
+| `!emote_status` | Emote catalog coverage and demand |
+| `!analyze <keyword>` | Keyword analysis across titles and descriptions |
+| `!desc_analyze <keyword>` | Keywords found only in descriptions |
+| `!opportunity <keyword>` | Opportunity score for one keyword |
+| `!trends` | Keyword trend history |
+| `!velocity <item_id>` | Favorites velocity for an item |
+| `!track <item_id>` | Track an item’s favorites history |
+| `!watchlist` | Watched items |
+| `!history` | Recent saved verdicts |
+| `!scan_status` | Scanner progress and coverage |
 
-### Data pipeline
+---
 
-| File | Runs from | Schedule |
+## Sales, pricing, and revenue
+
+| Command | What it does |
+|---|---|
+| `!sales_report [days]` | Revenue summary and daily trend |
+| `!sales_for <item>` | Sales for a specific item |
+| `!sales_backfill [limit]` | Import historical sales from the sales channel |
+| `!sales_post_now` | Trigger today’s summary |
+| `!sales_probe <item_id>` | Probe Roblox sales APIs |
+| `!sales_debug` | Diagnose missing sales, dates, timezone, channel |
+| `!sales_scan` | Inspect sales-channel embed formats |
+| `!sales_keywords` | Learn which title words correlate with sales |
+| `!revsim <price> [day1_favs] [promo]` | 30-day revenue scenario with 80% interval; calibrated only when enough ledger outcomes exist |
+| `!group_metrics <group_id>` | Roblox group analytics |
+| `!cookie_check` | Verify the server-side Roblox cookie |
+| `!whales` | Track top-studio drops and activity |
+| `!golden_hour` | 48-hour velocity acceleration during the early testing window |
+| `!meta_sniper` | High-demand terms top items in a niche do not use |
+| `!vacuum` | Scan search suggestions for exploding volume with low competition |
+| `!stealth` | Studio-friendly, spam-immune description generator |
+
+---
+
+## Launch ledger and closed-loop experiments
+
+| Command | What it does |
+|---|---|
+| `!launch <item_id>` | Record an item as launched |
+| `!launch_sync` | Auto-log every item from your groups |
+| `!ledger_sync` | Fill D1/D7/D30 favorites and sales |
+| `!hitrate` | Your launches vs niche peers |
+| `!experiments` | Show recommendation outcomes; measures anything due |
+| `!applied [id\|last]` | Mark advice as applied; starts the 7/14/30-day measurement |
+| `!ignored [id\|last]` | Mark advice as skipped |
+
+Recommendations are stored in `recommendation_ledger`. A 15-minute watcher auto-detects
+renames and price changes; `!applied last` is only needed for “keep + promote” advice with
+no detectable item change. Daily jobs also measure due experiments.
+
+---
+
+## Data and creator operations
+
+| Command | What it does |
+|---|---|
+| `!verified_scan [limit]` | Scan verified creators; resumable and throttled |
+| `!creator_brain` | Study creator patterns from your own data |
+| `!scan_run` | Owner-only: discover new catalog items |
+| `!enrich_run [batches]` | Owner-only: enrich discovered items |
+| `!snapshot_now` | Trigger a favorites snapshot |
+| `!suggest_probe` | Probe Roblox autocomplete endpoints |
+| `!suggest_run` | Owner-only: run the autocomplete scraper |
+| `!train` | Owner-only: retrain the title predictor |
+| `!dbtest` | Database connectivity |
+| `!logs [n]` | Owner-only: recent bot logs |
+| `!version` | Running commit and whether origin is ahead |
+| `!bot_update` | Owner-only: sync origin/main and restart |
+| `!selftest` | Owner-only: full automated audit |
+| `!selftest_db` | Owner-only: database health check |
+
+The “NASA-grade” audit is internal branding, not affiliated with NASA.
+
+---
+
+## Verification pipeline
+
+Every AI output passes these gates before display:
+
+1. **Tokens** — every title token must exist in the category allow-list or verified type words.
+2. **Phrase** — family-scoped supply, median favorites, exact-name competition, live demand.
+3. **Saturation** — saturation and broad-word warnings are advisory; they do not silently reject proven names.
+4. **Claims** — numbers in prose must match a computed fact; fabricated numbers are removed.
+5. **Guarantees** — “guaranteed”, “100%”, “will go viral”, “risk-free”, etc. are removed.
+6. **Bucket consistency** — the AI cannot call a keyword SATURATED when the DB says NEUTRAL.
+7. **Primary keyword / pivot** — must exist and reclassify against the DB; rejected values are cleared.
+8. **Descriptions** — customer-facing only; internal metrics, negative copy, promo, and “flex” language are removed. A factual fallback is used if the whole text is unusable.
+9. **Live marketplace** — champion titles are checked across up to 10 live search pages for exact matches and relatedness. A capped sample is labeled as such.
+
+Verification proves the words and claims are real. It does **not** prove the item will sell.
+
+---
+
+## Accuracy status (2026-10-23)
+
+Backtest: time-split holdout; 2,500+ launches across emotes, hair, headwear, accessories, clothing.
+
+```
+v1 title score:      AUC 0.440 · top-decile 5.6% vs 10% base
+v2 feature model:    AUC 0.533 · top-decile 18.1% vs 12.5% base (unshipped)
+Calibration:         v1 ~13.4% vs 10% expected; v2 miscalibrated
+Forecast error:      no improvement over the median baseline
+```
+
+**v2 is not shipped** because AUC is below 0.55 and calibration is poor. The bot does not
+present its ranking as a probability.
+
+Known data gaps:
+
+- 60% of catalog items currently have favorites (`favorites_backfill.py` runs nightly).
+- `launch_ledger`: 9 rows; 0 D30 favorites; 0 measured experiments.
+- Gear is thin; bundles are not true asset-table support.
+- Verified-creator discovery is sampled, not exhaustive.
+
+---
+
+## Architecture
+
+| Module | Role |
+|---|---|
+| `discord_ugc_bot.py` | Orchestrator, watchdog, health endpoint, command registration |
+| `menu.py` | Interactive `!start` UI |
+| `commands_advanced.py` | Chain, converge, tags, descriptions, creative |
+| `commands_ai.py` | Brainstorm, rescue, image analysis |
+| `commands_intel.py` | Autopsy, verdict, revive, momentum, predict, oracle, nextwave |
+| `commands_xray.py` | X-ray, patterns, failures, early winners |
+| `commands_market.py` | Trends, analyze, desc_analyze, opportunity |
+| `commands_sales.py` | Sales report, backfill, diagnostics |
+| `commands_supercomputer.py` | Operations, vacuum, meta sniper, revsim, whales, selftest |
+| `commands_experiments.py` | Applied/ignored/experiments |
+| `commands_guide.py` | Guide and playbook |
+| `verification.py` | Token/phrase/claim/bucket/description gates |
+| `confidence.py` | Bootstrap/prediction intervals, cohort evidence, sales history |
+| `opportunity_score.py` | Demand-vs-competition score and visibility proxy |
+| `experiments.py` | Recommendation ledger, auto-apply, 7/14/30 measurement |
+| `live_market.py` | Paginated live exact/relevance checks |
+| `revsim.py` | Ledger-calibrated revenue scenarios |
+| `creator_tracker.py` | Verified-creator discovery and live badge checks |
+| `favorites_backfill.py` | Fill missing favorites from live Roblox |
+| `title_scorer.py` | Word-lift / demand / freshness / uniqueness ranking |
+| `tag_generator.py` | Tag mining and filtering |
+| `desc_forge.py` | Top-seller description mining |
+| `convergence_engine.py` | Five-signal niche scoring |
+| `intel_common.py` | Shared percentile, verdict, portfolio logic |
+| `chain.py` | Full strategy pipeline |
+| `category_configs.py` | Families, vocab, shape rules, generic fallback |
+| `gemini_brain.py` | AI prompts, promo filter, title verification |
+| `launch_ledger.py` | Launch features, outcomes, recoup labels |
+| `scheduler.py` | Daily snapshots, launch sync, experiments, favorites backfill, 15-minute watcher |
+
+---
+
+## Data pipeline
+
+| Job | Schedule | Purpose |
 |---|---|---|
-| `scanner.py` | GH Actions | 02:00 UTC daily |
-| `enricher.py` | GH Actions | Every 6h |
-| `snapshot.py` | Render scheduler | 03:30 UTC daily |
-| `suggest.py` | GH Actions | Every 6h |
-| `discover_keywords.py` | GH Actions | 05:30 UTC daily |
-| `backfill_dates.py` | GH Actions | 06:30 UTC daily |
-| `scheduler.py` | Render | Snapshot · ML train · daily report |
-| `sales_listener.py` | Render (on_message) | Live — parses Roblox sale embeds |
-| `post_monitor.py` | Render (scheduler) | Daily report at 22:00 GMT+4 |
-| `live_enrich.py` | Called by smart_pipeline | On-demand Roblox API |
-| `desc_forge.py` | Called by chain/synth | Description mining |
-| `recovery_brain.py` | Called by autopsy | Failure mode detection |
-| `predictor.py` | Called by `!predict` | 6-factor success scoring |
-| `opportunity_feed.py` | Called by `!opportunities` | Daily feed builder |
-| `momentum.py` | Called by `!momentum` | Trend velocity |
-| `oracle.py` | Called by `!oracle` | Trend forecasting |
-| `rising_gaps.py` | Called by `!rising_gaps` | Emerging keyword detection |
-| `winner_analysis.py` | Called by chain/brainstorm | Winner blueprint |
-| `competition_check.py` | Called by autopsy | Deep phrase comp |
+| `scanner.py` | 02:00 UTC | Discover catalog items |
+| `enricher.py` | Every 6h | Fill descriptions, prices, creators |
+| `snapshot.py` | 03:30 UTC + top-ups | Favorites history; ledger items always included |
+| `favorites_backfill.py` | 02:30 UTC | Fill missing favorites |
+| `suggest.py` | Every 6h | Roblox autocomplete suggestions with rank/volume |
+| `discover_keywords.py` | 05:30 UTC | Keyword discovery |
+| `backfill_dates.py` | 06:30 UTC | Created-date repair |
+| `launch_sync` | 07:30 UTC | Auto-log group items |
+| `experiment_measure` | 08:00 UTC | Measure due 7/14/30 checkpoints |
+| `experiment_watch` | Every 15 min | Auto-detect renames/prices and measure |
+| `sales_listener.py` | Live | Parse sale notifications into `my_sales` |
 
 ---
 
-## 📊 How the title scorer works
-
-Every title is scored on 6 real signals — no AI guessing:
-
-1. **Word lift** — median favs of items containing word ÷ category median
-   (clamped to [0.1, 5.0] to prevent explosions)
-2. **Search demand** — how many real search queries contain the word
-3. **Bigram lift** — median favs of items matching two words together
-4. **Freshness** — trending up/down over last 90 days
-5. **Visibility gap** — search demand ÷ supply (finds open spots)
-6. **Uniqueness** — 0 exact title matches = 1.5× bonus
-
-**Output:** champion + backup + wildcard, each with full word-by-word audit.
-
-Every number traces to `items` and `search_suggestions`. Zero hallucination.
-
----
-
-## 🗄️ Database schema (Supabase Postgres)
+## Database (PostgreSQL)
 
 | Table | Purpose |
 |---|---|
-| `items` | ~65k UGC items (id, name, description, favorite_count, price, asset_type_id, created_at) |
-| `item_history` | Snapshot history for velocity calculations |
-| `discovered_items` | ID cache from Roblox scanner |
-| `search_suggestions` | ~33.6k real Roblox search queries |
-| `learned_keywords` | Vetted keywords with scores |
-| `my_sales` | **Live sales** — populated by `sales_listener.py` from Discord webhooks |
-| `my_portfolio` | Your 10 items |
-| `predictor_weights` | ML model weights |
-| `competitor_tracking`, `item_tracker`, `watchlist` | Tracking |
-| `user_profiles`, `saved_consultations` | Consultation history |
+| `items` | Catalog items: name, description, favorites, price, creator, asset type |
+| `item_history` | Favorites/price/sales snapshots |
+| `search_suggestions` | Live and mined search phrases, rank, volume |
+| `learned_keywords` | Vetted keyword scores |
+| `my_sales` | Recorded sales events |
+| `launch_ledger` | Launches, D1/D7/D30 favorites, units, revenue, features, labels |
+| `recommendation_ledger` | Advice, baseline, applied/ignored, outcome history |
+| `tracked_creators` | Verified creator queue |
+| `my_portfolio`, `watchlist`, `item_tracker` | Portfolio and tracking |
 
-**Free tier limit:** 500 MB. Currently ~60 MB (12%).
+`launch_ledger` labels:
+- `label_beat_median` — D30 favorites ≥ family median
+- `label_top_decile` — D30 favorites ≥ family p90
+- `label_recouped` — D30 revenue ≥ `UGC_UPLOAD_FEE_ROBUX` (default 750)
 
-### Cleanup if approaching 400 MB
+---
 
-```sql
-delete from item_history where snapshot_at < now() - interval '30 days';
-vacuum full item_history;
+## Setup
 
-delete from discovered_items
-where id not in (select id from items)
-  and id not in (select id from item_history);
-vacuum full discovered_items;
+Requirements: Python 3.12, PostgreSQL, Discord bot token, Gemini/OpenAI key, Roblox cookie.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Environment:
+
+```
+DISCORD_TOKEN=
+DATABASE_URL=postgresql://...
+GEMINI_API_KEY=
+OPENAI_API_KEY=
+ROBLOSECURITY_COOKIE=
+SALES_CHANNEL_ID=
+MY_GROUP_NAMES=group1,group2
+UGC_UPLOAD_FEE_ROBUX=750
+```
+
+Run:
+
+```powershell
+python discord_ugc_bot.py
+```
+
+Deploy: push to `main`; GitHub Actions deploys to Oracle Server 2 and restarts
+`ugc-bot` via systemd. `!version` shows the running commit.
+
+---
+
+## Honest limitations
+
+- Ranking is not validated for production use.
+- No validated sales/recoup model.
+- Live exact checks sample up to 300 results, not the full catalog.
+- Verified-creator discovery is sampled.
+- Descriptions are creative prose; only claims/numbers/internal language are filtered.
+- The bot cannot create demand or guarantee sales.
