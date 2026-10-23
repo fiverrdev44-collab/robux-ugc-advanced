@@ -13,7 +13,7 @@ from bot_core import get_db
 
 
 _STOP = {"the", "and", "with", "for", "of", "in", "on", "at", "to", "a", "an",
-         "emote", "dance", "animation"}
+         "emote", "dance", "animation", "but", "that", "this", "your", "you"}
 
 
 def _words(name):
@@ -135,11 +135,15 @@ def build_verdict(pd, diffs):
     # Defer to intel_common.decide_verdict which uses percentile.
     my_age = pd.get("my_age", 0)
     avg_peer_age = diffs.get("avg_peer_age", 0)
-    if my_age < 14:
+    if my_age < 30:
+        if diffs["ratio"] >= 0.8:
+            return ("✅ **KEEP.** You're already near the winners' pace. "
+                    "Post 2 TikToks, don't touch the name.")
         return (
-            f"⏳ **TOO EARLY TO JUDGE.** Item is {my_age:.1f}d old; "
-            f"peer winners average {avg_peer_age:.0f}d. "
-            f"Re-run `!autopsy` after day 14 for a fair comparison."
+            f"⏳ **WINNER-GAP ONLY.** Item is {my_age:.1f}d old; "
+            f"winners average {avg_peer_age:.0f}d. "
+            f"This is not a peer-percentile kill — use `!verdict` for the "
+            f"actual decision, and judge again at day 30."
         )
     # ────────────────────────────────────────────────────────────
 
@@ -171,10 +175,16 @@ def build_verdict(pd, diffs):
             f"🔧 **RESCUE.** You're at {ratio:.0%} of peer velocity. "
             f"Fix: **{fix_str}**. 30 min work. Re-check in 14d."
         )
+    if my_v < 0.30 and my_age >= 30:
+        return (
+            f"🪦 **KILL.** {ratio:.0%} of winner velocity ({my_v}/day vs "
+            f"{avg_v}/day), and own velocity is below 0.30/day at day 30+. "
+            f"Launch a new item."
+        )
     return (
-        f"🪦 **KILL.** {ratio:.0%} of peer velocity ({my_v}/day vs "
-        f"{avg_v}/day). Even perfect rename gets you to ~half their velocity. "
-        f"Launch a new item."
+        f"🔧 **WINNER GAP.** {ratio:.0%} of winner velocity "
+        f"({my_v}/day vs {avg_v}/day). Winners are not peers; use `!verdict` "
+        f"for the peer-percentile decision."
     )
 
 
@@ -213,10 +223,10 @@ def _format(pd, diffs, verdict):
     lines.append("\n## ✅ WINNERS' PATTERN")
     lines.append(f"• Avg title length: **{diffs['avg_words']} words** "
                  f"(you: {diffs['my_word_count']})")
-    lines.append(f"• Avg peer age: **{diffs['avg_peer_age']}d** "
+    lines.append(f"• Avg winner age: **{diffs['avg_peer_age']}d** "
                  f"(you: {pd['my_age']}d)")
-    lines.append(f"• Avg velocity: **{diffs['avg_velocity']}/day** "
-                 f"(you: {pd['my_velocity']}/day — {diffs['ratio']:.0%} of peer)")
+    lines.append(f"• Avg winner velocity: **{diffs['avg_velocity']}/day** "
+                 f"(you: {pd['my_velocity']}/day — {diffs['ratio']:.0%} of winners)")
     lines.append(f"• No parens: **{diffs['peers_no_parens']}**")
     lines.append(f"• No emoji: **{diffs['peers_no_emoji']}**")
     if diffs["top_lead_words"]:
@@ -241,5 +251,5 @@ def _format(pd, diffs, verdict):
     if not any_diff:
         lines.append("• No structural diffs — failure is niche/timing")
 
-    lines.append(f"\n## 🎯 DECISION\n{verdict}")
+    lines.append(f"\n## 🎯 DECISION (winner comparison)\n{verdict}")
     return ["\n".join(lines)]

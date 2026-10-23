@@ -343,7 +343,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         elif verdict == "KEEP":
             actions = [
                 "Post 3 TikToks this week (cross-post Shorts + Reels)",
-                f"Test price at R${max((data['price'] or 0) - 5, 45)}",
+                "Keep price; test -5 only if flat after 14 days",
                 f"Re-run `!verdict {item_id}` in 14 days",
             ]
         elif verdict == "RENAME":
@@ -372,8 +372,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         lines = [
             f"{emoji} **{data['name'][:60]}**",
-            f"**{verdict.replace('_', ' ')}** — top **{pct['percentile']}%** "
-            f"of `{pct['family']}`",
+            f"**{verdict.replace('_', ' ')}** — {pct['percentile']}th percentile "
+            f"(better than {pct['percentile']}% of `{pct['family']}`)",
             f"_{data['age_days']:.1f}d old · {data['favs']}♥ · "
             f"{pct['velocity']}/day{sales_line}_\n",
             f"**Why:** {reason}\n",
@@ -586,7 +586,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                         "Reply to every comment within 1h."]
             elif verdict == "KEEP":
                 acts = ["Post 3 TikToks this week (cross-post Shorts + Reels).",
-                        f"Test price at R${max((price or 0) - 5, 45)}.",
+                        "Keep price; test -5 only if flat after 14 days.",
                         f"Re-run `!autopsy {item_id}` in 14 days."]
             elif verdict == "RENAME":
                 acts = [f"Rename using a **GOLD** keyword from `!converge {pct_data['family']}`.",
@@ -601,7 +601,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
             dec_lines = [
                 f"{v_emoji} **{name[:60]}** — **{verdict.replace('_', ' ')}**",
-                f"Top **{pct_data['percentile']}%** of `{pct_data['family']}`",
+                f"{pct_data['percentile']}th percentile (better than {pct_data['percentile']}% of `{pct_data['family']}`)",
                 f"_{pct_data['age_days']}d old · {favs}♥ · "
                 f"{pct_data['velocity']}/day{sales_line} · {pct_data['sample_size']} peers_\n",
                 f"**Why:** {v_reason}\n",
@@ -669,6 +669,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         # ── KEYWORD INTELLIGENCE ──
         fast_class = None
         deep_intel = None
+        actual_bucket = None
         try:
             from gemini_brain import (
                 is_available, extract_keywords, _generate,
@@ -676,6 +677,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             )
             if competition_data:
                 fast_class = classify_competition_batch(competition_data)
+                seed_kw = (name_words[0] if name_words else "").lower()
+                actual_bucket = next(
+                    (c["bucket"] for c in fast_class
+                     if str(c.get("keyword", "")).lower() == seed_kw),
+                    None,
+                )
                 intel_msg = await ctx.send(
                     "🧬 **Keyword intelligence — supply × demand × velocity...**"
                 )
@@ -710,12 +717,16 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                     diag_clean, diag_drops = verify_claims_text(
                         deep_intel["diagnosis"], facts, allow_small={7, 14, 30}
                     )
+                    from verification import reconcile_bucket_text
+                    diag_clean, bucket_drops = reconcile_bucket_text(
+                        diag_clean, actual_bucket
+                    )
                     intel_lines.append("## 🎯 DIAGNOSIS")
                     intel_lines.append(diag_clean or "(removed: unverifiable claims)")
-                    if diag_drops:
+                    if diag_drops or bucket_drops:
                         intel_lines.append(
-                            f"_( {len(diag_drops)} unsupported numeric claim(s) "
-                            f"removed )_"
+                            f"_( {len(diag_drops) + len(bucket_drops)} "
+                            f"unsupported claim(s) removed )_"
                         )
                     intel_lines.append("")
                     bp = deep_intel.get("best_pivot") or {}
@@ -730,6 +741,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
                         vp, vp_reason = await asyncio.to_thread(_vp)
                         if vp:
+                            deep_intel["best_pivot"] = vp
                             intel_lines.append(
                                 "## 🚀 BEST PIVOT (verified against DB)"
                             )
@@ -836,6 +848,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         bp = (deep_intel or {}).get("best_pivot") or {}
         bp_kw = (bp.get("keyword") or "").strip().lower()
+        if bp_kw:
+            pivot_kw = bp_kw
+            pivot_conf = 0.0
+            pivot_reason = (
+                f"verified against DB · supply={bp.get('supply', 0)} · "
+                f"median={bp.get('median_favs', 0)} · {bp.get('bucket', '?')}"
+            )
 
         forbidden_first = []
         try:
@@ -1027,6 +1046,18 @@ description_seo, description_hype, description_short
                     data, facts, allow_small={7, 14, 30},
                     skip=set(TITLE_FIELDS) | {"primary_keyword"},
                 )
+                from verification import reconcile_bucket_text
+                for bkey in ("saturation_verdict", "what_was_wrong"):
+                    cleaned_b, dropped_b = reconcile_bucket_text(
+                        data.get(bkey), actual_bucket
+                    )
+                    if dropped_b:
+                        data[bkey] = cleaned_b
+                        claim_drops.extend(
+                            {"field": bkey, "text": s, "unsupported": [],
+                             "claim": "bucket mismatch"}
+                            for s in dropped_b
+                        )
                 pk = data.get("primary_keyword")
                 if pk:
                     from verification import allow_set, tokens, STOPWORDS
@@ -1136,6 +1167,15 @@ description_seo, description_hype, description_short
                     scored_recovery.sort(
                         key=lambda x: x["final_score"], reverse=True
                     )
+                    if pivot_kw:
+                        pref = pivot_kw.lower()
+                        scored_recovery.sort(
+                            key=lambda x: (
+                                x["title"].lower().startswith(pref + " "),
+                                x["final_score"],
+                            ),
+                            reverse=True,
+                        )
                     champion, backup, _ = pick_champion(scored_recovery)
 
                     stat_lines = ["# 📊 STATISTICAL RECOVERY RANKING\n",
@@ -1203,6 +1243,19 @@ description_seo, description_hype, description_short
             except Exception as e:
                 print(f"[autopsy] confidence failed: {e}", flush=True)
 
+            # LIVE MARKETPLACE CHECK — verify the champion against Roblox
+            try:
+                if champion and champion.get("title"):
+                    from live_market import check_title, format_check
+                    live_result = await asyncio.to_thread(
+                        check_title, champion["title"]
+                    )
+                    live_body = format_check(live_result)
+                    if live_body:
+                        await ctx.send(live_body[:1900])
+            except Exception as e:
+                print(f"[autopsy] live marketplace check failed: {e}", flush=True)
+
             # TAGS MERGE — uses tag_generator (not description_engine)
             merged_desc = None
             try:
@@ -1216,7 +1269,7 @@ description_seo, description_hype, description_short
 
                 if tag_seed:
                     tag_result = await asyncio.to_thread(
-                        generate_tags, tag_seed, family, 45
+                        generate_tags, tag_seed, family, 25
                     )
                     tags = (tag_result or {}).get("tags") or []
 
@@ -1257,9 +1310,11 @@ description_seo, description_hype, description_short
             if pivot_kw:
                 label = ("**🎯 Pivot for the next upload:**" if kill
                          else "**🎯 Pivot:**")
+                conf_txt = (f"confidence **{pivot_conf:.0%}**"
+                            if pivot_conf > 0 else "verified against DB")
                 final_lines.append(
                     f"{label} `{pivot_kw}` "
-                    f"(confidence **{pivot_conf:.0%}**)\n"
+                    f"({conf_txt})\n"
                     f"  _Reason: {pivot_reason}_"
                 )
 
@@ -1267,7 +1322,7 @@ description_seo, description_hype, description_short
                 name_label = ("**1. Name for the new upload:**" if kill
                               else "**1. New name:**")
                 final_lines.append(
-                    f"{name_label} `{champion['title']}`  ← verified winner"
+                    f"{name_label} `{champion['title']}`  ← top-ranked verified name"
                 )
                 if backup:
                     final_lines.append(

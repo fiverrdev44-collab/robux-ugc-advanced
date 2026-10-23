@@ -385,7 +385,8 @@ OUTPUT — ONLY JSON:
             conn_v = get_db(); cur_v = conn_v.cursor()
             try:
                 facts = facts_from_stats(stats, niche_extra)
-                return verify_synth(cur_v, synth, allow_list, family, facts)
+                return verify_synth(cur_v, synth, allow_list, family, facts,
+                             actual_bucket=best_niche_bucket)
             finally:
                 cur_v.close(); conn_v.close()
 
@@ -802,7 +803,7 @@ def format_chain(result):
     if scored:
         champion = scored[0]["title"]
         backup = scored[1]["title"] if len(scored) > 1 else None
-        final_lines.append(f"**1. Name:** `{champion}`  ← verified winner")
+        final_lines.append(f"**1. Name:** `{champion}`  ← top-ranked verified name")
         if backup:
             final_lines.append(f"**2. Backup name:** `{backup}`")
     else:

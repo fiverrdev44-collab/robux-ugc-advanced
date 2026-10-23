@@ -32,7 +32,7 @@ CORE_MODULES = [
     "creative_pivot", "creative_expand", "peer_autopsy", "algo_brain",
     "gemini_brain", "pivot_history", "live_enrich",
     "discover_keywords", "backfill_dates", "confidence",
-    "verification", "opportunity_score", "revsim",
+    "verification", "opportunity_score", "revsim", "live_market",
 ]
 
 EXPECTED_COMMANDS = [

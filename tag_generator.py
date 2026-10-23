@@ -692,7 +692,30 @@ def generate_tags(item_name, family=None, max_tags=45):
     }
 
     ranked = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
-    final_tags = [tag for tag, _ in ranked[:max_tags]]
+
+    noise_phrases = {
+        "dance moms", "dance moms costumes", "dance moms pants",
+        "chinese dance", "free dance", "dance free", "dance premium",
+        "dance clothes", "dance outfits", "dance shirt", "dance pants",
+        "emote free", "emotes free", "floss dance",
+    }
+    noise_words = {"mom", "moms", "costume", "costumes", "premium",
+                   "free", "freebie"}
+    clothing_words = {"pants", "shirt", "shorts", "clothes", "outfits",
+                      "costumes"}
+    name_l = (item_name or "").lower()
+    final_tags = []
+    for tag, _score in ranked:
+        if tag in noise_phrases:
+            continue
+        toks = set(tag.split())
+        if toks & noise_words:
+            continue
+        if (toks & clothing_words) and not (toks & set(name_l.split())):
+            continue
+        final_tags.append(tag)
+        if len(final_tags) >= max_tags:
+            break
 
     return {
         "item_name": item_name,

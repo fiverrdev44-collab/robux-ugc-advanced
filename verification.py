@@ -301,6 +301,28 @@ def verify_claims_text(text, facts, allow_small=None):
     return " ".join(kept).strip(), dropped
 
 
+BUCKET_WORDS = (
+    "SATURATED", "GOLD", "OPPORTUNITY", "NEUTRAL", "WEAK", "DEAD",
+    "VIRGIN", "CONTESTED", "OPEN", "UNPROVEN",
+)
+
+
+def reconcile_bucket_text(text, actual_bucket):
+    """Drop sentences that assert a different bucket than the DB says."""
+    if not text or not actual_bucket:
+        return text, []
+    actual = str(actual_bucket).upper()
+    kept, dropped = [], []
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        claimed = [b for b in BUCKET_WORDS
+                   if re.search(rf"\b{b}\b", sentence, re.I)]
+        if claimed and actual not in claimed:
+            dropped.append(sentence.strip())
+        else:
+            kept.append(sentence.strip())
+    return " ".join(kept).strip(), dropped
+
+
 def clean_text_fields(data, facts, allow_small=None, skip=None):
     """Clean every prose string/list field in an AI payload."""
     drops = []
@@ -359,7 +381,7 @@ def verify_pivot(cur, pivot, family=None):
     }, None
 
 
-def verify_synth(cur, synth, allow_list, family, facts):
+def verify_synth(cur, synth, allow_list, family, facts, actual_bucket=None):
     if not isinstance(synth, dict):
         return synth, {"verified": 0, "rejected": [], "claims": [],
                        "pivot": None}
@@ -419,6 +441,18 @@ def verify_synth(cur, synth, allow_list, family, facts):
         synth, facts, allow_small={7, 14, 30},
         skip=set(TITLE_FIELDS) | {"best_pivot", "killer_keywords"},
     )
+    if actual_bucket:
+        for field in ("saturation_verdict", "search_diagnosis", "diagnosis"):
+            cleaned_b, dropped_b = reconcile_bucket_text(
+                synth.get(field), actual_bucket
+            )
+            if dropped_b:
+                synth[field] = cleaned_b
+                claims.extend(
+                    {"field": field, "text": s, "unsupported": [],
+                     "claim": "bucket mismatch"}
+                    for s in dropped_b
+                )
 
     pivots = []
     for key in ("best_pivot",):
