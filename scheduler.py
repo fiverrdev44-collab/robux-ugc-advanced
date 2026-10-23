@@ -186,18 +186,41 @@ def _run_experiment_measure():
     """Measure due recommendation experiments daily."""
     _log("🧪 [scheduler] Experiment measurement triggered.")
     try:
-        from experiments import measure_due
+        from experiments import auto_apply_changes, measure_due
         from bot_core import get_db
 
         conn = get_db(); cur = conn.cursor()
         try:
+            auto_applied = auto_apply_changes(cur)
             measured = measure_due(cur)
             conn.commit()
-            _log(f"✅ [scheduler] Measured {measured} experiment(s).")
+            _log(f"✅ [scheduler] Auto-applied {auto_applied}, "
+                 f"measured {measured} experiment(s).")
         finally:
             cur.close(); conn.close()
     except Exception as e:
         _log(f"❌ [scheduler] Experiment measurement failed: "
+             f"{type(e).__name__}: {e}")
+
+
+def _run_experiment_watch():
+    """Every 15 min: auto-apply detected item changes and measure due rows."""
+    try:
+        from experiments import auto_apply_changes, measure_due
+        from bot_core import get_db
+
+        conn = get_db(); cur = conn.cursor()
+        try:
+            auto_applied = auto_apply_changes(cur)
+            measured = measure_due(cur)
+            conn.commit()
+            if auto_applied or measured:
+                _log(f"🧪 [watch] auto-applied {auto_applied}, "
+                     f"measured {measured} experiment(s).")
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        _log(f"❌ [watch] Experiment watch failed: "
              f"{type(e).__name__}: {e}")
 
 
@@ -246,6 +269,10 @@ def start_scheduler():
     _scheduler.add_job(_run_experiment_measure, "cron",
         hour=8, minute=0,
         id="experiment_measure", replace_existing=True, misfire_grace_time=3600)
+
+    _scheduler.add_job(_run_experiment_watch, "interval", minutes=15,
+        id="experiment_watch", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=600)
 
     # Catch up if the daily snapshot was missed (bot restarted at 03:30,
     # long downtime, or a failed run). Prevents 24h+ gaps in item_history,

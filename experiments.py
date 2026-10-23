@@ -6,7 +6,7 @@ happened after an action.
 """
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from bot_core import get_db
 
@@ -24,15 +24,20 @@ def create_recommendation(cur, item_id, source, rec_type, baseline,
                           note=None, dedupe_days=7):
     if item_id:
         cur.execute("""
-            select id from recommendation_ledger
-            where item_id = %s and rec_type = %s
-              and status in ('proposed', 'applied')
+            select id, rec_type from recommendation_ledger
+            where item_id = %s
+              and status = 'proposed'
               and created_at > now() - make_interval(days => %s)
-            order by created_at desc limit 1
-        """, (item_id, rec_type, int(dedupe_days)))
-        row = cur.fetchone()
-        if row:
-            return row[0], False
+            order by created_at desc
+        """, (item_id, int(dedupe_days)))
+        for existing_id, existing_type in cur.fetchall():
+            if existing_type == rec_type:
+                return existing_id, False
+        cur.execute("""
+            update recommendation_ledger
+            set status = 'superseded'
+            where item_id = %s and status = 'proposed'
+        """, (item_id,))
 
     cur.execute("""
         insert into recommendation_ledger
@@ -107,8 +112,74 @@ def _sales_units(cur, names, since):
     return int(cur.fetchone()[0] or 0)
 
 
+def auto_apply_changes(cur, limit=50):
+    """Auto-mark proposals whose item name or price changed since baseline."""
+    cur.execute("""
+        select id, item_id, baseline_name, baseline_price
+        from recommendation_ledger
+        where status = 'proposed' and item_id is not null
+          and created_at > now() - interval '30 days'
+        order by created_at desc
+        limit %s
+    """, (int(limit),))
+    rows = cur.fetchall()
+    applied = 0
+    for rec_id, item_id, b_name, b_price in rows:
+        cur.execute("select name, price from items where id = %s", (item_id,))
+        item = cur.fetchone()
+        if not item:
+            continue
+        name, price = item
+        name_changed = ((name or "").strip().lower()
+                        != (b_name or "").strip().lower())
+        price_changed = int(price or 0) != int(b_price or 0)
+        if not (name_changed or price_changed):
+            continue
+        cur.execute("""
+            update recommendation_ledger
+            set status = 'applied',
+                applied_at = now(),
+                measure_at = now() + interval '7 days',
+                note = coalesce(note, '') ||
+                       ' | auto-applied: item changed'
+            where id = %s and status = 'proposed'
+        """, (rec_id,))
+        applied += 1
+    return applied
+
+
+def mark_latest(cur, rec_type=None):
+    """Apply the newest proposed recommendation, no ID needed."""
+    sql = """
+        select id from recommendation_ledger
+        where status = 'proposed'
+    """
+    params = []
+    if rec_type:
+        sql += " and rec_type = %s"
+        params.append(rec_type)
+    sql += " order by created_at desc limit 1"
+    cur.execute(sql, params)
+    row = cur.fetchone()
+    if not row:
+        return None, "no proposed recommendation found"
+    return mark_applied(cur, row[0])
+
+
+def mark_latest_ignored(cur):
+    cur.execute("""
+        select id from recommendation_ledger
+        where status = 'proposed'
+        order by created_at desc limit 1
+    """)
+    row = cur.fetchone()
+    if not row:
+        return None, "no proposed recommendation found"
+    return mark_ignored(cur, row[0])
+
+
 def measure_due(cur, force=False, limit=50):
-    where = "status = 'applied'"
+    where = "status in ('applied', 'measured')"
     params = []
     if not force:
         where += " and measure_at is not null and measure_at <= now()"
@@ -162,12 +233,26 @@ def measure_due(cur, force=False, limit=50):
             "baseline_units_per_day": round(base_units_day, 3),
             "sales_delta_pct": (round(sales_delta, 1)
                                 if sales_delta is not None else None),
+            "checkpoint": min((7, 14, 30), key=lambda d: abs(d - days)),
         }
-        cur.execute("""
-            update recommendation_ledger
-            set status = 'measured', measured_at = now(), outcome = %s::jsonb
-            where id = %s
-        """, (_json(outcome), rec_id))
+        next_day = next((d for d in (7, 14, 30) if d > days + 0.5), None)
+        if next_day is not None and not force:
+            next_at = applied_at + timedelta(days=next_day)
+            cur.execute("""
+                update recommendation_ledger
+                set status = 'applied', measured_at = now(),
+                    measure_at = %s, outcome = %s::jsonb,
+                    outcome_history = outcome_history || %s::jsonb
+                where id = %s
+            """, (next_at, _json(outcome), _json([outcome]), rec_id))
+        else:
+            cur.execute("""
+                update recommendation_ledger
+                set status = 'measured', measured_at = now(),
+                    measure_at = null, outcome = %s::jsonb,
+                    outcome_history = outcome_history || %s::jsonb
+                where id = %s
+            """, (_json(outcome), _json([outcome]), rec_id))
         measured += 1
     return measured
 
@@ -252,6 +337,9 @@ def format_summary(data):
             v = outcome.get("velocity_delta_pct")
             s = outcome.get("sales_delta_pct")
             bits = []
+            day = outcome.get("checkpoint")
+            if day:
+                bits.append(f"day {day}")
             if v is not None:
                 bits.append(f"{v:+.1f}% velocity")
             if s is not None:

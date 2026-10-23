@@ -411,9 +411,14 @@ def setup_database():
             predicted JSONB,
             evidence JSONB,
             outcome JSONB,
+            outcome_history JSONB DEFAULT '[]'::jsonb,
             note TEXT
         );
     ''', "recommendation_ledger")
+    _safe_exec(cur, '''
+        ALTER TABLE recommendation_ledger
+        ADD COLUMN IF NOT EXISTS outcome_history JSONB DEFAULT '[]'::jsonb;
+    ''', "recommendation_ledger_history")
     _safe_exec(cur, '''
         CREATE INDEX IF NOT EXISTS idx_recommendation_item
         ON recommendation_ledger (item_id, created_at DESC);

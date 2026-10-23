@@ -683,16 +683,17 @@ class MenuView(discord.ui.View):
         embed.add_field(
             name="STEP 1 — after `!autopsy`",
             value=(
-                "`!applied <id>` — you applied the rename/price/keep\n"
-                "`!ignored <id>` — you skipped the advice"
+                "Rename or reprice the item — the watcher auto-detects it within 15 min.\n"
+                "`!applied last` — only needed for a keep+post (no name/price change)\n"
+                "`!ignored last` — skipped the newest advice\n"
+                "`!experiments` — read results (optional)"
             ),
             inline=False,
         )
         embed.add_field(
             name="STEP 2 — after 7 days",
             value=(
-                "`!experiments` — measures due experiments and shows "
-                "velocity/sales uplift"
+                "`!experiments` — shows day 7 / 14 / 30 velocity and sales uplift"
             ),
             inline=False,
         )

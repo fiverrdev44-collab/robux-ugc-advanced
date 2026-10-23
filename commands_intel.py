@@ -1748,6 +1748,60 @@ description_seo, description_hype, description_short
             "_Straight talk: a rename can't invent demand. If title, thumbnail "
             "and price don't move favourites in 7 days, the concept is the problem._",
         ]
+        try:
+            champ = ((result.get("scored_titles") or [{}])[0]
+                     if not result.get("error") else {})
+            rec_name = champ.get("title")
+            if rec_name:
+                rec_pivot = (result.get("best_niche_kw") or "")
+                baseline_vel = favs / max(age_days, 1)
+
+                def _save_revive_rec():
+                    conn_r = get_db(); cur_r = conn_r.cursor()
+                    try:
+                        from experiments import create_recommendation
+                        rid, created = create_recommendation(
+                            cur_r, item_id, "revive", "revive",
+                            {
+                                "name": name,
+                                "price": price or 0,
+                                "favs": favs,
+                                "sales_30d": 0,
+                                "velocity": baseline_vel,
+                                "age_days": age_days,
+                            },
+                            {
+                                "name": rec_name,
+                                "pivot": rec_pivot,
+                                "price": price or 0,
+                            },
+                            predicted={
+                                "revive_score": score,
+                                "chain_score": champ.get("score"),
+                            },
+                            evidence={
+                                "source": "revive",
+                                "golden_gaps": len(gaps.get("golden") or []),
+                                "sweet_gaps": len(gaps.get("sweet") or []),
+                            },
+                        )
+                        conn_r.commit()
+                        return rid, created
+                    finally:
+                        cur_r.close(); conn_r.close()
+
+                rec_id, created = await asyncio.to_thread(_save_revive_rec)
+                plan.insert(
+                    len(plan) - 1,
+                    f"**🧪 Experiment #{rec_id}** "
+                    f"({'new' if created else 'existing'}) — baseline "
+                    f"{favs}♥ · {baseline_vel:.2f}/day\n"
+                    f"After rename: `!applied last` · "
+                    f"after one week: `!experiments`",
+                )
+        except Exception as e:
+            print(f"[revive] experiment save failed: {e}", flush=True)
+
         await ctx.send("\n".join(plan)[:1900])
 
     # =========================================================
