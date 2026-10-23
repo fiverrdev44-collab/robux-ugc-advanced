@@ -178,6 +178,7 @@ MANUAL_SECTIONS = {
     "certify": (
         "🏅 CERTIFICATION & HELP",
         "**`!selftest`** — full NASA-grade audit + certificate\n"
+        "**`!experiments`** — did the advice actually work?\n"
         "**`!playbook`** — every tactic by topic\n"
         "**`!path`** — your stage and next milestones\n"
         "**`!guide`** — interactive consultation\n"
@@ -667,6 +668,44 @@ class MenuView(discord.ui.View):
             ),
             color=COLOR_STEALTH,
         )
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="🧪 LABS — Experiments", style=discord.ButtonStyle.success, row=4)
+    async def experiments_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🧪 LABS — CLOSED-LOOP EXPERIMENTS",
+            description=(
+                "_Every recommendation gets an ID, a baseline, and a measured "
+                "7-day outcome. This is how the bot learns what actually works._\n"
+            ),
+            color=0x8B5CF6,
+        )
+        embed.add_field(
+            name="STEP 1 — after `!autopsy`",
+            value=(
+                "`!applied <id>` — you applied the rename/price/keep\n"
+                "`!ignored <id>` — you skipped the advice"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="STEP 2 — after 7 days",
+            value=(
+                "`!experiments` — measures due experiments and shows "
+                "velocity/sales uplift"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="WHY",
+            value=(
+                "Opinions do not compound. Measured outcomes do. After "
+                "10–20 experiments, the bot has real evidence for your "
+                "creator account instead of generic advice."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="VANTA 73 · LABS · no prediction without measurement")
         await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="ℹ️ MANUAL — Easy Guide", style=discord.ButtonStyle.secondary, row=4)
