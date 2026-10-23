@@ -29,7 +29,7 @@ def _tokens(text):
             if w not in CONCEPT_STOP and len(w) >= 2]
 
 
-def check_title(title, limit=30, max_pages=3):
+def check_title(title, limit=30, max_pages=10):
     title = (title or "").strip()
     if not title:
         return None
@@ -60,6 +60,7 @@ def check_title(title, limit=30, max_pages=3):
         if not rows:
             return {"ok": False, "error": type(e).__name__}
 
+    capped = bool(cursor)
     exact = [x for x in rows
              if (x.get("name") or "").strip().lower() == title.lower()]
     q_tokens = set(_tokens(title))
@@ -75,6 +76,7 @@ def check_title(title, limit=30, max_pages=3):
         "title": title,
         "results": len(rows),
         "pages": pages,
+        "capped": capped,
         "exact": len(exact),
         "related": related,
         "related_n": len(top10),
@@ -101,7 +103,8 @@ def format_check(result):
         "## 🌐 LIVE MARKETPLACE CHECK",
         f"• Query: `{result['title']}`",
         f"• Scanned: **{result['results']}** live results across "
-        f"**{result['pages']}** page(s)",
+        f"**{result['pages']}** page(s)"
+        + (" (capped)" if result.get("capped") else ""),
         f"• Exact-name matches: **{result['exact']}**",
         f"• Related results: **{result['related']}/{result['related_n']}** "
         f"share a concept word",
@@ -122,7 +125,9 @@ def format_check(result):
             "Do not call this title unique."
         )
     lines.append(
-        "_Sampled live search (up to 3 pages), not a full catalog count. "
-        "0 exact matches is evidence, not proof of uniqueness._"
+        "_Sampled live search (up to 10 pages or cap), not a full catalog count. "
+        "0 exact matches is evidence, not proof of uniqueness."
+        + (" Results were capped before the catalog was exhausted."
+           if result.get("capped") else "") + "_"
     )
     return "\n".join(lines)

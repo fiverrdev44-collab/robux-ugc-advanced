@@ -31,7 +31,7 @@ def fetch_train(cur, family, start_days, end_days, min_favs=0):
         fam_sql = " and asset_type_id in (" + ",".join(["%s"] * len(ids)) + ")"
         params = list(ids)
     cur.execute(f"""
-        select name, favorite_count,
+        select id, name, favorite_count,
                extract(epoch from (now() - created_at)) / 86400.0 as age_days
         from items
         where favorite_count is not null
@@ -41,12 +41,13 @@ def fetch_train(cur, family, start_days, end_days, min_favs=0):
           {fam_sql}
     """, [int(min_favs), start_days, end_days] + params)
     out = []
-    for name, favs, age in cur.fetchall():
+    for item_id, name, favs, age in cur.fetchall():
         try:
             age = float(age or 0)
             if age <= 0:
                 continue
             out.append({
+                "id": item_id,
                 "name": name or "",
                 "favs": float(favs or 0),
                 "age_days": age,

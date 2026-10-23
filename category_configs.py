@@ -438,10 +438,10 @@ _CONVERGENCE_TO_CATEGORY = {
 _CATEGORY_TO_CONVERGENCE = {
     "emote":     "emotes",
     "hair":      "hair",
-    "headwear":  "hair",       # both map to convergence "hair"
+    "headwear":  "headwear",
     "face":      "face",
     "accessory": "neck",       # primary; other 4 sub-ids share "neck"
-    "clothing":  "tops",
+    "clothing":  "clothing",
     "gear":      "gear",
     # bundle has no convergence_engine equivalent
 }

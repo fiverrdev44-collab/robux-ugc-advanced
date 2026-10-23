@@ -17,17 +17,19 @@ from bot_core import get_db
 
 
 FAMILIES = {
-    "emotes":   [61],
-    "hair":     [8, 41],
-    "face":     [42, 76, 77],
+    "emotes":    [61],
+    "hair":      [41],
+    "headwear":  [8],
+    "face":      [42, 76, 77],
     "neck":     [43],
     "shoulder": [44],
     "front":    [45, 64],
     "back":     [46, 67],
     "waist":    [47, 69, 72],
-    "tops":     [65, 66, 68],
-    "classic":  [2, 11, 12],
-    "gear":     [19],
+    "tops":      [65, 66, 68],
+    "classic":   [2, 11, 12],
+    "clothing":  [64, 65, 66, 67, 68, 69, 70, 71, 72, 2, 11, 12],
+    "gear":      [19],
 }
 
 ASSET_TO_FAMILY = {}

@@ -371,7 +371,12 @@ def setup_database():
             recent_units_30d INTEGER,
             recent_revenue_30d INTEGER,
             last_synced TIMESTAMP,
-            notes TEXT
+            notes TEXT,
+            features JSONB,
+            label_beat_median BOOLEAN,
+            label_top_decile BOOLEAN,
+            label_recouped BOOLEAN,
+            labeled_at TIMESTAMPTZ
         );
     ''', "launch_ledger")
 
@@ -380,6 +385,15 @@ def setup_database():
         ADD COLUMN IF NOT EXISTS recent_units_30d INTEGER,
         ADD COLUMN IF NOT EXISTS recent_revenue_30d INTEGER;
     """, "launch_ledger_cols")
+
+    _safe_exec(cur, """
+        ALTER TABLE launch_ledger
+        ADD COLUMN IF NOT EXISTS features JSONB,
+        ADD COLUMN IF NOT EXISTS label_beat_median BOOLEAN,
+        ADD COLUMN IF NOT EXISTS label_top_decile BOOLEAN,
+        ADD COLUMN IF NOT EXISTS label_recouped BOOLEAN,
+        ADD COLUMN IF NOT EXISTS labeled_at TIMESTAMPTZ;
+    """, "launch_ledger_labels")
 
     _safe_exec(cur, '''
         CREATE INDEX IF NOT EXISTS idx_launch_ledger_launched

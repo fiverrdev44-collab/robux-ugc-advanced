@@ -125,33 +125,85 @@ def search_creator(s, creator_id, creator_type="User", pages=MAX_PAGES):
     return items
 
 
-def discover_verified(s, keywords=("emote", "aura", "beanie", "hair", "wings")):
+DISCOVERY_KEYWORDS = (
+    "emote", "dance", "aura", "hip sway", "kpop", "idle", "animation",
+    "hair", "wig", "beanie", "hat", "crown", "cap",
+    "glasses", "mask", "face", "eyelash", "eyebrow",
+    "wings", "backpack", "necklace", "chain", "scarf", "tail",
+    "shirt", "pants", "dress", "jacket", "shoes", "hoodie",
+    "sword", "staff", "shield", "wand",
+)
+
+
+def verify_creator_badge(s, creator_id, creator_type="User"):
+    """Live badge check. Returns True/False/None (None = API failed)."""
+    ctype = (creator_type or "User").lower()
+    if ctype.startswith("group"):
+        url = f"https://groups.roblox.com/v1/groups/{creator_id}"
+    else:
+        url = f"https://users.roblox.com/v1/users/{creator_id}"
+    try:
+        r = s.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        if "hasVerifiedBadge" in data:
+            return bool(data.get("hasVerifiedBadge"))
+        return None
+    except Exception:
+        return None
+
+
+def discover_verified(s, keywords=DISCOVERY_KEYWORDS, pages=1):
     """Bootstrap: pull popular items and keep the verified creators."""
     found = {}
     for kw in keywords:
-        data = _get_json(s, {"Keyword": kw, "Limit": PAGE_SIZE, "SortType": 2})
-        if not data:
-            continue
-        for d in data.get("data") or []:
-            if d.get("creatorHasVerifiedBadge") and d.get("creatorTargetId"):
-                found[(int(d["creatorTargetId"]),
-                       d.get("creatorType") or "User")] = d.get("creatorName") or "?"
+        cursor = None
+        for _ in range(max(1, pages)):
+            params = {"Keyword": kw, "Limit": PAGE_SIZE, "SortType": 2}
+            if cursor:
+                params["Cursor"] = cursor
+            data = _get_json(s, params)
+            if not data:
+                break
+            for d in data.get("data") or []:
+                if d.get("creatorHasVerifiedBadge") and d.get("creatorTargetId"):
+                    found[(int(d["creatorTargetId"]),
+                           d.get("creatorType") or "User")] = (
+                        d.get("creatorName") or "?")
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
+            time.sleep(DELAY)
         time.sleep(DELAY)
     return found
 
 
 # ── Database side ───────────────────────────────────────────────
 
-def ensure_creators(cur, creators):
-    """creators: {(id, type): name}"""
+def ensure_creators(cur, creators, session=None):
+    """creators: {(id, type): name}. Verifies the badge live when possible."""
     added = 0
     for (cid, ctype), name in creators.items():
+        cur.execute(
+            "select 1 from tracked_creators where creator_id = %s", (cid,)
+        )
+        if cur.fetchone():
+            continue
+        verified = True
+        if session is not None:
+            checked = verify_creator_badge(session, cid, ctype)
+            if checked is False:
+                continue
+            if checked is None:
+                verified = True  # catalog flag already said verified
+            time.sleep(0.5)
         cur.execute("""
             INSERT INTO tracked_creators (creator_id, creator_type, creator_name,
                                           verified, last_scanned)
-            VALUES (%s, %s, %s, TRUE, NULL)
+            VALUES (%s, %s, %s, %s, NULL)
             ON CONFLICT (creator_id) DO NOTHING
-        """, (cid, ctype, name))
+        """, (cid, ctype, name, verified))
         added += cur.rowcount or 0
     return added
 
@@ -264,7 +316,7 @@ def run_batch(cur, limit=10):
         print("[creator-tracker] rate limited during discovery — stopping", flush=True)
         return 0, 0, 0, "rate limited — cooling down 30m"
 
-    new_creators = ensure_creators(cur, discovered)
+    new_creators = ensure_creators(cur, discovered, s)
     cur.connection.commit()
 
     batch = pick_batch(cur, limit)
