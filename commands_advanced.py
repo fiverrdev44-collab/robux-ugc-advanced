@@ -478,6 +478,18 @@ def register_advanced_commands(bot, get_db):
                 await ctx.send(chunk[i:i+1900])
                 await asyncio.sleep(0.2)
 
+        try:
+            champ = ((result.get("scored_titles") or [{}])[0]
+                     .get("title") if result.get("scored_titles") else None)
+            if champ:
+                from live_market import check_title, format_check
+                live = await asyncio.to_thread(check_title, champ)
+                live_body = format_check(live)
+                if live_body:
+                    await ctx.send(live_body[:1900])
+        except Exception as e:
+            print(f"[chain] live marketplace check failed: {e}", flush=True)
+
     # ────────────────────────────────────────────────────────
     # 🔗 CHAIN
     # ────────────────────────────────────────────────────────

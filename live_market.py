@@ -4,6 +4,8 @@ Used to verify that a generated title is not already an exact catalog name and
 to show what the live search returns. It is a first-page sample (30 results),
 not a full catalog count.
 """
+import re
+
 import requests
 
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
@@ -15,36 +17,67 @@ HEADERS = {
 }
 
 
-def check_title(title, limit=30):
+CONCEPT_STOP = {
+    "the", "and", "for", "with", "your", "you", "a", "an", "of", "in",
+    "on", "to", "my", "is", "it", "as", "at", "by", "emote", "dance",
+    "animation", "hat", "hair", "item", "ugc",
+}
+
+
+def _tokens(text):
+    return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if w not in CONCEPT_STOP and len(w) >= 2]
+
+
+def check_title(title, limit=30, max_pages=3):
     title = (title or "").strip()
     if not title:
         return None
+    rows, pages, cursor = [], 0, None
     try:
-        r = requests.get(
-            SEARCH_URL,
-            params={"Keyword": title, "Limit": limit, "SortType": "Relevance"},
-            headers=HEADERS,
-            timeout=12,
-        )
+        while pages < max_pages:
+            params = {"Keyword": title, "Limit": limit,
+                      "SortType": "Relevance"}
+            if cursor:
+                params["Cursor"] = cursor
+            r = requests.get(SEARCH_URL, params=params,
+                             headers=HEADERS, timeout=12)
+            pages += 1
+            if r.status_code == 429:
+                if rows:
+                    break
+                return {"ok": False, "error": "rate limited (429)"}
+            if r.status_code != 200:
+                if rows:
+                    break
+                return {"ok": False, "error": f"HTTP {r.status_code}"}
+            data = r.json()
+            rows.extend(data.get("data") or [])
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
     except Exception as e:
-        return {"ok": False, "error": type(e).__name__}
-    if r.status_code == 429:
-        return {"ok": False, "error": "rate limited (429)"}
-    if r.status_code != 200:
-        return {"ok": False, "error": f"HTTP {r.status_code}"}
-    try:
-        rows = r.json().get("data", []) or []
-    except Exception:
-        return {"ok": False, "error": "bad JSON"}
+        if not rows:
+            return {"ok": False, "error": type(e).__name__}
+
     exact = [x for x in rows
              if (x.get("name") or "").strip().lower() == title.lower()]
+    q_tokens = set(_tokens(title))
+    top10 = rows[:10]
+    related = sum(
+        1 for x in top10
+        if q_tokens & set(_tokens(x.get("name") or ""))
+    )
     top = sorted(rows, key=lambda x: x.get("favoriteCount") or 0,
                  reverse=True)[:3]
     return {
         "ok": True,
         "title": title,
         "results": len(rows),
+        "pages": pages,
         "exact": len(exact),
+        "related": related,
+        "related_n": len(top10),
         "top": [
             {
                 "name": (x.get("name") or "")[:48],
@@ -67,15 +100,29 @@ def format_check(result):
     lines = [
         "## 🌐 LIVE MARKETPLACE CHECK",
         f"• Query: `{result['title']}`",
-        f"• First-page results: **{result['results']}** · "
-        f"exact-name matches: **{result['exact']}**",
+        f"• Scanned: **{result['results']}** live results across "
+        f"**{result['pages']}** page(s)",
+        f"• Exact-name matches: **{result['exact']}**",
+        f"• Related results: **{result['related']}/{result['related_n']}** "
+        f"share a concept word",
     ]
     for item in result.get("top", []):
         lines.append(
             f"• `{item['name']}` — **{item['favorites']:,}♥** · "
             f"R${item['price']}"
         )
+    if result["results"] == 0:
+        lines.append("⚠️ **No live results — demand is not proven.**")
+    elif result["exact"] == 0 and result["related"] < max(3, result["related_n"] // 2):
+        lines.append("⚠️ **0 exact matches, but live results are weakly related — "
+                     "do not treat this as proven demand.**")
+    if result["exact"] > 0:
+        lines.append(
+            "⚠️ **Exact name already exists in live search.** "
+            "Do not call this title unique."
+        )
     lines.append(
-        "_First page of Roblox search, not a full catalog count._"
+        "_Sampled live search (up to 3 pages), not a full catalog count. "
+        "0 exact matches is evidence, not proof of uniqueness._"
     )
     return "\n".join(lines)
