@@ -33,6 +33,7 @@ CORE_MODULES = [
     "gemini_brain", "pivot_history", "live_enrich",
     "discover_keywords", "backfill_dates", "confidence",
     "verification", "opportunity_score", "revsim", "live_market",
+    "experiments", "commands_experiments",
 ]
 
 EXPECTED_COMMANDS = [
@@ -629,6 +630,7 @@ SAFE_COMMANDS = [
     ("meta_sniper", [], {"niche": "aura emote"}),
     ("sales_keywords", ["emotes"], {}),
     ("early", [7], {}),
+    ("experiments", [], {}),
     ("momentum", [7], {}),
     ("oracle", [], {"keyword": "anime"}),
     ("predict", [], {"idea": "kawaii aura emote"}),

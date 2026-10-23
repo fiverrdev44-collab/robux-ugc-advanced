@@ -386,6 +386,44 @@ def setup_database():
         ON launch_ledger (launched_at DESC);
     ''', "idx_launch_ledger_launched")
 
+    # Closed-loop recommendation ledger — every advice has an ID, a baseline,
+    # an applied/ignored state, and a measured outcome.
+    _safe_exec(cur, '''
+        CREATE TABLE IF NOT EXISTS recommendation_ledger (
+            id SERIAL PRIMARY KEY,
+            item_id BIGINT,
+            source TEXT,
+            rec_type TEXT,
+            status TEXT DEFAULT 'proposed',
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            applied_at TIMESTAMPTZ,
+            measure_at TIMESTAMPTZ,
+            measured_at TIMESTAMPTZ,
+            baseline_name TEXT,
+            baseline_price INTEGER,
+            baseline_favs INTEGER,
+            baseline_sales_30d INTEGER,
+            baseline_velocity REAL,
+            baseline_age_days REAL,
+            recommended_name TEXT,
+            recommended_pivot TEXT,
+            recommended_price INTEGER,
+            predicted JSONB,
+            evidence JSONB,
+            outcome JSONB,
+            note TEXT
+        );
+    ''', "recommendation_ledger")
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_recommendation_item
+        ON recommendation_ledger (item_id, created_at DESC);
+    ''', "idx_recommendation_item")
+    _safe_exec(cur, '''
+        CREATE INDEX IF NOT EXISTS idx_recommendation_due
+        ON recommendation_ledger (status, measure_at);
+    ''', "idx_recommendation_due")
+
+
     # Findings from creator_brain.py — stored so commands can show the last
     # cohort study without re-running it.
     _safe_exec(cur, '''

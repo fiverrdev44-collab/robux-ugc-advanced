@@ -182,6 +182,25 @@ def _run_launch_sync():
         traceback.print_exc()
 
 
+def _run_experiment_measure():
+    """Measure due recommendation experiments daily."""
+    _log("🧪 [scheduler] Experiment measurement triggered.")
+    try:
+        from experiments import measure_due
+        from bot_core import get_db
+
+        conn = get_db(); cur = conn.cursor()
+        try:
+            measured = measure_due(cur)
+            conn.commit()
+            _log(f"✅ [scheduler] Measured {measured} experiment(s).")
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        _log(f"❌ [scheduler] Experiment measurement failed: "
+             f"{type(e).__name__}: {e}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -223,6 +242,10 @@ def start_scheduler():
     _scheduler.add_job(_run_launch_sync, "cron",
         hour=7, minute=30,
         id="launch_sync", replace_existing=True, misfire_grace_time=3600)
+
+    _scheduler.add_job(_run_experiment_measure, "cron",
+        hour=8, minute=0,
+        id="experiment_measure", replace_existing=True, misfire_grace_time=3600)
 
     # Catch up if the daily snapshot was missed (bot restarted at 03:30,
     # long downtime, or a failed run). Prevents 24h+ gaps in item_history,

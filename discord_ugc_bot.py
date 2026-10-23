@@ -115,6 +115,10 @@ try:
     from commands_advanced import register_advanced_commands
     register_advanced_commands(bot, get_db)
     print("✅ Advanced commands loaded.", flush=True)
+
+    from commands_experiments import register_experiment_commands
+    register_experiment_commands(bot, get_db)
+    print("✅ Experiment commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 

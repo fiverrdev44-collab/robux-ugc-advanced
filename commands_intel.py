@@ -527,6 +527,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         pivot_kw = None
         pivot_conf = 0.0
         pivot_reason = ""
+        sales_30d = 0
         try:
             from intel_common import pick_pivot_from_data
             temp_niche = []
@@ -1369,6 +1370,69 @@ description_seo, description_hype, description_short
                     f"\n_Still want to fight for it? `!revive {item_id}` runs the "
                     "full rebuild — gaps, pivots, peer autopsy, 14-day plan._"
                 )
+
+            try:
+                if not kill and not too_new:
+                    rec_type = "rename" if champion else "keep"
+                    rec_name = (champion.get("title") if champion else name)
+                    rec_pivot = pivot_kw or ""
+                    rec_price = item_stats.get("price") or 0
+                    baseline_vel = (pct_data["velocity"] if pct_data
+                                    else item_stats["favs"] /
+                                    max(item_stats["age_days"], 1))
+                    predicted = {
+                        "champion_score": (champion.get("score")
+                                           if champion else None),
+                        "pivot": rec_pivot,
+                        "verdict": verdict,
+                    }
+                    evidence = {
+                        "verdict": verdict,
+                        "percentile": (pct_data["percentile"]
+                                       if pct_data else None),
+                        "sample_size": (pct_data["sample_size"]
+                                        if pct_data else None),
+                        "source": "autopsy",
+                    }
+
+                    def _save_rec():
+                        conn_r = get_db(); cur_r = conn_r.cursor()
+                        try:
+                            from experiments import create_recommendation
+                            rid, created = create_recommendation(
+                                cur_r, item_id, "autopsy", rec_type,
+                                {
+                                    "name": name,
+                                    "price": item_stats.get("price") or 0,
+                                    "favs": item_stats["favs"],
+                                    "sales_30d": sales_30d,
+                                    "velocity": baseline_vel,
+                                    "age_days": item_stats["age_days"],
+                                },
+                                {
+                                    "name": rec_name,
+                                    "pivot": rec_pivot,
+                                    "price": rec_price,
+                                },
+                                predicted=predicted,
+                                evidence=evidence,
+                            )
+                            conn_r.commit()
+                            return rid, created
+                        finally:
+                            cur_r.close(); conn_r.close()
+
+                    rec_id, created = await asyncio.to_thread(_save_rec)
+                    state = "new" if created else "existing"
+                    final_lines.append(
+                        f"\n**🧪 Experiment #{rec_id}** ({state}) — baseline "
+                        f"{item_stats['favs']}♥ · {sales_30d} sales/30d · "
+                        f"{baseline_vel:.2f}/day\n"
+                        f"After you apply it: `!applied {rec_id}` · "
+                        f"if you skip it: `!ignored {rec_id}`"
+                    )
+            except Exception as e:
+                print(f"[autopsy] experiment save failed: {e}", flush=True)
 
             await ctx.send("\n".join(final_lines))
 
