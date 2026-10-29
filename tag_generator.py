@@ -533,6 +533,24 @@ def _normalize_pool(pool, cap=10.0):
     return Counter({k: (v / mx) * cap for k, v in pool.items()})
 
 
+def _allowed_tag_tokens(item_name, family):
+    """Tokens a tag may share with the item: its name plus its own family's
+    noun vocabulary. Other families' nouns are deliberately excluded so a
+    beanie never gets `shoes` or a mask never gets `hoodie`."""
+    tokens = set(re.findall(r"[a-z0-9]+", (item_name or "").lower()))
+    family_tokens = set()
+    for hint in CATEGORY_HINTS.get(family or "", []):
+        family_tokens.update(hint.split())
+    try:
+        from category_configs import get_all_type_words, get_type_words_for
+        family_tokens.update(get_type_words_for(family or ""))
+        if not family_tokens:
+            family_tokens.update(get_all_type_words())
+    except Exception:
+        pass
+    return tokens | family_tokens
+
+
 def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
@@ -705,12 +723,7 @@ def generate_tags(item_name, family=None, max_tags=45):
     clothing_words = {"pants", "shirt", "shorts", "clothes", "outfits",
                       "costumes"}
     name_l = (item_name or "").lower()
-    name_tokens = set(re.findall(r"[a-z0-9]+", name_l))
-    try:
-        from category_configs import get_all_type_words
-        name_tokens.update(get_all_type_words())
-    except Exception:
-        pass
+    name_tokens = _allowed_tag_tokens(item_name, detected_family)
     final_tags = []
     for tag, _score in ranked:
         if tag in noise_phrases:

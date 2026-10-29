@@ -94,6 +94,17 @@ def test_pivot_and_lane_gates():
     print("PASS pivot and lane gates")
 
 
+def test_tag_relevance_gate():
+    from tag_generator import _allowed_tag_tokens
+    allowed = _allowed_tag_tokens("Cute Fluffy Kitty Beanie", "hats")
+    assert "beanie" in allowed and "cute" in allowed
+    assert "shoes" not in allowed and "hoodie" not in allowed
+    bare = _allowed_tag_tokens("Beanie", "hats")
+    assert "beanie" in bare
+    assert "cute" not in bare and "shoes" not in bare
+    print("PASS tag relevance gate")
+
+
 def test_db_transaction():
     conn = get_db()
     cur = conn.cursor()
@@ -168,5 +179,6 @@ if __name__ == "__main__":
     test_control_selection_uses_pre_features()
     test_did_math_and_insufficient()
     test_pivot_and_lane_gates()
+    test_tag_relevance_gate()
     test_db_transaction()
     print("ALL TESTS PASSED")
