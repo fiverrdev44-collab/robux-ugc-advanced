@@ -10,7 +10,9 @@ def forecast_trend(cur, keyword, days=14):
     cur.execute("""
         SELECT LOWER(name), favorite_count,
                EXTRACT(EPOCH FROM (NOW() - created_at))/86400 AS age_days
-        FROM items WHERE favorite_count > 0 AND LOWER(name) LIKE %s LIMIT 1000
+        FROM items WHERE favorite_count > 0 AND LOWER(name) LIKE %s
+        ORDER BY favorite_count DESC, name
+        LIMIT 1000
     """, (pattern,))
     rows = cur.fetchall()
     if len(rows) < 5:
@@ -102,7 +104,7 @@ def forecast_trend(cur, keyword, days=14):
                 "avg_favs": int(wfav),
                 "score": int(wfav / (1 + wc ** 0.5)),
             })
-    next_words.sort(key=lambda x: x["score"], reverse=True)
+    next_words.sort(key=lambda x: (-x["score"], x["word"]))
 
     return {
         "keyword": keyword,
