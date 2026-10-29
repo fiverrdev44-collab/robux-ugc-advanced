@@ -267,8 +267,12 @@ def run_chain(concept, family=None, parent_id=None):
             3 if x["bucket"] == "VIRGIN" else
             4 if x["bucket"] == "NEUTRAL" else 5
         ))
-        best_niche_kw = best_obj["keyword"]
-        best_niche_bucket = best_obj["bucket"]
+        if best_obj.get("demand_live", 0) > 0:
+            best_niche_kw = best_obj["keyword"]
+            best_niche_bucket = best_obj["bucket"]
+        else:
+            best_niche_kw = None
+            best_niche_bucket = "UNPROVEN"
 
     # ── Stage 9: Big strategy prompt ──
     synth = {}
@@ -456,12 +460,16 @@ OUTPUT — ONLY JSON:
         print(f"[chain] title scoring failed: {e}", flush=True)
 
     try:
+        from opportunity_score import lane_priority
         verified_metrics = (verification_audit or {}).get("metrics") or {}
         for sc in scored_titles:
             opp = (verified_metrics.get(sc["title"]) or {}).get("opportunity") or {}
             sc["opportunity"] = opp
             sc["final_score"] = sc["score"]
-        scored_titles.sort(key=lambda x: x["final_score"], reverse=True)
+        scored_titles.sort(
+            key=lambda x: (lane_priority(x.get("opportunity")), x["final_score"]),
+            reverse=True,
+        )
     except Exception as e:
         print(f"[chain] opportunity rerank failed: {e}", flush=True)
 
@@ -804,7 +812,12 @@ def format_chain(result):
     if scored:
         champion = scored[0]["title"]
         backup = scored[1]["title"] if len(scored) > 1 else None
-        final_lines.append(f"**1. Name:** `{champion}`  ← top-ranked verified name")
+        final_lines.append(f"**1. Name:** `{champion}`  ← top-ranked candidate")
+        if scored and lane_priority(scored[0].get("opportunity")) == 0:
+            final_lines.append(
+                "**⚠️ Lane warning:** every surviving name is SATURATED. "
+                "Treat this as a test, not an open lane."
+            )
         if backup:
             final_lines.append(f"**2. Backup name:** `{backup}`")
     else:

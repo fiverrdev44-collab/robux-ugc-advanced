@@ -1,5 +1,6 @@
 """Pure tests for the conversational router. No Discord connection required."""
 import asyncio
+import vanta_conversation as vc
 from vanta_conversation import (
     ConversationState, ConversationStore, classify_intent, clean_concept,
     extract_item_id, _intent, INTENTS, _run_registry,
@@ -45,6 +46,8 @@ def test_conversational_glue():
     assert classify_intent("check my item", use_ai=False)["intent"] == "list_my_items"
     assert classify_intent("tags", use_ai=False)["intent"] == "tags"
     assert classify_intent("tags cute beanie", use_ai=False)["concept"] == "cute beanie"
+    assert classify_intent("tags", use_ai=False)["intent"] == "tags"
+    assert classify_intent("tags cute beanie", use_ai=False)["concept"] == "cute beanie"
     bare = classify_intent("99610366014241", use_ai=False)
     assert bare["intent"] == "inspect_item" and bare["item_id"] == 99610366014241
     state = ConversationState(user_id=1)
@@ -82,6 +85,13 @@ def test_followups():
     existing = classify_intent("can i use my existing name of item?",
                                state=state, use_ai=False)
     assert existing["intent"] == "tags"
+    state.pending_intent = "tags"
+    state.item_titles = {111111111111: "Aura Dance Emote"}
+    picked = classify_intent("1", state=state, use_ai=False)
+    assert picked["intent"] == "tags" and picked["item_id"] == 111111111111
+    existing = classify_intent("can i use my existing name of item?",
+                               state=state, use_ai=False)
+    assert existing["intent"] == "tags"
     assert classify_intent("go deeper", state=state, use_ai=False)["intent"] == "diagnose_item"
     same = classify_intent("same for this item 333333333333", state=state, use_ai=False)
     assert same["intent"] == "inspect_item" and same["item_id"] == 333333333333
@@ -94,6 +104,12 @@ def test_family_and_concept():
     route = classify_intent("find a low competition beanie niche", use_ai=False)
     assert route["intent"] == "find_opportunities" and route["family"] == "headwear"
     assert clean_concept("give me ideas for a kawaii cat beanie") == "kawaii cat beanie"
+    assert clean_concept("i want to change tags") is None
+    change_tags = classify_intent("i want to change tags", use_ai=False)
+    assert change_tags["intent"] == "tags" and change_tags["concept"] is None
+    item_tags = classify_intent("change tags of item 121930221694467", use_ai=False)
+    assert item_tags["intent"] == "tags" and item_tags["concept"] is None
+    assert item_tags["item_id"] == 121930221694467
     print("PASS family and concept extraction")
 
 
@@ -167,6 +183,82 @@ def test_registry_execution_and_context():
     print("PASS registry execution and context capture")
 
 
+def test_ai_planner_validation():
+    state = ConversationState(user_id=1)
+    state.last_item_id = 99610366014241
+    state.item_titles = {99610366014241: "Anime Battle Fighting Stance"}
+    original = vc._planner_ai
+
+    def fake(text, has_attachment, st):
+        return {"action": "tags", "item_id": None, "concept": None,
+                "family": "emotes", "confidence": 0.92, "clarify": None}
+
+    vc._planner_ai = fake
+    try:
+        route = asyncio.run(vc.plan_message("tag it", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "tags"
+    assert route["item_id"] == 99610366014241
+
+    def fake_bad(text, has_attachment, st):
+        return {"action": "run_shell", "confidence": 0.99}
+
+    vc._planner_ai = fake_bad
+    try:
+        route = asyncio.run(vc.plan_message("do the thing", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "clarify"
+
+    vc._planner_ai = fake
+    try:
+        route = asyncio.run(vc.plan_message("hi", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "greeting"
+
+    def fake_clarify(text, has_attachment, st):
+        return {"action": "clarify", "confidence": 0.8,
+                "clarify": "Which item do you mean?"}
+
+    vc._planner_ai = fake_clarify
+    try:
+        route = asyncio.run(vc.plan_message("do the thing", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "clarify"
+    assert route["question"] == "Which item do you mean?"
+
+    state.ai_calls = []
+    vc._planner_ai = fake
+    try:
+        asyncio.run(vc.plan_message("tag it", False, state))
+    finally:
+        vc._planner_ai = original
+    assert len(state.ai_calls) == 1
+    print("PASS AI planner validation and fast paths")
+
+
+def test_selection_skips_ai():
+    state = ConversationState(user_id=1)
+    state.pending_intent = "tags"
+    state.results = [111111111111]
+    state.item_titles = {111111111111: "Aura Dance Emote"}
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("planner should not run for selections")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("1", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "tags" and route["item_id"] == 111111111111
+    print("PASS selection fast path")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -185,5 +277,7 @@ if __name__ == "__main__":
     test_signed_thread_names()
     test_store_isolation()
     test_registry_execution_and_context()
+    test_ai_planner_validation()
+    test_selection_skips_ai()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

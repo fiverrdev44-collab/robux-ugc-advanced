@@ -420,6 +420,8 @@ def verify_pivot(cur, pivot, family=None):
         return None, "pivot did not resolve in the database"
     if opp["supply"] == 0 and opp["demand_live"] == 0:
         return None, "pivot has zero supply and zero live demand"
+    if opp["demand_live"] == 0:
+        return None, "pivot has no live demand measured"
     if opp["verdict"] in ("DEAD", "SATURATED"):
         return None, f"pivot is {opp['verdict']}"
     return {

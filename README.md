@@ -174,11 +174,12 @@ Every AI output passes these gates before display:
 
 1. **Tokens** — every title token must exist in the category allow-list or verified type words.
 2. **Phrase** — family-scoped supply, median favorites, exact-name competition, live demand.
-3. **Saturation** — saturation and broad-word warnings are advisory; they do not silently reject proven names.
+3. **Saturation** — warnings are advisory for display, but final new-name selection prefers
+   OPEN/CONTESTED lanes. If every surviving title is SATURATED, the final block says so.
 4. **Claims** — numbers in prose must match a computed fact; fabricated numbers are removed.
 5. **Guarantees** — “guaranteed”, “100%”, “will go viral”, “risk-free”, etc. are removed.
 6. **Bucket consistency** — the AI cannot call a keyword SATURATED when the DB says NEUTRAL.
-7. **Primary keyword / pivot** — must exist and reclassify against the DB; rejected values are cleared.
+7. **Primary keyword / pivot** — must exist, have live demand, and reclassify outside DEAD/SATURATED/GHOST; rejected values are cleared. VIRGIN now requires live demand; zero supply + zero live demand is GHOST.
 8. **Descriptions** — customer-facing only; internal metrics, negative copy, promo, and “flex” language are removed. A factual fallback is used if the whole text is unusable.
 9. **Live marketplace** — champion titles are checked across up to 10 live search pages for exact matches and relatedness. A capped sample is labeled as such.
 
@@ -340,6 +341,8 @@ Deploy: push to `main`; GitHub Actions deploys to Oracle Server 2 and restarts
 - Live exact checks sample up to 300 results, not the full catalog.
 - Verified-creator discovery is sampled.
 - Descriptions are creative prose; only claims/numbers/internal language are filtered.
+- Description “tags” are not a ranking field. Tag generation now keeps only tags sharing a
+  token with the item name or category type words.
 - The bot cannot create demand or guarantee sales.
 - Conversational public threads are visible to channel members; use **Private (DM)**
   for sensitive details. Thread ownership is verified with an HMAC-signed name, not

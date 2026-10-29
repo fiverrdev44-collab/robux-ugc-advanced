@@ -175,16 +175,11 @@ def build_verdict(pd, diffs):
             f"🔧 **RESCUE.** You're at {ratio:.0%} of peer velocity. "
             f"Fix: **{fix_str}**. 30 min work. Re-check in 14d."
         )
-    if my_v < 0.30 and my_age >= 30:
-        return (
-            f"🪦 **KILL.** {ratio:.0%} of winner velocity ({my_v}/day vs "
-            f"{avg_v}/day), and own velocity is below 0.30/day at day 30+. "
-            f"Launch a new item."
-        )
     return (
         f"🔧 **WINNER GAP.** {ratio:.0%} of winner velocity "
-        f"({my_v}/day vs {avg_v}/day). Winners are not peers; use `!verdict` "
-        f"for the peer-percentile decision."
+        f"({my_v}/day vs {avg_v}/day). Winners are not peers; this section "
+        f"does not make the kill decision. Use `!verdict` for the "
+        f"peer-percentile call."
     )
 
 

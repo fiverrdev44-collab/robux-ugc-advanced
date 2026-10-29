@@ -310,3 +310,16 @@ def score_opportunity(cur, phrase, family=None):
         "confidence": confidence,
         "reasons": reasons,
     }
+
+
+def lane_priority(opp):
+    """Rank lanes for final selection; saturation is not a winning lane."""
+    verdict = (opp or {}).get("verdict")
+    return {
+        "OPEN": 4,
+        "CONTESTED": 3,
+        "UNPROVEN": 2,
+        "NEUTRAL": 2,
+        "SATURATED": 0,
+        "DEAD": 0,
+    }.get(verdict, 1)

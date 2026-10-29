@@ -1174,19 +1174,29 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                                .get("opportunity") or {})
                         sc["opportunity"] = opp
                         sc["final_score"] = sc["score"]
+                    from opportunity_score import lane_priority
                     scored_recovery.sort(
-                        key=lambda x: x["final_score"], reverse=True
+                        key=lambda x: (
+                            lane_priority(x.get("opportunity")),
+                            x["final_score"],
+                        ),
+                        reverse=True,
                     )
                     if pivot_kw:
                         pref = pivot_kw.lower()
                         scored_recovery.sort(
                             key=lambda x: (
+                                lane_priority(x.get("opportunity")),
                                 x["title"].lower().startswith(pref + " "),
                                 x["final_score"],
                             ),
                             reverse=True,
                         )
                     champion, backup, _ = pick_champion(scored_recovery)
+                    if champion:
+                        pivot_kw = champion["title"].split()[0].lower()
+                        pivot_conf = 0.0
+                        pivot_reason = "lane leader from verified ranking"
 
                     stat_lines = ["# 📊 STATISTICAL RECOVERY RANKING\n",
                                   "_Real word-lift × search-demand from DB._\n"]
@@ -1332,8 +1342,17 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                 name_label = ("**1. Name for the new upload:**" if kill
                               else "**1. New name:**")
                 final_lines.append(
-                    f"{name_label} `{champion['title']}`  ← top-ranked verified name"
+                    f"{name_label} `{champion['title']}`  ← top-ranked candidate"
                 )
+                try:
+                    from opportunity_score import lane_priority
+                    if lane_priority(champion.get("opportunity")) == 0:
+                        final_lines.append(
+                            "**⚠️ Lane warning:** every surviving name is "
+                            "SATURATED. Treat this as a test, not an open lane."
+                        )
+                except Exception:
+                    pass
                 if backup:
                     final_lines.append(
                         f"**2. Backup name:** `{backup['title']}`"

@@ -99,9 +99,9 @@ def classify_keyword(cur, keyword, family=None):
     demand_reliable = demand_live > 0
     demand = demand_live if demand_reliable else demand_all
 
-    if supply == 0 and demand == 0:
+    if supply == 0 and demand_live == 0:
         bucket = "GHOST"
-    elif supply == 0:
+    elif supply == 0 and demand_live > 0:
         bucket = "VIRGIN"
     elif supply < 20 and median_favs >= 150:
         bucket = "GOLD"
@@ -119,6 +119,7 @@ def classify_keyword(cur, keyword, family=None):
         "median_favs": round(median_favs, 1),
         "demand": demand,
         "demand_live": demand_live,
+        "demand_mined": demand_all - demand_live,
         "demand_volume": demand_volume,
         "demand_reliable": demand_reliable,
         "bucket": bucket,
@@ -340,8 +341,11 @@ def pick_pivot_from_data(niche_data, keyword_intel=None):
         bucket = k.get("bucket", "NEUTRAL")
         median = k.get("median_favs", 0)
         supply = k.get("supply", 0)
-        demand = k.get("demand", 0)
+        demand = k.get("demand_live", k.get("demand", 0))
 
+        # No live demand or a saturated/ghost lane is not a pivot.
+        if demand == 0 or bucket in ("SATURATED", "GHOST", "DEAD"):
+            continue
         bmap = {"GOLD": 100, "OPPORTUNITY": 80, "VIRGIN": 70,
                 "NEUTRAL": 40, "SATURATED": 20, "GHOST": 5}
         b = bmap.get(bucket, 40)
@@ -369,6 +373,8 @@ def pick_pivot_from_data(niche_data, keyword_intel=None):
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
+    if not scored:
+        return (None, 0.0, "no demand-backed pivot")
     best = scored[0]
 
     # ── ABSOLUTE CONFIDENCE ────────────────────────────────────

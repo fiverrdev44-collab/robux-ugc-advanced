@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from bot_core import get_db
 from matched_experiments import (did_estimate, distance, select_controls,
                                  _velocity_pair)
+from intel_common import pick_pivot_from_data
+from opportunity_score import lane_priority
 from search_visibility import normalize_query, _fetch_query
 from sales_listener import _insert_sale
 
@@ -71,6 +73,25 @@ def test_did_math_and_insufficient():
     small = did_estimate(0.5, [0.1])
     assert small["insufficient"] and small["n"] == 1
     print("PASS DiD math and insufficient-data handling")
+
+
+def test_pivot_and_lane_gates():
+    assert lane_priority({"verdict": "OPEN"}) > lane_priority({"verdict": "CONTESTED"})
+    assert lane_priority({"verdict": "CONTESTED"}) > lane_priority({"verdict": "UNPROVEN"})
+    assert lane_priority({"verdict": "UNPROVEN"}) > lane_priority({"verdict": "SATURATED"})
+    no_demand = pick_pivot_from_data([
+        {"keyword": "combat", "bucket": "NEUTRAL", "supply": 0,
+         "median_favs": 0, "demand_live": 0},
+        {"keyword": "pose", "bucket": "SATURATED", "supply": 470,
+         "median_favs": 25, "demand_live": 2},
+    ])
+    assert no_demand[0] is None
+    backed = pick_pivot_from_data([
+        {"keyword": "stance", "bucket": "NEUTRAL", "supply": 20,
+         "median_favs": 40, "demand_live": 3},
+    ])
+    assert backed[0] == "stance"
+    print("PASS pivot and lane gates")
 
 
 def test_db_transaction():
@@ -146,5 +167,6 @@ if __name__ == "__main__":
     test_visibility_empty_results()
     test_control_selection_uses_pre_features()
     test_did_math_and_insufficient()
+    test_pivot_and_lane_gates()
     test_db_transaction()
     print("ALL TESTS PASSED")

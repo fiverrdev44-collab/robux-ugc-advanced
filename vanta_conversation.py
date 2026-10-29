@@ -7,6 +7,7 @@ command callbacks, and never executes arbitrary model output.
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import re
 import time
@@ -19,6 +20,11 @@ URL_ID_RE = re.compile(
     r"(?:catalog|marketplace|library|item)[^\d]{0,20}(\d{6,20})", re.I
 )
 ITEM_ID_RE = re.compile(r"\b(\d{6,20})\b")
+SELECTION_RE = re.compile(
+    r"^(?:the\s+)?(?:\d{1,2}|first|second|third|fourth|fifth|last)"
+    r"(?:\s+one)?[.!]*$",
+    re.I,
+)
 
 FAMILIES = {
     "emote": ("emote", "dance", "animation"),
@@ -102,6 +108,7 @@ class ConversationState:
     last_family: str | None = None
     item_titles: dict = field(default_factory=dict)
     pending_intent: str | None = None
+    messages: list = field(default_factory=list)
     history: list = field(default_factory=list)
     ai_calls: list = field(default_factory=list)
     updated_at: float = field(default_factory=time.time)
@@ -197,7 +204,8 @@ def clean_concept(text, item_id=None):
         r"niche|opportunity|opportunities|trending|trend|gap|low|"
         r"competition|revive|fix|improve|diagnose|analyze|analyse|"
         r"autopsy|verdict|deep|deeper|more|same|now|do|what|why|how|"
-        r"is|are|doing|does|it|about|some|new|current)\b",
+        r"is|are|doing|does|it|about|some|new|current|change|changed|"
+        r"edit|update|redo|add|write|existing)\b",
         " ", s,
     )
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
@@ -361,6 +369,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         if family:
             return _intent("find_opportunities", family=family, confidence="high")
         return _intent("find_opportunities", confidence="medium")
+
+    if (state.pending_intent == "tags"
+            and re.search(r"\b(name|existing|current|same)\b", low)):
+        return _intent("tags", item_id=_state_with_last_item(state, item_id),
+                       concept=state.last_concept, family=family,
+                       confidence="followup")
 
     if re.search(r"\b(tags?|seo)\b", low):
         target = _state_with_last_item(state, item_id)
@@ -724,32 +738,189 @@ async def _run_registry(bot, message, route, state):
           f"elapsed={time.time()-started:.2f}s", flush=True)
 
 
+ITEM_ACTIONS = {"inspect_item", "diagnose_item", "revive_item",
+                "improve_metadata"}
+CONCEPT_ACTIONS = {"create_ideas"}
+
+
+def _planner_prompt(text, has_attachment, state):
+    last_title = state.item_titles.get(state.last_item_id, "")
+    candidates = [
+        {"id": i, "name": state.item_titles.get(i, "")}
+        for i in (state.results or [])[:6]
+    ]
+    recent = [m for m in state.messages[-6:] if m]
+    return f"""You are the intent planner for a Roblox UGC assistant.
+The user speaks casually, may use slang, typos, incomplete sentences, or follow-ups.
+Choose exactly ONE allowed action and extract arguments.
+
+ALLOWED ACTIONS
+- inspect_item: check/verdict/keep-or-kill/performance of one existing item
+- diagnose_item: why an item is failing or underperforming
+- revive_item: revive/rebuild/relaunch an item
+- find_opportunities: niches, trends, gaps, what to create next
+- create_ideas: new concept, title ideas, brainstorm for a new item
+- improve_metadata: change/improve title, description, or listing of an item
+- tags: keywords/tags/SEO for an item (or the user's existing item name)
+- analyze_image: attached image critique
+- check_sales: recorded sales/revenue
+- check_experiments: experiment results/uplift
+- check_visibility: search visibility coverage
+- data_audit: data quality/integrity
+- help: explain capabilities
+- clarify: ask one short question when a required target is unclear
+
+RULES
+- Resolve "it", "this", "that", "my item" to last_item when available.
+- Resolve "the second one"/"number 2" from candidates.
+- Never invent an item ID or a command. Only use IDs present in context or explicit in the message.
+- If the user asks to use their existing/current item name, use last_item.
+- If the action needs an item and none is known, use clarify.
+- If the action needs a concept and none is given, use clarify.
+- For tags with no known item, item_id may be null; the system will list their items.
+- Return JSON ONLY, no markdown.
+
+CONTEXT
+last_item: {state.last_item_id} ({last_title})
+candidates: {candidates}
+pending_action: {state.pending_intent}
+recent_user_messages: {recent}
+has_attachment: {has_attachment}
+
+JSON SCHEMA
+{{"action": "one_allowed_action", "item_id": 123 or null,
+  "concept": "short phrase or null", "family": "emote|hair|headwear|face|accessory|clothing|gear|null",
+  "confidence": 0.0, "clarify": "one short question or null"}}
+
+USER MESSAGE
+{text[:800]}
+"""
+
+
+def _validate_plan(plan, state, has_attachment):
+    if not isinstance(plan, dict):
+        return None
+    action = str(plan.get("action") or "").strip()
+    if action == "clarify":
+        question = str(plan.get("clarify") or "").strip()
+        return _intent("clarify", confidence="ai",
+                       question=(question or "Can you tell me a bit more?")[:200])
+    if action not in INTENTS:
+        return None
+    item_id = plan.get("item_id")
+    try:
+        item_id = int(item_id) if item_id else None
+    except (TypeError, ValueError):
+        item_id = None
+    concept = clean_concept(str(plan.get("concept") or ""))
+    family = str(plan.get("family") or "").strip().lower() or None
+    if family not in FAMILIES:
+        family = None
+    confidence = plan.get("confidence")
+    try:
+        confidence = float(confidence) if confidence is not None else 0.5
+    except (TypeError, ValueError):
+        confidence = 0.5
+
+    if action in ITEM_ACTIONS:
+        item_id = item_id or state.last_item_id
+        if not item_id:
+            return _intent("clarify", question="Which item? Send the ID or URL.",
+                           confidence="low")
+    if action == "tags":
+        item_id = item_id or state.last_item_id
+    if action in CONCEPT_ACTIONS and not concept:
+        return _intent("clarify",
+                       question="Describe the concept or theme in a few words.",
+                       confidence="low")
+    if action == "improve_metadata" and not item_id and not concept:
+        return _intent("clarify",
+                       question="Send the item ID or describe the listing you want improved.",
+                       confidence="low")
+    if action == "analyze_image" and not has_attachment:
+        return _intent("clarify",
+                       question="Attach the image you want me to analyze.",
+                       confidence="low")
+    if confidence < 0.40 and not item_id and not concept:
+        return _intent("clarify", question="Can you say that another way?",
+                       confidence="low")
+    return _intent(action, item_id=item_id, concept=concept, family=family,
+                   confidence="ai")
+
+
+def _planner_ai(text, has_attachment, state):
+    started = time.time()
+    try:
+        from gemini_brain import _generate, get_last_usage, is_available
+        if not is_available():
+            return None
+        prompt = _planner_prompt(text, has_attachment, state)
+        raw = _generate(prompt, json_mode=True, temperature=0.0, max_tokens=300)
+        usage = get_last_usage()
+        if not raw:
+            return None
+        data = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+        print(f"[vanta-planner] usage={usage or {'estimated_input': round(len(prompt)/4)}} "
+              f"elapsed={time.time()-started:.2f}s", flush=True)
+        return data
+    except Exception as e:
+        print(f"[vanta-planner] failed: {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def _is_selection(text):
+    return bool(SELECTION_RE.fullmatch((text or "").strip()))
+
+
+async def plan_message(text, has_attachment, state):
+    # Deterministic fast path for bare IDs/URLs and small talk.
+    fast = classify_intent(text, has_attachment=has_attachment, state=state,
+                          use_ai=False)
+    if fast["intent"] in ("greeting", "presence", "ack", "cancel", "help"):
+        return fast
+    if extract_item_id(text) and re.fullmatch(
+        r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()
+    ):
+        return fast
+    if (text or "").strip().startswith("!"):
+        return fast
+    # Ordinals/numbers are already resolved against pending context.
+    if _is_selection(text) and fast["intent"] != "clarify":
+        return fast
+
+    now = time.time()
+    state.ai_calls = [t for t in state.ai_calls if now - t < 3600]
+    if len(state.ai_calls) < 20:
+        try:
+            plan = await asyncio.wait_for(
+                asyncio.to_thread(_planner_ai, text, has_attachment, state),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            print("[vanta-planner] timeout", flush=True)
+            plan = None
+        route = _validate_plan(plan, state, has_attachment)
+        if route:
+            state.ai_calls.append(time.time())
+            state.ai_calls = [t for t in state.ai_calls
+                              if time.time() - t < 3600]
+            return route
+    return fast
+
+
 async def handle_message(bot, message, state):
     text = (message.content or "").strip()
     has_attachment = bool(message.attachments)
     if not text and not has_attachment:
         await message.channel.send("Send a message, an item ID, or an image.")
         return
-    use_ai = len(text) < 600 and len(state.ai_calls) < 10
-    route = classify_intent(text, has_attachment=has_attachment,
-                            state=state, use_ai=False)
-    if route.get("ai_fallback") and use_ai:
-        try:
-            ai = await asyncio.wait_for(
-                asyncio.to_thread(_ai_route, text), timeout=30
-            )
-        except asyncio.TimeoutError:
-            ai = None
-            print("[vanta-router] ai fallback timeout", flush=True)
-        if ai:
-            route = ai
+    state.messages.append(text[:400])
+    state.messages = state.messages[-6:]
+    route = await plan_message(text, has_attachment, state)
     if route["intent"] == "clarify":
         await message.channel.send(route.get("question") or
                                   "Tell me what you want to do.")
         return
-    if route.get("confidence") == "ai":
-        state.ai_calls.append(time.time())
-        state.ai_calls = [t for t in state.ai_calls if time.time() - t < 3600]
     await _run_registry(bot, message, route, state)
 
 

@@ -700,10 +700,17 @@ def generate_tags(item_name, family=None, max_tags=45):
         "emote free", "emotes free", "floss dance",
     }
     noise_words = {"mom", "moms", "costume", "costumes", "premium",
-                   "free", "freebie"}
+                   "free", "freebie", "softcore", "nsfw", "sexy", "explicit",
+                   "about", "part", "best", "games"}
     clothing_words = {"pants", "shirt", "shorts", "clothes", "outfits",
                       "costumes"}
     name_l = (item_name or "").lower()
+    name_tokens = set(re.findall(r"[a-z0-9]+", name_l))
+    try:
+        from category_configs import get_all_type_words
+        name_tokens.update(get_all_type_words())
+    except Exception:
+        pass
     final_tags = []
     for tag, _score in ranked:
         if tag in noise_phrases:
@@ -712,6 +719,8 @@ def generate_tags(item_name, family=None, max_tags=45):
         if toks & noise_words:
             continue
         if (toks & clothing_words) and not (toks & set(name_l.split())):
+            continue
+        if name_tokens and not (toks & name_tokens):
             continue
         final_tags.append(tag)
         if len(final_tags) >= max_tags:
