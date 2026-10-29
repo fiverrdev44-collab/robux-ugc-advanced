@@ -48,6 +48,7 @@ INTENTS = {
     "ack": "Acknowledge a short confirmation",
     "cancel": "Cancel the current direction",
     "list_my_items": "List tracked launch items when no item ID is supplied",
+    "tags": "Generate description keywords for an item",
     "clarify": "Ask one short clarifying question",
 }
 
@@ -58,6 +59,7 @@ COMMAND_ARGS = {
     "find_opportunities": ("opportunities", "family"),
     "create_ideas": ("chain", "concept"),
     "improve_metadata": ("autopsy", "item"),
+    "tags": ("tags", "title"),
     "check_sales": ("sales_report", None),
     "check_experiments": ("experiments", None),
     "check_visibility": ("visibility", None),
@@ -98,6 +100,8 @@ class ConversationState:
     last_item_id: int | None = None
     last_concept: str | None = None
     last_family: str | None = None
+    item_titles: dict = field(default_factory=dict)
+    pending_intent: str | None = None
     history: list = field(default_factory=list)
     ai_calls: list = field(default_factory=list)
     updated_at: float = field(default_factory=time.time)
@@ -237,16 +241,16 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     # Follow-ups first.
     ordinal = re.search(
-        r"\b(first|1st|one|second|2nd|two|third|3rd|three|fourth|4th|four|"
-        r"fifth|5th|five|the other one)\b", low
+        r"\b(1|2|3|4|5|first|1st|one|second|2nd|two|third|3rd|three|"
+        r"fourth|4th|four|fifth|5th|five|the other one)\b", low
     )
     if ordinal and state.results:
         words = {
-            "first": 0, "1st": 0, "one": 0,
-            "second": 1, "2nd": 1, "two": 1, "the other one": 1,
-            "third": 2, "3rd": 2, "three": 2,
-            "fourth": 3, "4th": 3, "four": 3,
-            "fifth": 4, "5th": 4, "five": 4,
+            "first": 0, "1st": 0, "one": 0, "1": 0,
+            "second": 1, "2nd": 1, "two": 1, "the other one": 1, "2": 1,
+            "third": 2, "3rd": 2, "three": 2, "3": 2,
+            "fourth": 3, "4th": 3, "four": 3, "4": 3,
+            "fifth": 4, "5th": 4, "five": 4, "5": 4,
         }
         index = words.get(ordinal.group(1).lower(), 0)
         if index < len(state.results):
@@ -255,7 +259,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
             elif re.search(r"\b(why|fail|diagnos|wrong|dead)\b", low):
                 intent = "diagnose_item"
             else:
-                intent = state.last_intent or "inspect_item"
+                intent = (state.pending_intent or state.last_intent
+                          or "inspect_item")
             return _intent(intent, item_id=state.results[index],
                            concept=state.last_concept, family=state.last_family,
                            confidence="followup")
@@ -308,6 +313,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("clarify", question="Send the item ID or Roblox URL.",
                        confidence="low")
 
+    if (state.pending_intent == "tags"
+            and re.search(r"\b(name|existing|current|same)\b", low)):
+        return _intent("tags", item_id=_state_with_last_item(state, item_id),
+                       concept=state.last_concept, family=family,
+                       confidence="followup")
+
     if re.search(r"\b(my|our)\b[^.!?]{0,25}\bitems?\b", low) and not item_id:
         if state.last_item_id and not re.search(r"\bitems\b", low):
             return _intent("inspect_item", item_id=state.last_item_id,
@@ -351,13 +362,15 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
             return _intent("find_opportunities", family=family, confidence="high")
         return _intent("find_opportunities", confidence="medium")
 
-    if re.search(r"\b(tags|seo)\b", low):
+    if re.search(r"\b(tags?|seo)\b", low):
+        target = _state_with_last_item(state, item_id)
         concept = clean_concept(text, item_id)
-        if concept:
-            return _intent("improve_metadata", concept=concept, item_id=item_id,
-                           family=family, confidence="medium")
-        return _intent("clarify", question="What item name should I use?",
-                       confidence="low")
+        if re.search(r"\b(existing|current|same)\b.*\bname\b", low):
+            return _intent("tags", item_id=target,
+                           concept=state.last_concept, family=family,
+                           confidence="high")
+        return _intent("tags", item_id=target, concept=concept,
+                       family=family, confidence="high")
 
     if re.search(
         r"\b(ideas?|brainstorm|concept|title|description|metadata|launch|"
@@ -478,6 +491,59 @@ class ProxyCtx:
         return self.channel.typing()
 
 
+async def _fetch_my_items():
+    def _fetch():
+        from bot_core import get_db
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute("""
+                SELECT l.item_id, COALESCE(l.title, i.name),
+                       COALESCE(i.favorite_count, l.favs_launch, 0)
+                FROM launch_ledger l
+                LEFT JOIN items i ON i.id = l.item_id
+                ORDER BY l.launched_at DESC NULLS LAST
+                LIMIT 8
+            """)
+            rows = cur.fetchall()
+            if not rows:
+                names = [x.strip() for x in
+                         (os.getenv("MY_GROUP_NAMES") or "").split(",")
+                         if x.strip()]
+                if names:
+                    cur.execute("""
+                        SELECT id, name, COALESCE(favorite_count, 0)
+                        FROM items WHERE lower(creator_name) = ANY(%s)
+                        ORDER BY favorite_count DESC NULLS LAST LIMIT 8
+                    """, ([n.lower() for n in names],))
+                    rows = cur.fetchall()
+            return rows
+        finally:
+            cur.close(); conn.close()
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as e:
+        print(f"[vanta] my items failed: {type(e).__name__}: {e}", flush=True)
+        return []
+
+
+async def _fetch_item_title(item_id):
+    def _fetch():
+        from bot_core import get_db
+        conn = get_db(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT name FROM items WHERE id = %s", (item_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+        finally:
+            cur.close(); conn.close()
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception:
+        return None
+
+
 async def _run_registry(bot, message, route, state):
     intent = route["intent"]
     item_id = route.get("item_id")
@@ -507,39 +573,7 @@ async def _run_registry(bot, message, route, state):
         await message.channel.send("Stopped. Tell me the next thing you want to do.")
         return
     if intent == "list_my_items":
-        def _fetch():
-            from bot_core import get_db
-            conn = get_db(); cur = conn.cursor()
-            try:
-                cur.execute("""
-                    SELECT l.item_id, COALESCE(l.title, i.name),
-                           COALESCE(i.favorite_count, l.favs_launch, 0)
-                    FROM launch_ledger l
-                    LEFT JOIN items i ON i.id = l.item_id
-                    ORDER BY l.launched_at DESC NULLS LAST
-                    LIMIT 8
-                """)
-                rows = cur.fetchall()
-                if not rows:
-                    names = [x.strip() for x in
-                             (os.getenv("MY_GROUP_NAMES") or "").split(",")
-                             if x.strip()]
-                    if names:
-                        cur.execute("""
-                            SELECT id, name, COALESCE(favorite_count, 0)
-                            FROM items WHERE lower(creator_name) = ANY(%s)
-                            ORDER BY favorite_count DESC NULLS LAST LIMIT 8
-                        """, ([n.lower() for n in names],))
-                        rows = cur.fetchall()
-                return rows
-            finally:
-                cur.close(); conn.close()
-
-        try:
-            rows = await asyncio.to_thread(_fetch)
-        except Exception as e:
-            print(f"[vanta] my items failed: {type(e).__name__}: {e}", flush=True)
-            rows = []
+        rows = await _fetch_my_items()
         if not rows:
             await message.channel.send(
                 "I don't have a tracked launch list yet. Send an item ID/URL, "
@@ -547,6 +581,7 @@ async def _run_registry(bot, message, route, state):
             )
             return
         state.results = [int(r[0]) for r in rows]
+        state.item_titles = {int(r[0]): (r[1] or "") for r in rows}
         state.last_intent = "inspect_item"
         state.history.append({"intent": "list_my_items", "at": time.time()})
         lines = ["**Your tracked items:**"]
@@ -595,6 +630,28 @@ async def _run_registry(bot, message, route, state):
                 await message.channel.send("Describe the concept in a few words.")
                 return
             kwargs = {"args": concept}
+        elif arg_kind == "title":
+            title = concept or (state.item_titles.get(item_id)
+                                if item_id else None)
+            if not title and item_id:
+                title = await _fetch_item_title(item_id)
+            if not title:
+                rows = await _fetch_my_items()
+                if rows:
+                    state.results = [int(r[0]) for r in rows]
+                    state.item_titles = {int(r[0]): (r[1] or "") for r in rows}
+                    state.pending_intent = "tags"
+                    lines = ["**Which item?**"]
+                    for i, (iid, name, favs) in enumerate(rows, 1):
+                        lines.append(f"**{i}.** `{iid}` — {(name or '?')[:60]}")
+                    lines.append("\nReply with a number.")
+                    await message.channel.send("\n".join(lines)[:1900])
+                else:
+                    await message.channel.send(
+                        "Send the item name you want tags for."
+                    )
+                return
+            kwargs = {"args": title}
         elif arg_kind == "family":
             if family:
                 kwargs = {"family": family}
@@ -658,6 +715,7 @@ async def _run_registry(bot, message, route, state):
     state.last_item_id = item_id or (state.results[0] if state.results else None)
     state.last_concept = concept or state.last_concept
     state.last_family = family or state.last_family
+    state.pending_intent = None
     state.history.append({"intent": intent, "item_id": item_id,
                           "concept": concept, "at": time.time()})
     state.history = state.history[-8:]

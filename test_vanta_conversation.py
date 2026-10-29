@@ -43,6 +43,8 @@ def test_conversational_glue():
     assert classify_intent("yo check this item 121930221694467",
                            use_ai=False)["intent"] == "inspect_item"
     assert classify_intent("check my item", use_ai=False)["intent"] == "list_my_items"
+    assert classify_intent("tags", use_ai=False)["intent"] == "tags"
+    assert classify_intent("tags cute beanie", use_ai=False)["concept"] == "cute beanie"
     bare = classify_intent("99610366014241", use_ai=False)
     assert bare["intent"] == "inspect_item" and bare["item_id"] == 99610366014241
     state = ConversationState(user_id=1)
@@ -73,6 +75,13 @@ def test_followups():
     changed = classify_intent("change the title of the first one",
                               state=state, use_ai=False)
     assert changed["intent"] == "improve_metadata" and changed["item_id"] == 111111111111
+    state.pending_intent = "tags"
+    state.item_titles = {111111111111: "Aura Dance Emote"}
+    picked = classify_intent("1", state=state, use_ai=False)
+    assert picked["intent"] == "tags" and picked["item_id"] == 111111111111
+    existing = classify_intent("can i use my existing name of item?",
+                               state=state, use_ai=False)
+    assert existing["intent"] == "tags"
     assert classify_intent("go deeper", state=state, use_ai=False)["intent"] == "diagnose_item"
     same = classify_intent("same for this item 333333333333", state=state, use_ai=False)
     assert same["intent"] == "inspect_item" and same["item_id"] == 333333333333
