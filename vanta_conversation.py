@@ -399,10 +399,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("tags", item_id=target, concept=concept,
                        family=family, confidence="high")
 
-    if re.search(r"\b(desc|description|listing|copy|write[- ]?up)\b", low):
-        target = _state_with_last_item(state, item_id)
+    if (re.search(r"\b(desc|description|listing|copy|write[- ]?up)\b", low)
+            and not re.search(r"\btitle\b", low)):
+        target = (_match_item_by_name(text, state)
+                  or _state_with_last_item(state, item_id))
         if target:
-            return _intent("improve_metadata", item_id=target,
+            return _intent("tags", item_id=target,
                            concept=state.last_concept, family=family,
                            confidence="high")
         return _intent("list_my_items", confidence="high")
@@ -412,7 +414,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         r"make.*better|improve|name)\b", low
     ):
         if re.search(r"\b(title|description|metadata|improve|better)\b", low):
-            target = _state_with_last_item(state, item_id)
+            target = (_match_item_by_name(text, state)
+                      or _state_with_last_item(state, item_id))
             if target:
                 return _intent("improve_metadata", item_id=target,
                                concept=clean_concept(text, target), family=family,
@@ -1012,7 +1015,7 @@ async def plan_message(text, has_attachment, state):
         return fast
     if fast["intent"] in ("check_sales", "check_experiments",
                           "check_visibility", "data_audit", "list_my_items",
-                          "improve_metadata"):
+                          "improve_metadata", "tags"):
         return fast
     if extract_item_id(text) and re.fullmatch(
         r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()

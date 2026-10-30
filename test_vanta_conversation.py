@@ -195,7 +195,7 @@ def test_ai_planner_validation():
 
     vc._planner_ai = fake
     try:
-        route = asyncio.run(vc.plan_message("tag it", False, state))
+        route = asyncio.run(vc.plan_message("hmm interesting", False, state))
     finally:
         vc._planner_ai = original
     assert route["intent"] == "tags"
@@ -233,7 +233,7 @@ def test_ai_planner_validation():
     state.ai_calls = []
     vc._planner_ai = fake
     try:
-        asyncio.run(vc.plan_message("tag it", False, state))
+        asyncio.run(vc.plan_message("hmm interesting", False, state))
     finally:
         vc._planner_ai = original
     assert len(state.ai_calls) == 1
@@ -379,7 +379,25 @@ def test_description_requests():
         state.last_item_id = 130928797494687
         state.item_titles = {130928797494687: "Cute Kitty Fluffy Beanie"}
         route = asyncio.run(vc.plan_message("I need a desc for an item", False, state))
-        assert route["intent"] == "improve_metadata", route
+        assert route["intent"] == "tags", route
+        assert route["item_id"] == 130928797494687, route
+
+        # Naming a specific item must beat last_item.
+        state.last_item_id = 92364796546749
+        state.results = [92364796546749, 130928797494687, 108675634543142]
+        state.item_titles = {
+            92364796546749: "Smooth 360 flip Rizz",
+            130928797494687: "Cute Kitty Fluffy Beanie",
+            108675634543142: "Cute Kawaii Kitty Chibi Beanie",
+        }
+        route = asyncio.run(vc.plan_message(
+            "description of the Cute Kitty Fluffy Beanie", False, state))
+        assert route["intent"] == "tags", route
+        assert route["item_id"] == 130928797494687, route
+
+        route = asyncio.run(vc.plan_message(
+            "Cute Kitty Fluffy Beanie description new", False, state))
+        assert route["intent"] == "tags", route
         assert route["item_id"] == 130928797494687, route
     finally:
         vc._planner_ai = original
