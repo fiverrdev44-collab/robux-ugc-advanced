@@ -85,9 +85,9 @@ LAST_ERROR = None
 
 
 def _get_json(s, params):
-    """One request with one polite retry on 429."""
+    """One request with polite backoff on 429."""
     global LAST_ERROR
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             r = s.get(SEARCH_URL, params=params, timeout=15)
         except Exception as e:
@@ -98,7 +98,7 @@ def _get_json(s, params):
         if r.status_code == 200:
             return r.json()
         LAST_ERROR = f"HTTP {r.status_code}"
-        if r.status_code == 429 and attempt == 0:
+        if r.status_code == 429 and attempt < 2:
             try:
                 wait = int(r.headers.get("Retry-After", 15))
             except (TypeError, ValueError):

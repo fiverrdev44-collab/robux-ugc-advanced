@@ -84,7 +84,7 @@ def _run_verified_scan():
         conn = get_db()
         cur = conn.cursor()
         try:
-            scanned, upserted, discovered, note = run_batch(cur, limit=20)
+            scanned, upserted, discovered, note = run_batch(cur, limit=8)
         finally:
             cur.close()
             conn.close()
