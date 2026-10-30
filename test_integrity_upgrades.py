@@ -108,6 +108,25 @@ def test_tag_relevance_gate():
     print("PASS tag relevance gate")
 
 
+def test_live_fetch_survives_db_failure():
+    from unittest import mock
+    import tag_generator as tg
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": 1, "name": "Beanie", "description": "cute",
+                              "favoriteCount": 5, "price": 65,
+                              "assetType": 0, "creatorName": "x"}]}
+
+    with mock.patch.object(tg.requests, "get", return_value=_Resp()), \
+         mock.patch.object(tg, "get_db", side_effect=RuntimeError("no db")):
+        rows = tg._fetch_live_items("beanie", family=None)
+    assert rows == [("Beanie", "cute", 5)]
+    print("PASS live fetch survives DB failure")
+
+
 def test_db_transaction():
     conn = get_db()
     cur = conn.cursor()
@@ -183,5 +202,6 @@ if __name__ == "__main__":
     test_did_math_and_insufficient()
     test_pivot_and_lane_gates()
     test_tag_relevance_gate()
+    test_live_fetch_survives_db_failure()
     test_db_transaction()
     print("ALL TESTS PASSED")

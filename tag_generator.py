@@ -15,6 +15,7 @@ FIXES:
 """
 import os
 import re
+import time
 import requests
 from collections import Counter
 from bot_core import get_db
@@ -268,6 +269,7 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
     try:
         cookie = (os.getenv("ROBLOSECURITY_COOKIE_1")
                   or os.getenv("ROBLOSECURITY_COOKIE"))
+        cookie = cookie.strip() if cookie else ""
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; UGCBot/1.0)",
             "Accept": "application/json",
@@ -282,57 +284,75 @@ def _fetch_live_items(keyword, family=None, subtype=None, limit=30):
 
         r = requests.get(ROBLOX_SEARCH_URL, params=params,
                          headers=headers, timeout=15)
+        if r.status_code == 429:
+            time.sleep(2)
+            r = requests.get(ROBLOX_SEARCH_URL, params=params,
+                             headers=headers, timeout=15)
         if r.status_code != 200:
             return []
 
         data = (r.json() or {}).get("data", []) or []
+        if not data and cat and "Category" in params:
+            params.pop("Category")
+            r = requests.get(ROBLOX_SEARCH_URL, params=params,
+                             headers=headers, timeout=15)
+            if r.status_code == 200:
+                data = (r.json() or {}).get("data", []) or []
         if not data:
             return []
 
         out = []
-        conn = get_db(); cur = conn.cursor()
-        try:
-            for item in data:
-                item_id = item.get("id")
-                name = (item.get("name") or "").strip()
-                if not item_id or not name:
+        pending = []
+        for item in data:
+            item_id = item.get("id")
+            name = (item.get("name") or "").strip()
+            if not item_id or not name:
+                continue
+            desc = (item.get("description") or "").strip()
+            favs = item.get("favoriteCount") or 0
+            price = item.get("price") or 0
+            atype = item.get("assetType") or 0
+            creator = item.get("creatorName") or ""
+
+            if subtype:
+                if atype and atype != subtype:
                     continue
-                desc = (item.get("description") or "").strip()
-                favs = item.get("favoriteCount") or 0
-                price = item.get("price") or 0
-                atype = item.get("assetType") or 0
-                creator = item.get("creatorName") or ""
-
-                if subtype:
-                    if atype and atype != subtype:
+            elif family == "accessory" and not subtype:
+                if atype and atype not in ACCESSORY_IDS:
+                    continue
+            elif family and family != "accessory":
+                if atype:
+                    item_family = ASSET_TO_FAMILY.get(atype)
+                    if item_family and item_family != family:
                         continue
-                elif family == "accessory" and not subtype:
-                    if atype and atype not in ACCESSORY_IDS:
-                        continue
-                elif family and family != "accessory":
-                    if atype:
-                        item_family = ASSET_TO_FAMILY.get(atype)
-                        if item_family and item_family != family:
-                            continue
 
-                try:
-                    cur.execute("""
-                        insert into items (id, name, description, favorite_count,
-                                           price, asset_type_id, creator_name, fetched_at)
-                        values (%s, %s, %s, %s, %s, %s, %s, now())
-                        on conflict (id) do update set
-                            description = excluded.description,
-                            favorite_count = excluded.favorite_count,
-                            price = excluded.price,
-                            fetched_at = now()
-                    """, (item_id, name, desc, favs, price, atype, creator))
-                except Exception:
-                    pass
+            out.append((name, desc, favs))
+            pending.append((item_id, name, desc, favs, price, atype, creator))
 
-                out.append((name, desc, favs))
-            conn.commit()
-        finally:
-            cur.close(); conn.close()
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            try:
+                for row in pending:
+                    try:
+                        cur.execute("""
+                            insert into items (id, name, description, favorite_count,
+                                               price, asset_type_id, creator_name, fetched_at)
+                            values (%s, %s, %s, %s, %s, %s, %s, now())
+                            on conflict (id) do update set
+                                description = excluded.description,
+                                favorite_count = excluded.favorite_count,
+                                price = excluded.price,
+                                fetched_at = now()
+                        """, row)
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                cur.close(); conn.close()
+        except Exception as e:
+            print(f"[tag_generator] live cache skipped: {type(e).__name__}: {e}",
+                  flush=True)
 
         print(f"[tag_generator] live: {len(out)} items for '{keyword}'", flush=True)
         return out
