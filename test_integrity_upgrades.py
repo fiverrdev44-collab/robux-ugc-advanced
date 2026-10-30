@@ -130,6 +130,25 @@ def test_live_fetch_survives_db_failure():
     print("PASS live fetch survives DB failure")
 
 
+def test_tag_phrase_filter():
+    import tag_generator as tg
+    name = "Cute Kitty Fluffy Beanie"
+    cross = {tg._singular(t) for t in tg._cross_family_tokens(name, "hats")}
+    heads = {tg._singular(t) for t in tg._allowed_tag_tokens(name, "hats")}
+    desc = tg._descriptor_words()
+    bad = ["cute shirts", "cute shirts for boys", "cute shirts for girls",
+           "cute purse", "cute hairs", "cute hats for girls",
+           "natural cute makeup", "fluffy ear muffs", "cute double",
+           "cute bouncy"]
+    for tag in bad:
+        assert not tg._tag_shape_ok(tag, cross, heads, desc), tag
+    good = ["cute", "cat beanie", "black beanie", "goth beanie",
+            "cute kawaii", "black fluffy"]
+    for tag in good:
+        assert tg._tag_shape_ok(tag, cross, heads, desc), tag
+    print("PASS tag phrase filter")
+
+
 def test_tag_output_copy():
     from tag_generator import format_tags
     result = {
@@ -230,5 +249,6 @@ if __name__ == "__main__":
     test_tag_relevance_gate()
     test_live_fetch_survives_db_failure()
     test_tag_output_copy()
+    test_tag_phrase_filter()
     test_db_transaction()
     print("ALL TESTS PASSED")

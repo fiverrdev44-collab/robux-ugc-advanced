@@ -589,6 +589,44 @@ def _cross_family_tokens(item_name, family):
     return (all_words | EXTRA_TYPE_NOUNS) - own
 
 
+PHRASE_STOP_WORDS = {"for", "with", "and", "of", "in", "on", "to", "the",
+                     "a", "an", "my", "your", "by", "from"}
+
+
+def _singular(word):
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
+def _descriptor_words():
+    words = set()
+    for group in AESTHETIC_FAMILIES.values():
+        words.update(group)
+    for base, siblings in COLOR_SIBLINGS.items():
+        words.add(base)
+        words.update(siblings)
+    return {_singular(w) for w in words}
+
+
+def _tag_shape_ok(tag, cross_norm, allowed_heads, descriptor_words):
+    """Reject phrases that are really about another item type, or that are
+    search-phrase fragments ("cute shirts for boys")."""
+    words = tag.split()
+    toks = set(words)
+    if len(words) > 3 or toks & PHRASE_STOP_WORDS:
+        return False
+    if {_singular(w) for w in toks} & cross_norm:
+        return False
+    if len(words) > 1:
+        head = _singular(words[-1])
+        if head not in allowed_heads and head not in descriptor_words:
+            return False
+    return True
+
+
 def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
@@ -764,17 +802,20 @@ def generate_tags(item_name, family=None, max_tags=45):
                       "costumes"}
     name_l = (item_name or "").lower()
     name_tokens = _allowed_tag_tokens(item_name, detected_family)
-    cross_tokens = _cross_family_tokens(item_name, detected_family)
+    cross_norm = {_singular(t) for t in _cross_family_tokens(item_name, detected_family)}
+    allowed_heads = {_singular(t) for t in name_tokens}
+    descriptor_words = _descriptor_words()
     final_tags = []
     for tag, _score in ranked:
         if tag in noise_phrases:
             continue
-        toks = set(tag.split())
+        words = tag.split()
+        toks = set(words)
         if toks & noise_words:
             continue
         if (toks & clothing_words) and not (toks & set(name_l.split())):
             continue
-        if toks & cross_tokens:
+        if not _tag_shape_ok(tag, cross_norm, allowed_heads, descriptor_words):
             continue
         if name_tokens and not (toks & name_tokens):
             continue
