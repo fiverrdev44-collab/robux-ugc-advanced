@@ -1444,6 +1444,24 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                                 },
                                 predicted=predicted,
                                 evidence=evidence,
+                                hypothesis=(
+                                    "Adopting the recommended title/price improves "
+                                    "discovery and clickthrough versus the current "
+                                    "listing at the same age."
+                                ),
+                                proposed_change={
+                                    "name": rec_name,
+                                    "pivot": rec_pivot,
+                                    "price": rec_price,
+                                },
+                                success_condition={
+                                    "metric": "favorites_and_units",
+                                    "direction": "up",
+                                    "window_days": 14,
+                                    "min_relative_change_pct": 10,
+                                },
+                                expected_direction="up",
+                                effort="low",
                             )
                             conn_r.commit()
                             return rid, created
@@ -1812,6 +1830,25 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                                 "golden_gaps": len(gaps.get("golden") or []),
                                 "sweet_gaps": len(gaps.get("sweet") or []),
                             },
+                            hypothesis=(
+                                "Rebuilding the title/description and relaunching a "
+                                "stalled item restores discovery enough to convert "
+                                "into measurable units."
+                            ),
+                            proposed_change={
+                                "name": rec_name,
+                                "pivot": rec_pivot,
+                                "price": price or 0,
+                                "relaunch": True,
+                            },
+                            success_condition={
+                                "metric": "units",
+                                "direction": "up",
+                                "window_days": 30,
+                                "min_units": 1,
+                            },
+                            expected_direction="up",
+                            effort="medium",
                         )
                         conn_r.commit()
                         return rid, created
