@@ -285,7 +285,7 @@ def _cooldown_remaining(cur):
         return 0
 
 
-def _set_cooldown(cur, minutes=30):
+def _set_cooldown(cur, minutes=10):
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     try:
         cur.execute("""
@@ -298,6 +298,42 @@ def _set_cooldown(cur, minutes=30):
         cur.connection.commit()
     except Exception:
         pass
+
+
+DISCOVERY_OFFSET_KEY = "creator_discovery_offset"
+DISCOVERY_PER_RUN = 6
+
+
+def _next_discovery_keywords(cur, count=DISCOVERY_PER_RUN):
+    """Rotate the discovery keyword list so one run sends a few searches
+    instead of the full 34-keyword burst that trips Roblox's rate limiter."""
+    keywords = list(DISCOVERY_KEYWORDS)
+    offset = 0
+    try:
+        cur.execute(
+            "SELECT pattern_value FROM creator_patterns WHERE pattern_key = %s",
+            (DISCOVERY_OFFSET_KEY,),
+        )
+        row = cur.fetchone()
+        if row:
+            offset = int(row[0]) % len(keywords)
+    except Exception:
+        pass
+    chunk = [keywords[(offset + i) % len(keywords)]
+             for i in range(min(count, len(keywords)))]
+    try:
+        cur.execute("""
+            INSERT INTO creator_patterns (pattern_key, pattern_value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (pattern_key) DO UPDATE SET
+                pattern_value = EXCLUDED.pattern_value,
+                updated_at = CURRENT_TIMESTAMP
+        """, (DISCOVERY_OFFSET_KEY,
+              str((offset + len(chunk)) % len(keywords))))
+        cur.connection.commit()
+    except Exception:
+        cur.connection.rollback()
+    return chunk
 
 
 def run_batch(cur, limit=10):
@@ -315,22 +351,28 @@ def run_batch(cur, limit=10):
 
     s = _session()
 
-    try:
-        discovered = discover_verified(s)
-    except RateLimited:
-        _set_cooldown(cur, 30)
-        print("[creator-tracker] rate limited during discovery — stopping", flush=True)
-        return 0, 0, 0, "rate limited — cooling down 30m"
-
-    new_creators = ensure_creators(cur, discovered, s)
-    cur.connection.commit()
-
+    # Scan tracked creators first. Discovery is a 34-search burst and used to
+    # run on every batch, so a single 429 meant no creator was ever scanned.
     batch = pick_batch(cur, limit)
+    new_creators = 0
     if not batch:
-        note = None
-        if not new_creators and not discovered:
-            note = LAST_ERROR or "no verified creators returned by search"
-        return 0, 0, new_creators, note
+        keywords = _next_discovery_keywords(cur)
+        try:
+            discovered = discover_verified(s, keywords=keywords)
+        except RateLimited:
+            _set_cooldown(cur, 10)
+            print("[creator-tracker] rate limited during discovery — stopping",
+                  flush=True)
+            return 0, 0, 0, "rate limited — cooling down 10m"
+
+        new_creators = ensure_creators(cur, discovered, s)
+        cur.connection.commit()
+        batch = pick_batch(cur, limit)
+        if not batch:
+            note = None
+            if not new_creators and not discovered:
+                note = LAST_ERROR or "no verified creators returned by search"
+            return 0, 0, new_creators, note
 
     scanned = 0
     upserted = 0
@@ -349,8 +391,8 @@ def run_batch(cur, limit=10):
                 break
             time.sleep(DELAY)
     except RateLimited:
-        _set_cooldown(cur, 30)
+        _set_cooldown(cur, 10)
         print("[creator-tracker] rate limited — stopping batch early", flush=True)
-        return scanned, upserted, new_creators, "rate limited — cooling down 30m"
+        return scanned, upserted, new_creators, "rate limited — cooling down 10m"
 
     return scanned, upserted, new_creators, LAST_ERROR
