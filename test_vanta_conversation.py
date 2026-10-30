@@ -407,6 +407,10 @@ def test_description_requests():
         route = asyncio.run(vc.plan_message("cute kitty fluffy", False, state))
         assert route["intent"] == "tags", route
         assert route["item_id"] == 130928797494687, route
+
+        # An attached image must use the vision path, not the text miner.
+        route = asyncio.run(vc.plan_message("description for this", True, state))
+        assert route["intent"] == "analyze_image", route
     finally:
         vc._planner_ai = original
     print("PASS description requests")

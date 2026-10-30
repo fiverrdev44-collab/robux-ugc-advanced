@@ -401,6 +401,9 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     if (re.search(r"\b(desc|description|listing|copy|write[- ]?up)\b", low)
             and not re.search(r"\btitle\b", low)):
+        if has_attachment:
+            return _intent("analyze_image", concept=clean_concept(text),
+                           family=family, confidence="high")
         target = (_match_item_by_name(text, state)
                   or _state_with_last_item(state, item_id))
         if target:
@@ -1018,7 +1021,7 @@ async def plan_message(text, has_attachment, state):
         return fast
     if fast["intent"] in ("check_sales", "check_experiments",
                           "check_visibility", "data_audit", "list_my_items",
-                          "improve_metadata", "tags"):
+                          "improve_metadata", "tags", "analyze_image"):
         return fast
     if extract_item_id(text) and re.fullmatch(
         r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()
