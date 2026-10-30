@@ -570,6 +570,8 @@ Real top-seller descriptions in this niche (tone and structure only):
 - No corporate filler: enhance, elevate, seamless, ultimate, leverage, optimize, experience.
 - No invented numbers or claims.
 - Casual human creator voice. Aim for about {target_chars} characters.
+- Every line must read like a sentence. Never end with a keyword list or a line
+  of separated nouns/adjectives.
 - Return ONLY the description text. No labels, no quotes, no preamble.
 
 DESCRIPTION:"""
