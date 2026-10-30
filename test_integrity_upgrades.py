@@ -135,7 +135,7 @@ def test_tag_output_copy():
     result = {
         "item_name": "Cute Kitty Fluffy Beanie", "family": "hats",
         "subtype": None, "subtype_label": None,
-        "tags": ["cute", "fluffy", "beanie", "kitty", "soft"],
+        "tags": ["cute", "fluffy", "beanie", "kitty", "soft", "pink"],
         "sources": {
             "live_roblox": 0, "live_tag_blocks": 0, "live_words": 0,
             "live_skipped": True, "top_seller_tags": 119,
@@ -149,6 +149,7 @@ def test_tag_output_copy():
     assert "Roblox removed item tags" in text
     assert "title and description" in text
     assert "keyword candidates" in text
+    assert "Full candidate set (6)" in text
     print("PASS tag output copy")
 
 

@@ -841,6 +841,13 @@ def format_tags(result):
             lines.append(f"`{tag}` — weight {score:.1f}")
         chunks.append("\n".join(lines))
 
+    if len(tags) > 5:
+        full = ", ".join(tags)
+        chunks.append(
+            f"**📋 Full candidate set ({len(tags)}) — reference only:**\n"
+            f"```\n{full}\n```"
+        )
+
     live_str = f"**{src['live_roblox']}**"
     if src['live_roblox'] > 0:
         live_str += " 🔥 (live Roblox)"
