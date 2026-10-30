@@ -551,6 +551,17 @@ def _allowed_tag_tokens(item_name, family):
     return tokens | family_tokens
 
 
+def _cross_family_tokens(item_name, family):
+    """Nouns that belong to other families and must never appear in this
+    item's tags, even inside a multi-word phrase like `cute hair`."""
+    try:
+        from category_configs import get_all_type_words
+        all_words = set(get_all_type_words())
+    except Exception:
+        return set()
+    return all_words - _allowed_tag_tokens(item_name, family)
+
+
 def generate_tags(item_name, family=None, max_tags=45):
     if not item_name or not item_name.strip():
         return {"error": "Item name required."}
@@ -724,6 +735,7 @@ def generate_tags(item_name, family=None, max_tags=45):
                       "costumes"}
     name_l = (item_name or "").lower()
     name_tokens = _allowed_tag_tokens(item_name, detected_family)
+    cross_tokens = _cross_family_tokens(item_name, detected_family)
     final_tags = []
     for tag, _score in ranked:
         if tag in noise_phrases:
@@ -732,6 +744,8 @@ def generate_tags(item_name, family=None, max_tags=45):
         if toks & noise_words:
             continue
         if (toks & clothing_words) and not (toks & set(name_l.split())):
+            continue
+        if toks & cross_tokens:
             continue
         if name_tokens and not (toks & name_tokens):
             continue

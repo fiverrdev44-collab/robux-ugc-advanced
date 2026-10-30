@@ -95,13 +95,16 @@ def test_pivot_and_lane_gates():
 
 
 def test_tag_relevance_gate():
-    from tag_generator import _allowed_tag_tokens
+    from tag_generator import _allowed_tag_tokens, _cross_family_tokens
     allowed = _allowed_tag_tokens("Cute Fluffy Kitty Beanie", "hats")
     assert "beanie" in allowed and "cute" in allowed
     assert "shoes" not in allowed and "hoodie" not in allowed
     bare = _allowed_tag_tokens("Beanie", "hats")
     assert "beanie" in bare
     assert "cute" not in bare and "shoes" not in bare
+    cross = _cross_family_tokens("Cute Kitty Fluffy Beanie", "hats")
+    assert "hair" in cross and "shoes" in cross and "beanie" not in cross
+    assert set("cute hair".split()) & cross
     print("PASS tag relevance gate")
 
 
