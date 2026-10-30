@@ -332,6 +332,38 @@ def test_casual_leadins():
     print("PASS casual lead-ins and rename anywhere")
 
 
+def test_selection_digit_8_and_revive_by_name():
+    state = ConversationState(user_id=1)
+    ids = [92364796546749, 121930221694467, 136684068885192, 99610366014241,
+           90568160524259, 108675634543142, 86973415376933, 130928797494687]
+    state.results = list(ids)
+    state.item_titles = {
+        ids[0]: "Smooth 360 flip Rizz",
+        ids[1]: "Trendy Kpop Hip Sway Emote",
+        ids[2]: "Viral Russian Kick Dance",
+        ids[3]: "Anime Battle Fighting Stance",
+        ids[7]: "Cute Kitty Fluffy Beanie",
+    }
+    state.pending_intent = "tags"
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("should resolve deterministically")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("8", False, state))
+        assert route["intent"] == "tags", route
+        assert route["item_id"] == ids[7], route
+
+        route = asyncio.run(vc.plan_message("Revive Viral russian kick", False, state))
+        assert route["intent"] == "revive_item", route
+        assert route["item_id"] == ids[2], route
+    finally:
+        vc._planner_ai = original
+    print("PASS selection 8 and revive by name")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -355,5 +387,6 @@ if __name__ == "__main__":
     test_rename_routing()
     test_planner_context_inheritance()
     test_casual_leadins()
+    test_selection_digit_8_and_revive_by_name()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

@@ -249,7 +249,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     # Follow-ups first.
     ordinal = re.search(
-        r"\b(1|2|3|4|5|first|1st|one|second|2nd|two|third|3rd|three|"
+        r"\b(\d{1,2}|first|1st|one|second|2nd|two|third|3rd|three|"
         r"fourth|4th|four|fifth|5th|five|the other one)\b", low
     )
     if ordinal and state.results:
@@ -260,7 +260,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
             "fourth": 3, "4th": 3, "four": 3, "4": 3,
             "fifth": 4, "5th": 4, "five": 4, "5": 4,
         }
-        index = words.get(ordinal.group(1).lower(), 0)
+        token = ordinal.group(1).lower()
+        index = int(token) - 1 if token.isdigit() else words.get(token, 0)
         if index < len(state.results):
             if re.search(r"\b(title|description|metadata|improve|better|rewrite)\b", low):
                 intent = "improve_metadata"
@@ -925,6 +926,32 @@ def _is_selection(text):
     return bool(SELECTION_RE.fullmatch((text or "").strip()))
 
 
+def _match_item_by_name(text, state):
+    """Resolve a phrase like 'revive viral russian kick' to a known item by
+    token overlap with tracked titles, instead of defaulting to last_item."""
+    if not text:
+        return None
+    given = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+    titles = {}
+    for i in (state.results or []):
+        t = state.item_titles.get(i)
+        if t:
+            titles[i] = t.lower()
+    for i, t in state.item_titles.items():
+        if i not in titles and t:
+            titles[i] = t.lower()
+    best_id, best_score = None, 0.0
+    for i, t in titles.items():
+        toks = set(re.findall(r"[a-z0-9]+", t))
+        if not toks:
+            continue
+        overlap = given & toks
+        score = len(overlap) / len(toks)
+        if score > best_score and len(overlap) >= 2:
+            best_id, best_score = i, score
+    return best_id if best_score >= 0.5 else None
+
+
 RENAME_RE = re.compile(
     r"\b(?:re-?name|retitle|re-?title|rebrand|re-?brand|"
     r"change\s+(?:its\s+|the\s+)?name)\b(.*)$", re.I)
@@ -983,6 +1010,25 @@ async def plan_message(text, has_attachment, state):
         return fast
     if (text or "").strip().startswith("!"):
         return fast
+    # Resolve an item by name, and derive the intent from the verb.
+    matched = _match_item_by_name(text, state)
+    if matched:
+        low = (text or "").lower()
+        if re.search(r"\breviv", low):
+            intent = "revive_item"
+        elif re.search(r"\b(autopsy|diagnos|why|fail|wrong|dead)\b", low):
+            intent = "diagnose_item"
+        elif re.search(r"\btags?\b", low):
+            intent = "tags"
+        elif re.search(r"\b(title|description|metadata|rename|improve|rewrite)\b", low):
+            intent = "improve_metadata"
+        elif re.search(r"\b(check|inspect|verdict|look at|how is)\b", low):
+            intent = "inspect_item"
+        else:
+            intent = fast.get("intent")
+        if intent in ITEM_ACTIONS or intent == "tags":
+            return _intent(intent, item_id=matched, concept=fast.get("concept"),
+                           family=fast.get("family"), confidence="high")
     # "rename to <theme>" is a new-concept request, never a diagnosis.
     if RENAME_RE.search((text or "").strip()):
         concept = _rename_concept(text)
