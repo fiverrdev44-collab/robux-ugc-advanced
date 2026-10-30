@@ -14,7 +14,7 @@ Runs:
   10. Focused title pass
   11. Smart pipeline
   12. Statistical title scoring
-  13. Description + tags merge (AI body + tag_generator)
+   13. Description (AI body)
   14. FINAL block
 """
 import re
@@ -494,43 +494,17 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] confidence failed: {e}", flush=True)
 
-    # ── Stage 13: Description + tags merge ──
-    # Uses tag_generator (description_engine was removed).
-    # Builds: AI body (seo_description) + 45 mined tags + audit.
+    # ── Stage 13: Description (AI body only — tags removed) ──
     merged_description = None
     description_audit = None
     try:
-        from tag_generator import generate_tags
-
-        # Pick the champion title as the tag seed
-        tag_seed = None
-        if scored_titles:
-            tag_seed = scored_titles[0]["title"]
-        if not tag_seed:
-            tag_seed = concept
-
-        # Generate 45 sales-weighted tags
-        tag_result = generate_tags(tag_seed, family=family, max_tags=45)
-        tags = (tag_result or {}).get("tags") or []
-
-        # AI body — strip any stray tags the AI added
         ai_body = (synth.get("seo_description") or "").strip()
         ai_body_lines = [
             ln for ln in ai_body.split("\n")
-            if not ln.strip().lower().startswith("tags:")
+            if not ln.strip().lower().startswith(("tags:", "tags "))
         ]
-        ai_body = "\n".join(ai_body_lines).strip()
+        merged_description = "\n".join(ai_body_lines).strip() or None
 
-        # Merge: AI body + tag block
-        if ai_body and tags:
-            tag_line = ", ".join(tags)
-            merged_description = f"{ai_body}\n\ntags: {tag_line}"
-        elif ai_body:
-            merged_description = ai_body
-        elif tags:
-            merged_description = f"tags: {', '.join(tags)}"
-
-        # Build audit from tag_generator result
         description_audit = {
             "primary_keyword": (
                 scored_titles[0]["breakdown"][0]["word"]
@@ -542,8 +516,6 @@ OUTPUT — ONLY JSON:
                 if scored_titles and scored_titles[0].get("breakdown")
                 else 0
             ),
-            "mined_tag_count": len(tags),
-            "top_10_tags": tags[:10],
             "family": family,
         }
     except Exception as e:
@@ -693,7 +665,7 @@ def format_chain(result):
                 lines.append(f"• {b}")
             chunks.append("\n".join(lines))
 
-    # ── MERGED DESCRIPTION (AI body + engine tags) ──
+    # ── MERGED DESCRIPTION (AI body) ──
     merged = result.get("merged_description")
     audit = result.get("description_audit") or {}
     if merged:
@@ -703,14 +675,10 @@ def format_chain(result):
         )
         if audit:
             audit_lines = [
-                "**🔍 Description audit — every word traceable:**",
+                "**🔍 Description audit:**",
                 f"• Primary keyword: `{audit.get('primary_keyword', '?')}` "
                 f"({audit.get('primary_demand', 0)} searches)",
-                f"• Tags mined: **{audit.get('mined_tag_count', 0)}**",
             ]
-            top10 = audit.get("top_10_tags", [])
-            if top10:
-                audit_lines.append(f"• Top 10 tags: `{', '.join(top10)}`")
             chunks.append("\n".join(audit_lines))
 
     # ── 10 TITLES ──

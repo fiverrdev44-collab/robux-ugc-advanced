@@ -459,82 +459,34 @@ def _generate_description(keyword, family, rows, pattern):
 
     examples_block = "\n".join(examples) or "(no examples)"
 
-    sample = pattern.get("sample_size", 0)
     avg_chars = pattern.get("avg_chars", 0)
-    avg_lines = pattern.get("avg_lines", 0)
+    phrases = pattern.get("top_bigrams") or []
+    first_words = pattern.get("top_first_words") or []
+    target_chars = max(320, int((avg_chars or 200) * 1.4))
 
-    weak_pattern = (
-        sample < 10
-        or avg_chars < 80
-        or avg_lines < 1.5
-    )
+    prompt = f"""You write high-converting Roblox UGC descriptions. Write ONE powerful
+description for a {family} item about: {keyword}.
 
-    if weak_pattern:
-        prompt = f"""You write Roblox UGC descriptions for {family} items.
-
-The DB is thin for '{keyword}' — do NOT copy any pattern below.
-Write a STANDARD strong Roblox UGC description instead.
-
-=== REQUIRED FORMAT (3 lines) ===
-Line 1: <keyword> + type word + ONE emoji. Example:
-        "Kawaii Plush Beanie 🎀"
-Line 2: 2-3 adjectives + use case. Example:
-        "Soft pastel fleece for cozy winter fits."
-Line 3: vibe / mood. Example:
-        "Perfect for cottagecore and preppy outfits."
-
-=== ABSOLUTE RULES ===
-1. NEVER include URLs, group links, or "join" language.
-2. NEVER reference creators, "by X", "idea by", or credits.
-3. NO corporate words: enhance, elevate, seamless, integration,
-   designed for, experience, ultimate, leverage, optimize.
-4. Include keyword: {keyword}
-5. Include a type word for {family} (hat/beanie/hair/dance/etc).
-6. Casual, human, creator-voice. 3 lines exactly.
-7. Return ONLY the description text. No quotes, no labels.
-
-REAL EXAMPLES FROM THIS NICHE FOR TONE ONLY:
+Real top-seller descriptions in this niche (tone and structure only):
 {examples_block}
 
-DESCRIPTION:"""
-    else:
-        prompt = f"""You write Roblox UGC descriptions. Style-match the real top-seller examples below.
+=== STRUCTURE (4-6 short lines) ===
+1. Hook line: the keyword + one type word + ONE emoji.
+2. 1-3 feature/benefit lines: how it looks, moves, or sits, and why people want it.
+3. One fit/aesthetic line: which outfits or vibes it matches.
+4. Weave these high-value phrases naturally into the body — do NOT write "tags:",
+   do NOT list them, do NOT stuff commas: {', '.join(phrases[:8])}
 
-=== NICHE ===
-Keyword: {keyword}
-Category: {family}
-
-=== REAL TOP DESCRIPTIONS IN THIS NICHE (copy their STYLE, not their text) ===
-{examples_block}
-
-=== MINED PATTERN ===
-- Average line count: {pattern.get('avg_lines')} lines
-- Average emoji count: {pattern.get('avg_emojis')} per description
-- Average character count: {pattern.get('avg_chars')}
-- % with emoji on first line: {pattern.get('pct_emoji_first_line')}%
-- Common first words: {', '.join(pattern.get('top_first_words') or [])}
-
-=== ABSOLUTE RULES (NON-NEGOTIABLE) ===
-1. NEVER include URLs. No http://, no https://, no www., no .com, no .gg, no roblox.com links.
-2. NEVER invent a Roblox community link, catalog link, or store link.
-3. NEVER write "join our", "shop our", "visit our", or any group promo.
-4. NEVER reference a specific creator or group by name.
-5. Match the average line count EXACTLY ({pattern.get('avg_lines')} lines).
-6. Match the average emoji count ({pattern.get('avg_emojis')} emojis).
-7. MUST include: {keyword}, and one type word (dance/emote/hat/etc).
-8. NO corporate words: enhance, elevate, seamless, integration, designed for, experience, ultimate, leverage, compound, aligns, optimize.
-9. Write like a real creator describing their item. Casual. Human.
-10. Return ONLY the description text. No quotes, no labels, no preamble.
-11. If the real examples contain URLs, IGNORE that aspect — we do NOT want URLs.
-
-Good example of correct output:
-Smooth hip sway dance emote 🎀
-Cute motion animation with lively steps and bouncy energy.
-Perfect for chillin with friends, party fits, or trending.
+=== RULES (non-negotiable) ===
+- No URLs, group links, "join", credits, or creator names.
+- No corporate filler: enhance, elevate, seamless, ultimate, leverage, optimize, experience.
+- No invented numbers or claims.
+- Casual human creator voice. Aim for about {target_chars} characters.
+- Return ONLY the description text. No labels, no quotes, no preamble.
 
 DESCRIPTION:"""
 
-    raw = _generate(prompt, json_mode=False, temperature=0.85, max_tokens=600)
+    raw = _generate(prompt, json_mode=False, temperature=0.85, max_tokens=800)
     return (raw or "").strip()
 
 

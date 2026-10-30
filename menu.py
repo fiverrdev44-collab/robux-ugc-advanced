@@ -99,7 +99,7 @@ MANUAL_SECTIONS = {
     "naming": (
         "🏷️ NAME & DESCRIBE",
         "**`!chain \"kawaii aura emote\"`**\n"
-        "Returns: champion title, backup title, description, 45 tags, price, "
+        "Returns: champion title, backup title, description, price, "
         "and a final **DO THIS** block.\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "**`!tags <name>`** — 45 sales-weighted tags\n"

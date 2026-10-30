@@ -21,7 +21,7 @@ current accuracy and data gaps are documented below.
 | Niche discovery | Convergence scan, gap engine, rising gaps, emerging waves, daily opportunity feed |
 | Item decisions | KEEP / RENAME / KILL verdicts from age, favorites, velocity, percentile, sales; failure autopsy and full revive plans |
 | Creation pipeline | Concept fan-out → competitor/winners analysis → AI titles/descriptions → verification → statistical ranking → final action block |
-| Title & tag tooling | Word-lift scoring, ML title predictor, pattern/lift mining, sales-weighted tags, description forging |
+| Title & description tooling | Word-lift scoring, ML title predictor, pattern/lift mining, sales-weighted keywords woven into descriptions |
 | Market intelligence | X-ray dashboards, winner-loser patterns, early winners, momentum, trend oracle, competition checks |
 | Sales & revenue | Discord sale ingestion, backfill, per-item and daily reports, revenue simulation, group metrics |
 | Launch ledger & experiments | Launch logging, D1/D7/D30 outcomes, recommendation ledger, applied/ignored tracking, matched-control DiD |
@@ -123,7 +123,8 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!creative <seed>` | AI fan-out (20 concepts) + DB demand gate |
 | `!creative_raw <seed>` | Debug view of anchors, raw AI output, parsed concepts |
 | `!desc_forge <[family:]keyword>` | Mine top-seller descriptions and generate a matching one |
-| `!tags <[family:]name>` | Sales-weighted keyword ideas from real top sellers (Roblox's tag field was removed in Dec 2025) |
+| `!desc_forge <keyword>` | Powerful, style-matched listing description mined from top sellers |
+| `!tags <[family:]name>` | Legacy keyword mining (Roblox removed the tag field; prefer `!desc_forge`) |
 | `!guide [idea]` | Interactive four-section consultation (market, risks, pricing/ROI, titles) |
 | `!playbook [topic]` | Proven UGC tactics: niche, naming, pricing, launch, promotion |
 | `!path` | Your current UGC stage and next milestones from real data |

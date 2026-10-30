@@ -54,7 +54,7 @@ INTENTS = {
     "ack": "Acknowledge a short confirmation",
     "cancel": "Cancel the current direction",
     "list_my_items": "List tracked launch items when no item ID is supplied",
-    "tags": "Generate description keywords for an item",
+    "tags": "Craft an optimized listing description for an item",
     "clarify": "Ask one short clarifying question",
 }
 
@@ -65,7 +65,7 @@ COMMAND_ARGS = {
     "find_opportunities": ("opportunities", "family"),
     "create_ideas": ("chain", "concept"),
     "improve_metadata": ("autopsy", "item"),
-    "tags": ("tags", "title"),
+    "tags": ("desc_forge", "title"),
     "check_sales": ("sales_report", None),
     "check_experiments": ("experiments", None),
     "check_visibility": ("visibility", None),
@@ -775,7 +775,7 @@ ALLOWED ACTIONS
 - find_opportunities: niches, trends, gaps, what to create next
 - create_ideas: new concept, title ideas, brainstorm for a new item
 - improve_metadata: change/improve title, description, or listing of an item
-- tags: keywords/tags/SEO for an item (or the user's existing item name)
+- tags: craft an optimized description (no tag lists; Roblox removed tags)
 - analyze_image: attached image critique
 - check_sales: recorded sales/revenue
 - check_experiments: experiment results/uplift
