@@ -57,7 +57,7 @@ def _detect_type_override(concept):
     return None
 
 
-def run_chain(concept, family=None, parent_id=None):
+def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     from gemini_brain import (
         extract_keywords, all_terms, synthesize_hybrid, _generate
     )
@@ -437,7 +437,7 @@ OUTPUT — ONLY JSON:
             return run_full_pipeline(
                 description=concept, intent=intent, item_type=family,
                 category_asset_ids=cat_ids, ai_titles=ai_titles,
-                live_enrich=True, db_factory=get_db,
+                live_enrich=live_enrich, db_factory=get_db,
             )
 
         pr = _pipeline()

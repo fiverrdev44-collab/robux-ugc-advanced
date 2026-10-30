@@ -526,11 +526,15 @@ def register_advanced_commands(bot, get_db):
             family, concept = _resolve_family_prefix(concept)
 
         mode_label = "VARIANT" if parent_id else "NEW"
-        eta = "~30-60s" if parent_id else "~60-120s"
+        interactive = getattr(ctx, "vanta_state", None) is not None
+        eta = "~30-60s" if parent_id else ("~20-45s" if interactive else "~60-120s")
         progress = await ctx.send(f"🔗 Running chain [{mode_label}]... ({eta})")
 
         def _run():
-            return run_chain(concept, family=family, parent_id=parent_id)
+            # Conversational runs stay DB-only: live enrichment is the stage
+            # that hangs on 429 backoff and blows the chat timeout.
+            return run_chain(concept, family=family, parent_id=parent_id,
+                             live_enrich=not interactive)
 
         try:
             result = await asyncio.to_thread(_run)

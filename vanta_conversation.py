@@ -729,7 +729,7 @@ async def _run_registry(bot, message, route, state):
     started = time.time()
     try:
         await asyncio.wait_for(
-            command.callback(proxy, **kwargs), timeout=300
+            command.callback(proxy, **kwargs), timeout=600
         )
     except asyncio.TimeoutError:
         await message.channel.send(
