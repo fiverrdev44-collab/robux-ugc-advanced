@@ -32,17 +32,39 @@ def register_sales_commands(bot, get_db):
                 )
             )
 
+        cov = data.get("coverage") or {}
+        win = data.get("window") or {}
+        unresolved_records = (cov.get("unresolved_records", 0)
+                              + cov.get("ambiguous_records", 0))
+        unresolved_robux = (cov.get("unresolved_robux", 0)
+                            + cov.get("ambiguous_robux", 0))
         lines = [
             f"# 📊 SALES REPORT — last {days} days",
-            f"**Units:** {data['total_units']:,}  ·  "
-            f"**Robux:** R${data['total_robux']:,}",
+            f"**Window:** {win.get('start')} → {win.get('end_exclusive')} "
+            f"(exclusive, UTC; today {'partial' if win.get('today_partial') else 'complete'})",
+            f"**Sale records:** {data['total_units']:,}  ·  "
+            f"**Recorded amount:** R${data['total_robux']:,}",
+            f"**Mapped to assets:** {cov.get('mapped_records', 0):,} records · "
+            f"R${cov.get('mapped_robux', 0):,}",
+            f"**Unresolved/ambiguous:** {unresolved_records:,} records · "
+            f"R${unresolved_robux:,}",
+            "_Recorded amount is not verified gross revenue, creator proceeds, "
+            "or profit._",
             "",
         ]
 
         if data["top_items"]:
-            lines.append("## 🏆 Top items")
+            lines.append("## 🏆 Top items (canonical asset)")
             for name, units, robux in data["top_items"]:
-                lines.append(f"• `{name[:45]}` — {units} units · R${robux:,}")
+                lines.append(f"• `{name[:45]}` — {units} records · R${robux:,}")
+            lines.append("")
+
+        unresolved = data.get("unresolved") or []
+        if unresolved:
+            lines.append("## ❓ Unresolved sale names")
+            for g in unresolved[:5]:
+                label = (g["aliases"][0] if g.get("aliases") else "?")[:45]
+                lines.append(f"• `{label}` — {g['records']} records · R${g['robux']:,}")
             lines.append("")
 
         if data["daily"]:
@@ -79,10 +101,13 @@ def register_sales_commands(bot, get_db):
             )
 
         await ctx.send(
-            f"**📊 Sales for `{item_name[:50]}`** (last 30 days)\n"
-            f"• Units: **{data['units']}**\n"
-            f"• Robux: **R${data['robux']:,}**\n"
-            f"• Last sale: {data['last_sale']}"
+            f"**📊 Sales for `{(data.get('name') or item_name)[:50]}`** "
+            f"(last {data.get('days', 30)} days)\n"
+            f"• Sale records: **{data['units']}**\n"
+            f"• Recorded amount: **R${data['robux']:,}**\n"
+            f"• Last sale: {data['last_sale']}\n"
+            f"• Identity: `{data.get('status', 'unknown')}` · "
+            f"recorded amount is not verified proceeds"
         )
 
     @bot.command(name="sales_backfill")

@@ -618,6 +618,21 @@ def setup_database():
             pass
 
     try:
+        from item_resolver import ensure_schema as _ensure_alias_schema
+        _ensure_alias_schema(cur, conn)
+        print("✅ [setup] sales alias resolver ready", flush=True)
+    except Exception as e:
+        print(
+            f"⚠️ [setup] sales alias resolver failed: "
+            f"{type(e).__name__}: {str(e)[:200]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    try:
         cur.close()
         conn.close()
     except Exception:

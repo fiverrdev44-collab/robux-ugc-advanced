@@ -335,39 +335,36 @@ def sales_summary(days=30):
         conn = get_db()
         cur = conn.cursor()
 
-        cur.execute("""
-            select count(*), coalesce(sum(amount_robux), 0)
-            from my_sales
-            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
-        """, (days,))
-        total_units, total_robux = cur.fetchone()
+        from reporting import window_bounds, describe_window, AMOUNT_SEMANTICS
+        from item_resolver import sales_breakdown
 
-        cur.execute("""
-            select item_name, count(*) as units,
-                   coalesce(sum(amount_robux), 0) as robux
-            from my_sales
-            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
-            group by item_name
-            order by robux desc
-            limit 10
-        """, (days,))
-        top_items = cur.fetchall()
+        start, end, anchor = window_bounds(cur, days)
+        data = sales_breakdown(cur, start, end)
+        totals = data["totals"]
 
         cur.execute("""
             select sale_date, count(*), coalesce(sum(amount_robux), 0)
             from my_sales
-            where sale_date > (now() AT TIME ZONE 'UTC')::date - %s
+            where sale_date >= %s and sale_date < %s
             group by sale_date
             order by sale_date desc
             limit 14
-        """, (days,))
+        """, (start, end))
         daily = cur.fetchall()
+
+        top_items = [(g["name"], g["records"], g["robux"])
+                     for g in data["items"][:10] if g["item_id"]]
+        unresolved = [g for g in data["items"] if not g["item_id"]]
 
         return {
             "days": days,
-            "total_units": total_units or 0,
-            "total_robux": total_robux or 0,
+            "window": describe_window(start, end, anchor),
+            "total_units": totals["records"],
+            "total_robux": totals["robux"],
             "top_items": top_items,
+            "unresolved": unresolved,
+            "coverage": totals,
+            "amount_semantics": AMOUNT_SEMANTICS,
             "daily": daily,
         }
     finally:
@@ -388,19 +385,56 @@ def item_sales_summary(item_name, days=30):
     try:
         conn = get_db()
         cur = conn.cursor()
+
+        from reporting import window_bounds, AMOUNT_SEMANTICS
+        from item_resolver import (normalize_name, resolve_name,
+                                   sales_breakdown)
+
+        start, end, anchor = window_bounds(cur, days)
+        target = resolve_name(cur, item_name)
+        data = sales_breakdown(cur, start, end)
+
+        match = None
+        if target.get("item_id"):
+            match = next((g for g in data["items"]
+                          if g["item_id"] == target["item_id"]), None)
+        if match is None:
+            wanted = normalize_name(item_name)
+            for g in data["items"]:
+                if any(normalize_name(a) == wanted for a in g["aliases"]):
+                    match = g
+                    break
+
+        if match:
+            return {
+                "units": match["records"],
+                "robux": match["robux"],
+                "last_sale": match["last_sale"],
+                "days": days,
+                "name": match["name"],
+                "status": match["status"],
+                "amount_semantics": AMOUNT_SEMANTICS,
+                "window": (str(start), str(end)),
+            }
+
+        # Preserve the old fuzzy behaviour for names we cannot resolve.
         like = f"%{item_name[:20]}%"
         cur.execute("""
             select count(*), coalesce(sum(amount_robux), 0), max(sale_time)
             from my_sales
             where lower(item_name) like lower(%s)
-              and sale_date > (now() AT TIME ZONE 'UTC')::date - %s
-        """, (like, days))
+              and sale_date >= %s and sale_date < %s
+        """, (like, start, end))
         units, robux, last = cur.fetchone()
         if not units:
             return None
         return {
             "units": units, "robux": robux or 0,
             "last_sale": last, "days": days,
+            "name": item_name,
+            "status": "unresolved_fuzzy",
+            "amount_semantics": AMOUNT_SEMANTICS,
+            "window": (str(start), str(end)),
         }
     finally:
         try:
