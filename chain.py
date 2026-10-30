@@ -776,12 +776,17 @@ def format_chain(result):
 
     # ── FINAL BLOCK ──
     final_lines = ["# ✅ FINAL — DO THIS"]
+    try:
+        from opportunity_score import lane_priority
+    except Exception:
+        def lane_priority(_opp):
+            return 1
 
     if scored:
         champion = scored[0]["title"]
         backup = scored[1]["title"] if len(scored) > 1 else None
         final_lines.append(f"**1. Name:** `{champion}`  ← top-ranked candidate")
-        if scored and lane_priority(scored[0].get("opportunity")) == 0:
+        if lane_priority(scored[0].get("opportunity")) == 0:
             final_lines.append(
                 "**⚠️ Lane warning:** every surviving name is SATURATED. "
                 "Treat this as a test, not an open lane."
