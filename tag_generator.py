@@ -613,6 +613,7 @@ def generate_tags(item_name, family=None, max_tags=45):
     live_tags = Counter()
     live_words = Counter()
     live_count = 0
+    live_attempted = False
     search_phrases = Counter()
     search_words = Counter()
     category_wide = Counter()
@@ -656,6 +657,7 @@ def generate_tags(item_name, family=None, max_tags=45):
         if sorted_words:
             live_kw = sorted_words[0]
         if live_kw and len(live_kw) >= 3:
+            live_attempted = True
             try:
                 live_tags, live_words, live_count = _mine_live_tags(
                     live_kw, detected_family, accessory_subtype)
@@ -783,6 +785,7 @@ def generate_tags(item_name, family=None, max_tags=45):
             "live_roblox":     live_count,
             "live_tag_blocks": len(live_tags),
             "live_words":      len(live_words),
+            "live_skipped":    not live_attempted,
             "top_seller_tags": len(top_tags),
             "top_seller_words": len(top_words),
             "search_phrases":  len(search_phrases),
@@ -832,6 +835,8 @@ def format_tags(result):
     live_str = f"**{src['live_roblox']}**"
     if src['live_roblox'] > 0:
         live_str += " 🔥 (live Roblox)"
+    elif src.get("live_skipped"):
+        live_str = "_skipped — DB signal is already dense_"
 
     chunks.append(
         f"**📊 Signals mined (pool-normalized · 2+ source bonus):**\n"
