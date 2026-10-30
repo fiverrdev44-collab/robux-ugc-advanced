@@ -571,15 +571,22 @@ def _allowed_tag_tokens(item_name, family):
     return tokens | family_tokens
 
 
+EXTRA_TYPE_NOUNS = {
+    "earmuffs", "headphones", "wig", "bangs", "braids", "ponytail",
+    "gloves", "socks", "boots", "skirt", "dress", "shorts", "sleeves",
+}
+
+
 def _cross_family_tokens(item_name, family):
     """Nouns that belong to other families and must never appear in this
     item's tags, even inside a multi-word phrase like `cute hair`."""
+    own = _allowed_tag_tokens(item_name, family)
     try:
         from category_configs import get_all_type_words
         all_words = set(get_all_type_words())
     except Exception:
-        return set()
-    return all_words - _allowed_tag_tokens(item_name, family)
+        all_words = set()
+    return (all_words | EXTRA_TYPE_NOUNS) - own
 
 
 def generate_tags(item_name, family=None, max_tags=45):

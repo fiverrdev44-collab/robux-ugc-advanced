@@ -104,7 +104,10 @@ def test_tag_relevance_gate():
     assert "cute" not in bare and "shoes" not in bare
     cross = _cross_family_tokens("Cute Kitty Fluffy Beanie", "hats")
     assert "hair" in cross and "shoes" in cross and "beanie" not in cross
+    assert "earmuffs" in cross
     assert set("cute hair".split()) & cross
+    assert set("fluffy earmuffs".split()) & cross
+    assert "earmuffs" in _allowed_tag_tokens("Fluffy Earmuffs", "hats")
     print("PASS tag relevance gate")
 
 
