@@ -19,10 +19,38 @@ def _norm(name):
     return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
 
 
+def application_matches(actual_name, actual_price, rec_name, rec_price):
+    """A metadata change is only evidence when it matches the request."""
+    name_match = bool(rec_name) and _norm(actual_name or "") == _norm(rec_name or "")
+    try:
+        price_match = (rec_price is not None
+                       and int(actual_price or 0) == int(rec_price))
+    except (TypeError, ValueError):
+        price_match = False
+    return {"name_match": name_match, "price_match": price_match,
+            "verified": bool(name_match or price_match)}
+
+
 def create_recommendation(cur, item_id, source, rec_type, baseline,
                           recommended, predicted=None, evidence=None,
-                          note=None, dedupe_days=7):
+                          note=None, dedupe_days=7, hypothesis=None,
+                          proposed_change=None, success_condition=None,
+                          alternatives=None, expected_direction=None,
+                          effort=None):
+    active_id = None
     if item_id:
+        cur.execute("""
+            select id from recommendation_ledger
+            where item_id = %s and status = 'applied'
+              and measured_at is null
+              and measure_at is not null and measure_at > now()
+            order by applied_at desc nulls last
+            limit 1
+        """, (item_id,))
+        row = cur.fetchone()
+        active_id = row[0] if row else None
+
+    if active_id is None and item_id:
         cur.execute("""
             select id, rec_type from recommendation_ledger
             where item_id = %s
@@ -39,25 +67,33 @@ def create_recommendation(cur, item_id, source, rec_type, baseline,
             where item_id = %s and status = 'proposed'
         """, (item_id,))
 
+    # A new suggestion must not silently replace a running experiment.
+    status = "superseded" if active_id else "proposed"
     cur.execute("""
         insert into recommendation_ledger
-          (item_id, source, rec_type, baseline_name, baseline_price,
+          (item_id, source, rec_type, status, superseded_by,
+           baseline_name, baseline_price,
            baseline_favs, baseline_sales_30d, baseline_velocity,
            baseline_age_days, recommended_name, recommended_pivot,
-           recommended_price, predicted, evidence, note)
-        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s::jsonb, %s::jsonb, %s)
+           recommended_price, predicted, evidence, note,
+           hypothesis, proposed_change, success_condition, alternatives,
+           expected_direction, effort)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s::jsonb,
+                %s::jsonb, %s, %s)
         returning id
     """, (
-        item_id, source, rec_type,
+        item_id, source, rec_type, status, active_id,
         baseline.get("name"), baseline.get("price", 0),
         baseline.get("favs", 0), baseline.get("sales_30d", 0),
         baseline.get("velocity", 0), baseline.get("age_days", 0),
         recommended.get("name"), recommended.get("pivot"),
         recommended.get("price", 0),
         _json(predicted), _json(evidence), note,
+        hypothesis, _json(proposed_change), _json(success_condition),
+        _json(alternatives), expected_direction, effort,
     ))
-    return cur.fetchone()[0], True
+    return cur.fetchone()[0], status == "proposed"
 
 
 def mark_applied(cur, rec_id, days=7):
@@ -73,7 +109,12 @@ def mark_applied(cur, rec_id, days=7):
         update recommendation_ledger
         set status = 'applied',
             applied_at = now(),
-            measure_at = now() + make_interval(days => %s)
+            measure_at = now() + make_interval(days => %s),
+            application_status = 'creator_reported',
+            application_evidence = jsonb_build_object(
+                'method', 'manual !applied',
+                'recorded_at', now()
+            )
         where id = %s
         returning measure_at
     """, (int(days), rec_id))
@@ -113,9 +154,14 @@ def _sales_units(cur, names, since):
 
 
 def auto_apply_changes(cur, limit=50):
-    """Auto-mark proposals whose item name or price changed since baseline."""
+    """Auto-mark proposals only when the changed field matches the request.
+
+    A generic rename or price change is not proof the advice was followed, so
+    non-matching changes are recorded as `inferred_change` and stay proposed.
+    """
     cur.execute("""
-        select id, item_id, baseline_name, baseline_price
+        select id, item_id, baseline_name, baseline_price,
+               recommended_name, recommended_price
         from recommendation_ledger
         where status = 'proposed' and item_id is not null
           and created_at > now() - interval '30 days'
@@ -124,7 +170,9 @@ def auto_apply_changes(cur, limit=50):
     """, (int(limit),))
     rows = cur.fetchall()
     applied = 0
-    for rec_id, item_id, b_name, b_price in rows:
+    inferred = 0
+    for (rec_id, item_id, b_name, b_price,
+         rec_name, rec_price) in rows:
         cur.execute("select name, price from items where id = %s", (item_id,))
         item = cur.fetchone()
         if not item:
@@ -135,16 +183,45 @@ def auto_apply_changes(cur, limit=50):
         price_changed = int(price or 0) != int(b_price or 0)
         if not (name_changed or price_changed):
             continue
-        cur.execute("""
-            update recommendation_ledger
-            set status = 'applied',
-                applied_at = now(),
-                measure_at = now() + interval '7 days',
-                note = coalesce(note, '') ||
-                       ' | auto-applied: item changed'
-            where id = %s and status = 'proposed'
-        """, (rec_id,))
-        applied += 1
+
+        match = application_matches(name, price, rec_name, rec_price)
+        evidence = {
+            "actual_name": name,
+            "actual_price": int(price or 0),
+            "baseline_name": b_name,
+            "baseline_price": int(b_price or 0),
+            "requested_name": rec_name,
+            "requested_price": (int(rec_price) if rec_price is not None else None),
+            "name_match": match["name_match"],
+            "price_match": match["price_match"],
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if match["verified"]:
+            cur.execute("""
+                update recommendation_ledger
+                set status = 'applied',
+                    applied_at = now(),
+                    measure_at = now() + interval '7 days',
+                    application_status = 'verified_fields',
+                    application_evidence = %s::jsonb,
+                    note = coalesce(note, '') ||
+                           ' | auto-applied: requested field matched'
+                where id = %s and status = 'proposed'
+            """, (_json(evidence), rec_id))
+            applied += 1
+        else:
+            cur.execute("""
+                update recommendation_ledger
+                set application_status = 'inferred_change',
+                    application_evidence = %s::jsonb,
+                    note = coalesce(note, '') ||
+                           ' | inferred change: does not match request'
+                where id = %s and status = 'proposed'
+            """, (_json(evidence), rec_id))
+            inferred += 1
+    if inferred:
+        print(f"[experiments] {inferred} metadata change(s) inferred, not applied",
+              flush=True)
     return applied
 
 
@@ -186,7 +263,8 @@ def measure_due(cur, force=False, limit=50):
     cur.execute(f"""
         select id, item_id, applied_at, baseline_name, baseline_price,
                baseline_favs, baseline_sales_30d, baseline_velocity,
-               baseline_age_days, recommended_name, recommended_price
+               baseline_age_days, recommended_name, recommended_price,
+               coalesce(contaminated, false)
         from recommendation_ledger
         where {where}
         order by measure_at asc nulls first
@@ -195,7 +273,7 @@ def measure_due(cur, force=False, limit=50):
     rows = cur.fetchall()
     measured = 0
     for (rec_id, item_id, applied_at, b_name, b_price, b_favs,
-         b_sales, b_vel, b_age, r_name, r_price) in rows:
+         b_sales, b_vel, b_age, r_name, r_price, contaminated) in rows:
         cur.execute("""
             select name, favorite_count, price
             from items where id = %s
@@ -236,23 +314,33 @@ def measure_due(cur, force=False, limit=50):
             "checkpoint": min((7, 14, 30), key=lambda d: abs(d - days)),
         }
         next_day = next((d for d in (7, 14, 30) if d > days + 0.5), None)
+        if contaminated:
+            maturity = "invalid"
+        elif cur_favs is None or b_favs is None:
+            maturity = "missing"
+        elif next_day is not None:
+            maturity = "partial"
+        else:
+            maturity = "mature"
         if next_day is not None and not force:
             next_at = applied_at + timedelta(days=next_day)
             cur.execute("""
                 update recommendation_ledger
                 set status = 'applied', measured_at = now(),
                     measure_at = %s, outcome = %s::jsonb,
-                    outcome_history = outcome_history || %s::jsonb
+                    outcome_history = outcome_history || %s::jsonb,
+                    maturity = %s
                 where id = %s
-            """, (next_at, _json(outcome), _json([outcome]), rec_id))
+            """, (next_at, _json(outcome), _json([outcome]), maturity, rec_id))
         else:
             cur.execute("""
                 update recommendation_ledger
                 set status = 'measured', measured_at = now(),
                     measure_at = null, outcome = %s::jsonb,
-                    outcome_history = outcome_history || %s::jsonb
+                    outcome_history = outcome_history || %s::jsonb,
+                    maturity = %s
                 where id = %s
-            """, (_json(outcome), _json([outcome]), rec_id))
+            """, (_json(outcome), _json([outcome]), maturity, rec_id))
         measured += 1
     return measured
 

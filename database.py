@@ -653,6 +653,48 @@ def setup_database():
         except Exception:
             pass
 
+    # ── Recommendation lifecycle + outcome maturity (idempotent, Phase 5) ──
+    for ddl, label in (
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS hypothesis TEXT",
+         "recommendation_ledger.hypothesis"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS proposed_change JSONB",
+         "recommendation_ledger.proposed_change"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS success_condition JSONB",
+         "recommendation_ledger.success_condition"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS alternatives JSONB",
+         "recommendation_ledger.alternatives"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS expected_direction TEXT",
+         "recommendation_ledger.expected_direction"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS effort TEXT",
+         "recommendation_ledger.effort"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS application_status TEXT DEFAULT 'none'",
+         "recommendation_ledger.application_status"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS application_evidence JSONB",
+         "recommendation_ledger.application_evidence"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS maturity TEXT DEFAULT 'pending'",
+         "recommendation_ledger.maturity"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS contaminated BOOLEAN DEFAULT FALSE",
+         "recommendation_ledger.contaminated"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS contamination_note TEXT",
+         "recommendation_ledger.contamination_note"),
+        ("ALTER TABLE recommendation_ledger ADD COLUMN IF NOT EXISTS superseded_by INTEGER",
+         "recommendation_ledger.superseded_by"),
+    ):
+        _safe_exec(cur, ddl, label)
+    try:
+        cur.execute("""
+            UPDATE recommendation_ledger
+            SET maturity = 'pending'
+            WHERE maturity IS NULL
+        """)
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ [setup] recommendation maturity backfill failed: {e}", flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     try:
         from item_resolver import ensure_schema as _ensure_alias_schema
         _ensure_alias_schema(cur, conn)

@@ -125,6 +125,55 @@ ALTER TABLE launch_ledger
     DROP COLUMN IF EXISTS tracking_started_at;
 ```
 
+## 2026-10-31 — Recommendation lifecycle and maturity
+
+`setup_database()` adds these idempotently to `recommendation_ledger`:
+
+| Column | Purpose |
+|---|---|
+| `hypothesis` | Plain-language expected mechanism |
+| `proposed_change` | JSONB exact fields requested (name/price/description) |
+| `success_condition` | JSONB metric, direction, threshold, window |
+| `alternatives` | JSONB considered but not chosen |
+| `expected_direction` | up / flat / down |
+| `effort` | low / medium / high |
+| `application_status` | none / inferred_change / verified_fields / creator_reported |
+| `application_evidence` | JSONB actual vs requested values and timestamps |
+| `maturity` | pending / partial / mature / missing / invalid |
+| `contaminated` | boolean flag set when concurrent changes are detected |
+| `contamination_note` | free-text reason |
+| `superseded_by` | rec id of the running experiment that blocked a duplicate |
+
+Behavior changes:
+- `auto_apply_changes` only marks a recommendation applied when the observed
+  name/price **matches the requested value** (`verified_fields`). Any other
+  metadata change is recorded as `inferred_change` and the recommendation stays
+  proposed.
+- `!applied` records `creator_reported` with evidence.
+- `create_recommendation` will not supersede a running experiment: a duplicate
+  suggestion is inserted as `superseded` with `superseded_by` pointing at the
+  active recommendation.
+- `measure_due` writes `maturity` (`invalid` when contaminated, `missing` when
+  baseline/current favorites are absent, `partial` before D30, `mature` after).
+
+Rollback drops only the added columns.
+
+```sql
+ALTER TABLE recommendation_ledger
+    DROP COLUMN IF EXISTS hypothesis,
+    DROP COLUMN IF EXISTS proposed_change,
+    DROP COLUMN IF EXISTS success_condition,
+    DROP COLUMN IF EXISTS alternatives,
+    DROP COLUMN IF EXISTS expected_direction,
+    DROP COLUMN IF EXISTS effort,
+    DROP COLUMN IF EXISTS application_status,
+    DROP COLUMN IF EXISTS application_evidence,
+    DROP COLUMN IF EXISTS maturity,
+    DROP COLUMN IF EXISTS contaminated,
+    DROP COLUMN IF EXISTS contamination_note,
+    DROP COLUMN IF EXISTS superseded_by;
+```
+
 ## 2026-10-31 — Sales identity aliases (`sales_name_aliases`)
 
 Names are mutable; asset IDs are identity. `item_resolver.ensure_schema()` runs
