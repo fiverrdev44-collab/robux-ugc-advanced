@@ -296,7 +296,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("clarify", question="Which item should I use?", confidence="low")
 
     if (has_attachment and not item_id and re.search(
-        r"\b(image|photo|picture|pic|look|check|inspect|think|made|design|render|thumbnail)\b",
+        r"\b(image|photo|picture|pic|look|check|inspect|think|made|design|"
+        r"render|thumbnail|title|description|desc|name|rename|listing)\b",
         low,
     )):
         return _intent("analyze_image", confidence="high")

@@ -411,6 +411,10 @@ def test_description_requests():
         # An attached image must use the vision path, not the text miner.
         route = asyncio.run(vc.plan_message("description for this", True, state))
         assert route["intent"] == "analyze_image", route
+
+        route = asyncio.run(vc.plan_message(
+            "new title and description for this", True, state))
+        assert route["intent"] == "analyze_image", route
     finally:
         vc._planner_ai = original
     print("PASS description requests")
