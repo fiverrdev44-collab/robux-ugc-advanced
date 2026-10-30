@@ -334,6 +334,30 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                            confidence="followup")
         return _intent("list_my_items", confidence="high")
 
+    if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
+        return _intent("check_sales", confidence="high")
+
+    if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
+        return _intent("check_experiments", confidence="high")
+
+    if re.search(r"\b(visibility|search position|rank(ing)?|showing up)\b", low):
+        return _intent("check_visibility", confidence="high")
+
+    if re.search(r"\b(audit|data quality|coverage|integrity)\b", low):
+        return _intent("data_audit", confidence="high")
+
+    if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
+        return _intent("check_sales", confidence="high")
+
+    if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
+        return _intent("check_experiments", confidence="high")
+
+    if re.search(r"\b(visibility|search position|rank(ing)?|showing up)\b", low):
+        return _intent("check_visibility", confidence="high")
+
+    if re.search(r"\b(audit|data quality|coverage|integrity)\b", low):
+        return _intent("data_audit", confidence="high")
+
     if re.search(
         r"\b(check|chek|chekc|inspect|look at|verdict|keep or kill|how is|"
         r"what do you think|evaluate|review)\b", low
@@ -349,18 +373,6 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                      "or rebuild the title and description from the item data.",
             confidence="low",
         )
-
-    if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
-        return _intent("check_sales", confidence="high")
-
-    if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
-        return _intent("check_experiments", confidence="high")
-
-    if re.search(r"\b(visibility|search position|rank(ing)?|showing up)\b", low):
-        return _intent("check_visibility", confidence="high")
-
-    if re.search(r"\b(audit|data quality|coverage|integrity)\b", low):
-        return _intent("data_audit", confidence="high")
 
     if re.search(
         r"\b(niche|opportunit|trend|gap|low competition|what.*(create|make|next)|"
@@ -408,8 +420,9 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     result = _intent(
         "clarify",
-        question="Tell me what you want to do — check an item, find a niche, "
-                 "or improve a listing.",
+        question="I didn't catch that. Try `check item <ID>`, "
+                 "`rename to <theme>`, `find a niche`, `my items`, "
+                 "or `how are my sales?`",
         confidence="low",
     )
     result["ai_fallback"] = bool(use_ai)
@@ -895,26 +908,56 @@ def _is_selection(text):
 
 
 RENAME_RE = re.compile(
-    r"^(?:re-?name|retitle|re-?title|rebrand|re-?brand)\b(.*)$", re.I)
+    r"\b(?:re-?name|retitle|re-?title|rebrand|re-?brand|"
+    r"change\s+(?:its\s+|the\s+)?name)\b(.*)$", re.I)
+
+FILLER_RE = re.compile(
+    r"^(?:alr|alright|ok|okay|so|hey|yo|hi|hello|um|uh|pls|please|"
+    r"can you|can u|could you|would you|i wanna|i want to|i want|"
+    r"i need to|i need|need to|let'?s|help me|i'd like to|id like to|"
+    r"gonna|quick question|question)[\s,]+", re.I)
+
+REPLACE_RE = re.compile(
+    r"^(?:to|into|as|it|this|that|my item|the item|an item|the listing|"
+    r"my listing|please|pls)\b[\s,]*", re.I)
+
+
+def _strip_fillers(text):
+    """Drop conversational lead-ins so `alr i wanna rename x` behaves like
+    `rename x`."""
+    cleaned = (text or "").strip()
+    while True:
+        nxt = FILLER_RE.sub("", cleaned, count=1).strip()
+        if nxt == cleaned:
+            break
+        cleaned = nxt
+    return cleaned or (text or "").strip()
 
 
 def _rename_concept(text):
-    """Extract the new theme from 'rename [it] to <theme>'."""
-    m = RENAME_RE.match((text or "").strip())
+    """Extract the new theme from any rename phrasing."""
+    m = RENAME_RE.search((text or "").strip())
     if not m:
         return None
     rest = m.group(1).strip(" ,.!?-")
-    rest = re.sub(r"^(?:it|this|that|my item|the item|the listing)\b",
-                  "", rest, flags=re.I).strip(" ,.!?-")
-    rest = re.sub(r"^(?:to|into|as)\b", "", rest, flags=re.I).strip(" ,.!?-")
+    while True:
+        nxt = REPLACE_RE.sub("", rest, count=1).strip(" ,.!?-")
+        if nxt == rest:
+            break
+        rest = nxt
     return rest or None
 
 
 async def plan_message(text, has_attachment, state):
+    # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
+    text = _strip_fillers(text)
     # Deterministic fast path for bare IDs/URLs and small talk.
     fast = classify_intent(text, has_attachment=has_attachment, state=state,
                           use_ai=False)
     if fast["intent"] in ("greeting", "presence", "ack", "cancel", "help"):
+        return fast
+    if fast["intent"] in ("check_sales", "check_experiments",
+                          "check_visibility", "data_audit", "list_my_items"):
         return fast
     if extract_item_id(text) and re.fullmatch(
         r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()
@@ -923,20 +966,33 @@ async def plan_message(text, has_attachment, state):
     if (text or "").strip().startswith("!"):
         return fast
     # "rename to <theme>" is a new-concept request, never a diagnosis.
-    if RENAME_RE.match((text or "").strip()):
+    if RENAME_RE.search((text or "").strip()):
         concept = _rename_concept(text)
+        target = state.last_item_id
+        if concept:
+            pick = re.match(
+                r"^(?:item\s+)?(\d{6,20}|[1-5]|first|second|third|fourth|fifth)"
+                r"\s*(?:to|into|as)?\s*(.+)$", concept, re.I)
+            if pick:
+                token, concept = pick.group(1).lower(), pick.group(2).strip()
+                index = {"1": 0, "first": 0, "2": 1, "second": 1, "3": 2,
+                         "third": 2, "4": 3, "fourth": 3, "5": 4,
+                         "fifth": 4}.get(token)
+                if index is not None and index < len(state.results or []):
+                    target = state.results[index]
+                elif token.isdigit() and len(token) >= 6:
+                    target = int(token)
         if concept:
             state.last_concept = concept
             if fast.get("family"):
                 state.last_family = fast["family"]
             return _intent("create_ideas", concept=concept,
                            family=fast.get("family"),
-                           item_id=state.last_item_id, confidence="high")
+                           item_id=target, confidence="high")
         if state.last_item_id:
             return _intent("improve_metadata", item_id=state.last_item_id,
                            confidence="high")
-        return _intent("clarify", confidence="high",
-                       question="Which item, and what should the new theme be?")
+        return _intent("list_my_items", confidence="high")
     # Ordinals/numbers are already resolved against pending context.
     if _is_selection(text) and fast["intent"] != "clarify":
         return fast
@@ -975,8 +1031,10 @@ async def handle_message(bot, message, state):
     state.messages = state.messages[-6:]
     route = await plan_message(text, has_attachment, state)
     if route["intent"] == "clarify":
-        await message.channel.send(route.get("question") or
-                                  "Tell me what you want to do.")
+        await message.channel.send(
+            route.get("question") or
+            "I didn't catch that. Try `check item <ID>`, `rename to <theme>`, "
+            "`find a niche`, `my items`, or `how are my sales?`")
         return
     await _run_registry(bot, message, route, state)
 

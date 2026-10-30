@@ -309,6 +309,29 @@ def test_planner_context_inheritance():
     print("PASS planner context inheritance")
 
 
+def test_casual_leadins():
+    state = ConversationState(user_id=1)
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("casual lead-ins should resolve deterministically")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("Alr i wanna rename an item", False, state))
+        assert route["intent"] == "list_my_items", route
+
+        route = asyncio.run(vc.plan_message("alr rename it to viral russian", False, state))
+        assert route["intent"] == "create_ideas", route
+        assert route["concept"] == "viral russian", route
+
+        route = asyncio.run(vc.plan_message("i wanna check my sales", False, state))
+        assert route["intent"] == "check_sales", route
+    finally:
+        vc._planner_ai = original
+    print("PASS casual lead-ins and rename anywhere")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -331,5 +354,6 @@ if __name__ == "__main__":
     test_selection_skips_ai()
     test_rename_routing()
     test_planner_context_inheritance()
+    test_casual_leadins()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")
