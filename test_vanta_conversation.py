@@ -427,6 +427,30 @@ def test_planner_prompt_renders():
     print("PASS planner prompt renders")
 
 
+def test_pending_chain_offer():
+    state = ConversationState(user_id=1)
+    state.pending_chain = {"concept": "wooden fence personal space", "family": "waist"}
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("pending chain yes/no must not call the AI")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("yes", False, state))
+        assert route["intent"] == "create_ideas", route
+        assert route["concept"] == "waist:wooden fence personal space", route
+        assert state.pending_chain is None
+
+        state.pending_chain = {"concept": "wooden fence", "family": "waist"}
+        route = asyncio.run(vc.plan_message("no", False, state))
+        assert route["intent"] == "ack", route
+        assert state.pending_chain is None
+    finally:
+        vc._planner_ai = original
+    print("PASS pending chain yes/no")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -453,5 +477,6 @@ if __name__ == "__main__":
     test_selection_digit_8_and_revive_by_name()
     test_description_requests()
     test_planner_prompt_renders()
+    test_pending_chain_offer()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

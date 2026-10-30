@@ -108,6 +108,7 @@ class ConversationState:
     last_family: str | None = None
     item_titles: dict = field(default_factory=dict)
     pending_intent: str | None = None
+    pending_chain: dict | None = None
     messages: list = field(default_factory=list)
     history: list = field(default_factory=list)
     ai_calls: list = field(default_factory=list)
@@ -517,10 +518,11 @@ USER: {text[:600]}
 
 class ProxyCtx:
     """Minimal context compatible with existing command callbacks."""
-    def __init__(self, message):
+    def __init__(self, message, state=None):
         self.message = message
         self.channel = message.channel
         self.author = message.author
+        self.vanta_state = state
         self.sent = []
 
     async def send(self, content=None, **kwargs):
@@ -723,7 +725,7 @@ async def _run_registry(bot, message, route, state):
     }.get(intent, "Working")
     await message.channel.send(f"_{label}…_")
 
-    proxy = ProxyCtx(message)
+    proxy = ProxyCtx(message, state)
     started = time.time()
     try:
         await asyncio.wait_for(
@@ -1015,6 +1017,21 @@ def _rename_concept(text):
 async def plan_message(text, has_attachment, state):
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
     text = _strip_fillers(text)
+    # A pending chain offer from image analysis accepts yes/no.
+    pending_chain = getattr(state, "pending_chain", None)
+    if pending_chain and not has_attachment:
+        low = (text or "").strip().lower()
+        if re.fullmatch(r"(yes|y|yeah|yep|ok|okay|sure|do it|start|go|run it|run)[.!]*", low):
+            state.pending_chain = None
+            concept = pending_chain.get("concept")
+            fam = pending_chain.get("family")
+            if concept and fam and not concept.lower().startswith(f"{fam}:"):
+                concept = f"{fam}:{concept}"
+            return _intent("create_ideas", concept=concept,
+                           family=fam, confidence="high")
+        if re.fullmatch(r"(no|n|nah|nope|skip|not now|later|never mind)[.!]*", low):
+            state.pending_chain = None
+            return _intent("ack", confidence="high")
     # Deterministic fast path for bare IDs/URLs and small talk.
     fast = classify_intent(text, has_attachment=has_attachment, state=state,
                           use_ai=False)

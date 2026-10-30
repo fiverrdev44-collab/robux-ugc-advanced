@@ -1624,6 +1624,35 @@ RULES:
             await ctx.send(body[i:i + 1900])
             await asyncio.sleep(0.3)
 
+        # Offer a follow-up chain seeded from this vision read (VANTA threads).
+        vanta_state = getattr(ctx, "vanta_state", None)
+        if vanta_state is not None:
+            vtype = (vision.get("item_type_visual") or "").lower()
+            fam = {
+                "hat": "headwear", "hair": "hair", "face": "face",
+                "neck": "neck", "shoulder": "shoulder", "front": "front",
+                "back": "back", "waist": "waist", "emote": "emotes",
+                "shirt": "tops", "pants": "tops", "jacket": "tops",
+                "shoes": "clothing", "3d_clothing": "clothing",
+                "bundle": "clothing", "gear": "gear",
+            }.get(vtype)
+            bits = [
+                vision.get("search_description") or "",
+                vision.get("visual_summary") or "",
+                ", ".join(vision.get("distinctive_features") or []),
+                ", ".join(vision.get("likely_aesthetic") or []),
+            ]
+            concept = re.sub(r"\s+", " ", " ".join(b for b in bits if b)).strip()
+            if concept:
+                vanta_state.pending_chain = {
+                    "concept": concept[:300],
+                    "family": fam,
+                }
+                await ctx.send(
+                    "**Run the full chain from this image analysis?** "
+                    "Reply `yes` or `no`."
+                )
+
     @bot.command(name="ai_debug")
     async def ai_debug(ctx):
         """Show AI provider diagnostics."""
