@@ -399,6 +399,14 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("tags", item_id=target, concept=concept,
                        family=family, confidence="high")
 
+    if re.search(r"\b(desc|description|listing|copy|write[- ]?up)\b", low):
+        target = _state_with_last_item(state, item_id)
+        if target:
+            return _intent("improve_metadata", item_id=target,
+                           concept=state.last_concept, family=family,
+                           confidence="high")
+        return _intent("list_my_items", confidence="high")
+
     if re.search(
         r"\b(ideas?|brainstorm|concept|title|description|metadata|launch|"
         r"make.*better|improve|name)\b", low
@@ -819,11 +827,12 @@ RULES
 - Return JSON ONLY, no markdown.
 
 EXAMPLES
-"rename viral russian" -> {"action":"create_ideas","concept":"viral russian"}
-"call it russian dance instead" -> {"action":"create_ideas","concept":"russian dance"}
-"make my listing cuter" -> {"action":"improve_metadata"} (last_item)
-"why is it flopping" -> {"action":"diagnose_item"} (last_item)
-"what about the first one" -> {"action":"inspect_item"} (candidates[0])
+"rename viral russian" -> {{"action":"create_ideas","concept":"viral russian"}}
+"call it russian dance instead" -> {{"action":"create_ideas","concept":"russian dance"}}
+"make my listing cuter" -> {{"action":"improve_metadata"}} (last_item)
+"i need a description for it" -> {{"action":"improve_metadata"}} (last_item)
+"why is it flopping" -> {{"action":"diagnose_item"}} (last_item)
+"what about the first one" -> {{"action":"inspect_item"}} (candidates[0])
 "same but for hair" -> create_ideas with last_concept + family hair
 "how are sales" -> check_sales
 "thanks" -> ack
@@ -1002,7 +1011,8 @@ async def plan_message(text, has_attachment, state):
     if fast["intent"] in ("greeting", "presence", "ack", "cancel", "help"):
         return fast
     if fast["intent"] in ("check_sales", "check_experiments",
-                          "check_visibility", "data_audit", "list_my_items"):
+                          "check_visibility", "data_audit", "list_my_items",
+                          "improve_metadata"):
         return fast
     if extract_item_id(text) and re.fullmatch(
         r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()
@@ -1020,7 +1030,7 @@ async def plan_message(text, has_attachment, state):
             intent = "diagnose_item"
         elif re.search(r"\btags?\b", low):
             intent = "tags"
-        elif re.search(r"\b(title|description|metadata|rename|improve|rewrite)\b", low):
+        elif re.search(r"\b(title|description|desc|listing|metadata|rename|improve|rewrite)\b", low):
             intent = "improve_metadata"
         elif re.search(r"\b(check|inspect|verdict|look at|how is)\b", low):
             intent = "inspect_item"

@@ -364,6 +364,35 @@ def test_selection_digit_8_and_revive_by_name():
     print("PASS selection 8 and revive by name")
 
 
+def test_description_requests():
+    state = ConversationState(user_id=1)
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("description requests should be deterministic")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("I need a desc for an item", False, state))
+        assert route["intent"] == "list_my_items", route
+
+        state.last_item_id = 130928797494687
+        state.item_titles = {130928797494687: "Cute Kitty Fluffy Beanie"}
+        route = asyncio.run(vc.plan_message("I need a desc for an item", False, state))
+        assert route["intent"] == "improve_metadata", route
+        assert route["item_id"] == 130928797494687, route
+    finally:
+        vc._planner_ai = original
+    print("PASS description requests")
+
+
+def test_planner_prompt_renders():
+    state = ConversationState(user_id=1)
+    prompt = vc._planner_prompt("test", False, state)
+    assert "EXAMPLES" in prompt and "ALLOWED ACTIONS" in prompt
+    print("PASS planner prompt renders")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -388,5 +417,7 @@ if __name__ == "__main__":
     test_planner_context_inheritance()
     test_casual_leadins()
     test_selection_digit_8_and_revive_by_name()
+    test_description_requests()
+    test_planner_prompt_renders()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")
