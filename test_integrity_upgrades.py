@@ -172,6 +172,15 @@ def test_tag_output_copy():
     print("PASS tag output copy")
 
 
+def test_desc_forge_keyword_fallback():
+    from desc_forge import _candidate_keywords
+    cands = _candidate_keywords("Cute Kitty Fluffy Beanie")
+    assert cands[0] == "cute kitty fluffy beanie"
+    assert "beanie" in cands
+    assert "kitty" in cands
+    print("PASS desc_forge keyword fallback")
+
+
 def test_db_transaction():
     conn = get_db()
     cur = conn.cursor()
@@ -250,5 +259,6 @@ if __name__ == "__main__":
     test_live_fetch_survives_db_failure()
     test_tag_output_copy()
     test_tag_phrase_filter()
+    test_desc_forge_keyword_fallback()
     test_db_transaction()
     print("ALL TESTS PASSED")

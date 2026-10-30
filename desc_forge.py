@@ -345,13 +345,94 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
 # MAIN FETCH
 # ─────────────────────────────────────────────────────────────────────
 
-def _fetch_top_descriptions(keyword, family=None, limit=20):
-    rows = _query_db(keyword, family, limit)
-    clean = _filter_clean(rows, limit)
+_KEYWORD_STOP = {
+    "the", "a", "an", "for", "with", "and", "of", "to", "my", "our",
+    "new", "best", "item", "items", "ugc", "roblox", "edition",
+}
 
+
+def _candidate_keywords(keyword):
+    """Progressively simpler mining keywords so a full item title like
+    'Cute Kitty Fluffy Beanie' still finds top sellers."""
+    words = re.findall(r"[a-z0-9]+", (keyword or "").lower())
+    toks = [w for w in words if w not in _KEYWORD_STOP and len(w) >= 3]
+    candidates = []
+    if (keyword or "").strip():
+        candidates.append(keyword.strip())
+    if len(toks) >= 2:
+        candidates.append(" ".join(toks[-2:]))
+    if toks:
+        candidates.append(toks[-1])
+    if len(toks) >= 2:
+        candidates.append(" ".join(toks[:-1]))
+    for tok in reversed(toks):
+        candidates.append(tok)
+    seen, out = set(), []
+    for c in candidates:
+        c = c.strip().lower()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _query_family_fallback(family, limit):
+    """Last resort: top items in the family with clean descriptions."""
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        fam_ids = []
+        if family:
+            try:
+                from convergence_engine import FAMILIES
+                from category_configs import to_convergence_family
+                fam = to_convergence_family(family)
+            except Exception:
+                fam = family
+            if fam == "accessory":
+                fam_ids = ACCESSORY_IDS
+            else:
+                fam_ids = FAMILIES.get(fam) or []
+        sql = """
+            select name, description, favorite_count, price
+            from items
+            where favorite_count > 200
+              and description is not null
+              and length(trim(description)) > 40
+        """
+        params = []
+        if fam_ids:
+            sql += " and asset_type_id in (%s)" % ",".join(["%s"] * len(fam_ids))
+            params = list(fam_ids)
+        sql += " order by favorite_count desc limit %s"
+        params.append(limit * 5)
+        cur.execute(sql, params)
+        return cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _fetch_top_descriptions(keyword, family=None, limit=20):
+    best = []
+    for kw in _candidate_keywords(keyword):
+        try:
+            rows = _query_db(kw, family, limit)
+        except Exception as e:
+            print(f"[desc_forge] db query failed for '{kw}': {e}", flush=True)
+            continue
+        clean = _filter_clean(rows, limit)
+        if len(clean) >= MIN_DB_RESULTS:
+            print(f"[desc_forge] keyword '{kw}' -> {len(clean)} clean", flush=True)
+            return clean
+        if len(clean) > len(best):
+            best = clean
+
+    clean = best
     if len(clean) < MIN_DB_RESULTS:
         print(f"[desc_forge] DB thin ({len(clean)} clean) → live fallback", flush=True)
-        live_rows = _fetch_live_descriptions(keyword, family, limit)
+        live_kw = (_candidate_keywords(keyword) or [keyword])[-1]
+        live_rows = _fetch_live_descriptions(live_kw, family, limit)
         live_clean = _filter_clean(live_rows, limit)
 
         seen_names = set()
@@ -365,6 +446,13 @@ def _fetch_top_descriptions(keyword, family=None, limit=20):
             if len(merged) >= limit:
                 break
         clean = merged
+
+    if not clean:
+        print("[desc_forge] falling back to family top sellers", flush=True)
+        try:
+            clean = _filter_clean(_query_family_fallback(family, limit), limit)
+        except Exception as e:
+            print(f"[desc_forge] family fallback failed: {e}", flush=True)
 
     return clean
 
