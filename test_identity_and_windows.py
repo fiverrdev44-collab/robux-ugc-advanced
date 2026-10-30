@@ -88,7 +88,7 @@ def test_db_fixtures():
         assert row, "flip ledger row missing"
         published, tracking, created = row
         assert published is not None and tracking is not None
-        assert published == created, (published, created)
+        assert published.replace(tzinfo=None) == created, (published, created)
         assert published.date() < date(2026, 10, 19), published
 
         cur.execute("""
