@@ -783,6 +783,24 @@ ALLOWED ACTIONS
 - help: explain capabilities
 - clarify: ask one short question when a required target is unclear
 
+CAPABILITIES BEHIND THESE ACTIONS (choose the closest action; never output a
+command name as the action)
+- inspect_item -> verdict on an item (keep/rename/kill)
+- diagnose_item -> autopsy: why it failed, what to change
+- revive_item -> full relaunch plan for a dead item
+- improve_metadata -> rebuild an existing listing's title/description
+- create_ideas -> chain/brainstorm: new concept, verified titles, launch plan
+- find_opportunities -> niches, gaps, rising keywords, what to make next
+- tags -> keyword ideas for a name/item
+- analyze_image -> attached image feedback
+- check_sales -> recorded sales, revenue, per-item sales
+- check_experiments -> applied/ignored advice, measured outcomes
+- check_visibility -> search visibility coverage
+- data_audit -> data quality and coverage
+- help -> what the bot can do, command names, how to use it
+If the user names a specific command (xray, playbook, whale, revsim, etc.),
+map it to the closest action above and let the system run it; do not invent.
+
 RULES
 - Resolve "it", "this", "that", "my item", "the listing" to last_item when available.
 - Resolve "the second one"/"number 2"/"that one" from candidates.
@@ -890,7 +908,7 @@ def _planner_ai(text, has_attachment, state):
         if not is_available():
             return None
         prompt = _planner_prompt(text, has_attachment, state)
-        raw = _generate(prompt, json_mode=True, temperature=0.0, max_tokens=300)
+        raw = _generate(prompt, json_mode=True, temperature=0.0, max_tokens=400)
         usage = get_last_usage()
         if not raw:
             return None
