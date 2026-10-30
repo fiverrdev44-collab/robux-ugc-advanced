@@ -78,6 +78,53 @@ restoring the constraint.
   hidden algorithm score.
 - Matched-control results are observational; the 80% interval is not a causal proof.
 
+## 2026-10-31 — Money and date semantics
+
+`setup_database()` adds these idempotently:
+
+```sql
+ALTER TABLE my_sales
+    ADD COLUMN IF NOT EXISTS amount_semantics TEXT
+    DEFAULT 'unknown_recorded_amount';
+
+ALTER TABLE launch_ledger
+    ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS tracking_started_at TIMESTAMPTZ;
+```
+
+Backfill (runs once per restart, only where NULL):
+
+```sql
+UPDATE launch_ledger
+SET tracking_started_at = launched_at
+WHERE tracking_started_at IS NULL;
+
+UPDATE launch_ledger l
+SET published_at = i.created_at
+FROM items i
+WHERE i.id = l.item_id
+  AND l.published_at IS NULL
+  AND i.created_at IS NOT NULL;
+```
+
+Meaning:
+- `amount_semantics` records what `amount_robux` represents. New rows default to
+  `unknown_recorded_amount`; it must not be labelled revenue or proceeds until a
+  verified transaction export supplies the semantics.
+- `published_at` is the asset's catalog creation date (age anchor).
+- `tracking_started_at` is when VANTA began tracking. Renames and first tracking
+  never reset product age; D1/D7/D30 windows use
+  `COALESCE(published_at, launched_at)`.
+
+Rollback drops the three columns (data loss for those columns only):
+
+```sql
+ALTER TABLE my_sales DROP COLUMN IF EXISTS amount_semantics;
+ALTER TABLE launch_ledger
+    DROP COLUMN IF EXISTS published_at,
+    DROP COLUMN IF EXISTS tracking_started_at;
+```
+
 ## 2026-10-31 — Sales identity aliases (`sales_name_aliases`)
 
 Names are mutable; asset IDs are identity. `item_resolver.ensure_schema()` runs

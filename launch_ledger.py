@@ -61,13 +61,23 @@ def sync_group_items(cur, group_names):
             print(f"[launch_ledger] feature snapshot failed: {e}", flush=True)
         cur.execute("""
             INSERT INTO launch_ledger
-              (item_id, launched_at, family, title, asset_type_id,
+              (item_id, launched_at, tracking_started_at, family, title, asset_type_id,
                price, favs_launch, features)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
             ON CONFLICT (item_id) DO NOTHING
-        """, (iid, launched, family, name, atype, price or 0, favs,
+        """, (iid, launched, launched, family, name, atype, price or 0, favs,
               json.dumps(features, default=str)))
         added += cur.rowcount
+
+        # Published date is a property of the asset, not of when we started
+        # tracking it. Use the catalog creation date when available so age,
+        # D1/D7/D30 windows and "mature" checks are not reset by renames.
+        cur.execute("""
+            UPDATE launch_ledger l
+            SET published_at = COALESCE(l.published_at, i.created_at)
+            FROM items i
+            WHERE i.id = l.item_id AND l.item_id = %s
+        """, (iid,))
 
     return len(rows), added
 
@@ -75,7 +85,7 @@ def sync_group_items(cur, group_names):
 def fill_ledger(cur, item_id):
     """Fill one ledger row with D1/D7/D30 favorites and D7/D30 sales."""
     cur.execute("""
-        SELECT item_id, launched_at, title, family
+        SELECT item_id, COALESCE(published_at, launched_at), title, family
         FROM launch_ledger WHERE item_id = %s
     """, (item_id,))
     row = cur.fetchone()

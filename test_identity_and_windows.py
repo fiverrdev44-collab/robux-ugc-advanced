@@ -78,7 +78,25 @@ def test_db_fixtures():
 
         flip = resolve_name(cur, "Smooth 360 flip Rizz")
         assert flip["item_id"] == 92364796546749 and flip["status"] == "candidate"
-        print("PASS flip candidate identity")
+
+        cur.execute("""
+            select l.published_at, l.tracking_started_at, i.created_at
+            from launch_ledger l join items i on i.id = l.item_id
+            where l.item_id = 92364796546749
+        """)
+        row = cur.fetchone()
+        assert row, "flip ledger row missing"
+        published, tracking, created = row
+        assert published is not None and tracking is not None
+        assert published == created, (published, created)
+        assert published.date() < date(2026, 10, 19), published
+
+        cur.execute("""
+            select 1 from information_schema.columns
+            where table_name = 'my_sales' and column_name = 'amount_semantics'
+        """)
+        assert cur.fetchone(), "my_sales.amount_semantics missing"
+        print("PASS published/tracking date split and amount semantics column")
     finally:
         try:
             con.rollback()

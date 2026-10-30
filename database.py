@@ -617,6 +617,42 @@ def setup_database():
         except Exception:
             pass
 
+    # ── Money + date semantics (idempotent, Phase 4) ──
+    _safe_exec(cur, """
+        ALTER TABLE my_sales
+        ADD COLUMN IF NOT EXISTS amount_semantics TEXT
+        DEFAULT 'unknown_recorded_amount'
+    """, "my_sales.amount_semantics")
+    _safe_exec(cur, """
+        ALTER TABLE launch_ledger
+        ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ
+    """, "launch_ledger.published_at")
+    _safe_exec(cur, """
+        ALTER TABLE launch_ledger
+        ADD COLUMN IF NOT EXISTS tracking_started_at TIMESTAMPTZ
+    """, "launch_ledger.tracking_started_at")
+    try:
+        cur.execute("""
+            UPDATE launch_ledger
+            SET tracking_started_at = launched_at
+            WHERE tracking_started_at IS NULL
+        """)
+        cur.execute("""
+            UPDATE launch_ledger l
+            SET published_at = i.created_at
+            FROM items i
+            WHERE i.id = l.item_id
+              AND l.published_at IS NULL
+              AND i.created_at IS NOT NULL
+        """)
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ [setup] date semantics backfill failed: {e}", flush=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
     try:
         from item_resolver import ensure_schema as _ensure_alias_schema
         _ensure_alias_schema(cur, conn)

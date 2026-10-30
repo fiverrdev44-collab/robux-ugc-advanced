@@ -106,7 +106,7 @@ def ledger_integrity(cur):
     """)
     old_missing_d30 = _one(cur, """
         SELECT COUNT(*) FROM launch_ledger
-        WHERE launched_at < now() - interval '30 days'
+        WHERE COALESCE(published_at, launched_at) < now() - interval '30 days'
           AND favs_d30 IS NULL
     """)
     stale = _one(cur, """
@@ -116,7 +116,7 @@ def ledger_integrity(cur):
     """)
     unlabeled = _one(cur, """
         SELECT COUNT(*) FROM launch_ledger
-        WHERE launched_at < now() - interval '30 days'
+        WHERE COALESCE(published_at, launched_at) < now() - interval '30 days'
           AND label_beat_median IS NULL
     """)
     return {

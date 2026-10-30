@@ -1251,7 +1251,7 @@ def register_supercomputer_commands(bot):
             try:
                 cur.execute("""
                     SELECT item_id FROM launch_ledger
-                    WHERE launched_at >= NOW() - %s
+                    WHERE COALESCE(published_at, launched_at) >= NOW() - %s
                 """, (timedelta(days=days),))
                 for (iid,) in cur.fetchall():
                     try:
@@ -1266,8 +1266,8 @@ def register_supercomputer_commands(bot):
                            units_d30, revenue_d30,
                            recent_units_30d, recent_revenue_30d
                     FROM launch_ledger
-                    WHERE launched_at >= NOW() - %s
-                    ORDER BY launched_at DESC
+                    WHERE COALESCE(published_at, launched_at) >= NOW() - %s
+                    ORDER BY COALESCE(published_at, launched_at) DESC
                 """, (timedelta(days=days),))
                 rows = cur.fetchall()
                 if not rows:
