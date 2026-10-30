@@ -281,9 +281,32 @@ def test_rename_routing():
         route = asyncio.run(vc.plan_message("rename it", False, state))
         assert route["intent"] == "improve_metadata", route
         assert route["item_id"] == 121930221694467, route
+        route = asyncio.run(vc.plan_message("Rename viral russian", False, state))
+        assert route["intent"] == "create_ideas", route
+        assert state.last_concept == "viral russian", state.last_concept
     finally:
         vc._planner_ai = original
     print("PASS rename routing")
+
+
+def test_planner_context_inheritance():
+    state = ConversationState(user_id=1)
+    state.last_concept = "viral russian"
+    state.last_family = "emote"
+    original = vc._planner_ai
+
+    def fake(text, has_attachment, st):
+        return {"action": "create_ideas", "confidence": 0.8}
+
+    vc._planner_ai = fake
+    try:
+        route = asyncio.run(vc.plan_message("do another one like that", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] == "create_ideas", route
+    assert route["concept"] == "viral russian", route
+    assert route["family"] == "emote", route
+    print("PASS planner context inheritance")
 
 
 def test_invalid_intent_rejected():
@@ -307,5 +330,6 @@ if __name__ == "__main__":
     test_ai_planner_validation()
     test_selection_skips_ai()
     test_rename_routing()
+    test_planner_context_inheritance()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

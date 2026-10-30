@@ -771,18 +771,35 @@ ALLOWED ACTIONS
 - clarify: ask one short question when a required target is unclear
 
 RULES
-- Resolve "it", "this", "that", "my item" to last_item when available.
-- Resolve "the second one"/"number 2" from candidates.
+- Resolve "it", "this", "that", "my item", "the listing" to last_item when available.
+- Resolve "the second one"/"number 2"/"that one" from candidates.
+- Inherit last_concept when the user says "same", "again", "that", or omits the theme but clearly means it.
 - Never invent an item ID or a command. Only use IDs present in context or explicit in the message.
 - If the user asks to use their existing/current item name, use last_item.
 - If the action needs an item and none is known, use clarify.
-- If the action needs a concept and none is given, use clarify.
-- If the user wants to rename/retitle/rebrand toward a theme, use create_ideas with that theme as the concept — never diagnose_item for a rename.
+- If the action needs a concept and none is given or inherited, use clarify.
+- A rename/retitle/rebrand toward a theme is create_ideas with that theme — never diagnose_item for a rename.
+- "why is it dead / what went wrong / fix it" about an item is diagnose_item, not create_ideas.
+- Tags/SEO/keywords requests are tags; use last_item when the user implies their own item.
+- Small talk ("thanks", "lol", "ok") is ack; capability questions are help. Do not invent work for small talk.
+- Prefer the user's wording for concept; do not translate or embellish it.
 - For tags with no known item, item_id may be null; the system will list their items.
 - Return JSON ONLY, no markdown.
 
+EXAMPLES
+"rename viral russian" -> {"action":"create_ideas","concept":"viral russian"}
+"call it russian dance instead" -> {"action":"create_ideas","concept":"russian dance"}
+"make my listing cuter" -> {"action":"improve_metadata"} (last_item)
+"why is it flopping" -> {"action":"diagnose_item"} (last_item)
+"what about the first one" -> {"action":"inspect_item"} (candidates[0])
+"same but for hair" -> create_ideas with last_concept + family hair
+"how are sales" -> check_sales
+"thanks" -> ack
+
 CONTEXT
 last_item: {state.last_item_id} ({last_title})
+last_concept: {state.last_concept}
+last_intent: {state.last_intent}
 candidates: {candidates}
 pending_action: {state.pending_intent}
 recent_user_messages: {recent}
@@ -817,6 +834,10 @@ def _validate_plan(plan, state, has_attachment):
     family = str(plan.get("family") or "").strip().lower() or None
     if family not in FAMILIES:
         family = None
+    if action in CONCEPT_ACTIONS and not concept:
+        concept = state.last_concept
+    if not family:
+        family = state.last_family
     confidence = plan.get("confidence")
     try:
         confidence = float(confidence) if confidence is not None else 0.5
@@ -905,6 +926,9 @@ async def plan_message(text, has_attachment, state):
     if RENAME_RE.match((text or "").strip()):
         concept = _rename_concept(text)
         if concept:
+            state.last_concept = concept
+            if fast.get("family"):
+                state.last_family = fast["family"]
             return _intent("create_ideas", concept=concept,
                            family=fast.get("family"),
                            item_id=state.last_item_id, confidence="high")
@@ -930,6 +954,10 @@ async def plan_message(text, has_attachment, state):
             plan = None
         route = _validate_plan(plan, state, has_attachment)
         if route:
+            if route.get("concept"):
+                state.last_concept = route["concept"]
+            if route.get("family"):
+                state.last_family = route["family"]
             state.ai_calls.append(time.time())
             state.ai_calls = [t for t in state.ai_calls
                               if time.time() - t < 3600]
