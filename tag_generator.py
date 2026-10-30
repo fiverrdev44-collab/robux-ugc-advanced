@@ -820,21 +820,23 @@ def format_tags(result):
         subtype_str = f" · `{result['subtype_label']}`"
 
     chunks.append(
-        f"# 🏷️ TAGS — `{result['item_name'][:60]}`\n"
+        f"# 🏷️ TAG / KEYWORD IDEAS — `{result['item_name'][:60]}`\n"
         f"_Category detected: `{result['family']}`{subtype_str} · "
-        f"{len(tags)} tags generated_"
+        f"{len(tags)} keyword candidates_"
     )
 
     top5 = ", ".join(tags[:5])
     chunks.append(
-        "**🏷️ Roblox gives you 5 tag slots — use the top 5:**\n"
+        "**ℹ️ Roblox removed item tags in December 2025** — the field no longer "
+        "exists, and tags never influenced ranking while it did.\n"
+        "**Use the strongest 2–3 naturally in your title and description:**\n"
         f"```\n{top5}\n```\n"
         "**📝 Optional:** weave 2–3 more naturally into the description. "
         "Do not paste all 45 as a comma list — that reads as keyword stuffing."
     )
 
     if result.get("top_weighted"):
-        lines = ["**🎯 Highest-weight tags (sales signal):**"]
+        lines = ["**🎯 Highest-weight keywords (sales signal):**"]
         for tag, score in result["top_weighted"][:10]:
             lines.append(f"`{tag}` — weight {score:.1f}")
         chunks.append("\n".join(lines))
@@ -858,7 +860,7 @@ def format_tags(result):
         f"• Aesthetic siblings: **{src['aesthetic']}**\n"
         f"• Color siblings: **{src['colors']}**\n"
         f"• Name words: **{src['name_words']}**\n"
-        f"\n_Every tag traces to real data. 2+ source agreement ranks highest._"
+        f"\n_Every keyword traces to real data. 2+ source agreement ranks highest._"
     )
 
     return chunks

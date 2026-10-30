@@ -123,7 +123,7 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!creative <seed>` | AI fan-out (20 concepts) + DB demand gate |
 | `!creative_raw <seed>` | Debug view of anchors, raw AI output, parsed concepts |
 | `!desc_forge <[family:]keyword>` | Mine top-seller descriptions and generate a matching one |
-| `!tags <[family:]name>` | Sales-weighted tags from real top sellers (top 5 for Roblox slots) |
+| `!tags <[family:]name>` | Sales-weighted keyword ideas from real top sellers (Roblox's tag field was removed in Dec 2025) |
 | `!guide [idea]` | Interactive four-section consultation (market, risks, pricing/ROI, titles) |
 | `!playbook [topic]` | Proven UGC tactics: niche, naming, pricing, launch, promotion |
 | `!path` | Your current UGC stage and next milestones from real data |
@@ -505,8 +505,9 @@ Known data gaps:
 - Ranking is not validated for production use; no validated sales/recoup model.
 - Live exact checks sample up to 300 results, not the full catalog.
 - Descriptions are creative prose; only claims/numbers/internal language are filtered.
-- Description "tags" are not a ranking field; tags must share a token with the item name or
-  category type words.
+- Description "tags" are not a ranking field — Roblox removed avatar item tags in December 2025,
+  so keyword ideas must live in the title and description. Keywords must still share a token
+  with the item name or category type words.
 - The bot cannot create demand or guarantee sales.
 - Conversational public threads are visible to channel members; use **Private (DM)** for
   sensitive details. Thread ownership is HMAC-verified; the visible user ID alone is not trusted.

@@ -130,6 +130,28 @@ def test_live_fetch_survives_db_failure():
     print("PASS live fetch survives DB failure")
 
 
+def test_tag_output_copy():
+    from tag_generator import format_tags
+    result = {
+        "item_name": "Cute Kitty Fluffy Beanie", "family": "hats",
+        "subtype": None, "subtype_label": None,
+        "tags": ["cute", "fluffy", "beanie", "kitty", "soft"],
+        "sources": {
+            "live_roblox": 0, "live_tag_blocks": 0, "live_words": 0,
+            "live_skipped": True, "top_seller_tags": 119,
+            "top_seller_words": 652, "search_phrases": 154, "search_words": 92,
+            "category_wide": 0, "aesthetic": 30, "colors": 0, "name_words": 4,
+        },
+        "top_weighted": [("cute", 164.4)],
+    }
+    text = "\n".join(format_tags(result))
+    assert "5 tag slots" not in text
+    assert "Roblox removed item tags" in text
+    assert "title and description" in text
+    assert "keyword candidates" in text
+    print("PASS tag output copy")
+
+
 def test_db_transaction():
     conn = get_db()
     cur = conn.cursor()
@@ -206,5 +228,6 @@ if __name__ == "__main__":
     test_pivot_and_lane_gates()
     test_tag_relevance_gate()
     test_live_fetch_survives_db_failure()
+    test_tag_output_copy()
     test_db_transaction()
     print("ALL TESTS PASSED")
