@@ -259,6 +259,33 @@ def test_selection_skips_ai():
     print("PASS selection fast path")
 
 
+def test_rename_routing():
+    state = ConversationState(user_id=1)
+    state.last_item_id = 121930221694467
+    state.item_titles = {121930221694467: "Cute Hip Sway Emote"}
+    original = vc._planner_ai
+
+    def boom(*args, **kwargs):
+        raise AssertionError("rename should not need the AI planner")
+
+    vc._planner_ai = boom
+    try:
+        route = asyncio.run(vc.plan_message("Rename viral russian", False, state))
+        assert route["intent"] == "create_ideas", route
+        assert route["concept"] == "viral russian", route
+
+        route = asyncio.run(vc.plan_message("retitle it to cute hip sway", False, state))
+        assert route["intent"] == "create_ideas", route
+        assert route["concept"] == "cute hip sway", route
+
+        route = asyncio.run(vc.plan_message("rename it", False, state))
+        assert route["intent"] == "improve_metadata", route
+        assert route["item_id"] == 121930221694467, route
+    finally:
+        vc._planner_ai = original
+    print("PASS rename routing")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -279,5 +306,6 @@ if __name__ == "__main__":
     test_registry_execution_and_context()
     test_ai_planner_validation()
     test_selection_skips_ai()
+    test_rename_routing()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

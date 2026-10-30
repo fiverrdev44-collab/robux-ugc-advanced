@@ -777,6 +777,7 @@ RULES
 - If the user asks to use their existing/current item name, use last_item.
 - If the action needs an item and none is known, use clarify.
 - If the action needs a concept and none is given, use clarify.
+- If the user wants to rename/retitle/rebrand toward a theme, use create_ideas with that theme as the concept — never diagnose_item for a rename.
 - For tags with no known item, item_id may be null; the system will list their items.
 - Return JSON ONLY, no markdown.
 
@@ -872,6 +873,22 @@ def _is_selection(text):
     return bool(SELECTION_RE.fullmatch((text or "").strip()))
 
 
+RENAME_RE = re.compile(
+    r"^(?:re-?name|retitle|re-?title|rebrand|re-?brand)\b(.*)$", re.I)
+
+
+def _rename_concept(text):
+    """Extract the new theme from 'rename [it] to <theme>'."""
+    m = RENAME_RE.match((text or "").strip())
+    if not m:
+        return None
+    rest = m.group(1).strip(" ,.!?-")
+    rest = re.sub(r"^(?:it|this|that|my item|the item|the listing)\b",
+                  "", rest, flags=re.I).strip(" ,.!?-")
+    rest = re.sub(r"^(?:to|into|as)\b", "", rest, flags=re.I).strip(" ,.!?-")
+    return rest or None
+
+
 async def plan_message(text, has_attachment, state):
     # Deterministic fast path for bare IDs/URLs and small talk.
     fast = classify_intent(text, has_attachment=has_attachment, state=state,
@@ -884,6 +901,18 @@ async def plan_message(text, has_attachment, state):
         return fast
     if (text or "").strip().startswith("!"):
         return fast
+    # "rename to <theme>" is a new-concept request, never a diagnosis.
+    if RENAME_RE.match((text or "").strip()):
+        concept = _rename_concept(text)
+        if concept:
+            return _intent("create_ideas", concept=concept,
+                           family=fast.get("family"),
+                           item_id=state.last_item_id, confidence="high")
+        if state.last_item_id:
+            return _intent("improve_metadata", item_id=state.last_item_id,
+                           confidence="high")
+        return _intent("clarify", confidence="high",
+                       question="Which item, and what should the new theme be?")
     # Ordinals/numbers are already resolved against pending context.
     if _is_selection(text) and fast["intent"] != "clarify":
         return fast
