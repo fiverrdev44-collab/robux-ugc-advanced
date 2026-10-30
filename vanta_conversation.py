@@ -407,6 +407,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
             return _intent("tags", item_id=target,
                            concept=state.last_concept, family=family,
                            confidence="high")
+        state.pending_intent = "tags"
         return _intent("list_my_items", confidence="high")
 
     if re.search(
@@ -826,6 +827,8 @@ RULES
 - Tags/SEO/keywords requests are tags; use last_item when the user implies their own item.
 - Small talk ("thanks", "lol", "ok") is ack; capability questions are help. Do not invent work for small talk.
 - Prefer the user's wording for concept; do not translate or embellish it.
+- A message that is only an item name or partial name refers to that existing item;
+  use the pending action (or inspect_item), never create_ideas from a name fragment.
 - For tags with no known item, item_id may be null; the system will list their items.
 - Return JSON ONLY, no markdown.
 
@@ -1038,7 +1041,8 @@ async def plan_message(text, has_attachment, state):
         elif re.search(r"\b(check|inspect|verdict|look at|how is)\b", low):
             intent = "inspect_item"
         else:
-            intent = fast.get("intent")
+            intent = (state.pending_intent or state.last_intent
+                      or fast.get("intent"))
         if intent in ITEM_ACTIONS or intent == "tags":
             return _intent(intent, item_id=matched, concept=fast.get("concept"),
                            family=fast.get("family"), confidence="high")

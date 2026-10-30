@@ -399,6 +399,14 @@ def test_description_requests():
             "Cute Kitty Fluffy Beanie description new", False, state))
         assert route["intent"] == "tags", route
         assert route["item_id"] == 130928797494687, route
+
+        # Name-only follow-up after a description listing keeps the pending
+        # action instead of falling into chain.
+        state.last_item_id = None
+        state.pending_intent = "tags"
+        route = asyncio.run(vc.plan_message("cute kitty fluffy", False, state))
+        assert route["intent"] == "tags", route
+        assert route["item_id"] == 130928797494687, route
     finally:
         vc._planner_ai = original
     print("PASS description requests")
