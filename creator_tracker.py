@@ -9,6 +9,7 @@ throttled and resumable, so the 100GB box can chew through the cohort over
 hours without tripping rate limits.
 """
 import os
+import random
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -34,10 +35,22 @@ def _headers():
     }
 
 
-def _session():
+def _cookie_values():
+    """All configured .ROBLOSECURITY cookies, primary first."""
+    values = []
+    for i in range(1, 6):
+        raw = os.getenv(f"ROBLOSECURITY_COOKIE_{i}")
+        if raw and raw.strip() and raw.strip() not in values:
+            values.append(raw.strip())
+    raw = os.getenv("ROBLOSECURITY_COOKIE")
+    if raw and raw.strip() and raw.strip() not in values:
+        values.append(raw.strip())
+    return values
+
+
+def _session(cookie=None):
     s = requests.Session()
     s.headers.update(_headers())
-    cookie = os.getenv("ROBLOSECURITY_COOKIE_1") or os.getenv("ROBLOSECURITY_COOKIE")
     if cookie:
         s.cookies[".ROBLOSECURITY"] = cookie
     return s
@@ -349,7 +362,9 @@ def run_batch(cur, limit=10):
     if remaining > 0:
         return 0, 0, 0, f"cooling down for {remaining // 60}m {remaining % 60}s"
 
-    s = _session()
+    cookies = _cookie_values()
+    session_idx = 0
+    s = _session(cookies[0] if cookies else None)
 
     # Scan tracked creators first. Discovery is a 34-search burst and used to
     # run on every batch, so a single 429 meant no creator was ever scanned.
@@ -360,10 +375,10 @@ def run_batch(cur, limit=10):
         try:
             discovered = discover_verified(s, keywords=keywords)
         except RateLimited:
-            _set_cooldown(cur, 10)
+            _set_cooldown(cur, 5)
             print("[creator-tracker] rate limited during discovery — stopping",
                   flush=True)
-            return 0, 0, 0, "rate limited — cooling down 10m"
+            return 0, 0, 0, "rate limited — cooling down 5m"
 
         new_creators = ensure_creators(cur, discovered, s)
         cur.connection.commit()
@@ -378,21 +393,31 @@ def run_batch(cur, limit=10):
     upserted = 0
     budget = MAX_REQUESTS
 
-    try:
-        for cid, ctype, _name in batch:
-            items = search_creator(s, cid, ctype or "User")
-            upserted += upsert_items(cur, items)
-            mark_scanned(cur, cid)
-            cur.connection.commit()
-            scanned += 1
-            budget -= MAX_PAGES + 1
-            if budget <= 0:
-                print("[creator-tracker] request budget reached — pausing", flush=True)
-                break
-            time.sleep(DELAY)
-    except RateLimited:
-        _set_cooldown(cur, 10)
-        print("[creator-tracker] rate limited — stopping batch early", flush=True)
-        return scanned, upserted, new_creators, "rate limited — cooling down 10m"
+    for cid, ctype, _name in batch:
+        items = None
+        while items is None:
+            try:
+                items = search_creator(s, cid, ctype or "User")
+            except RateLimited:
+                if session_idx + 1 < len(cookies):
+                    session_idx += 1
+                    s = _session(cookies[session_idx])
+                    print(f"[creator-tracker] rotating to cookie {session_idx + 1}",
+                          flush=True)
+                    continue
+                _set_cooldown(cur, 5)
+                print("[creator-tracker] rate limited on all cookies — stopping",
+                      flush=True)
+                return (scanned, upserted, new_creators,
+                        "rate limited on all cookies — cooling down 5m")
+        upserted += upsert_items(cur, items)
+        mark_scanned(cur, cid)
+        cur.connection.commit()
+        scanned += 1
+        budget -= MAX_PAGES + 1
+        if budget <= 0:
+            print("[creator-tracker] request budget reached — pausing", flush=True)
+            break
+        time.sleep(DELAY + random.uniform(0, 0.8))
 
     return scanned, upserted, new_creators, LAST_ERROR
