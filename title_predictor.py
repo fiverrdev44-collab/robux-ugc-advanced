@@ -308,8 +308,9 @@ def predict_title(cur, title, category_asset_ids=None, auto_train=True):
         raw_score += loaded["weights"].get(name, 0) * feats[name]
 
     normalized = max(0, min(100, (raw_score + 0.5) * 50))
-    data_conf = min(1.0, loaded["n_samples"] / 3000)
-    confidence = round(loaded["accuracy"] * data_conf * 100, 1)
+    # `loaded["accuracy"]` is the in-sample R^2 of the fit, not a validated
+    # accuracy or a probability. It must not be presented as confidence.
+    model_r2 = float(loaded["accuracy"] or 0.0)
 
     if normalized >= 80:
         verdict = "🥇 GOLD"
@@ -325,9 +326,11 @@ def predict_title(cur, title, category_asset_ids=None, auto_train=True):
     return {
         "title": title,
         "score": round(normalized, 1),
-        "confidence": confidence,
+        "confidence": None,
         "verdict": verdict,
         "model_samples": loaded["n_samples"],
-        "model_accuracy": round(loaded["accuracy"] * 100, 1),
+        "model_r2": round(model_r2, 3),
+        "model_fit_is_insample_r2": True,
+        "calibrated": False,
         "raw": feats["_raw"],
     }
