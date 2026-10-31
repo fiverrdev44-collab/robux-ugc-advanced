@@ -29,6 +29,7 @@ from recovery_brain import (
 )
 from category_configs import (
     detect_family_from_asset_type, get_category_config,
+    is_static_prop, strip_prop_words,
 )
 
 from intel_common import (
@@ -909,6 +910,14 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         role = ("You're a Roblox UGC seller who scales a working item."
                 if scale_mode else
                 "You're a Roblox UGC seller who fixes dead items.")
+        prop_rule = ""
+        if is_static_prop(f"{name} {desc or ''}"):
+            prop_rule = (
+                "\n=== STATIC PROP RULE (NON-NEGOTIABLE) ===\n"
+                "This item is a static prop (sign / fence / board / barrier).\n"
+                "NEVER use these words in any title: necklace, chain, backpack,\n"
+                "tail, wing, hat. A sign is a sign, not a necklace.\n"
+            )
         recovery_prompt = f"""{role} Talk like a blunt friend, not a consultant.
 
 === VOICE ===
@@ -953,6 +962,7 @@ FAILURE MODE: {diagnosis['failure_mode']}
 6. Every title MUST end with one of: {type_words_str}
 7. Use ONLY these allow-list words + glue + type words:
    {', '.join(allow_list[:80])}
+{prop_rule}
 8. Every title MUST be UNIQUE.
 9. If CREATOR'S OWN TOP PERFORMERS are listed above, style-match them.
 
@@ -993,6 +1003,17 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
             if not data:
                 await ai_msg.edit(content="⚠️ AI returned nothing. Try again.")
                 return
+
+            # Props must not carry wearable nouns even if the model ignores
+            # the prompt rule.
+            if is_static_prop(f"{name} {desc or ''}"):
+                for _k in ("titles_safe", "titles_differentiated",
+                           "titles_longtail", "titles_viral"):
+                    if isinstance(data.get(_k), list):
+                        data[_k] = [
+                            t for t in (strip_prop_words(x) for x in data[_k])
+                            if len(t.split()) >= 2
+                        ]
 
             try:
                 from gemini_brain import _strip_promo_from_description
