@@ -1,4 +1,4 @@
-# VANTA 73 — Roblox UGC Intelligence Bot
+﻿# VANTA 73 — Roblox UGC Intelligence Bot
 
 A Discord operations bot for Roblox UGC creators: catalog discovery and enrichment, niche
 scoring, verified title/description generation, live marketplace checks, launch tracking,
@@ -81,7 +81,7 @@ allow-listed set of existing command callbacks — it never invents commands or 
 - **Context:** remembers the last item, result list, tracked items, pending action, and the
   last six messages; "it", "this", "the second one", and `1` resolve against that context.
 - **Rate/latency bounds:** at most 20 planner calls per hour per conversation, 30s timeout,
-  ~300 output tokens.
+  ~400 output tokens.
 - **Ownership:** thread names are HMAC-signed with `VANTA_THREAD_SECRET` (falls back to the bot
   token); ownership is checked with `hmac.compare_digest`, so a lookalike thread name is ignored.
   DMs are bound to the DM channel and author.
@@ -115,14 +115,13 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!chain variant <item_id> [theme]` | Variant of a proven winner |
 | `!chain <family>:<concept>` | Family-scoped chain |
 | `!verdict <item_id>` | KEEP / RENAME / KILL with age, favorites, velocity, percentile, live sales, confidence interval |
-| `!autopsy <item_id> [notes]` | Failure diagnosis, peer autopsy, keyword intelligence, recovery titles, live marketplace check, experiment record |
+| `!autopsy <item_id> [notes]` | Scale-vs-recovery routing: sales > 0 or KEEP/DOUBLE_DOWN runs SCALE PROTOCOL; only KILL/RENAME with zero sales runs failure diagnosis, peer autopsy, recovery titles, live check, experiment record |
 | `!revive <item_id>` (alias `revive_item`) | Full rebuild: live stats, niche scan, variant chain, peer autopsy, 14-day plan |
 | `!brainstorm <description>` | AI concept expansion with verified titles |
 | `!rescue <description>` | Rebuild a failing item with verified alternatives |
 | `!analyze_image [notes]` + 1–4 images | Vision → keywords → verified titles and tags |
 | `!creative <seed>` | AI fan-out (20 concepts) + DB demand gate |
 | `!creative_raw <seed>` | Debug view of anchors, raw AI output, parsed concepts |
-| `!desc_forge <[family:]keyword>` | Mine top-seller descriptions and generate a matching one |
 | `!desc_forge <keyword>` | Powerful, style-matched listing description mined from top sellers |
 | `!tags <[family:]name>` | Legacy keyword mining (Roblox removed the tag field; prefer `!desc_forge`) |
 | `!guide [idea]` | Interactive four-section consultation (market, risks, pricing/ROI, titles) |
@@ -162,7 +161,7 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 
 | Command | What it does |
 |---|---|
-| `!sales_report [days]` | Revenue summary and daily trend |
+| `!sales_report [days]` | Sale records and recorded amount with explicit UTC window, asset-mapped vs unresolved coverage, and amount-semantics warning |
 | `!sales_for <item_name>` | Sales for a specific item |
 | `!sales_backfill [limit]` | Import historical sales from the sales channel |
 | `!sales_post_now` | Backfill, then post the 7-day summary |
@@ -300,10 +299,10 @@ bot-side jobs. All times UTC.
 
 | Job | When | Purpose |
 |---|---|---|
-| `scanner.py` | 02:00 (Actions) | Discover catalog items across 6 categories × 6 sorts + learned keywords |
-| `enricher.py` | Manual workflow / `ugc-enrich.service` loop | Fill descriptions, prices, creators, favorites; mark permanent failures |
+| `scanner.py` | 02:00 (Actions) | Discover items via search pages **plus monotonic ID stepping** (30-item batches, `SCANNER_ID_WINDOW`) |
+| `enricher.py` | Manual workflow / `ugc-enrich.service` loop | **30-item batch details** (`roblox_batch_client.py`) with bulk upsert; marks missing/404 IDs as failed |
 | `live_enrich.py` | On demand (library) | Keyword search + detail fetch with rate limits and circuit breaker |
-| `snapshot.py` | 03:30 + top-ups 09:30/15:30/21:30 + catch-up | Favorites history; ledger items always included |
+| `snapshot.py` | 03:30 + top-ups 09:30/15:30/21:30 + catch-up | Favorites history; **tiered half-life selection** (`SNAPSHOT_TIER_LIMIT`, default 1500) |
 | `favorites_backfill.py` | 02:30 | Fill NULL and ambiguous-zero favorites (500/day, ledger first) |
 | `suggest.py` | 04:30/10:30/16:30/22:30 (Actions) | Autocomplete suggestions with rank; DB-mined fallback |
 | `discover_keywords.py` | 05:30 (Actions) | Mine and score keywords from 30k items |
@@ -394,6 +393,9 @@ documented in `MIGRATIONS.md`.
 | `gemini_brain.py` | AI prompts, providers, fallbacks, usage tracking |
 | `category_configs.py`, `intel_common.py`, `launch_ledger.py`, `pivot_history.py` | Shared config, verdict/pivot logic, ledger sync, pivot consistency |
 | `scanner.py`, `enricher.py`, `live_enrich.py`, `snapshot.py` | Crawl and enrich pipeline |
+| `roblox_batch_client.py` | Async 30-item catalog POST client: token bucket, AIMD, jitter backoff, CSRF |
+| `item_resolver.py` | Canonical sale→asset identity (`sales_name_aliases`), confirmed rename fixtures |
+| `reporting.py` | Single definition of UTC reporting windows and amount semantics |
 | `suggest.py`, `discover_keywords.py`, `backfill_dates.py`, `favorites_backfill.py` | Auxiliary data repair and discovery |
 | `sales_listener.py`, `post_monitor.py`, `creator_tracker.py` | Sales ingestion, reporting, creator crawling |
 | `scheduler.py` | In-process jobs (snapshots, training, measurements, watcher) |
@@ -428,19 +430,25 @@ and `title_pipeline.py`, `title_miner.py`, `creative_pivot.py`, `competition_che
 ## Testing
 
 ```
-python test_vanta_conversation.py    # router/planner, pure (no Discord, no DB)
-python test_integrity_upgrades.py    # normalization, DiD math, lane gates, DB idempotency
-python selftest.py                   # full audit (env, schema, freshness, engines, live items)
+python test_vanta_conversation.py        # router/planner, pure (no Discord, no DB)
+python test_integrity_upgrades.py        # normalization, DiD math, lane gates, DB idempotency
+python test_identity_and_windows.py      # alias resolver, frozen sales windows, beanie fixture
+python test_recommendation_lifecycle.py  # application evidence, maturity, rec-10 marker
+python test_shared_repairs.py            # visibility 429, live backoff, batch client, chain fallback, prop gate
+python test_live_roblox_sync.py          # read-only DB-vs-live marketplace sample (writes LIVE_MARKET_AUDIT.md)
+python test_live_advantage.py            # gap/rank/velocity truth check (writes LIVE_ADVANTAGE_AUDIT.md)
+python selftest.py                       # full audit (env, schema, freshness, engines, live items)
 ```
 
-`!selftest` runs the same audit plus a command harness and issues a certificate only when there
-are no hard failures and the effective score is ≥90.
+DB-backed tests skip automatically when `DATABASE_URL` is absent. `!selftest` runs the audit plus a
+command harness and issues a certificate only when there are no hard failures and the effective
+score is ≥90.
 
 ---
 
 ## Setup
 
-Requirements: Python 3.11+ (server runtime 3.11.9; developed on 3.12), PostgreSQL, Discord bot
+Requirements: Python 3.10+ (production runs 3.10.12; developed on 3.12), PostgreSQL, Discord bot
 token, a Gemini or OpenRouter key, and a Roblox cookie for live checks.
 
 ```powershell
@@ -477,6 +485,35 @@ Tuning knobs include `ENRICH_BATCH_SIZE`, `SNAPSHOT_TOP_ITEMS`, `SNAPSHOT_MIN_FA
 
 ---
 
+## Recent updates (2026-10-31)
+
+- **Sales identity:** `sales_name_aliases` with confirmed/candidate/ambiguous/unresolved states; the
+  creator-confirmed rename “Cute Beanie w paws” → “Cute Kitty Fluffy Beanie” resolves to asset
+  `130928797494687` (fixture: 139 records / 4,045 recorded R$). Reports show mapped vs unresolved coverage.
+- **Windows and money:** one half-open UTC window definition (7 days = 7 dates, today partial), and
+  `my_sales.amount_semantics` defaults to `unknown_recorded_amount`. Recorded amount is never called
+  revenue or profit.
+- **Dates:** `launch_ledger.published_at` (catalog creation) and `tracking_started_at` are separate;
+  D1/D7/D30 anchor on `COALESCE(published_at, launched_at)`.
+- **Batch ingestion:** `roblox_batch_client.py` fetches 30 assets per POST (token bucket 90/min, AIMD,
+  full-jitter backoff honouring `Retry-After`, CSRF challenge handling); enricher uses it with bulk upsert.
+- **Scheduling:** snapshot selection uses the tiered half-life CTE (`SNAPSHOT_TIER_LIMIT`, default 1500);
+  scanner adds monotonic ID stepping (`SCANNER_ID_WINDOW`, default 600).
+- **Experiments:** recommendation lifecycle fields, verified-vs-inferred application, maturity states,
+  active-experiment protection, and `insufficient: true` DiD payloads never counted as effects.
+- **Autopsy:** sales ground truth is injected into the AI prompt; sales > 0 or KEEP/DOUBLE_DOWN routes to
+  SCALE PROTOCOL and cannot produce “zero sales”/“KILL”. Static props (sign/fence/board) cannot take
+  wearable nouns (necklace/chain/backpack/tail/wing/hat) in chain or autopsy titles.
+- **Chain:** conversational runs are DB-only with a 600s chat timeout; deterministic intent/title/description
+  fallbacks keep it working when the AI provider is offline; hat type detection uses word boundaries
+  (“that” no longer matches “hat”).
+- **Reliability:** live marketplace calls back off with `Retry-After`; visibility failures now record an
+  error; the title predictor’s stored in-sample R² is reported as `model_r2`, never as confidence.
+- **Docs:** `COMMAND_REPAIR_MATRIX.md`, `LIVE_MARKET_AUDIT.md`, `LIVE_ADVANTAGE_AUDIT.md`, and the
+  rollback notes in `MIGRATIONS.md`.
+
+---
+
 ## Accuracy status (2026-10-23)
 
 Backtest: time-split holdout; 2,500+ launches across emotes, hair, headwear, accessories, clothing.
@@ -504,7 +541,12 @@ Known data gaps:
 ## Honest limitations
 
 - Ranking is not validated for production use; no validated sales/recoup model.
-- Live exact checks sample up to 300 results, not the full catalog.
+- The batch details endpoint returns name, description, price, favorites, creator, and type only —
+  it does **not** refresh `created_at` or `total_sales` (existing values are preserved, not zeroed).
+- Live checks sample up to 300 results, not the full catalog. HTTP 429/400 responses are reported as
+  blocked, never as zero competition.
+- The title predictor's stored metric is in-sample R² (no holdout); it is not a probability and does
+  not rank `!chain`.
 - Descriptions are creative prose; only claims/numbers/internal language are filtered.
 - Description "tags" are not a ranking field — Roblox removed avatar item tags in December 2025,
   so keyword ideas must live in the title and description. Keywords must still share a token
@@ -513,7 +555,7 @@ Known data gaps:
 - Conversational public threads are visible to channel members; use **Private (DM)** for
   sensitive details. Thread ownership is HMAC-verified; the visible user ID alone is not trusted.
 - Conversation context is in-memory with a 24h TTL and resets on restart.
-- The AI planner is bounded: allow-listed actions only, ~300 output tokens, 20 calls/hour per
+- The AI planner is bounded: allow-listed actions only, ~400 output tokens, 20 calls/hour per
   conversation, 30s timeout, deterministic routing first. No mutating operation is routed from
   casual language.
 - Provider-reported token usage is logged per AI call; otherwise an explicit input estimate is
