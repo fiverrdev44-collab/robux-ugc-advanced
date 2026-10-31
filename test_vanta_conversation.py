@@ -451,6 +451,23 @@ def test_pending_chain_offer():
     print("PASS pending chain yes/no")
 
 
+def test_empty_concept_not_chain():
+    state = ConversationState(user_id=1)
+    original = vc._planner_ai
+
+    def fake(text, has_attachment, st):
+        return {"action": "create_ideas", "concept": "an item",
+                "confidence": 0.9}
+
+    vc._planner_ai = fake
+    try:
+        route = asyncio.run(vc.plan_message("do the thing", False, state))
+    finally:
+        vc._planner_ai = original
+    assert route["intent"] != "create_ideas", route
+    print("PASS filler-only concept never starts chain")
+
+
 def test_invalid_intent_rejected():
     assert _intent("run_shell")["intent"] == "clarify"
     assert "run_shell" not in INTENTS
@@ -478,5 +495,6 @@ if __name__ == "__main__":
     test_description_requests()
     test_planner_prompt_renders()
     test_pending_chain_offer()
+    test_empty_concept_not_chain()
     test_invalid_intent_rejected()
     print("ALL TESTS PASSED")

@@ -427,6 +427,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                                concept=clean_concept(text, target), family=family,
                                confidence="high")
         concept = clean_concept(text, item_id)
+        if concept and concept.lower() in _EMPTY_CONCEPTS:
+            concept = None
         if concept:
             return _intent("create_ideas", concept=concept,
                            item_id=item_id, family=family, confidence="medium")
@@ -884,6 +886,8 @@ def _validate_plan(plan, state, has_attachment):
     except (TypeError, ValueError):
         item_id = None
     concept = clean_concept(str(plan.get("concept") or ""))
+    if concept and concept.lower() in _EMPTY_CONCEPTS:
+        concept = None
     family = str(plan.get("family") or "").strip().lower() or None
     if family not in FAMILIES:
         family = None
@@ -976,6 +980,12 @@ def _match_item_by_name(text, state):
 RENAME_RE = re.compile(
     r"\b(?:re-?name|retitle|re-?title|rebrand|re-?brand|"
     r"change\s+(?:its\s+|the\s+)?name)\b(.*)$", re.I)
+
+# Concepts that are just the request itself; they must never seed a chain.
+_EMPTY_CONCEPTS = {
+    "an item", "the item", "item", "my item", "this", "that", "it",
+    "thing", "something", "an item please", "a listing", "listing",
+}
 
 FILLER_RE = re.compile(
     r"^(?:alr|alright|ok|okay|so|hey|yo|hi|hello|um|uh|pls|please|"
