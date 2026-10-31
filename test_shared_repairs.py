@@ -153,6 +153,12 @@ def test_chain_type_detection_word_boundary():
     assert chain._detect_type_override("personal space sign") is None
     assert "belt" in chain._DEFAULT_TYPE_WORDS["waist"]
     assert "hat" not in chain._DEFAULT_TYPE_WORDS["waist"]
+
+    titles = chain._fallback_titles(text, "waist")
+    assert all(len(t) <= 50 for t in titles)
+    assert any("Belt" in t for t in titles)
+    assert all("Hat" not in t for t in titles)
+    assert "Accessory" not in titles[0]  # short core, no vision boilerplate
     print("PASS chain type detection uses word boundaries")
 
 

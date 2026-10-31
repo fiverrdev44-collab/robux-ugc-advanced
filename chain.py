@@ -80,12 +80,35 @@ def _detect_type_override(concept):
 _FALLBACK_STOP = {
     "the", "a", "an", "for", "with", "and", "of", "to", "my", "your",
     "new", "best", "top", "roblox", "ugc", "item", "items", "cute",
-    "aesthetic", "trendy", "viral",
+    "aesthetic", "trendy", "viral", "featuring", "feature", "features",
+    "that", "this", "these", "those", "read", "reads", "signs", "consists",
+    "made", "looks", "look", "very", "really", "which", "who", "it",
 }
+
+
+def _short_concept(text, max_words=4):
+    """Extract a short, title-safe core from a long vision description."""
+    words = []
+    for w in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if len(w) < 3 or w in _FALLBACK_STOP:
+            continue
+        if w not in words:
+            words.append(w)
+    return " ".join(words[:max_words])
+
+
+def _truncate_words(text, limit=50):
+    out = ""
+    for word in (text or "").split():
+        candidate = f"{out} {word}".strip()
+        if len(candidate) > limit:
+            break
+        out = candidate
+    return out or (text or "")[:limit]
 
 _TYPE_WORD = {
     "emotes": "Emote", "headwear": "Hat", "hair": "Hair", "face": "Face",
-    "neck": "Necklace", "waist": "Waist", "front": "Chest", "back": "Back",
+    "neck": "Necklace", "waist": "Belt", "front": "Chest", "back": "Back",
     "shoulder": "Shoulder", "classic": "Classic", "tops": "Top",
     "clothing": "Outfit", "gear": "Gear",
 }
@@ -94,8 +117,7 @@ _TYPE_WORD = {
 def _fallback_intent(concept):
     """Deterministic intent used when the AI provider is unavailable."""
     text = (concept or "").strip().lower()
-    words = [w for w in re.findall(r"[a-z0-9]+", text)
-             if len(w) >= 2 and w not in _FALLBACK_STOP]
+    words = _short_concept(concept, 8).split()
     fam = ""
     if any(w in words for w in ("emote", "dance", "animation")):
         fam = "emote"
@@ -119,8 +141,7 @@ def _fallback_intent(concept):
 
 def _fallback_titles(concept, family, n=8):
     """Deterministic, verification-friendly titles from the raw concept."""
-    base = " ".join(w.capitalize() for w in re.findall(r"[a-z0-9]+",
-                                                       (concept or "").lower()))
+    base = " ".join(w.capitalize() for w in _short_concept(concept, 3).split())
     base = base or "New Item"
     type_word = _TYPE_WORD.get(family, "Item")
 
@@ -156,7 +177,7 @@ def _fallback_titles(concept, family, n=8):
         ]
     out, seen = [], set()
     for v in variants:
-        v = " ".join(_dedupe_words(v).split())[:50]
+        v = _truncate_words(_dedupe_words(v), 50)
         if v.lower() not in seen:
             seen.add(v.lower())
             out.append(v)
@@ -164,7 +185,8 @@ def _fallback_titles(concept, family, n=8):
 
 
 def _fallback_description(concept, family):
-    base = " ".join((concept or "").split()).strip().title() or "New Item"
+    base = " ".join(w.capitalize() for w in _short_concept(concept, 4).split())
+    base = base or "New Item"
     type_word = _TYPE_WORD.get(family, "Item")
     has_type = type_word.lower() in [w.lower() for w in base.split()]
     head = base if has_type else f"{base} {type_word}"
