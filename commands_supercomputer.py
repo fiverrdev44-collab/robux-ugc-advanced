@@ -576,9 +576,14 @@ def register_supercomputer_commands(bot):
                 for w in set(toks(name)):
                     top_tokens[w] = top_tokens.get(w, 0) + 1
 
-            # Suggestions relevant to the niche terms.
+            # Suggestions relevant to the niche terms. Generic modifiers such
+            # as "cute" cannot define the niche, otherwise "cute pants" becomes
+            # an "emote" gap.
+            from gap_engine import (is_cross_family_type_word,
+                                    specific_niche_terms)
             niche_terms = [t for t in niche.split() if len(t) >= 3]
-            pats = [f"%{t}%" for t in niche_terms] or [f"%{niche}%"]
+            match_terms = specific_niche_terms(niche_terms) or [niche]
+            pats = [f"%{t}%" for t in match_terms]
             cur.execute("""
                 SELECT suggestion, COUNT(*) AS n
                 FROM search_suggestions
@@ -605,6 +610,10 @@ def register_supercomputer_commands(bot):
             for w, sugg_count in sorted(cand.items(), key=lambda x: -x[1])[:60]:
                 # 1-2 suggestions is noise, not demand.
                 if sugg_count < 3:
+                    continue
+                # Never propose another family's type noun (e.g. "pants" for
+                # emotes), even if a few unrelated items happen to contain it.
+                if is_cross_family_type_word(w, fam or ""):
                     continue
                 coverage = top_tokens.get(w, 0)
                 if coverage > 3:

@@ -19,6 +19,56 @@ FILLER = {
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Modifiers that describe any item and must not define a niche on their own.
+GENERIC_NICHE_MODIFIERS = {
+    "cute", "aesthetic", "funny", "cool", "trendy", "viral", "hot",
+    "best", "new", "kawaii", "pretty", "soft", "nice", "good",
+}
+
+_FAMILY_ALIAS = {"emotes": "emote", "hats": "headwear", "hat": "headwear"}
+
+
+def family_for_asset_ids(asset_ids):
+    """Map a family asset-id list back to a convergence family name."""
+    try:
+        from convergence_engine import FAMILIES
+    except Exception:
+        return None
+    ids = set(asset_ids or [])
+    if not ids:
+        return None
+    for fam, vals in FAMILIES.items():
+        if set(vals) == ids:
+            return fam
+    return None
+
+
+def is_cross_family_type_word(word, family):
+    """True when `word` is a type noun belonging to another family.
+
+    Prevents clothing nouns ("pants") from being proposed as gaps for emotes.
+    """
+    word = (word or "").strip().lower()
+    if not word or not family:
+        return False
+    try:
+        from category_configs import get_all_type_words, get_type_words_for
+    except Exception:
+        return False
+    fam = _FAMILY_ALIAS.get(str(family).lower(), str(family).lower())
+    own = set(get_type_words_for(fam))
+    if not own:
+        return False
+    other = set(get_all_type_words()) - own
+    return word in other
+
+
+def specific_niche_terms(terms):
+    """Drop generic modifiers so 'cute pants' cannot define 'cute emote'."""
+    words = [t for t in (terms or []) if t]
+    strong = [t for t in words if t.lower() not in GENERIC_NICHE_MODIFIERS]
+    return strong or words
+
 
 def _tokens(text):
     return TOKEN_RE.findall((text or "").lower())
@@ -90,6 +140,13 @@ def find_candidate_terms(cur, user_terms, max_scan=4000, asset_ids=None):
     for t, c in unigrams.items():
         if t not in merged:
             merged[t] = c
+
+    if asset_ids:
+        fam = family_for_asset_ids(asset_ids)
+        if fam:
+            for t in list(merged):
+                if any(is_cross_family_type_word(tok, fam) for tok in t.split()):
+                    del merged[t]
 
     return merged, rows
 

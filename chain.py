@@ -57,6 +57,102 @@ def _detect_type_override(concept):
     return None
 
 
+_FALLBACK_STOP = {
+    "the", "a", "an", "for", "with", "and", "of", "to", "my", "your",
+    "new", "best", "top", "roblox", "ugc", "item", "items", "cute",
+    "aesthetic", "trendy", "viral",
+}
+
+_TYPE_WORD = {
+    "emotes": "Emote", "headwear": "Hat", "hair": "Hair", "face": "Face",
+    "neck": "Necklace", "waist": "Waist", "front": "Chest", "back": "Back",
+    "shoulder": "Shoulder", "classic": "Classic", "tops": "Top",
+    "clothing": "Outfit", "gear": "Gear",
+}
+
+
+def _fallback_intent(concept):
+    """Deterministic intent used when the AI provider is unavailable."""
+    text = (concept or "").strip().lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", text)
+             if len(w) >= 2 and w not in _FALLBACK_STOP]
+    fam = ""
+    if any(w in words for w in ("emote", "dance", "animation")):
+        fam = "emote"
+    elif any(w in words for w in ("hat", "beanie", "cap", "crown", "beret")):
+        fam = "headwear"
+    elif any(w in words for w in ("hair", "bangs", "ponytail")):
+        fam = "hair"
+    primary = words[:3] or ["item"]
+    return {
+        "primary": primary,
+        "synonyms": [],
+        "style": [],
+        "vibe": [],
+        "colors": [],
+        "references": [],
+        "specific_moves": words[3:6],
+        "title_verbs": [],
+        "item_type": fam,
+    }
+
+
+def _fallback_titles(concept, family, n=8):
+    """Deterministic, verification-friendly titles from the raw concept."""
+    base = " ".join(w.capitalize() for w in re.findall(r"[a-z0-9]+",
+                                                       (concept or "").lower()))
+    base = base or "New Item"
+    type_word = _TYPE_WORD.get(family, "Item")
+
+    def _dedupe_words(text):
+        out = []
+        for w in text.split():
+            if not out or out[-1].lower() != w.lower():
+                out.append(w)
+        return " ".join(out)
+
+    has_type = type_word.lower() in [w.lower() for w in base.split()]
+    if has_type:
+        variants = [
+            base,
+            f"Cute {base}",
+            f"{base} Aesthetic",
+            f"Trendy {base}",
+            f"{base} for Girls",
+            f"{base} for Boys",
+            f"Viral {base}",
+            f"{base} Kawaii",
+        ]
+    else:
+        variants = [
+            f"{base} {type_word}",
+            f"Cute {base} {type_word}",
+            f"{base} {type_word} Aesthetic",
+            f"Trendy {base} {type_word}",
+            f"{base} {type_word} for Girls",
+            f"{base} {type_word} for Boys",
+            f"Viral {base} {type_word}",
+            f"{base} Kawaii {type_word}",
+        ]
+    out, seen = [], set()
+    for v in variants:
+        v = " ".join(_dedupe_words(v).split())[:50]
+        if v.lower() not in seen:
+            seen.add(v.lower())
+            out.append(v)
+    return out[:n]
+
+
+def _fallback_description(concept, family):
+    base = " ".join((concept or "").split()).strip().title() or "New Item"
+    type_word = _TYPE_WORD.get(family, "Item")
+    has_type = type_word.lower() in [w.lower() for w in base.split()]
+    head = base if has_type else f"{base} {type_word}"
+    return (f"{head}\n"
+            f"Made for {base.lower()} fans.\n"
+            f"Perfect for your next avatar look.")
+
+
 def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     from gemini_brain import (
         extract_keywords, all_terms, synthesize_hybrid, _generate
@@ -96,10 +192,16 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         except Exception as e:
             print(f"[chain] parent load failed: {e}", flush=True)
 
-    # ── Stage 1: Intent ──
-    intent = extract_keywords(concept)
+    # ── Stage 1: Intent (AI, with deterministic fallback) ──
+    try:
+        intent = extract_keywords(concept)
+    except Exception as e:
+        print(f"[chain] keyword extraction failed: {type(e).__name__}: {e}",
+              flush=True)
+        intent = None
     if not intent:
-        return {"error": "Intent extraction failed. Try a clearer description."}
+        intent = _fallback_intent(concept)
+        print("[chain] using deterministic intent fallback", flush=True)
 
     raw_family = family or intent.get("item_type", "unknown")
     if family and family in FAMILIES:
@@ -454,6 +556,9 @@ OUTPUT — ONLY JSON:
         for k in ("titles_safe", "titles_differentiated",
                   "titles_longtail", "titles_viral"):
             all_titles.extend(synth.get(k) or [])
+        if not all_titles:
+            all_titles = _fallback_titles(concept, family)
+            print("[chain] using deterministic title fallback", flush=True)
         if all_titles:
             scored_titles = score_titles_batch(all_titles, family=family)
     except Exception as e:
@@ -504,6 +609,8 @@ OUTPUT — ONLY JSON:
             if not ln.strip().lower().startswith(("tags:", "tags "))
         ]
         merged_description = "\n".join(ai_body_lines).strip() or None
+        if not merged_description:
+            merged_description = _fallback_description(concept, family)
 
         description_audit = {
             "primary_keyword": (

@@ -5,6 +5,7 @@ to show what the live search returns. It is a first-page sample (30 results),
 not a full catalog count.
 """
 import re
+import time
 
 import requests
 
@@ -29,6 +30,36 @@ def _tokens(text):
             if w not in CONCEPT_STOP and len(w) >= 2]
 
 
+def _get_with_backoff(url, params, max_attempts=3):
+    """GET with exponential backoff that honours Retry-After on 429."""
+    resp = None
+    for attempt in range(max_attempts):
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        if resp.status_code != 429:
+            return resp
+        if attempt == max_attempts - 1:
+            return resp
+        wait = 2 ** attempt
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                wait = float(retry_after)
+            except (TypeError, ValueError):
+                pass
+        time.sleep(min(max(wait, 1.0), 60.0))
+    return resp
+
+
+def fetch_csrf_token(session, url):
+    """Fetch an X-CSRF-TOKEN for POST endpoints.
+
+    The catalog search used here is a GET and does not need CSRF; this helper
+    exists for any future POST call that requires it.
+    """
+    resp = session.post(url, headers=HEADERS, timeout=12)
+    return resp.headers.get("X-CSRF-TOKEN")
+
+
 def check_title(title, limit=30, max_pages=10):
     title = (title or "").strip()
     if not title:
@@ -40,8 +71,7 @@ def check_title(title, limit=30, max_pages=10):
                       "SortType": "Relevance"}
             if cursor:
                 params["Cursor"] = cursor
-            r = requests.get(SEARCH_URL, params=params,
-                             headers=HEADERS, timeout=12)
+            r = _get_with_backoff(SEARCH_URL, params)
             pages += 1
             if r.status_code == 429:
                 if rows:
