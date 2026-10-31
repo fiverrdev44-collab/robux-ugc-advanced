@@ -162,6 +162,39 @@ def test_chain_type_detection_word_boundary():
     print("PASS chain type detection uses word boundaries")
 
 
+def test_autopsy_sales_ground_truth():
+    import recovery_brain as rb
+    assert rb.choose_protocol("KEEP", 3) == "scale"
+    assert rb.choose_protocol("KILL", 3) == "scale"
+    assert rb.choose_protocol("KILL", 0) == "recovery"
+    body = rb.format_scale_protocol("KEEP", 3, {"favs": 11, "age_days": 182.0,
+                                                "price": 65})
+    low = body.lower()
+    assert "keep" in low
+    assert "zero sales" not in low and "no sales" not in low
+    assert "kill" not in low
+    guard = rb.sales_guard_instruction(3)
+    assert "total_sales_30d = 3" in guard and "FORBIDDEN" in guard
+    print("PASS autopsy sales ground truth")
+
+
+def test_static_prop_title_gate():
+    from category_configs import is_static_prop
+    import chain
+    concept = "waist: wooden fence sign with personal space planks"
+    assert is_static_prop(concept)
+    raw = ["Cyber Board Necklace", "Cardboard Sign Chain",
+           "Wooden Fence Sign", "Personal Space Necklace"]
+    cleaned = chain._sanitize_titles(raw)
+    text = " ".join(cleaned).lower()
+    assert "necklace" not in text and "chain" not in text
+    assert cleaned
+    titles = chain._fallback_titles(concept, "waist")
+    assert all("necklace" not in t.lower() and "chain" not in t.lower()
+               for t in chain._sanitize_titles(titles))
+    print("PASS static prop title gate")
+
+
 if __name__ == "__main__":
     test_fetch_query_429_sets_error()
     test_fetch_query_empty_is_completed()
@@ -170,4 +203,6 @@ if __name__ == "__main__":
     test_chain_fallback_without_ai()
     test_batch_client_chunks_and_backoff()
     test_chain_type_detection_word_boundary()
+    test_autopsy_sales_ground_truth()
+    test_static_prop_title_gate()
     print("ALL SHARED REPAIR TESTS PASSED")

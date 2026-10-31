@@ -540,3 +540,39 @@ def fetch_created_date_live(item_id, cookie=None):
         return datetime.fromisoformat(created_str)
     except Exception:
         return None
+
+
+def choose_protocol(verdict, total_sales_30d):
+    """SCALE when the item sells or the verdict is keep/grow."""
+    sales = int(total_sales_30d or 0)
+    if sales > 0 or (verdict or "").upper() in ("KEEP", "DOUBLE_DOWN", "TOO_NEW"):
+        return "scale"
+    return "recovery"
+
+
+def format_scale_protocol(verdict, total_sales_30d, item_stats):
+    favs = (item_stats or {}).get("favs", 0)
+    age = (item_stats or {}).get("age_days", 0) or 0
+    return (
+        "# SCALE PROTOCOL - this item is selling\n"
+        f"**Verdict:** {verdict or 'KEEP'}\n"
+        f"**Sales (30d):** {int(total_sales_30d or 0)}\n"
+        f"**Favorites:** {favs} - **Age:** {float(age):.1f} days\n\n"
+        "Sales present. Do not run the failure protocol.\n"
+        "- Make 1-2 variants of this concept (same format, new theme).\n"
+        "- Keep the current title and price.\n"
+        "- Re-check sales in 14 days and scale the best variant.\n"
+    )
+
+
+def sales_guard_instruction(total_sales_30d):
+    """Hard prompt rule so the AI cannot claim zero sales when sales exist."""
+    sales = int(total_sales_30d or 0)
+    if sales <= 0:
+        return ""
+    return (
+        "\n=== SALES GROUND TRUTH (AUTHORITATIVE) ===\n"
+        f"total_sales_30d = {sales}. This item HAS sales.\n"
+        "FORBIDDEN: the phrases 'zero sales', 'no sales', 'failure', 'kill'.\n"
+        "Recommend scaling or variant testing. Never recommend killing it.\n"
+    )

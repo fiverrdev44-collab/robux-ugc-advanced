@@ -519,3 +519,26 @@ def get_all_type_words():
 
 def get_category_label(item_type_or_family):
     return get_category_config(item_type_or_family).get("label", "UGC")
+
+import re
+
+# ── Static prop semantics (prevents wearable nouns on props) ──
+STATIC_PROP_WORDS = {
+    "sign", "signs", "fence", "picket", "board", "barrier", "poster",
+    "banner", "stand", "prop", "plank", "plaque", "billboard", "notice",
+}
+
+PROP_FORBIDDEN_WORDS = ("necklace", "chain", "backpack", "tail", "wing", "hat")
+
+
+def is_static_prop(text):
+    """True when the concept describes a static prop rather than a wearable."""
+    words = set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+    return bool(words & STATIC_PROP_WORDS)
+
+
+def strip_prop_words(title, forbidden=None):
+    """Remove wearable nouns from a prop title, preserving word order."""
+    banned = {w.lower() for w in (forbidden or PROP_FORBIDDEN_WORDS)}
+    parts = [w for w in (title or "").split() if w.lower().strip(".,!?") not in banned]
+    return " ".join(parts).strip()

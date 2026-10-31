@@ -22,6 +22,21 @@ import json
 import asyncio
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
+from category_configs import is_static_prop, strip_prop_words
+
+
+def _sanitize_titles(titles):
+    """Strip wearable nouns from prop titles; drop empties/duplicates."""
+    out, seen = [], set()
+    for t in titles or []:
+        cleaned = strip_prop_words(t)
+        if len(cleaned.split()) < 2:
+            continue
+        key = cleaned.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(cleaned)
+    return out
 
 
 _FAMILY_MAP = {
@@ -442,6 +457,14 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     except Exception as e:
         print(f"[chain] synth failed: {e}", flush=True)
 
+    # Static props (sign/fence/board) must never take wearable nouns.
+    if is_static_prop(concept):
+        for _k in ("titles_safe", "titles_differentiated",
+                   "titles_longtail", "titles_viral"):
+            if synth.get(_k):
+                synth[_k] = _sanitize_titles(synth[_k])
+        print("[chain] static prop gate applied", flush=True)
+
     # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
@@ -520,6 +543,13 @@ OUTPUT — ONLY JSON:
                         synth[key] = focused_data[key]
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
+
+    # The focused pass can reintroduce wearable nouns; re-apply the gate.
+    if is_static_prop(concept):
+        for _k in ("titles_safe", "titles_differentiated",
+                   "titles_longtail", "titles_viral"):
+            if synth.get(_k):
+                synth[_k] = _sanitize_titles(synth[_k])
 
     # ── Stage 10b: Staged verification ──
     verification_audit = None
@@ -605,6 +635,8 @@ OUTPUT — ONLY JSON:
         if not all_titles:
             all_titles = _fallback_titles(concept, family)
             print("[chain] using deterministic title fallback", flush=True)
+        if is_static_prop(concept):
+            all_titles = _sanitize_titles(all_titles)
         if all_titles:
             scored_titles = score_titles_batch(all_titles, family=family)
     except Exception as e:

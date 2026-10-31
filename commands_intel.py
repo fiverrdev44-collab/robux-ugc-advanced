@@ -21,6 +21,7 @@ from oracle import (forecast_trend, format_oracle_forecast,
 from opportunity_feed import build_daily_feed, format_daily_feed
 from recovery_brain import (
     detect_failure_mode, format_recovery_report,
+    choose_protocol, format_scale_protocol, sales_guard_instruction,
     fetch_user_sales, enrich_item_stats_with_sales,
     fetch_item_from_roblox, save_item_to_db,
     save_item_and_created_at, fetch_created_date_live,
@@ -555,6 +556,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             print(f"[autopsy] pivot picker failed: {e}", flush=True)
 
         # ── DECISION LINE ─────────────────
+        verdict = "UNKNOWN"
         if pct_data:
             sales_30d = 0
             try:
@@ -648,7 +650,22 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception as e:
             print(f"[autopsy] niche intel failed: {e}", flush=True)
 
-        diagnosis = detect_failure_mode(item_stats)
+        sales_lifetime = sales_30d
+        try:
+            from sales_listener import item_sales_summary
+            si_all = item_sales_summary(name, days=3650)
+            if si_all:
+                sales_lifetime = max(sales_lifetime, int(si_all["units"] or 0))
+        except Exception as e:
+            print(f"[autopsy] lifetime sales fetch failed: {e}", flush=True)
+        effective_sales = max(sales_30d, sales_lifetime)
+        item_stats["sales"] = effective_sales
+        scale_mode = choose_protocol(verdict, effective_sales) == "scale"
+        if scale_mode:
+            diagnosis = {"failure_mode": "healthy", "severity": "none",
+                         "message": "Sales present - scale protocol."}
+        else:
+            diagnosis = detect_failure_mode(item_stats)
         try: await progress.delete()
         except Exception: pass
 
@@ -663,7 +680,10 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         )
         await ctx.send(header)
 
-        body = format_recovery_report(diagnosis, item_stats, show_sales=False)
+        if scale_mode:
+            body = format_scale_protocol(verdict, effective_sales, item_stats)
+        else:
+            body = format_recovery_report(diagnosis, item_stats, show_sales=False)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900]); await asyncio.sleep(0.3)
 
@@ -886,24 +906,30 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             )
         pivot_hint = "".join(hint_parts)
 
-        recovery_prompt = f"""You're a Roblox UGC seller who fixes dead items. Talk like a blunt friend, not a consultant.
+        role = ("You're a Roblox UGC seller who scales a working item."
+                if scale_mode else
+                "You're a Roblox UGC seller who fixes dead items.")
+        recovery_prompt = f"""{role} Talk like a blunt friend, not a consultant.
 
 === VOICE ===
 Short sentences. Plain words. Say the number, then the move.
 Never use "leverage", "signaling", "landscape", "optimal", "capture buyer intent",
 "demonstrates", "vastly outperforms", "necessary to". No report-speak.
 
-=== THE FAILING ITEM ===
+=== THE ITEM ===
 Current name: {name}
 Creator description: {desc or '(none)'}
 Category family: {cfg['label']}
 Current favs: {item_stats['favs']}
 Current sales: {item_stats['sales']}
+Total sales (30d): {sales_30d}
+Total sales (lifetime): {sales_lifetime}
 Price: R${item_stats['price']}
 Age: {item_stats['age_days']:.1f} days
 Winner median in niche: {item_stats['winner_median_favs']:,} favs
 
 FAILURE MODE: {diagnosis['failure_mode']}
+{sales_guard_instruction(effective_sales)}
 
 === 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {intel_block}
