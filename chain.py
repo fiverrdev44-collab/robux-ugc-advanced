@@ -48,11 +48,31 @@ def _map_family(label):
     return _FAMILY_MAP.get(l, "hair")
 
 
+_HAT_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _HAT_WORDS) + r")\b", re.I)
+
+_DEFAULT_TYPE_WORDS = {
+    "emotes": "emote, dance, animation",
+    "headwear": "hat, beanie, cap, beret",
+    "hair": "hair, bangs, ponytail",
+    "face": "mask, glasses, face",
+    "neck": "necklace, chain",
+    "waist": "belt, waist, chain, bag",
+    "back": "wings, cape, backpack",
+    "shoulder": "shoulder accessory",
+    "front": "chest accessory",
+    "classic": "shirt, pants",
+    "tops": "shirt, top",
+    "clothing": "outfit, clothing",
+    "gear": "gear, accessory",
+}
+
+
 def _detect_type_override(concept):
+    # Word-boundary match: "that" must not be read as the hat type word.
     if not concept:
         return None
-    c = concept.lower()
-    if any(w in c for w in _HAT_WORDS):
+    if _HAT_PATTERN.search(concept):
         return "hat"
     return None
 
@@ -216,6 +236,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     type_override = _detect_type_override(concept)
     if parent_name and not type_override:
         type_override = _detect_type_override(parent_name)
+    # An explicit non-headwear family wins: a waist item is never a hat.
+    if type_override == "hat" and family not in ("headwear", "hair"):
+        type_override = None
 
     # ── Stage 2: Niche pre-check ──
     niche_data = []
@@ -400,10 +423,11 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
-        if type_override == "hat":
+        if type_override == "hat" and family in ("headwear", "hair"):
             type_words = "hat, beanie, cap, beret, crown, visor"
         else:
-            type_words = ", ".join(cfg.get("type_words", [])[:6]) or "hat, beanie"
+            type_words = (", ".join(cfg.get("type_words", [])[:6])
+                          or _DEFAULT_TYPE_WORDS.get(family, "accessory"))
 
         archetypes = "\n".join(
             f"- {a}" for a in cfg.get("title_archetypes", [])[:5]

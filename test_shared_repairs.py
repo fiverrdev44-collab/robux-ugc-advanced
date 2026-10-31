@@ -143,6 +143,19 @@ def test_batch_client_chunks_and_backoff():
     print("PASS batch client 30-item chunking and Retry-After")
 
 
+def test_chain_type_detection_word_boundary():
+    import chain
+    # "that" must not match the hat type word "hat".
+    text = ("A 3D wooden picket fence accessory featuring signs that read "
+            "'i need personal space!'")
+    assert chain._detect_type_override(text) is None, text
+    assert chain._detect_type_override("cute beanie") == "hat"
+    assert chain._detect_type_override("personal space sign") is None
+    assert "belt" in chain._DEFAULT_TYPE_WORDS["waist"]
+    assert "hat" not in chain._DEFAULT_TYPE_WORDS["waist"]
+    print("PASS chain type detection uses word boundaries")
+
+
 if __name__ == "__main__":
     test_fetch_query_429_sets_error()
     test_fetch_query_empty_is_completed()
@@ -150,4 +163,5 @@ if __name__ == "__main__":
     test_live_market_backoff_honours_retry_after()
     test_chain_fallback_without_ai()
     test_batch_client_chunks_and_backoff()
+    test_chain_type_detection_word_boundary()
     print("ALL SHARED REPAIR TESTS PASSED")
