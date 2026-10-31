@@ -90,6 +90,8 @@ def _fetch_query(session, query, max_pages=MAX_PAGES):
                 error = f"HTTP {response.status_code}"
                 break
             time.sleep(2 ** attempt)
+        if response is not None and response.status_code == 429:
+            error = "HTTP 429 rate limited"
         if response is None or response.status_code != 200:
             status = "failed" if not rows else "partial"
             break
