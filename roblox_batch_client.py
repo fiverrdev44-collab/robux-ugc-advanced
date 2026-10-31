@@ -120,8 +120,14 @@ class RobloxBatchClient:
                     ) as resp:
                         if resp.status == 200:
                             data = (await resp.json(content_type=None) or {}).get("data")
+                            data = data or []
                             self._aimd_success()
-                            return data or [], failed
+                            requested = {int(i) for i in ids}
+                            returned = {int(d.get("id"))
+                                        for d in data if d.get("id")}
+                            for missing in requested - returned:
+                                failed[missing] = "not found (batch)"
+                            return data, failed
                         if resp.status == 403:
                             # CSRF challenge: capture the token and retry.
                             token = resp.headers.get("X-CSRF-TOKEN")
