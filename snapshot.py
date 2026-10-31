@@ -160,28 +160,37 @@ def _snapshot_top_items_inner():
     conn = get_db_connection()
     cur = conn.cursor()
 
+    # Tiered half-life selection. `last_updated_at` is the freshest observed
+    # timestamp we store (fetched_at, else updated_at). Active ledger items and
+    # very new items are always tier 0; the rest decay by age/velocity.
+    tier_limit = int(os.getenv("SNAPSHOT_TIER_LIMIT", "1500"))
     cur.execute("""
-        SELECT i.id, i.favorite_count, i.total_sales, i.price
-        FROM items i
-        WHERE (
-                i.favorite_count >= %s
-                OR EXISTS (
-                    SELECT 1 FROM launch_ledger l
-                    WHERE l.item_id = i.id
-                )
-              )
-          AND NOT EXISTS (
-              SELECT 1 FROM item_history h
-              WHERE h.item_id = i.id
-                AND h.snapshot_at >= CURRENT_DATE
-          )
-        ORDER BY
-          CASE WHEN EXISTS (
-              SELECT 1 FROM launch_ledger l WHERE l.item_id = i.id
-          ) THEN 0 ELSE 1 END,
-          i.favorite_count DESC NULLS LAST
+        WITH ranked_items AS (
+            SELECT id, total_sales, price, favorite_count, created_at,
+                   COALESCE(fetched_at, updated_at) AS last_updated_at,
+                CASE
+                    WHEN id IN (SELECT item_id FROM launch_ledger)
+                      OR created_at > NOW() - INTERVAL '3 days'
+                      OR (COALESCE(favorite_count, 0) > 1000
+                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '2 hours')
+                        THEN 0
+                    WHEN (COALESCE(favorite_count, 0) BETWEEN 100 AND 1000
+                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '8 hours')
+                      OR (created_at > NOW() - INTERVAL '14 days'
+                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '6 hours')
+                        THEN 1
+                    WHEN COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '7 days'
+                        THEN 2
+                    ELSE 99
+                END AS tier
+            FROM items
+        )
+        SELECT id, total_sales, price
+        FROM ranked_items
+        WHERE tier < 99
+        ORDER BY tier ASC, last_updated_at ASC NULLS FIRST
         LIMIT %s
-    """, (MIN_FAVS, TOP_ITEMS_LIMIT))
+    """, (tier_limit,))
     rows = cur.fetchall()
     log(f"📊 Found {len(rows)} items to snapshot.")
 
@@ -191,7 +200,7 @@ def _snapshot_top_items_inner():
         return True
 
     log(f"🔄 Fetching with {TOTAL_WORKERS} workers, {DELAY}s delay...")
-    id_to_data = {r[0]: {"total_sales": r[2], "price": r[3]} for r in rows}
+    id_to_data = {r[0]: {"total_sales": r[1], "price": r[2]} for r in rows}
     ids = list(id_to_data.keys())
 
     fresh_favs = {}

@@ -351,6 +351,66 @@ def build_all_queries():
     return queries
 
 
+def scan_id_window(cur, count=600):
+    """Monotonic ID stepping: probe the next asset-ID window in 30-item batches.
+
+    Roblox asset IDs increase over time, so walking forward from the highest
+    known ID finds new catalog items without search pagination. Valid metadata
+    is upserted directly; the cursor is persisted so empty windows advance.
+    """
+    from roblox_batch_client import fetch_id_window_sync
+
+    cur.execute("select coalesce(max(id), 0) from items")
+    max_items = int(cur.fetchone()[0] or 0)
+    cur.execute("select coalesce(max(id), 0) from discovered_items")
+    max_disc = int(cur.fetchone()[0] or 0)
+    cur.execute("select pattern_value from creator_patterns where pattern_key = %s",
+                ("scanner_id_cursor",))
+    row = cur.fetchone()
+    cursor = int(row[0]) if row and str(row[0]).isdigit() else 0
+    start = max(max_items, max_disc, cursor, MIN_VALID_ID - 1) + 1
+    count = max(30, min(int(count), 3000))
+
+    found, failed = fetch_id_window_sync(start, count, max_batch=30,
+                                         rate_per_min=90, max_concurrency=3)
+    rows = []
+    for iid, d in found.items():
+        if not is_valid_asset_id(iid):
+            continue
+        favs = d.get("favorite_count")
+        rows.append((
+            iid, (d.get("name") or "")[:500], favs, d.get("price") or 0,
+            (d.get("description") or "")[:5000],
+            (d.get("creator_name") or "")[:200],
+            d.get("asset_type_id") or 0,
+            ("known" if favs is not None else "missing"),
+        ))
+    if rows:
+        execute_values(cur, """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, asset_type_id, favorite_status,
+                               fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """, rows, template="(%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)")
+
+    cur.execute("""
+        INSERT INTO creator_patterns (pattern_key, pattern_value, updated_at)
+        VALUES (%s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (pattern_key) DO UPDATE SET
+            pattern_value = EXCLUDED.pattern_value,
+            updated_at = CURRENT_TIMESTAMP
+    """, ("scanner_id_cursor", str(start + count - 1)))
+    return start, len(rows), len(failed)
+
+
 def run_scanner():
     log("🚀 Scanner started.")
     setup_database()
@@ -404,6 +464,22 @@ def run_scanner():
     cur.close()
     conn.close()
     log(f"✅ Inserted {new_count} NEW item IDs.")
+
+    # ── ID stepping supplement (30-item batches) ──
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        start, found_n, failed_n = scan_id_window(
+            cur, count=int(os.getenv("SCANNER_ID_WINDOW", "600")))
+        conn.commit()
+        log(f"🪜 ID window from {start}: {found_n} valid, "
+            f"{failed_n} invalid/blocked")
+    except Exception as e:
+        conn.rollback()
+        log(f"⚠️ ID stepping failed: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
 
 if __name__ == "__main__":

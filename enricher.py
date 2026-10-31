@@ -3,6 +3,7 @@ import requests
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 
 COOKIES = []
@@ -173,9 +174,7 @@ def enrich_items():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    for s in SESSIONS:
-        get_csrf_token(s)
-    log(f"🔐 CSRF tokens fetched for {len(SESSIONS)} session(s).")
+    # Batch client handles CSRF internally; per-session warm-up no longer needed.
 
     if REFRESH_EXISTING:
         log("🔄 REFRESH MODE")
@@ -204,35 +203,17 @@ def enrich_items():
         log("✅ Nothing to enrich.")
         return
 
-    log(f"🔧 Enriching {len(ids)} items with {len(SESSIONS)} cookie(s)...")
+    log(f"🔧 Enriching {len(ids)} items in 30-item batches...")
     start = time.time()
 
-    slices = [[] for _ in SESSIONS]
-    for i, iid in enumerate(ids):
-        slices[i % len(SESSIONS)].append(iid)
+    from roblox_batch_client import fetch_many_items_sync
+    raw_results, failed_ids = fetch_many_items_sync(
+        ids, max_batch=30, rate_per_min=90, max_concurrency=3
+    )
+    results = {iid: d for iid, d in raw_results.items()}
 
-    results = {}
-    failed_ids = {}
-    with ThreadPoolExecutor(max_workers=len(SESSIONS)) as ex:
-        futures = {
-            ex.submit(fetch_worker, SESSIONS[i], slices[i], i + 1): i
-            for i in range(len(SESSIONS))
-        }
-        done = 0
-        for fut in as_completed(futures):
-            done += 1
-            try:
-                r, f = fut.result(timeout=3600)
-                results.update(r)
-                failed_ids.update(f)
-            except Exception as e:
-                log(f"  worker {done} error: {e}")
-            elapsed = time.time() - start
-            log(f"  workers done: {done}/{len(SESSIONS)} — "
-                f"items: {len(results)} ({elapsed:.0f}s)")
-
-    log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s")
-    log(f"📊 Failure breakdown: {_fail_codes}")
+    log(f"✅ Downloaded {len(results)} items in {time.time()-start:.1f}s "
+        f"({len(failed_ids)} failed)")
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -241,61 +222,64 @@ def enrich_items():
     db_errors = 0
     dates_filled = 0
 
+    def _row(item_id, d):
+        favs = d.get("favorite_count")
+        favs = (_safe_int(favs, MAX_SANE_FAVS) if favs is not None else None)
+        price = _safe_int(d.get("price"), MAX_SANE_PRICE)
+        name = (d.get("name") or "")[:500]
+        desc = (d.get("description") or "")[:5000]
+        creator = (d.get("creator_name") or "")[:200]
+        asset_type = _safe_int(d.get("asset_type_id"), 1000)
+        status = "known" if favs is not None else "missing"
+        return (item_id, name, favs, price, desc, creator, asset_type, status)
+
+    rows = []
     for item_id, d in results.items():
         try:
-            favs = _safe_int(d.get("FavoriteCount"), MAX_SANE_FAVS)
-            price = _safe_int(
-                d.get("PriceInRobux") or d.get("price") or d.get("LowestPrice"),
-                MAX_SANE_PRICE)
-            sales = _safe_int(d.get("Sales"), MAX_SANE_SALES)
-            name = (d.get("Name", "") or "")[:500]
-            desc = (d.get("Description", "") or "")[:5000]
-            creator_obj = d.get("Creator") or {}
-            creator = (creator_obj.get("Name", "") if isinstance(creator_obj, dict) else "")[:200]
-            asset_type = _safe_int(d.get("AssetTypeId"), 1000)
-            created_dt = _parse_created(d.get("Created"))
-
-            if asset_type == 61:
+            rows.append(_row(item_id, d))
+            if _safe_int(d.get("asset_type_id"), 1000) == 61:
                 emote_count += 1
-            if created_dt:
-                dates_filled += 1
-
-            cur.execute("""
-                INSERT INTO items (id, name, favorite_count, price, total_sales,
-                                   description, creator_name, asset_type_id, created_at,
-                                   favorite_status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    favorite_count = EXCLUDED.favorite_count,
-                    favorite_status = CASE
-                        WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
-                        ELSE 'known'
-                    END,
-                    total_sales = EXCLUDED.total_sales,
-                    price = EXCLUDED.price,
-                    description = EXCLUDED.description,
-                    name = EXCLUDED.name,
-                    asset_type_id = EXCLUDED.asset_type_id,
-                    created_at = COALESCE(items.created_at, EXCLUDED.created_at),
-                    fetched_at = CURRENT_TIMESTAMP
-            """, (item_id, name, favs, price, sales, desc, creator, asset_type, created_dt,
-             ("known" if favs is not None else "missing")))
-
-            enriched += 1
-            # Commit in small chunks so a restart can't wipe the batch.
-            if enriched % 100 == 0:
-                conn.commit()
-                log(f"  💾 committed {enriched} rows")
         except Exception as e:
             db_errors += 1
-            log(f"  DB error {item_id}: {e}")
-            try:
-                conn.rollback()
-                cur = conn.cursor()
-            except Exception:
-                pass
+            log(f"  row build error {item_id}: {e}")
 
-    # Record permanent failures (400/404) so they are skipped after 3 tries.
+    upsert = """
+        INSERT INTO items (id, name, favorite_count, price, description,
+                           creator_name, asset_type_id, favorite_status,
+                           fetched_at)
+        VALUES %s
+        ON CONFLICT (id) DO UPDATE SET
+            favorite_count = EXCLUDED.favorite_count,
+            favorite_status = EXCLUDED.favorite_status,
+            price = EXCLUDED.price,
+            description = EXCLUDED.description,
+            name = EXCLUDED.name,
+            asset_type_id = EXCLUDED.asset_type_id,
+            fetched_at = CURRENT_TIMESTAMP
+    """
+    template = "(%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
+
+    for i in range(0, len(rows), 100):
+        chunk = rows[i:i + 100]
+        try:
+            execute_values(cur, upsert, chunk, template=template, page_size=100)
+            conn.commit()
+            enriched += len(chunk)
+        except Exception as e:
+            conn.rollback()
+            db_errors += len(chunk)
+            log(f"  bulk upsert failed ({len(chunk)} rows): {e}")
+            for row in chunk:
+                try:
+                    execute_values(cur, upsert, [row], template=template)
+                    conn.commit()
+                    enriched += 1
+                    db_errors -= 1
+                except Exception as e2:
+                    conn.rollback()
+                    log(f"  DB error {row[0]}: {e2}")
+
+    # Record permanent failures (404/invalid) so they are skipped after 3 tries.
     for fid, reason in failed_ids.items():
         try:
             cur.execute("""

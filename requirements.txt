@@ -5,3 +5,4 @@ openai
 apscheduler
 flask
 requests
+aiohttp

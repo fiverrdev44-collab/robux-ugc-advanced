@@ -124,10 +124,30 @@ def test_chain_fallback_without_ai():
     print("PASS chain returns a champion with AI offline")
 
 
+def test_batch_client_chunks_and_backoff():
+    import asyncio
+    import roblox_batch_client as rbc
+
+    class Fake(rbc.RobloxBatchClient):
+        async def _post(self, ids):
+            assert len(ids) <= 30
+            return [{"id": i, "name": f"item{i}"} for i in ids], {}
+
+    async def run():
+        client = Fake(max_batch=30, rate_per_min=90, max_concurrency=3)
+        return await client.fetch_many_items(list(range(1, 66)))
+
+    items, failed = asyncio.run(run())
+    assert len(items) == 65 and not failed
+    assert rbc.RobloxBatchClient._backoff(3, "7") == 7.0
+    print("PASS batch client 30-item chunking and Retry-After")
+
+
 if __name__ == "__main__":
     test_fetch_query_429_sets_error()
     test_fetch_query_empty_is_completed()
     test_gap_rejects_cross_family_words()
     test_live_market_backoff_honours_retry_after()
     test_chain_fallback_without_ai()
+    test_batch_client_chunks_and_backoff()
     print("ALL SHARED REPAIR TESTS PASSED")
