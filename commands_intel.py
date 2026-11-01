@@ -1,4 +1,4 @@
-"""
+﻿"""
 commands_intel.py — All intel commands. Category-aware autopsy.
 
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
@@ -389,7 +389,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 f"supply {opp.get('supply', 0)} · "
                 f"exact {opp.get('exact', 0)}\n"
             )
-        lines.append("**3 actions:**")
+        lines.append("**Options to consider:**")
         for i, a in enumerate(actions, 1):
             lines.append(f"{i}. {a}")
 
@@ -609,7 +609,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 f"_{pct_data['age_days']}d old · {favs}♥ · "
                 f"{pct_data['velocity']}/day{sales_line} · {pct_data['sample_size']} peers_\n",
                 f"**Why:** {v_reason}\n",
-                "**3 actions:**",
+                "**Options to consider:**",
             ]
             for i, a in enumerate(acts, 1):
                 dec_lines.append(f"{i}. {a}")
@@ -918,6 +918,18 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 "NEVER use these words in any title: necklace, chain, backpack,\n"
                 "tail, wing, hat. A sign is a sign, not a necklace.\n"
             )
+
+        learning_block = ""
+        try:
+            from learning import format_learning_context
+            conn_l = get_db(); cur_l = conn_l.cursor()
+            try:
+                learning_block = format_learning_context(cur_l, item_id=iid)
+            finally:
+                cur_l.close(); conn_l.close()
+        except Exception as e:
+            print(f"[autopsy] learning context skipped: {e}", flush=True)
+
         recovery_prompt = f"""{role} Talk like a blunt friend, not a consultant.
 
 === VOICE ===
@@ -939,6 +951,7 @@ Winner median in niche: {item_stats['winner_median_favs']:,} favs
 
 FAILURE MODE: {diagnosis['failure_mode']}
 {sales_guard_instruction(effective_sales)}
+{learning_block}
 
 === 🧠 KEYWORD INTELLIGENCE (AUTHORITATIVE) ===
 {intel_block}

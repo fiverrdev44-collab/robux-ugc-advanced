@@ -67,6 +67,15 @@ REQUIRED_WORKFLOWS = [
 ]
 
 
+def _rollback(conn):
+    """A failed check must never poison the next check's transaction."""
+    try:
+        if conn is not None:
+            conn.rollback()
+    except Exception:
+        pass
+
+
 def run_selftest(bot=None, progress=None):
     results = []
 
@@ -299,6 +308,7 @@ def run_selftest(bot=None, progress=None):
                 warning=(p.get("error") == "no_model"),
             )
         except Exception as e:
+            _rollback(conn)
             add("engines", "title_predictor", False, f"{type(e).__name__}: {e}")
 
         try:
@@ -308,6 +318,7 @@ def run_selftest(bot=None, progress=None):
             else:
                 add("engines", "ledger fill", False, "no ledger rows", warning=True)
         except Exception as e:
+            _rollback(conn)
             add("engines", "ledger fill", False, f"{type(e).__name__}: {e}")
 
         try:
@@ -316,6 +327,7 @@ def run_selftest(bot=None, progress=None):
             audit_price(20)
             add("engines", "playbook rules", True)
         except Exception as e:
+            _rollback(conn)
             add("engines", "playbook rules", False, f"{type(e).__name__}: {e}")
 
         # Determinism: same input must produce the same output twice.
@@ -325,6 +337,7 @@ def run_selftest(bot=None, progress=None):
             b = _sc(cur, "fluffy", "emotes", 0, 0)
             add("determinism", "convergence", a == b)
         except Exception as e:
+            _rollback(conn)
             add("determinism", "convergence", False, f"{type(e).__name__}: {e}")
 
         try:
@@ -333,6 +346,7 @@ def run_selftest(bot=None, progress=None):
             b = _ft(cur, "anime", days=14)
             add("determinism", "oracle", a == b)
         except Exception as e:
+            _rollback(conn)
             add("determinism", "oracle", False, f"{type(e).__name__}: {e}")
 
         # Cross-check the sales report against a direct SQL sum.
@@ -355,8 +369,10 @@ def run_selftest(bot=None, progress=None):
                 f"sql={u}/{r}",
             )
         except Exception as e:
+            _rollback(conn)
             add("crosscheck", "sales today", False, f"{type(e).__name__}: {e}")
     except Exception as e:
+        _rollback(conn)
         add("engines", "db", False, f"{type(e).__name__}: {e}")
     finally:
         if cur:

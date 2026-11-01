@@ -711,6 +711,21 @@ def setup_database():
             pass
 
     try:
+        from memory import ensure_schema as _ensure_memory_schema
+        _ensure_memory_schema(cur, conn)
+        print("✅ [setup] conversation memory ready", flush=True)
+    except Exception as e:
+        print(
+            f"⚠️ [setup] conversation memory failed: "
+            f"{type(e).__name__}: {str(e)[:200]}",
+            flush=True,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+    try:
         cur.close()
         conn.close()
     except Exception:
