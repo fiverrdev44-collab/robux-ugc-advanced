@@ -850,6 +850,11 @@ CONCEPT_ACTIONS = {"create_ideas"}
 
 def _owner_ids():
     ids = set()
+    try:
+        from commands_supercomputer import BOT_OWNERS
+        ids.update(int(x) for x in BOT_OWNERS)
+    except Exception:
+        pass
     for key in ("BOT_OWNER_ID", "DISCORD_OWNER_ID"):
         for part in (os.getenv(key) or "").replace(",", " ").split():
             try:
