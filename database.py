@@ -38,6 +38,18 @@ def setup_database():
 
     cur = conn.cursor()
 
+    # Schema DDL used to run on every bot start. ADD COLUMN IF NOT EXISTS still
+    # takes an ACCESS EXCLUSIVE lock, which deadlocked against read queries
+    # (D-07/D-09). Gate it behind an explicit one-shot flag.
+    if os.getenv("RUN_MIGRATIONS_ON_START", "0") != "1":
+        print("⏭️ [setup] DDL skipped (RUN_MIGRATIONS_ON_START != 1); "
+              "schema assumed current", flush=True)
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+        return
+
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS discovered_items (
             id BIGINT PRIMARY KEY

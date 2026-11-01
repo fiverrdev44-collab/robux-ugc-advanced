@@ -109,7 +109,9 @@ class ConversationState:
     item_titles: dict = field(default_factory=dict)
     pending_intent: str | None = None
     pending_chain: dict | None = None
+    pending_action: dict | None = None
     messages: list = field(default_factory=list)
+    bot_messages: list = field(default_factory=list)
     history: list = field(default_factory=list)
     ai_calls: list = field(default_factory=list)
     updated_at: float = field(default_factory=time.time)
@@ -120,7 +122,8 @@ class ConversationState:
 
 _PERSIST_FIELDS = (
     "last_intent", "last_item_id", "last_concept", "last_family",
-    "pending_intent", "pending_chain", "messages", "results", "item_titles",
+    "pending_intent", "pending_chain", "pending_action", "messages",
+    "bot_messages", "results", "item_titles",
 )
 
 
@@ -690,6 +693,11 @@ async def _run_registry(bot, message, route, state):
         state.results = [int(r[0]) for r in rows]
         state.item_titles = {int(r[0]): (r[1] or "") for r in rows}
         state.last_intent = "inspect_item"
+        state.pending_action = {
+            "intent": state.pending_intent or "inspect_item",
+            "items": state.results[:20],
+            "created_at": time.time(),
+        }
         state.history.append({"intent": "list_my_items", "at": time.time()})
         lines = ["**Your tracked items:**"]
         for index, (item_id, title, favs) in enumerate(rows, 1):
@@ -816,6 +824,10 @@ async def _run_registry(bot, message, route, state):
     ids = []
     for text in captured:
         ids.extend(int(x) for x in ITEM_ID_RE.findall(text or ""))
+    bot_text = " ".join(t for t in captured if t).strip()
+    if bot_text:
+        state.bot_messages.append(bot_text[:500])
+        state.bot_messages = state.bot_messages[-3:]
     if ids:
         state.results = list(dict.fromkeys(ids))[:8]
     state.last_intent = intent
@@ -836,16 +848,54 @@ ITEM_ACTIONS = {"inspect_item", "diagnose_item", "revive_item",
 CONCEPT_ACTIONS = {"create_ideas"}
 
 
-def _planner_prompt(text, has_attachment, state):
+def _owner_ids():
+    ids = set()
+    for key in ("BOT_OWNER_ID", "DISCORD_OWNER_ID"):
+        for part in (os.getenv(key) or "").replace(",", " ").split():
+            try:
+                ids.add(int(part))
+            except (TypeError, ValueError):
+                continue
+    return ids
+
+
+def build_tool_registry(bot):
+    """Names + first-line descriptions of every registered command."""
+    if bot is None:
+        return []
+    cached = getattr(bot, "_vanta_tool_cache", None)
+    if cached is not None:
+        return cached
+    tools = []
+    for name, cmd in sorted(bot.all_commands.items()):
+        if cmd.aliases and name in cmd.aliases:
+            continue  # alias row
+        desc = (cmd.help or getattr(cmd.callback, "__doc__", "") or "").strip()
+        desc = desc.splitlines()[0][:120] if desc else ""
+        tools.append({"command": "!" + name, "description": desc})
+    try:
+        bot._vanta_tool_cache = tools
+    except Exception:
+        pass
+    return tools
+
+
+def _planner_prompt(text, has_attachment, state, bot=None):
     last_title = state.item_titles.get(state.last_item_id, "")
     candidates = [
         {"id": i, "name": state.item_titles.get(i, "")}
         for i in (state.results or [])[:6]
     ]
     recent = [m for m in state.messages[-6:] if m]
-    return f"""You are the intent planner for a Roblox UGC assistant.
-The user speaks casually, may use slang, typos, incomplete sentences, or follow-ups.
-Choose exactly ONE allowed action and extract arguments.
+    recent_bot = [m for m in state.bot_messages[-3:] if m]
+    tools_json = json.dumps(build_tool_registry(bot), separators=(",", ":"))
+    pending = json.dumps(state.pending_action or {}, default=str)
+    return f"""You are VANTA, an elite, witty, brutally honest UGC strategy AI.
+You understand slang, jokes, typos, vague descriptions and multi-step requests.
+You choose one action that uses real bot data; you never invent item IDs.
+
+TOOL REGISTRY (registered bot commands; use as capability reference, not as actions)
+{tools_json}
 
 ALLOWED ACTIONS
 - inspect_item: check/verdict/keep-or-kill/performance of one existing item
@@ -915,8 +965,9 @@ last_item: {state.last_item_id} ({last_title})
 last_concept: {state.last_concept}
 last_intent: {state.last_intent}
 candidates: {candidates}
-pending_action: {state.pending_intent}
+pending_action: {pending}
 recent_user_messages: {recent}
+recent_bot_messages: {recent_bot}
 has_attachment: {has_attachment}
 
 JSON SCHEMA
@@ -988,11 +1039,12 @@ def _validate_plan(plan, state, has_attachment):
 
 def _planner_ai(text, has_attachment, state):
     started = time.time()
+    bot = getattr(state, "_planner_bot", None)
     try:
         from gemini_brain import _generate, get_last_usage, is_available
         if not is_available():
             return None
-        prompt = _planner_prompt(text, has_attachment, state)
+        prompt = _planner_prompt(text, has_attachment, state, bot)
         raw = _generate(prompt, json_mode=True, temperature=0.0, max_tokens=400)
         usage = get_last_usage()
         if not raw:
@@ -1083,7 +1135,7 @@ def _rename_concept(text):
     return rest or None
 
 
-async def plan_message(text, has_attachment, state):
+async def plan_message(text, has_attachment, state, bot=None):
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
     text = _strip_fillers(text)
     # A pending chain offer from image analysis accepts yes/no.
@@ -1163,6 +1215,10 @@ async def plan_message(text, has_attachment, state):
         if state.last_item_id:
             return _intent("improve_metadata", item_id=state.last_item_id,
                            confidence="high")
+        # Listing for a rename request: remember what to do with the choice.
+        state.pending_intent = "improve_metadata"
+        state.pending_action = {"intent": "improve_metadata",
+                                "created_at": time.time()}
         return _intent("list_my_items", confidence="high")
     # Ordinals/numbers are already resolved against pending context.
     if _is_selection(text) and fast["intent"] != "clarify":
@@ -1170,7 +1226,9 @@ async def plan_message(text, has_attachment, state):
 
     now = time.time()
     state.ai_calls = [t for t in state.ai_calls if now - t < 3600]
-    if len(state.ai_calls) < 20:
+    planner_limit = 100 if state.user_id in _owner_ids() else 20
+    state._planner_bot = bot
+    if len(state.ai_calls) < planner_limit:
         try:
             plan = await asyncio.wait_for(
                 asyncio.to_thread(_planner_ai, text, has_attachment, state),
@@ -1179,7 +1237,24 @@ async def plan_message(text, has_attachment, state):
         except asyncio.TimeoutError:
             print("[vanta-planner] timeout", flush=True)
             plan = None
+        # ReAct plans may arrive as {"actions":[{command,args}], "chat_response"}.
+        if isinstance(plan, dict) and plan.get("actions") and not plan.get("action"):
+            first = plan["actions"][0] or {}
+            cmd = str(first.get("command") or "").lstrip("!").lower()
+            mapped = {
+                "autopsy": "diagnose_item", "verdict": "inspect_item",
+                "revive": "revive_item", "revive_item": "revive_item",
+                "chain": "create_ideas", "brainstorm": "create_ideas",
+                "tags": "tags", "desc_forge": "tags",
+                "analyze_image": "analyze_image", "sales_report": "check_sales",
+                "experiments": "check_experiments", "visibility": "check_visibility",
+                "data_audit": "data_audit", "converge": "find_opportunities",
+            }.get(cmd, "clarify")
+            plan = dict(plan)
+            plan["action"] = mapped
         route = _validate_plan(plan, state, has_attachment)
+        if route and isinstance(plan, dict):
+            route["chat_response"] = str(plan.get("chat_response") or "")[:200]
         if route:
             if route.get("concept"):
                 state.last_concept = route["concept"]
@@ -1200,15 +1275,24 @@ async def handle_message(bot, message, state):
         return
     state.messages.append(text[:400])
     state.messages = state.messages[-6:]
-    route = await plan_message(text, has_attachment, state)
+    route = await plan_message(text, has_attachment, state, bot=bot)
     if route["intent"] == "clarify":
-        await message.channel.send(
-            route.get("question") or
-            "I didn't catch that. Try `check item <ID>`, `rename to <theme>`, "
-            "`find a niche`, `my items`, or `how are my sales?`")
+        names = [t for t in list(state.item_titles.values())[:2] if t]
+        if len(names) == 2:
+            question = (f"I didn't catch that. Did you mean **{names[0]}** or "
+                        f"**{names[1]}**? Or type `!guide` for the tool list.")
+        else:
+            question = route.get("question") or (
+                "I didn't catch that. Did you mean one of your tracked items? "
+                "Or type `!guide` for the tool list.")
+        await message.channel.send(question)
         await asyncio.to_thread(_save_state, message.channel.id,
                                 state.user_id, state)
         return
+    # Optional short ReAct acknowledgement before the command output.
+    ack = (route.get("chat_response") or "").strip()
+    if ack and len(ack) <= 200:
+        await message.channel.send(ack)
     await _run_registry(bot, message, route, state)
     await asyncio.to_thread(_save_state, message.channel.id,
                             state.user_id, state)
