@@ -39,6 +39,18 @@ def _sanitize_titles(titles):
     return out
 
 
+def _diverse_titles(titles, max_shared=2):
+    """Keep options that are meaningfully different from earlier ones."""
+    out = []
+    for t in titles or []:
+        toks = set((t or "").lower().split())
+        if not toks:
+            continue
+        if all(len(toks & set(k.lower().split())) <= max_shared for k in out):
+            out.append(t)
+    return out
+
+
 _FAMILY_MAP = {
     "headwear": "hair", "hat": "hair", "hats": "hair", "cap": "hair",
     "crown": "hair", "beanie": "hair", "beret": "hair", "hair": "hair",
@@ -443,6 +455,20 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         if parent_context:
             concept_for_ai = f"{concept}\n{parent_context}"
 
+        # Measured outcomes from the creator's own catalog inform the options.
+        try:
+            from learning import format_learning_context
+            conn_l = get_db(); cur_l = conn_l.cursor()
+            try:
+                _learning = format_learning_context(cur_l, item_id=parent_id)
+            finally:
+                cur_l.close(); conn_l.close()
+            if _learning:
+                concept_for_ai = f"{concept_for_ai}\n\n{_learning}"
+                print("[chain] measured-outcome context attached", flush=True)
+        except Exception as e:
+            print(f"[chain] learning context skipped: {e}", flush=True)
+
         synth = synthesize_hybrid(
             concept_for_ai, allow_list, top_items, stats,
             item_type, intent.get("trend_source", "none"),
@@ -637,6 +663,7 @@ OUTPUT — ONLY JSON:
             print("[chain] using deterministic title fallback", flush=True)
         if is_static_prop(concept):
             all_titles = _sanitize_titles(all_titles)
+        all_titles = _diverse_titles(all_titles)
         if all_titles:
             scored_titles = score_titles_batch(all_titles, family=family)
     except Exception as e:
@@ -959,8 +986,10 @@ def format_chain(result):
     except Exception:
         pass
 
-    # ── FINAL BLOCK ──
-    final_lines = ["# ✅ FINAL — DO THIS"]
+    # ── ASSESSMENT BLOCK ──
+    # Options and tradeoffs; the creator makes the decision.
+    final_lines = ["# 🧭 ASSESSMENT & OPTIONS",
+                   "_Ranked options and evidence. Nothing is applied automatically._"]
     try:
         from opportunity_score import lane_priority
     except Exception:
@@ -1026,8 +1055,8 @@ def format_chain(result):
     except Exception:
         pass
 
-    final_lines.append("**6. Post 1 TikTok today** with the name as overlay")
-    final_lines.append("**7. In 14 days:** run `!verdict <new_item_id>`")
+    final_lines.append("**If you choose it:** overlay the name on one TikTok")
+    final_lines.append("**Later check:** run `!verdict <new_item_id>` in 14 days")
 
     chunks.append("\n".join(final_lines))
 

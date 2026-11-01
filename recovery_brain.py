@@ -554,14 +554,15 @@ def format_scale_protocol(verdict, total_sales_30d, item_stats):
     favs = (item_stats or {}).get("favs", 0)
     age = (item_stats or {}).get("age_days", 0) or 0
     return (
-        "# SCALE PROTOCOL - this item is selling\n"
-        f"**Verdict:** {verdict or 'KEEP'}\n"
+        "# WHAT THE EVIDENCE SUGGESTS\n"
+        f"**Current read:** {verdict or 'KEEP'}\n"
         f"**Sales (30d):** {int(total_sales_30d or 0)}\n"
         f"**Favorites:** {favs} - **Age:** {float(age):.1f} days\n\n"
-        "Sales present. Do not run the failure protocol.\n"
-        "- Make 1-2 variants of this concept (same format, new theme).\n"
+        "Sales exist, so this is not a failure case. These are options, not "
+        "instructions:\n"
         "- Keep the current title and price.\n"
-        "- Re-check sales in 14 days and scale the best variant.\n"
+        "- Test a variant of the same concept with a different theme.\n"
+        "- Re-check sales in 14 days and compare before changing anything.\n"
     )
 
 

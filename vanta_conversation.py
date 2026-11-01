@@ -118,6 +118,61 @@ class ConversationState:
         self.updated_at = time.time()
 
 
+_PERSIST_FIELDS = (
+    "last_intent", "last_item_id", "last_concept", "last_family",
+    "pending_intent", "pending_chain", "messages", "results", "item_titles",
+)
+
+
+def _state_to_dict(state):
+    data = {f: getattr(state, f, None) for f in _PERSIST_FIELDS}
+    data["item_titles"] = {str(k): v for k, v in (state.item_titles or {}).items()}
+    return data
+
+
+def _state_from_dict(user_id, data):
+    state = ConversationState(user_id=user_id)
+    for f in _PERSIST_FIELDS:
+        if f == "item_titles":
+            continue
+        if f in data:
+            setattr(state, f, data[f])
+    try:
+        state.item_titles = {int(k): v
+                             for k, v in (data.get("item_titles") or {}).items()}
+    except Exception:
+        state.item_titles = {}
+    return state
+
+
+def _load_state(channel_id, user_id):
+    try:
+        from bot_core import get_db
+        import memory
+        conn = get_db(); cur = conn.cursor()
+        try:
+            return memory.load(cur, channel_id, user_id)
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        print(f"[vanta] memory load failed: {e}", flush=True)
+        return None
+
+
+def _save_state(channel_id, user_id, state):
+    try:
+        from bot_core import get_db
+        import memory
+        conn = get_db(); cur = conn.cursor()
+        try:
+            memory.save(cur, channel_id, user_id, _state_to_dict(state))
+            conn.commit()
+        finally:
+            cur.close(); conn.close()
+    except Exception as e:
+        print(f"[vanta] memory save failed: {e}", flush=True)
+
+
 class ConversationStore:
     def __init__(self, ttl_seconds=86400):
         self.ttl = ttl_seconds
@@ -130,7 +185,11 @@ class ConversationStore:
                 self._states.pop(key, None)
         state = self._states.get(thread_id)
         if state is None and user_id is not None:
-            state = ConversationState(user_id=user_id)
+            persisted = _load_state(thread_id, user_id)
+            if persisted:
+                state = _state_from_dict(user_id, persisted)
+            else:
+                state = ConversationState(user_id=user_id)
             self._states[thread_id] = state
         return state
 
@@ -1147,8 +1206,12 @@ async def handle_message(bot, message, state):
             route.get("question") or
             "I didn't catch that. Try `check item <ID>`, `rename to <theme>`, "
             "`find a niche`, `my items`, or `how are my sales?`")
+        await asyncio.to_thread(_save_state, message.channel.id,
+                                state.user_id, state)
         return
     await _run_registry(bot, message, route, state)
+    await asyncio.to_thread(_save_state, message.channel.id,
+                            state.user_id, state)
 
 
 async def maybe_handle(bot, message):
