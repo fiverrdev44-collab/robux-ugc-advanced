@@ -228,7 +228,8 @@ def _run_favorites_backfill():
     _log("⭐ [scheduler] Favorites backfill triggered.")
     try:
         from favorites_backfill import run
-        ok, failed = run(limit=500, sleep=1.0)
+        ok, failed = run(limit=int(os.getenv("FAVORITES_BACKFILL_LIMIT", "1500")),
+                         sleep=1.0)
         _log(f"✅ [scheduler] Favorites backfill: ok={ok}, failed={failed}")
     except Exception as e:
         _log(f"❌ [scheduler] Favorites backfill failed: "

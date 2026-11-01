@@ -6,7 +6,10 @@ items are auto-logged and outcomes are auto-synced.
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
+
+import psycopg2
 
 
 def detect_family(asset_type_id):
@@ -83,10 +86,41 @@ def sync_group_items(cur, group_names):
 
 
 def fill_ledger(cur, item_id):
-    """Fill one ledger row with D1/D7/D30 favorites and D7/D30 sales."""
+    """Fill one ledger row with D1/D7/D30 favorites and D7/D30 sales.
+
+    The row lock is taken up front (FOR UPDATE) and deadlocks are retried after
+    a rollback so a failed fill can never poison the caller's transaction.
+    """
+    last_error = None
+    for attempt in range(3):
+        try:
+            return _fill_ledger_once(cur, item_id)
+        except psycopg2.errors.DeadlockDetected as e:
+            last_error = e
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+            print(f"[launch_ledger] deadlock on {item_id}, retry {attempt + 1}",
+                  flush=True)
+            time.sleep(1.0)
+        except psycopg2.Error:
+            # Any other DB error: never leave an aborted transaction behind.
+            try:
+                cur.connection.rollback()
+            except Exception:
+                pass
+            raise
+    print(f"[launch_ledger] gave up after 3 deadlocks on {item_id}: "
+          f"{type(last_error).__name__}", flush=True)
+    return False
+
+
+def _fill_ledger_once(cur, item_id):
     cur.execute("""
         SELECT item_id, COALESCE(published_at, launched_at), title, family
         FROM launch_ledger WHERE item_id = %s
+        FOR UPDATE
     """, (item_id,))
     row = cur.fetchone()
     if not row:
