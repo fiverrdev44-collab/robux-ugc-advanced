@@ -396,6 +396,10 @@ documented in `MIGRATIONS.md`.
 | `roblox_batch_client.py` | Async 30-item catalog POST client: token bucket, AIMD, jitter backoff, CSRF |
 | `item_resolver.py` | Canonical sale→asset identity (`sales_name_aliases`), confirmed rename fixtures |
 | `reporting.py` | Single definition of UTC reporting windows and amount semantics |
+| `evidence.py` | Traceable evidence records (metric/unit/asset/window/source/validity) |
+| `learning.py` | Retrieves only valid measured outcomes; injected into chain/autopsy prompts |
+| `memory.py` | Durable conversation context (`conversation_memory`, user+channel scoped, 24h TTL) |
+| `test_api_speed.py` | Opt-in live benchmark: 30 sequential GETs vs one 30-item batch POST |
 | `suggest.py`, `discover_keywords.py`, `backfill_dates.py`, `favorites_backfill.py` | Auxiliary data repair and discovery |
 | `sales_listener.py`, `post_monitor.py`, `creator_tracker.py` | Sales ingestion, reporting, creator crawling |
 | `scheduler.py` | In-process jobs (snapshots, training, measurements, watcher) |
@@ -407,6 +411,22 @@ Paused / not wired: `vanta_guide.py` (a `!guide`/`!tools` field manual) and `van
 Unused or standalone: `title_simulator.py` (no imports), `backtest_opportunity.py` (CLI),
 and `title_pipeline.py`, `title_miner.py`, `creative_pivot.py`, `competition_check.py`
 (covered by the selftest import smoke check only).
+
+---
+
+## Measured ingestion speed
+
+`test_api_speed.py` (opt-in, live) grabs 30 real asset IDs and compares the legacy per-item
+`GET /v2/assets/{id}/details` loop with one 30-item `POST /v1/catalog/items/details` batch.
+
+| Run | Old way (30 GETs) | New way (1 POST) | Speedup | 429s |
+|---|---|---|---|---|
+| Paced 1.0 s/item (production-like) | 30.522 s | 0.376 s | **81.3×** | 0 / 0 |
+| Aggressive 0.25 s/item | 9.721 s | 0.534 s | 18.2× | **10** / 0 |
+
+The aggressive run is the honest failure mode: thirty rapid GETs were rate-limited ten times,
+while the batch returned all 30 items with no 429. Numbers are a single small sample, not a
+throughput guarantee.
 
 ---
 
@@ -435,14 +455,18 @@ python test_integrity_upgrades.py        # normalization, DiD math, lane gates, 
 python test_identity_and_windows.py      # alias resolver, frozen sales windows, beanie fixture
 python test_recommendation_lifecycle.py  # application evidence, maturity, rec-10 marker
 python test_shared_repairs.py            # visibility 429, live backoff, batch client, chain fallback, prop gate
+python test_jarvis_cases.py              # evidence semantics, learning filtering, diversity, memory
+python test_integrity_upgrades.py        # pure checks; DB transaction test writes my_sales (skip in prod)
+python test_api_speed.py                 # opt-in live benchmark (30 GETs vs 1 batch POST)
 python test_live_roblox_sync.py          # read-only DB-vs-live marketplace sample (writes LIVE_MARKET_AUDIT.md)
 python test_live_advantage.py            # gap/rank/velocity truth check (writes LIVE_ADVANTAGE_AUDIT.md)
 python selftest.py                       # full audit (env, schema, freshness, engines, live items)
 ```
 
-DB-backed tests skip automatically when `DATABASE_URL` is absent. `!selftest` runs the audit plus a
-command harness and issues a certificate only when there are no hard failures and the effective
-score is ≥90.
+DB-backed tests skip automatically when `DATABASE_URL` is absent. The `test_live_*` and
+`test_api_speed.py` suites make external requests and are excluded from the default audit run.
+`!selftest` runs the audit plus a command harness and issues a certificate only when there are no
+hard failures and the effective score is ≥90.
 
 ---
 
@@ -478,15 +502,50 @@ DISCORD_OWNER_ID=
 TRIGGER_TOKEN=
 PORT=10000
 VANTA_THREAD_SECRET=        # optional; falls back to the bot token
+RUN_MIGRATIONS_ON_START=0   # 1 = run schema DDL once on boot; 0 (default) = skip DDL
 ```
 
+Schema DDL is **not** run on every restart. Set `RUN_MIGRATIONS_ON_START=1` for the first boot
+after a schema change, then return it to `0`; otherwise apply migrations manually. DDL runs used
+to take `ACCESS EXCLUSIVE` locks on `items`/`launch_ledger` during startup and could deadlock
+against reads.
+
+Prepared but **not applied** to production:
+
+```
+migrations/2026-11-01_items_name_lower_trim_index.sql
+-- CREATE INDEX CONCURRENTLY idx_items_name_lower_trim
+--   ON items (lower(trim(name)));
+```
+
+That index supports the exact-title lookup in `item_resolver.resolve_name`; without it the lookup
+is a parallel sequential scan and can hit the 20s statement timeout under load.
+
 Tuning knobs include `ENRICH_BATCH_SIZE`, `SNAPSHOT_TOP_ITEMS`, `SNAPSHOT_MIN_FAVS`,
+`SNAPSHOT_TIER_LIMIT`, `SCANNER_ID_WINDOW`, `FAVORITES_BACKFILL_LIMIT`,
 `VISIBILITY_MAX_PAGES`, and `VISIBILITY_DELAY`.
 
 ---
 
-## Recent updates (2026-10-31)
+## Recent updates (2026-11-01)
 
+- **Interpretation boundary:** analytical outputs no longer present “DO THIS / KILL / SCALE” as directives.
+  Chain ends with **ASSESSMENT & OPTIONS** (“nothing is applied automatically”); autopsy’s sales-present
+  branch reads “WHAT THE EVIDENCE SUGGESTS … options, not instructions”. Internal labels remain for
+  compatibility but authorize no action.
+- **Evidence and learning:** `evidence.py` records metric/unit/asset/window/source/validity; `learning.py`
+  retrieves only measured outcomes with maturity `mature`/`partial` and no `insufficient: true` marker, and
+  injects them into chain/autopsy prompts. Production currently has **0 usable outcomes**, so the loop is
+  wired and tested but not yet demonstrated on real sales.
+- **Durable memory:** `conversation_memory` persists last item, candidates, pending offers and recent
+  messages per user+channel (24h TTL) across restarts.
+- **Creative diversity:** near-duplicate adjective stacks are filtered; original wording with no historical
+  precedent is preserved.
+- **Measured ingestion speed:** one 30-item batch POST is **81.3× faster** than 30 paced GETs
+  (0.376 s vs 30.522 s, 0 × 429); with aggressive pacing the old path hit 10 × 429 while the batch hit 0.
+- **DDL decoupled from startup:** `setup_database()` skips schema DDL unless `RUN_MIGRATIONS_ON_START=1`,
+  removing the `ACCESS EXCLUSIVE` lock/deadlock window on restarts. A functional index migration for
+  `items (lower(trim(name)))` is prepared under `migrations/` but **not applied**.
 - **Sales identity:** `sales_name_aliases` with confirmed/candidate/ambiguous/unresolved states; the
   creator-confirmed rename “Cute Beanie w paws” → “Cute Kitty Fluffy Beanie” resolves to asset
   `130928797494687` (fixture: 139 records / 4,045 recorded R$). Reports show mapped vs unresolved coverage.
@@ -552,9 +611,16 @@ Known data gaps:
   so keyword ideas must live in the title and description. Keywords must still share a token
   with the item name or category type words.
 - The bot cannot create demand or guarantee sales.
+- No usable mature recommendation outcomes exist yet; `learning.py` is wired and tested but has
+  nothing real to retrieve, so “learning from sales” is not yet demonstrated.
+- `migrations/2026-11-01_items_name_lower_trim_index.sql` is prepared but **not applied**; until it
+  is, the exact-title lookup can scan `items` and hit the statement timeout under load.
+- Schema DDL must not run on every boot: `RUN_MIGRATIONS_ON_START` stays `0` except for a one-shot
+  migration boot. Forgetting to run migrations leaves new tables/columns absent.
 - Conversational public threads are visible to channel members; use **Private (DM)** for
   sensitive details. Thread ownership is HMAC-verified; the visible user ID alone is not trusted.
-- Conversation context is in-memory with a 24h TTL and resets on restart.
+- Conversation context persists in `conversation_memory` (user+channel scoped, 24h TTL) across
+  restarts; it stores router context, not full transcripts.
 - The AI planner is bounded: allow-listed actions only, ~400 output tokens, 20 calls/hour per
   conversation, 30s timeout, deterministic routing first. No mutating operation is routed from
   casual language.
