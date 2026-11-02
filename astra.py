@@ -11,7 +11,7 @@ import unicodedata
 MOTION_TOKENS = {
     "pose", "dance", "idle", "float", "sway", "kick", "walk", "run",
     "spin", "flip", "sit", "wave", "shake", "jump", "fall", "death",
-    "strut", "lean", "stance", "moonwalk",
+    "strut", "lean", "stance", "moonwalk", "dancing", "posing", "swaying", "floating", "kicking", "jumping", "sitting", "waving", "spinning", "flipping", "falling", "walking", "running", "stancing", "strutting", "leaning", "moonwalking",
 }
 
 BANNED_PLATFORM_WORDS = ("tiktok", "youtube", "viral", "trending")
