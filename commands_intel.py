@@ -1,4 +1,4 @@
-﻿"""
+"""
 commands_intel.py — All intel commands. Category-aware autopsy.
 
 VERDICT: multi-signal (sales + age + favs + velocity + percentile).
@@ -35,6 +35,7 @@ from category_configs import (
 from intel_common import (
     item_percentile,
     decide_verdict,
+    d30_milestone_probability,
     classify_keyword,
     portfolio_context,
 )
@@ -303,11 +304,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 except Exception as e:
                     print(f"[verdict] sales CI failed: {e}", flush=True)
 
+                d30 = d30_milestone_probability(
+                    cur, pct["family"], favs=favs or 0,
+                    age_days=age_days or 0, velocity=pct["velocity"],
+                ) if pct else {"available": False, "reason": "Family percentile unavailable."}
+
                 return {
                     "name": name, "favs": favs or 0, "price": price or 0,
                     "age_days": float(age_days or 0), "pct": pct,
                     "sales_30d": (sales_info["units"] if sales_info else 0),
                     "opportunity": opp, "sales_ci": sales_ci,
+                    "d30": d30,
                 }
             finally:
                 cur.close(); conn.close()
@@ -327,38 +334,54 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             velocity=pct["velocity"],
             total_sales=data["sales_30d"],
             sample_size=pct["sample_size"],
+            d30_probability=(
+                data["d30"].get("probability")
+                if data.get("d30", {}).get("available") else None
+            ),
         )
 
-        if verdict == "TOO_NEW":
-            target_day = 30 if data["age_days"] >= 14 else 7
+        wait_days = max(1, int(__import__("math").ceil(14 - data["age_days"])))
+        if verdict == "TOO_EARLY":
             actions = [
-                f"Wait {max(1, int(target_day - data['age_days']))} more days",
-                "Post 1 TikTok per day while you wait",
-                f"Re-run `!verdict {item_id}` on day {target_day}",
+                f"Watch for another {wait_days} days",
+                "Collect another favorites snapshot before changing the listing",
+                f"Re-run !verdict {item_id} after day 14",
             ]
-        elif verdict == "DOUBLE_DOWN":
+        elif verdict == "WINNER":
             actions = [
-                f"Launch a variant within 7 days: `!chain variant {item_id} neon`",
-                "Post 1 TikTok/day for 7 days",
-                "Reply to every comment within 1h",
+                f"Review a related variant opportunity with !chain variant {item_id} neon",
+                "Keep collecting D7/D30 outcome data",
+                f"Re-check !verdict {item_id} in 7 days",
             ]
-        elif verdict == "KEEP":
+        elif verdict == "RECOVERING":
             actions = [
-                "Post 3 TikToks this week (cross-post Shorts + Reels)",
-                "Keep price; test -5 only if flat after 14 days",
-                f"Re-run `!verdict {item_id}` in 14 days",
+                "Preserve the current listing while positive traction continues",
+                "Monitor favorites and sales over the next 7 days",
+                f"Re-run !verdict {item_id} in 7 days",
             ]
-        elif verdict == "RENAME":
+        elif verdict == "WATCH":
             actions = [
-                f"Rename using a GOLD keyword from `!converge {pct['family']}`",
-                "Change thumbnail first frame — motion, not static",
-                "Re-post to TikTok with a 1.5s hook",
+                "Do not make a major change on this evidence alone",
+                "Collect another favorites and sales snapshot",
+                f"Re-run !verdict {item_id} in 7 days",
+            ]
+        elif verdict == "STAGNATING":
+            actions = [
+                "Review title, description and search visibility before editing",
+                f"Compare its family cohort with !converge {pct['family']}",
+                f"Re-run !verdict {item_id} in 7 days",
+            ]
+        elif verdict == "KILL_CANDIDATE":
+            actions = [
+                "Manual review only — this is not an automatic removal decision",
+                "Check listing accuracy, search visibility and comparable items",
+                "Compare another 7-day observation window before deciding",
             ]
         else:
             actions = [
-                "Stop investing in this item",
-                f"Run `!converge {pct['family']}` for a fresh niche",
-                "Reallocate content time to your top 2 performers",
+                "Review current performance and collect another observation",
+                f"Run !converge {pct['family']} for category context",
+                f"Re-run !verdict {item_id} in 14 days",
             ]
 
         sales_line = ""
@@ -380,6 +403,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             f"{pct['velocity']}/day{sales_line}_\n",
             f"**Why:** {reason}\n",
         ]
+        d30 = data.get("d30") or {}
+        if d30.get("available"):
+            lines.append(
+                f"**Family D30 milestone:** {d30['milestone_favs']:,.0f} favorites · "
+                f"projected {d30['projected_favs_d30']:,.0f} · "
+                f"heuristic {d30['probability']:.1f}% (n={d30['cohort_n']}; not calibrated)\n"
+            )
+        else:
+            lines.append(
+                f"**Family D30 estimate:** unavailable — {d30.get('reason', 'insufficient mature cohort data')}\n"
+            )
         opp = data.get("opportunity")
         if opp:
             lines.append(

@@ -389,4 +389,70 @@ def pick_pivot_from_data(niche_data, keyword_intel=None):
         f"bucket={best['bucket']} · supply={best['supply']} · "
         f"median={best['median']} · demand={best['demand']}"
     )
+    return (best["keyword"], round(confidence, 2), reason)# ── DETERMINISTIC PIVOT PICKER ──
+def pick_pivot_from_data(niche_data, keyword_intel=None):
+    """
+    Deterministic pivot picker. Uses real DB data, not AI opinion.
+    Same input → same output. Returns (keyword, confidence, reason).
+
+    Confidence is ABSOLUTE (based on winning score), not margin-based.
+    Margin-based was giving ~3% when all candidates were NEUTRAL with
+    similar scores, even when the winning score was high.
+    """
+    if not niche_data:
+        return (None, 0.0, "no niche data")
+
+    scored = []
+    for k in niche_data:
+        bucket = k.get("bucket", "NEUTRAL")
+        median = k.get("median_favs", 0)
+        supply = k.get("supply", 0)
+        demand = k.get("demand_live", k.get("demand", 0))
+
+        # No live demand or a saturated/ghost lane is not a pivot.
+        if demand == 0 or bucket in ("SATURATED", "GHOST", "DEAD"):
+            continue
+        bmap = {"GOLD": 100, "OPPORTUNITY": 80, "VIRGIN": 70,
+                "NEUTRAL": 40, "SATURATED": 20, "GHOST": 5}
+        b = bmap.get(bucket, 40)
+
+        m = min(median / 50.0, 3.0) * 15
+        d = min(demand / 100.0, 2.0) * 10
+
+        if supply < 5:
+            s = -20
+        elif supply <= 50:
+            s = 20
+        elif supply <= 150:
+            s = 5
+        else:
+            s = -10
+
+        total = b + m + d + s
+        scored.append({
+            "keyword": k["keyword"],
+            "score": total,
+            "bucket": bucket,
+            "median": median,
+            "supply": supply,
+            "demand": demand,
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    if not scored:
+        return (None, 0.0, "no demand-backed pivot")
+    best = scored[0]
+
+    # ── ABSOLUTE CONFIDENCE ────────────────────────────────────
+    # 120 = practical top score (100 base + 20 supply + 10 demand - small)
+    # Cap at 90% — no system should be 100% confident.
+    confidence = min(best["score"] / 120.0, 0.9)
+    if len(scored) == 1:
+        confidence = 0.5
+    # ────────────────────────────────────────────────────────────
+
+    reason = (
+        f"bucket={best['bucket']} · supply={best['supply']} · "
+        f"median={best['median']} · demand={best['demand']}"
+    )
     return (best["keyword"], round(confidence, 2), reason)
