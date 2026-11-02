@@ -268,6 +268,33 @@ def _run_market_research():
         _log(f"❌ [scheduler] Research failed: {type(e).__name__}: {e}")
 
 
+def _notify_alert(text):
+    """Send an operational notification to ALERT_CHANNEL_ID (REST, no bot)."""
+    token = os.getenv("TOKEN")
+    channel = os.getenv("ALERT_CHANNEL_ID") or os.getenv("SALES_CHANNEL_ID")
+    if not token or not channel:
+        return
+    try:
+        import requests
+        requests.post(
+            f"https://discord.com/api/v10/channels/{channel}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            json={"content": text[:1900]}, timeout=10)
+    except Exception as e:
+        _log(f"⚠️ [scheduler] alert failed: {type(e).__name__}")
+
+
+def _run_auto_link():
+    """Every 2h: match new uploads to recent unlinked chain runs."""
+    _log("🔗 [scheduler] Auto-link scan triggered.")
+    try:
+        from creator_memory import auto_link_recent_runs
+        result = auto_link_recent_runs(notifier=_notify_alert)
+        _log(f"✅ [scheduler] Auto-link: {result}")
+    except Exception as e:
+        _log(f"❌ [scheduler] Auto-link failed: {type(e).__name__}: {e}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -321,6 +348,10 @@ def start_scheduler():
     _scheduler.add_job(_run_market_research, "cron",
         hour="*/6", minute=15,
         id="market_research", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=3600)
+
+    _scheduler.add_job(_run_auto_link, "interval", hours=2,
+        id="auto_link", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=3600)
 
     _scheduler.add_job(_run_favorites_backfill, "cron",
