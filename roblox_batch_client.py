@@ -188,6 +188,7 @@ def _normalize(d):
         "name": (d.get("name") or "")[:500],
         "description": (d.get("description") or "")[:5000],
         "price": d.get("price") or 0,
+        "price_missing": d.get("price") is None,
         "favorite_count": d.get("favoriteCount"),
         "asset_type_id": d.get("assetType") or 0,
         "creator_name": (d.get("creatorName") or "")[:200],
