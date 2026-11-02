@@ -751,7 +751,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         )
         await ctx.send(header)
 
-        if scale_mode:
+        if immature_item:
+            wait_days = max(1, int(math.ceil(14 - item_stats["age_days"])))
+            body = (
+                "This item is too young to judge. The data is still maturing. "
+                f"We should WATCH it for another {wait_days} days."
+            )
+        elif scale_mode:
             body = format_scale_protocol(verdict, effective_sales, item_stats)
         else:
             body = format_recovery_report(diagnosis, item_stats, show_sales=False)
