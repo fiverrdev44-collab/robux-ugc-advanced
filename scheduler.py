@@ -334,6 +334,19 @@ def _run_trend_cohorts():
         _log(f"❌ [scheduler] ORACLE cohorts failed: {type(e).__name__}: {e}")
 
 
+def _run_oracle_scan():
+    """ORACLE Phase 2 scan (6h). Never lets a worker error kill the scheduler."""
+    _log("🔭 [scheduler] ORACLE scan triggered.")
+    try:
+        from oracle_worker import run_oracle_scan
+        result = run_oracle_scan()
+        _log(f"✅ [scheduler] ORACLE scan: {result.get('status')} "
+             f"run={result.get('scan_run_id')} "
+             f"inserted={result.get('observations_inserted')}")
+    except BaseException as e:      # never terminate the scheduler process
+        _log(f"❌ [scheduler] ORACLE scan crashed: {type(e).__name__}: {e}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -404,6 +417,10 @@ def start_scheduler():
     if os.getenv("ORACLE_ENABLED", "0") == "1":
         _scheduler.add_job(_run_trend_cohorts, "cron", hour=5, minute=30,
             id="trend_cohorts", replace_existing=True,
+            max_instances=1, coalesce=True, misfire_grace_time=3600)
+
+        _scheduler.add_job(_run_oracle_scan, "interval", hours=6,
+            id="oracle_scan", replace_existing=True,
             max_instances=1, coalesce=True, misfire_grace_time=3600)
 
     _scheduler.add_job(_run_favorites_backfill, "cron",
