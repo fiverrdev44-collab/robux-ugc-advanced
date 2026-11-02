@@ -364,6 +364,71 @@ def auto_link_recent_runs(days=30, threshold=0.80, notifier=None,
                     "item_id": item["id"], "item_name": item["name"],
                     "ratio": best["ratio"],
                 })
+
+        # Rename pass: applied rename advice + the catalog title now matches.
+        try:
+            from category_configs import detect_family_from_asset_type
+            cur.execute("""
+                select item_id, recommended_name, baseline_name, applied_at
+                from recommendation_ledger
+                where rec_type = 'rename' and applied_at is not null
+                  and recommended_name is not null
+                  and applied_at > now() - make_interval(days => %s)
+            """, (int(days),))
+            for item_id, rec_name, baseline_name, applied_at in cur.fetchall():
+                cur.execute("""
+                    select id, name, asset_type_id from items where id = %s
+                """, (item_id,))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                iid, cur_name, atype = row
+                if not is_applied_rename({"recommended_name": rec_name},
+                                         {"name": cur_name}):
+                    continue
+                cur.execute("""
+                    select id from astra_runs
+                    where linked_item_id = %s and lower(chosen_title) = lower(%s)
+                    limit 1
+                """, (iid, rec_name))
+                if cur.fetchone():
+                    continue
+                item = {"id": iid, "name": cur_name, "asset_type_id": atype}
+                cur.execute("""
+                    select id, chosen_title, asset_type, created_at, concept
+                    from astra_runs where linked_item_id is null
+                """)
+                unlinked = [{"id": r[0], "chosen_title": r[1],
+                             "asset_type": r[2], "created_at": r[3],
+                             "concept": r[4]} for r in cur.fetchall()]
+                run_id = None
+                for run in unlinked:
+                    if match_run_to_items(run, [item], threshold=threshold):
+                        run_id = run["id"]
+                        break
+                if run_id is None:
+                    fam = _norm_family(detect_family_from_asset_type(atype))
+                    cur.execute("""
+                        insert into astra_runs
+                          (item_id, concept, asset_type, titles, chosen_title)
+                        values (%s, %s, %s, %s::jsonb, %s)
+                        returning id
+                    """, (iid, (baseline_name or "")[:300], fam,
+                          str([rec_name]), (rec_name or "")[:200]))
+                    run_id = cur.fetchone()[0]
+                res = link_run(cur, run_id, iid,
+                               heuristic_version="astra-fit-v1")
+                if res.get("ok"):
+                    used.add(iid)
+                    matches.append({
+                        "run_id": run_id, "title": rec_name,
+                        "item_id": iid, "item_name": cur_name,
+                        "ratio": 1.0, "source": "rename",
+                    })
+        except Exception as e:
+            print(f"[auto-link] rename pass failed: {type(e).__name__}: {e}",
+                  flush=True)
+
         conn.commit()
         for m in matches:
             text = (f"🤖 Auto-Linked! Run #{m['run_id']} "
@@ -389,3 +454,10 @@ def auto_link_recent_runs(days=30, threshold=0.80, notifier=None,
             cur.close(); conn.close()
         except Exception:
             pass
+
+
+def is_applied_rename(rec, item):
+    """True when the catalog title now equals the recommended rename."""
+    want = (rec.get("recommended_name") or "").strip().lower()
+    have = (item.get("name") or "").strip().lower()
+    return bool(want) and want == have
