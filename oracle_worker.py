@@ -229,7 +229,7 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
     if store is None:
         store = PostgresStore()
     if search_fn is None:
-        from creator_tracker import search_creator as search_fn
+        from creator_tracker import search_creator_complete as search_fn
     if batch_fn is None:
         from roblox_batch_client import fetch_many_items_sync as batch_fn
     if session_fn is None:
@@ -245,10 +245,13 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
         "skipped_unknown_type": 0, "truncated_creators": {},
         "per_cohort": {"elite": 0, "emerging": 0, "control": 0},
     }
-    if not store.try_lock():
-        summary["status"] = "skipped_locked"
-        return summary
+    lock_acquired = False
+    scan_run_id = None
     try:
+        lock_acquired = bool(store.try_lock())
+        if not lock_acquired:
+            summary["status"] = "skipped_locked"
+            return summary
         ref, cohort_rows = store.latest_cohort()
         summary["cohort_snapshot_ref"] = ref
         creators, seen = [], set()
@@ -281,8 +284,20 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
             try:
                 if session is None:
                     session = session_fn()
-                results = search_fn(session, cid, creator_type=ctype,
-                                    pages=pages) or []
+                discovery = search_fn(
+                    session, cid, creator_type=ctype, max_pages=pages
+                ) or {}
+                if isinstance(discovery, dict):
+                    results = discovery.get("items") or []
+                    was_truncated = bool(discovery.get("truncated"))
+                    pages_fetched = int(discovery.get("pages") or 0)
+                else:
+                    # Backward-compatible fallback for injected/legacy list APIs.
+                    results = discovery or []
+                    pages_fetched = min(
+                        pages, (len(results) + PAGE_SIZE - 1) // PAGE_SIZE
+                    )
+                    was_truncated = len(results) >= pages * PAGE_SIZE
             except Exception as e:
                 from creator_tracker import RateLimited
                 if isinstance(e, RateLimited):
@@ -296,8 +311,12 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
                     f"{type(e).__name__}: {e}")
                 continue
             summary["creators_scanned"] += 1
-            if len(results) == pages * PAGE_SIZE:
-                summary["truncated_creators"][str(cid)] = "possibly_truncated"
+            if was_truncated:
+                summary["truncated_creators"][str(cid)] = {
+                    "reason": "page_cap_reached",
+                    "pages_fetched": pages_fetched,
+                    "items_returned": len(results),
+                }
             for it in results:
                 created = it.get("created_at")
                 age = _age_days(created, now)
@@ -346,7 +365,11 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
             else:
                 summary["skipped_unavailable"] += 1
 
-        if discovery_rate_limited or summary["creators_errored"] or failed:
+        if (discovery_rate_limited
+                or summary["creators_errored"]
+                or summary["skipped_unknown_type"]
+                or summary["truncated_creators"]
+                or failed):
             summary["status"] = "partial"
         else:
             summary["status"] = "success"
@@ -360,14 +383,30 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
         summary["duration_seconds"] = round(time.time() - started, 2)
         summary.setdefault("error_summary", {})["fatal"] = (
             f"{type(e).__name__}: {e}")
+        # A scan-run row is created before discovery. Best-effort finalization
+        # prevents fatal errors from leaving status='running' indefinitely.
+        if scan_run_id is not None:
+            try:
+                store.update_scan_run(scan_run_id, summary)
+            except Exception as finalize_error:
+                summary["error_summary"]["finalize"] = (
+                    f"{type(finalize_error).__name__}: {finalize_error}")
         print(f"[oracle] fatal: {type(e).__name__}: {e}", flush=True)
         return summary
     finally:
-        try:
-            store.release_lock()
-        except Exception:
-            pass
+        if lock_acquired:
+            try:
+                store.release_lock()
+            except Exception:
+                pass
         try:
             store.close()
         except Exception:
             pass
+
+
+if __name__ == "__main__":
+    # Manual smoke-run entry point. It respects ORACLE_ENABLED and prints a
+    # machine-readable summary; migrations are deliberately never applied here.
+    result = run_oracle_scan()
+    print(json.dumps(result, default=str, sort_keys=True), flush=True)
