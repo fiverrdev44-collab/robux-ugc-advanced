@@ -483,7 +483,11 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
             from learning import format_learning_context
             conn_l = get_db(); cur_l = conn_l.cursor()
             try:
-                _learning = format_learning_context(cur_l, item_id=parent_id)
+                # Evaluation guard: live generation never sees outcomes
+                # unless the explicit learning flag is enabled.
+                _learning = (format_learning_context(cur_l, item_id=parent_id)
+                             if os.getenv("ASTRA_LEARNING_IN_GENERATION", "0") == "1"
+                             else "")
             finally:
                 cur_l.close(); conn_l.close()
             if _learning:

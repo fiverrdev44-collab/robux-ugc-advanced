@@ -145,6 +145,8 @@ except Exception as e:
 try:
     from commands_sales import register_sales_commands
     register_sales_commands(bot, get_db)
+    from commands_astra import register_astra_commands
+    register_astra_commands(bot, get_db)
     print("✅ Sales commands loaded.", flush=True)
 except Exception as e:
     print(f"⚠️ Sales commands failed to load: {e}", flush=True)

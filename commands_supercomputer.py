@@ -1227,6 +1227,9 @@ def register_supercomputer_commands(bot):
             text="D1/D7/D30 favorites and sales fill via !ledger_sync"
         )
         await ctx.send(embed=embed)
+        await ctx.send(
+            "Item launched! Was this based on a VANTA recommendation? "
+            f"Use `!link <run_id> {result['id']}` to track its success.")
 
     @bot.command(name="ledger_sync", aliases=["sync_ledger"])
     async def ledger_sync_command(ctx):
