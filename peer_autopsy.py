@@ -135,15 +135,21 @@ def build_verdict(pd, diffs):
     # Defer to intel_common.decide_verdict which uses percentile.
     my_age = pd.get("my_age", 0)
     avg_peer_age = diffs.get("avg_peer_age", 0)
+    if my_age < 14:
+        wait_days = max(1, int(14 - my_age + 0.999999))
+        return (
+            f"⏳ **TOO EARLY TO JUDGE.** This item is too young to judge. "
+            f"The data is still maturing. We should WATCH it for another "
+            f"{wait_days} days."
+        )
     if my_age < 30:
         if diffs["ratio"] >= 0.8:
-            return ("✅ **KEEP.** You're already near the winners' pace. "
-                    "Post 2 TikToks, don't touch the name.")
+            return ("📈 **RECOVERING.** You're already near the winners' pace. "
+                    "Keep observing; avoid unnecessary edits.")
         return (
-            f"⏳ **WINNER-GAP ONLY.** Item is {my_age:.1f}d old; "
+            f"👀 **WATCH.** Item is {my_age:.1f}d old; "
             f"winners average {avg_peer_age:.0f}d. "
-            f"This is not a peer-percentile kill — use `!verdict` for the "
-            f"actual decision, and judge again at day 30."
+            f"This is not a final decision — judge again at day 30."
         )
     # ────────────────────────────────────────────────────────────
 

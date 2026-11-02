@@ -545,7 +545,10 @@ def fetch_created_date_live(item_id, cookie=None):
 def choose_protocol(verdict, total_sales_30d):
     """SCALE when the item sells or the verdict is keep/grow."""
     sales = int(total_sales_30d or 0)
-    if sales > 0 or (verdict or "").upper() in ("KEEP", "DOUBLE_DOWN", "TOO_NEW"):
+    if sales > 0 or (verdict or "").upper() in (
+        "KEEP", "DOUBLE_DOWN", "TOO_NEW", "TOO_EARLY",
+        "WATCH", "RECOVERING", "WINNER",
+    ):
         return "scale"
     return "recovery"
 

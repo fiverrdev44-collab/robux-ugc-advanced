@@ -72,7 +72,7 @@ MANUAL_SECTIONS = {
         "🎛️ EVERY BUTTON",
         "**🚀 FIRE — Launch New Item**\n`!chain <concept>` → full launch kit\n"
         "**⭐ STRIKE — Variant of Winner**\n`!chain variant <id> <theme>` → clone a winner\n"
-        "**🔧 INSPECT — Check Live Item**\n`!verdict <id>` → KEEP / RENAME / KILL\n"
+        "**🔧 INSPECT — Check Live Item**\n`!verdict <id>` → maturity-aware survival states\n"
         "**📡 SCAN — Find Trending Niche**\n`!converge <family>` e.g. `emotes`, `hair`, `face`, `tops`\n"
         "**🖼️ RECON — Analyze Idea**\n`!brainstorm <description>` (image vision is not enabled)\n"
         "**🏷️ LOAD — Generate Tags**\n`!tags <item name>` → 45 tags\n"
@@ -124,8 +124,8 @@ MANUAL_SECTIONS = {
     "item": (
         "🔧 CHECK YOUR ITEM",
         "**`!verdict <id>`** — after 14 days\n"
-        "Returns: 🔥 DOUBLE_DOWN · ✅ KEEP · 🔧 RENAME · 🪦 KILL · ⏳ TOO_NEW\n"
-        "**`!autopsy <id>`** — why it failed + pivot plan\n"
+        "States: 🏆 WINNER · 📈 RECOVERING · 👀 WATCH · ⏳ TOO_EARLY · 🟠 STAGNATING · ⚠️ KILL_CANDIDATE\n"
+        "**`!autopsy <id>`** — evidence-based diagnosis + options\n"
         "**`!sales_for <name>`** — sales for one item\n"
         "**`!history`** — past verdicts\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -283,7 +283,7 @@ SIMPLE_MANUAL = {
         "🔥 **DOUBLE_DOWN** → make more like it\n"
         "✅ **KEEP** → leave it alone\n"
         "🔧 **RENAME** → run `!autopsy <id>` first\n"
-        "🪦 **KILL** → stop making that type\n"
+        "⚠️ **KILL_CANDIDATE** → manual review only\n"
         "⏳ **TOO_NEW** → wait longer\n"
         "━━━━━━━━━━━━━━\n"
         "**Golden rule:** if it says DOUBLE_DOWN, make 3 variants this week.",
@@ -530,7 +530,7 @@ class MenuView(discord.ui.View):
                 "🔥 **DOUBLE_DOWN** — It's working. Ship a variant this week.\n"
                 "✅ **KEEP** — Steady. Post 3 TikToks, re-check in 14 days.\n"
                 "🔧 **RENAME** — Buyers exist but title is weak. Run `!autopsy <id>`.\n"
-                "🪦 **KILL** — Dead. Launch something else.\n"
+                "⚠️ **KILL_CANDIDATE** — Manual review only; never automatic.\n"
                 "⏳ **TOO_NEW** — Under 7 days old. Wait a few more days."
             ),
             color=COLOR_STEALTH,

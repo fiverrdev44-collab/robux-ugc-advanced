@@ -54,6 +54,45 @@ ITEM_TYPE_WORDS = {
 }
 
 
+def autopsy_maturity_prompt(age_days):
+    """Strict prompt guard for items younger than the 14-day maturity gate."""
+    age = max(0.0, float(age_days or 0.0))
+    if age >= 14.0:
+        return ""
+    wait_days = max(1, int(14.0 - age + 0.999999))
+    return (
+        "\n=== IMMATURE ITEM SAFETY RULE — HIGHEST PRIORITY ===\n"
+        "This item is younger than 14 days. It is too early to judge.\n"
+        "You MUST NOT describe this item as a failure or recommend killing/removing it.\n"
+        "Do not use the words KILL or failure anywhere in your response.\n"
+        "Do not use phrases such as dead item, failed item, or let it go.\n"
+        "You MUST include this exact assessment, filling in the number: "
+        f'"This item is too young to judge. The data is still maturing. '
+        f'We should WATCH it for another {wait_days} days."\n'
+        "Keep the tone calm. Discuss observations only, not final outcomes.\n"
+    )
+
+
+def guard_immature_autopsy_output(payload, age_days):
+    """Post-process generated autopsy fields so immature items use safe wording."""
+    if float(age_days or 0.0) >= 14.0:
+        return payload
+
+    def clean(value):
+        if isinstance(value, str):
+            value = re.sub(r"\b(?:kill|killed|killing)\b", "pause", value, flags=re.IGNORECASE)
+            value = re.sub(r"\b(?:failure|failures)\b", "issue", value, flags=re.IGNORECASE)
+            value = re.sub(r"\bfailed\b", "underperformed", value, flags=re.IGNORECASE)
+            return value
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        return value
+
+    return clean(payload)
+
+
 # ── PROMO FILTER ─────────────────────────────────────────────────────
 _PROMO_MARKERS = [
     "join the group", "join our", "join this group", "join and",

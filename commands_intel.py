@@ -12,6 +12,7 @@ import os
 import re
 import json
 import asyncio
+import math
 from datetime import datetime
 
 from momentum import find_momentum_keywords, format_momentum_report
@@ -458,6 +459,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         competition_data = []
         family = "emote"
         pct_data = None
+        d30_data = None
         portfolio_data = None
 
         try:
@@ -533,8 +535,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
             try:
                 pct_data = item_percentile(cur, item_id)
+                if pct_data:
+                    d30_data = d30_milestone_probability(
+                        cur, pct_data["family"], favs=favs or 0,
+                        age_days=age_days or 0, velocity=pct_data["velocity"],
+                    )
             except Exception as e:
-                print(f"[autopsy] percentile failed: {e}", flush=True)
+                print(f"[autopsy] percentile/survival estimate failed: {e}", flush=True)
             try:
                 portfolio_data = portfolio_context(cur, top_n=3)
             except Exception as e:
@@ -609,31 +616,43 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 velocity=pct_data["velocity"],
                 total_sales=sales_30d,
                 sample_size=pct_data["sample_size"],
+                d30_probability=(
+                    d30_data.get("probability")
+                    if d30_data and d30_data.get("available") else None
+                ),
             )
 
-            if verdict == "TOO_NEW":
-                target_day = 30 if item_stats["age_days"] >= 14 else 7
+            wait_days = max(1, int(math.ceil(14 - item_stats["age_days"])))
+            if verdict == "TOO_EARLY":
                 acts = [
-                    f"Wait {max(1, int(target_day - item_stats['age_days']))} more days",
-                    "Post 1 TikTok per day while you wait",
-                    f"Re-run `!autopsy {item_id}` on day {target_day}",
+                    f"Watch for another {wait_days} days.",
+                    "Collect another favorites snapshot before changing the listing.",
+                    f"Re-run !autopsy {item_id} after day 14.",
                 ]
-            elif verdict == "DOUBLE_DOWN":
-                acts = ["Launch a **variant** within 7 days — same motion, new theme.",
-                        "Post 1 TikTok/day for 7 days.",
-                        "Reply to every comment within 1h."]
-            elif verdict == "KEEP":
-                acts = ["Post 3 TikToks this week (cross-post Shorts + Reels).",
-                        "Keep price; test -5 only if flat after 14 days.",
-                        f"Re-run `!autopsy {item_id}` in 14 days."]
-            elif verdict == "RENAME":
-                acts = [f"Rename using a **GOLD** keyword from `!converge {pct_data['family']}`.",
-                        "Change thumbnail first frame — motion, not static.",
-                        "Re-post to TikTok with a 1.5s hook."]
+            elif verdict == "WINNER":
+                acts = ["Preserve what is working and review a related variant opportunity.",
+                        "Keep collecting D7/D30 outcome data.",
+                        f"Re-run !autopsy {item_id} in 7 days."]
+            elif verdict == "RECOVERING":
+                acts = ["Preserve the current listing while positive traction continues.",
+                        "Monitor favorites and sales over the next 7 days.",
+                        f"Re-run !autopsy {item_id} in 7 days."]
+            elif verdict == "WATCH":
+                acts = ["Do not make a major change on this evidence alone.",
+                        "Collect another favorites and sales snapshot.",
+                        f"Re-run !autopsy {item_id} in 7 days."]
+            elif verdict == "STAGNATING":
+                acts = ["Review title, description and search visibility before editing.",
+                        f"Compare its family cohort with !converge {pct_data['family']}.",
+                        f"Re-run !autopsy {item_id} in 7 days."]
+            elif verdict == "KILL_CANDIDATE":
+                acts = ["Manual review only — this is not an automatic removal decision.",
+                        "Check listing accuracy, search visibility and comparable items.",
+                        "Compare another 7-day observation window before deciding."]
             else:
-                acts = ["Stop investing in this item.",
-                        f"Run `!converge {pct_data['family']}` for a snipe zone.",
-                        "Reallocate content to your top-2 performers."]
+                acts = ["Review current performance and collect another observation.",
+                        f"Run !converge {pct_data['family']} for category context.",
+                        f"Re-run !autopsy {item_id} in 14 days."]
 
             sales_line = f" · 💰 {sales_30d} sales (30d)" if sales_30d > 0 else ""
 
@@ -647,6 +666,17 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             ]
             for i, a in enumerate(acts, 1):
                 dec_lines.append(f"{i}. {a}")
+            if d30_data and d30_data.get("available"):
+                dec_lines.append(
+                    f"**Family D30 milestone:** {d30_data['milestone_favs']:,.0f} favorites · "
+                    f"projected {d30_data['projected_favs_d30']:,.0f} · "
+                    f"heuristic {d30_data['probability']:.1f}% (n={d30_data['cohort_n']}; not calibrated)"
+                )
+            else:
+                dec_lines.append(
+                    f"**Family D30 estimate:** unavailable — "
+                    f"{(d30_data or {}).get('reason', 'insufficient mature family outcomes')}"
+                )
 
             if portfolio_data and portfolio_data["winners"]:
                 p = portfolio_data["winners"][0]
@@ -696,9 +726,15 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         effective_sales = max(sales_30d, sales_lifetime)
         item_stats["sales"] = effective_sales
         scale_mode = choose_protocol(verdict, effective_sales) == "scale"
-        if scale_mode:
+        immature_item = item_stats["age_days"] < 14
+        if immature_item:
+            diagnosis = {
+                "failure_mode": "too_early", "severity": "none",
+                "message": "This item is too young to judge; the data is still maturing.",
+            }
+        elif scale_mode:
             diagnosis = {"failure_mode": "healthy", "severity": "none",
-                         "message": "Sales present - scale protocol."}
+                         "message": "Sales present - review scale options."}
         else:
             diagnosis = detect_failure_mode(item_stats)
         try: await progress.delete()
@@ -941,9 +977,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             )
         pivot_hint = "".join(hint_parts)
 
-        role = ("You're a Roblox UGC seller who scales a working item."
-                if scale_mode else
-                "You're a Roblox UGC seller who fixes dead items.")
+        role = (
+            "You're a cautious Roblox UGC analyst. This item is still maturing."
+            if immature_item else
+            ("You're a Roblox UGC seller who scales a working item."
+             if scale_mode else
+             "You're a Roblox UGC seller who diagnoses underperforming items.")
+        )
         prop_rule = ""
         if is_static_prop(f"{name} {desc or ''}"):
             prop_rule = (
@@ -964,6 +1004,16 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         except Exception as e:
             print(f"[autopsy] learning context skipped: {e}", flush=True)
 
+        try:
+            from gemini_brain import autopsy_maturity_prompt
+            maturity_prompt = autopsy_maturity_prompt(item_stats["age_days"])
+        except Exception:
+            maturity_prompt = (
+                "The item is still young. Describe it as too early to judge; "
+                "recommend another observation window."
+                if immature_item else ""
+            )
+
         recovery_prompt = f"""{role} Talk like a blunt friend, not a consultant.
 
 === VOICE ===
@@ -983,7 +1033,8 @@ Price: R${item_stats['price']}
 Age: {item_stats['age_days']:.1f} days
 Winner median in niche: {item_stats['winner_median_favs']:,} favs
 
-FAILURE MODE: {diagnosis['failure_mode']}
+{'MATURITY STATUS' if immature_item else 'ITEM DIAGNOSIS'}: {diagnosis['failure_mode']}
+{maturity_prompt}
 {sales_guard_instruction(effective_sales)}
 {learning_block}
 
@@ -1050,6 +1101,12 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
             if not data:
                 await ai_msg.edit(content="⚠️ AI returned nothing. Try again.")
                 return
+            if immature_item:
+                try:
+                    from gemini_brain import guard_immature_autopsy_output
+                    data = guard_immature_autopsy_output(data, item_stats["age_days"])
+                except Exception as guard_error:
+                    print(f"[autopsy] maturity language guard failed: {guard_error}", flush=True)
 
             # Props must not carry wearable nouns even if the model ignores
             # the prompt rule.
@@ -1432,14 +1489,15 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                 )
 
             # FINAL BLOCK
-            final_lines = ["# ✅ FINAL — DO THIS FOR THIS ITEM"]
-            kill = verdict == "KILL"
-            too_new = verdict == "TOO_NEW"
+            final_lines = ["# 🩺 FINAL — EVIDENCE & OPTIONS"]
+            kill = verdict == "KILL_CANDIDATE"
+            too_new = verdict == "TOO_EARLY"
 
             if kill:
                 final_lines.append(
-                    "**Let it go.** Don't rename it, don't re-upload it, don't touch "
-                    "the price. A fresh title won't save a dead item."
+                    "**Manual review candidate.** The evidence is weak, but this is "
+                    "not an automatic removal decision. Check the listing and compare "
+                    "another observation window."
                 )
             elif too_new:
                 final_lines.append(
@@ -1448,8 +1506,8 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                 )
 
             if pivot_kw:
-                label = ("**🎯 Pivot for the next upload:**" if kill
-                         else "**🎯 Pivot:**")
+                label = ("**🎯 Alternative keyword to test:**" if kill
+                         else "**🎯 Pivot option:**")
                 conf_txt = (f"confidence **{pivot_conf:.0%}**"
                             if pivot_conf > 0 else "verified against DB")
                 final_lines.append(
@@ -1459,8 +1517,8 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                 )
 
             if champion:
-                name_label = ("**1. Name for the new upload:**" if kill
-                              else "**1. New name:**")
+                name_label = ("**1. Alternative title to evaluate:**" if kill
+                              else "**1. Title option:**")
                 final_lines.append(
                     f"{name_label} `{champion['title']}`  ← top-ranked candidate"
                 )
@@ -1498,29 +1556,36 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                          f"test -5 after 14d if flat"
                 )
 
-            if kill:
+            if too_new:
                 final_lines.append(
-                    "**5. Today:** skip the rename. Start the new item with the "
-                    "name above."
+                    f"**Next observation:** {max(1, int(math.ceil(14 - item_stats['age_days'])))} days; "
+                    "the item is too young to judge."
                 )
-            elif too_new:
+            elif kill:
                 final_lines.append(
-                    "**5. Today:** nothing. Judge it again on day 30."
+                    "**Next step:** manual review and another 7-day observation window."
                 )
             else:
                 final_lines.append(
-                    "**5. Today:** rename it, swap the thumbnail to a motion frame, "
-                    "post 1 TikTok."
+                    "**Next step:** evaluate the title/description options only if the "
+                    "evidence supports a controlled test."
                 )
-            final_lines.append(f"**6. In 14 days:** `!verdict {item_id}`")
+            alternative_keyword = pivot_kw or next(
+                (word for word in name_words[1:] if word.lower() not in {"emote", "dance", "hair", "hat"}),
+                "a different category keyword",
+            )
+            final_lines.append(
+                f"**Counterfactual Question:** What if we targeted {alternative_keyword} instead?"
+            )
+            final_lines.append(f"**Next check:** !verdict {item_id} in 7 days.")
             if kill:
                 final_lines.append(
-                    f"\n_Still want to fight for it? `!revive {item_id}` runs the "
-                    "full rebuild — gaps, pivots, peer autopsy, 14-day plan._"
+                    f"\n_If you want another assessment, !revive {item_id} runs "
+                    "the full rebuild — gaps, pivots, peer comparison and a 14-day plan._"
                 )
 
             try:
-                if not kill and not too_new:
+                if verdict in ("RECOVERING", "STAGNATING", "WATCH"): 
                     rec_type = "rename" if champion else "keep"
                     rec_name = (champion.get("title") if champion else name)
                     rec_pivot = pivot_kw or ""
