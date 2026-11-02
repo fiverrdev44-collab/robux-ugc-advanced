@@ -1521,6 +1521,22 @@ RULES:
             f"[CREATOR NOTES] {description or '(none)'}"
         )
 
+        try:
+            from product_understanding import (from_image, to_prompt_block,
+                                               STATIC_FAMILIES)
+            _pu = from_image(vision, description, image_kind="attachment")
+            full_desc += "\n\n" + to_prompt_block(_pu)
+            if _pu["family"] == "emotes":
+                full_desc += (
+                    "\n[EMOTE RULE] Do NOT infer movement from the static image. "
+                    "Use only the creator's notes/metadata for motion.")
+            elif _pu["family"] in STATIC_FAMILIES:
+                full_desc += (
+                    "\n[STATIC RULE] Static accessory: never use motion words "
+                    "such as dance, sway, float.")
+        except Exception as e:
+            print(f"[analyze_image] understanding skipped: {e}", flush=True)
+
         synth = None
         try:
             synth = await asyncio.to_thread(

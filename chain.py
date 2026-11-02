@@ -25,14 +25,13 @@ from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 from category_configs import is_static_prop, strip_prop_words
 
 
-def _astra_filter(titles, concept):
-    """Drop platform-promo words and titles that swap the requested motion."""
+def _astra_filter(titles, concept, family=None):
+    """Platform guard + identity lock; static families skip motion checks."""
     try:
-        from astra import contains_banned_platform, identity_lock_ok
+        from product_understanding import validate_title
     except Exception:
         return list(titles or [])
-    return [t for t in (titles or [])
-            if not contains_banned_platform(t) and identity_lock_ok(concept, t)]
+    return [t for t in (titles or []) if validate_title(concept, t, family)[0]]
 
 
 def _sanitize_titles(titles):
@@ -290,6 +289,20 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
 
     intent["item_type"] = family
     item_type = family
+
+    # Shared product understanding: user text overrides inference; static
+    # accessories carry no motion requirements.
+    understanding = None
+    try:
+        from product_understanding import merge as _pu_merge
+        understanding = _pu_merge(concept, api_family=None)
+        if raw_family in ("unknown", "", None) and \
+                understanding["family"] != "unknown":
+            family = understanding["family"]
+            item_type = family
+    except Exception as e:
+        print(f"[chain] product understanding skipped: {e}", flush=True)
+
     terms = all_terms(intent)
 
     type_override = _detect_type_override(concept)
@@ -505,7 +518,7 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     for _k in ("titles_safe", "titles_differentiated", "titles_longtail",
                "titles_viral"):
         if synth.get(_k):
-            synth[_k] = _astra_filter(synth[_k], concept)
+            synth[_k] = _astra_filter(synth[_k], concept, family)
 
     # ── Stage 10: Focused title pass ──
     try:
@@ -595,7 +608,7 @@ OUTPUT — ONLY JSON:
     for _k in ("titles_safe", "titles_differentiated", "titles_longtail",
                "titles_viral"):
         if synth.get(_k):
-            synth[_k] = _astra_filter(synth[_k], concept)
+            synth[_k] = _astra_filter(synth[_k], concept, family)
 
     # ── Stage 10b: Staged verification ──
     verification_audit = None
@@ -683,7 +696,7 @@ OUTPUT — ONLY JSON:
             print("[chain] using deterministic title fallback", flush=True)
         if is_static_prop(concept):
             all_titles = _sanitize_titles(all_titles)
-        all_titles = _astra_filter(all_titles, concept)
+        all_titles = _astra_filter(all_titles, concept, family)
         all_titles = _diverse_titles(all_titles)
         if all_titles:
             scored_titles = score_titles_batch(all_titles, family=family)
