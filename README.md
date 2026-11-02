@@ -20,7 +20,8 @@ current accuracy and data gaps are documented below.
 | Conversational VANTA | Public threads or private DMs; casual phrasing, typos, follow-ups, ordinals, image attachments; AI planner with deterministic fast paths |
 | Niche discovery | Convergence scan, gap engine, rising gaps, emerging waves, daily opportunity feed |
 | Item decisions | KEEP / RENAME / KILL verdicts from age, favorites, velocity, percentile, sales; failure autopsy and full revive plans |
-| Creation pipeline | Concept fan-out → competitor/winners analysis → AI titles/descriptions → verification → statistical ranking → final action block |
+| Creation pipeline | Concept fan-out → product understanding → competitor/winners analysis → AI titles/descriptions → verification → statistical ranking → Analyst Report |
+| Algorithmic tracking | `!link`/`!rename` baselines, `!outcome` D7/D30 deltas, auto-link every 2 h, rename watcher every 15 min, algorithmic-fit heuristic (frozen version) |
 | Title & description tooling | Word-lift scoring, ML title predictor, pattern/lift mining, sales-weighted keywords woven into descriptions |
 | Market intelligence | X-ray dashboards, winner-loser patterns, early winners, momentum, trend oracle, competition checks |
 | Sales & revenue | Discord sale ingestion, backfill, per-item and daily reports, revenue simulation, group metrics |
@@ -111,7 +112,7 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!start [classic]` | Command Center (conversational) or legacy tactical console |
 | `!converge [family] [limit]` | Rank open niches by demand, supply, velocity, recency, creator concentration (`all_families` scans every family) |
 | `!converge_debug <keyword>` | Diagnose one keyword's convergence score |
-| `!chain <concept>` | Full pipeline: niche → market → competitors → descriptions → AI titles → verification → statistical ranking → final action block |
+| `!chain <concept>` | Full pipeline: product understanding → niche/market → competitors → verified AI titles → statistical ranking → seven-section Analyst Report |
 | `!chain variant <item_id> [theme]` | Variant of a proven winner |
 | `!chain <family>:<concept>` | Family-scoped chain |
 | `!verdict <item_id>` | KEEP / RENAME / KILL with age, favorites, velocity, percentile, live sales, confidence interval |
@@ -182,7 +183,10 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 
 | Command | What it does |
 |---|---|
-| `!launch <item_id> [launched] [notes]` | Record an item as launched |
+| `!launch <item_id> [launched] [notes]` | Record an item as launched; VANTA then auto-scans your catalog for a matching recommendation |
+| `!link <run_id> <item_id>` | Link a generated run to any asset (old or new); captures the launch-time baseline now |
+| `!rename <run_id> <item_id>` | Same as `!link` for an existing item you just renamed; reports rename baseline |
+| `!outcome <run_id>` | D7 favorites gained and sale records since the link/rename moment |
 | `!launch_sync [groups]` | Auto-log every item from your groups |
 | `!ledger_sync` | Fill D1/D7/D30 favorites and sales |
 | `!hitrate [days]` | Your launches vs niche peers |
@@ -302,8 +306,11 @@ bot-side jobs. All times UTC.
 | `scanner.py` | 02:00 (Actions) | Discover items via search pages **plus monotonic ID stepping** (30-item batches, `SCANNER_ID_WINDOW`) |
 | `enricher.py` | Manual workflow / `ugc-enrich.service` loop | **30-item batch details** (`roblox_batch_client.py`) with bulk upsert; marks missing/404 IDs as failed |
 | `live_enrich.py` | On demand (library) | Keyword search + detail fetch with rate limits and circuit breaker |
-| `snapshot.py` | 03:30 + top-ups 09:30/15:30/21:30 + catch-up | Favorites history; **tiered half-life selection** (`SNAPSHOT_TIER_LIMIT`, default 1500) |
-| `favorites_backfill.py` | 02:30 | Fill NULL and ambiguous-zero favorites (500/day, ledger first) |
+| `snapshot.py` | 03:30 + top-ups 09:30/15:30/21:30 + catch-up | Favorites history via **30-item batch client** and bulk unnest update; tiered half-life selection (`SNAPSHOT_TIER_LIMIT`, default 1500) |
+| `favorites_backfill.py` | 02:30 | Fill NULL and ambiguous-zero favorites (`FAVORITES_BACKFILL_LIMIT`, default 1500/day, ledger first) |
+| `rename_watcher` | Every 15 min (scheduler) | Check live titles for recent rename advice; capture a fresh baseline when a rename is detected |
+| `market_research_worker` | Every 6 h (scheduler) | Priority refresh (launch ledger → recent launches → exploratory) in 30-item batches |
+| `auto_link` | Every 2 h (scheduler) | Match new/renamed owned items to recent unlinked runs and capture baselines |
 | `suggest.py` | 04:30/10:30/16:30/22:30 (Actions) | Autocomplete suggestions with rank; DB-mined fallback |
 | `discover_keywords.py` | 05:30 (Actions) | Mine and score keywords from 30k items |
 | `backfill_dates.py` | 06:30 (Actions) | Repair `items.created_at` |
@@ -337,11 +344,17 @@ bot-side jobs. All times UTC.
 | `recommendation_ledger` | Advice lifecycle, baselines, outcomes, matched-control results |
 | `experiment_controls` | Matched control items and pre-intervention distances |
 | `creator_patterns`, `tracked_creators` | Creator findings and verified-creator queue |
+| `astra_runs` | Generated concepts/titles, chosen title, `linked_item_id`, `linked_at` |
+| `astra_outcomes` | Per-run launch/rename baseline and `launched_at` for D7/D30 deltas |
+| `sales_name_aliases` | Confirmed/candidate sale-name → asset aliases (beanie rename fixture) |
+| `conversation_memory` | Durable router context per user+channel (24 h TTL) |
 | `search_queries`, `search_runs`, `search_observations` | Search-visibility history |
 
 Notable indexes: `item_history` per-item and one-per-day uniqueness, `pg_trgm` GIN on
-`items.name`, partial unique indexes for `my_sales` (`source_event_id`, fingerprint fallback),
-recommendation due-time and item indexes, visibility observation uniqueness.
+`items.name`, functional `idx_items_name_lower_trim` on `items (lower(trim(name)))`, partial
+unique indexes for `my_sales` (`source_event_id`, fingerprint fallback), recommendation due-time
+and item indexes, `sales_name_aliases` item index, Astra run/outcome indexes, visibility
+observation uniqueness.
 
 Writes are idempotent: `IF NOT EXISTS` tables/columns/indexes, `ON CONFLICT DO NOTHING/UPDATE`,
 pre-index dedupe deletes, and safe per-statement rollback. Schema changes and rollback are
@@ -394,6 +407,14 @@ documented in `MIGRATIONS.md`.
 | `category_configs.py`, `intel_common.py`, `launch_ledger.py`, `pivot_history.py` | Shared config, verdict/pivot logic, ledger sync, pivot consistency |
 | `scanner.py`, `enricher.py`, `live_enrich.py`, `snapshot.py` | Crawl and enrich pipeline |
 | `roblox_batch_client.py` | Async 30-item catalog POST client: token bucket, AIMD, jitter backoff, CSRF |
+| `product_understanding.py` | Shared family/colors/details/motion model with per-fact source; emote-thumbnail and static-motion rules |
+| `astra_report.py` | Seven-section Analyst Report for `!chain` (product, market, angles, test, description, preview, measurement) |
+| `market_research_worker.py` | 6-hour priority research cycle with circuit breaker and idempotent upserts |
+| `rename_watcher.py` | 15-minute rename detector that snapshots a fresh launch baseline |
+| `creator_memory.py` | Astra runs, `!link`/`!rename` baselines, `!outcome` deltas, auto-link matcher |
+| `commands_astra.py` | `!link`, `!rename`, `!outcome` |
+| `apply_phase3_migration.py`, `apply_missing_index.py` | One-time migration/index runners |
+| `astra.py` | Algorithmic-fit heuristic (frozen `astra-fit-v1`), platform guard, identity lock, Astra output |
 | `item_resolver.py` | Canonical sale→asset identity (`sales_name_aliases`), confirmed rename fixtures |
 | `reporting.py` | Single definition of UTC reporting windows and amount semantics |
 | `evidence.py` | Traceable evidence records (metric/unit/asset/window/source/validity) |
@@ -450,23 +471,32 @@ throughput guarantee.
 ## Testing
 
 ```
-python test_vanta_conversation.py        # router/planner, pure (no Discord, no DB)
-python test_integrity_upgrades.py        # normalization, DiD math, lane gates, DB idempotency
-python test_identity_and_windows.py      # alias resolver, frozen sales windows, beanie fixture
+python test_vanta_conversation.py        # router/planner, rename/selection, memory, pending chain
+python test_identity_and_windows.py      # alias resolver + dynamic DB window reconciliation
 python test_recommendation_lifecycle.py  # application evidence, maturity, rec-10 marker
-python test_shared_repairs.py            # visibility 429, live backoff, batch client, chain fallback, prop gate
+python test_shared_repairs.py            # visibility 429, backoff, batch client, chain fallback, prop gate
 python test_jarvis_cases.py              # evidence semantics, learning filtering, diversity, memory
+python test_astra.py                     # algorithmic-fit heuristic, platform guard, identity lock
+python test_product_understanding.py     # blue hat/no motion, emote thumbnail rule, family sources
+python test_phase2.py                    # research worker priority, circuit breaker, analyst report
+python test_phase3.py                    # linking, outcome deltas, evaluation guard, frozen version
+python test_auto_linker.py               # auto-link matching (Pose vs Pose V2), family gate
+python test_rename_tracking.py           # old-item baselines, rename detection, launched_at anchors
+python test_rename_watcher.py            # 15-minute watcher detection and autopsy persistence
+python test_snapshot_batch.py            # snapshot batch fetch + bulk unnest history write
+python test_algorithm_journey.py         # run → launch ledger → favorites answer
 python test_integrity_upgrades.py        # pure checks; DB transaction test writes my_sales (skip in prod)
+python api_performance_audit.py          # live speed benchmark + daily API footprint estimate
 python test_api_speed.py                 # opt-in live benchmark (30 GETs vs 1 batch POST)
 python test_live_roblox_sync.py          # read-only DB-vs-live marketplace sample (writes LIVE_MARKET_AUDIT.md)
 python test_live_advantage.py            # gap/rank/velocity truth check (writes LIVE_ADVANTAGE_AUDIT.md)
 python selftest.py                       # full audit (env, schema, freshness, engines, live items)
 ```
 
-DB-backed tests skip automatically when `DATABASE_URL` is absent. The `test_live_*` and
-`test_api_speed.py` suites make external requests and are excluded from the default audit run.
-`!selftest` runs the audit plus a command harness and issues a certificate only when there are no
-hard failures and the effective score is ≥90.
+DB-backed tests skip automatically when `DATABASE_URL` is absent. The `test_live_*`,
+`test_api_speed.py`, and `api_performance_audit.py` suites make external requests and are excluded
+from the default audit run. `!selftest` runs the audit plus a command harness and issues a
+certificate only when there are no hard failures and the effective score is ≥90.
 
 ---
 
@@ -510,20 +540,61 @@ after a schema change, then return it to `0`; otherwise apply migrations manuall
 to take `ACCESS EXCLUSIVE` locks on `items`/`launch_ledger` during startup and could deadlock
 against reads.
 
-Prepared but **not applied** to production:
+Applied to production:
 
 ```
-migrations/2026-11-01_items_name_lower_trim_index.sql
--- CREATE INDEX CONCURRENTLY idx_items_name_lower_trim
---   ON items (lower(trim(name)));
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_items_name_lower_trim
+  ON items (lower(trim(name)));
 ```
 
-That index supports the exact-title lookup in `item_resolver.resolve_name`; without it the lookup
-is a parallel sequential scan and can hit the 20s statement timeout under load.
+That functional index supports the exact-title lookup in `item_resolver.resolve_name`
+(previously a sequential scan that could hit the 20 s statement timeout).
+
+Astra schema migrations (applied; re-runnable):
+
+```
+migrations/2026-11-02_astra_tables.sql     -- astra_runs
+migrations/2026-11-02_astra_outcomes.sql   -- linked_item_id/linked_at + astra_outcomes
+python apply_phase3_migration.py           -- one-shot outcome migration
+python apply_missing_index.py              -- one-shot functional index
+```
 
 Tuning knobs include `ENRICH_BATCH_SIZE`, `SNAPSHOT_TOP_ITEMS`, `SNAPSHOT_MIN_FAVS`,
-`SNAPSHOT_TIER_LIMIT`, `SCANNER_ID_WINDOW`, `FAVORITES_BACKFILL_LIMIT`,
+`SNAPSHOT_TIER_LIMIT`, `SNAPSHOT_BATCH_RATE`, `SNAPSHOT_BATCH_CONCURRENCY`,
+`SCANNER_ID_WINDOW`, `FAVORITES_BACKFILL_LIMIT`, `RESEARCH_MAX_IDS`,
+`RESEARCH_HIGH_LIMIT`, `RESEARCH_MEDIUM_LIMIT`, `RESEARCH_LOW_LIMIT`,
+`RENAME_WATCH_DAYS`, `RENAME_WATCH_RATE`, `ASTRA_LEARNING_IN_GENERATION`,
 `VISIBILITY_MAX_PAGES`, and `VISIBILITY_DELAY`.
+
+---
+
+## Recent updates (2026-11-02)
+
+- **Product understanding (Astra v3):** `product_understanding.py` extracts family, colors,
+  details, motion, constraints and unknowns with per-fact sources (user/API/visual/inferred/
+  unknown). Emotes never infer motion from a static image; static accessories never carry motion.
+- **Chain Analyst Report:** `!chain` now prints seven sections — Product Understanding, Market
+  Evidence, 3–5 Positioning Angles, Recommended First Test, Description, Preview Brief, and
+  Measurement Plan. The old metric-dump blocks are no longer sent.
+- **Algorithmic fit:** the heuristic is frozen as `astra-fit-v1`, labelled “Algorithmic Fit
+  Heuristic (not a prediction)”, and reports `result_count` separately from
+  `retrieval_completeness` (5 returned / 5 checked = 5/5, not “5 of 30 pages”).
+- **Launch & rename memory:** `!link` (any item age), `!rename`, and `!outcome` capture a baseline
+  at link time (`launched_at = now()`) and report D7 favorites/units from that moment. Auto-link
+  runs every 2 h; a rename watcher checks live titles every 15 minutes.
+- **Research worker:** `market_research_worker.py` refreshes HIGH (launch ledger), MEDIUM (recent
+  launches) and LOW (exploratory) items every 6 h in 30-item batches with a circuit breaker.
+- **Snapshot batching:** `snapshot.py` now uses the 30-item client and a bulk `unnest` update for
+  `items`/`item_history` instead of per-item GETs. Live benchmark: **73.7× faster** (30.946 s →
+  0.420 s, 0 × 429); estimated background footprint **~0.2%** of a 100 req/min daily allowance
+  (or ~1.21% before snapshot batching).
+- **Evaluation guard:** live generation does not see past outcomes unless
+  `ASTRA_LEARNING_IN_GENERATION=1`; outcome-based learning is an explicit path.
+- **Database:** `astra_runs`, `astra_outcomes`, `linked_item_id`/`linked_at`, and the
+  `idx_items_name_lower_trim` functional index are applied. The former `marketplace_links`/`!links`
+  external-link tracking was removed entirely.
+- **Tests:** added Astra/product/phase2/phase3/auto-link/rename/snapshot suites; the identity test
+  now reconciles against live SQL instead of hardcoded historical totals.
 
 ---
 
@@ -613,8 +684,13 @@ Known data gaps:
 - The bot cannot create demand or guarantee sales.
 - No usable mature recommendation outcomes exist yet; `learning.py` is wired and tested but has
   nothing real to retrieve, so “learning from sales” is not yet demonstrated.
-- `migrations/2026-11-01_items_name_lower_trim_index.sql` is prepared but **not applied**; until it
-  is, the exact-title lookup can scan `items` and hit the statement timeout under load.
+- `idx_items_name_lower_trim` is applied; exact-title lookups use the functional index.
+- Auto-linking requires a ≥80% title similarity and a matching family; renamed items are matched
+  through applied rename advice, so mismatched or highly edited titles still need manual `!link`.
+- `astra_runs`/`astra_outcomes` start empty; outcomes appear only after a run is linked (manually or
+  by the 2-hour auto-linker / 15-minute rename watcher). No real D7/D30 journey has been demonstrated yet.
+- The batched snapshot path is unit-tested but has not yet been exercised by a full production
+  snapshot run.
 - Schema DDL must not run on every boot: `RUN_MIGRATIONS_ON_START` stays `0` except for a one-shot
   migration boot. Forgetting to run migrations leaves new tables/columns absent.
 - Conversational public threads are visible to channel members; use **Private (DM)** for
@@ -622,7 +698,8 @@ Known data gaps:
 - Conversation context persists in `conversation_memory` (user+channel scoped, 24h TTL) across
   restarts; it stores router context, not full transcripts.
 - The AI planner is bounded: allow-listed actions only, ~400 output tokens, 20 calls/hour per
-  conversation, 30s timeout, deterministic routing first. No mutating operation is routed from
+  conversation (100 for bot owners), 30s timeout, deterministic routing first, and a tool registry
+  of registered commands injected into the prompt. No mutating operation is routed from
   casual language.
 - Provider-reported token usage is logged per AI call; otherwise an explicit input estimate is
   logged.
