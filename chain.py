@@ -25,6 +25,16 @@ from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 from category_configs import is_static_prop, strip_prop_words
 
 
+def _astra_filter(titles, concept):
+    """Drop platform-promo words and titles that swap the requested motion."""
+    try:
+        from astra import contains_banned_platform, identity_lock_ok
+    except Exception:
+        return list(titles or [])
+    return [t for t in (titles or [])
+            if not contains_banned_platform(t) and identity_lock_ok(concept, t)]
+
+
 def _sanitize_titles(titles):
     """Strip wearable nouns from prop titles; drop empties/duplicates."""
     out, seen = [], set()
@@ -491,6 +501,12 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                 synth[_k] = _sanitize_titles(synth[_k])
         print("[chain] static prop gate applied", flush=True)
 
+    # Astra guards also apply before any title is scored or displayed.
+    for _k in ("titles_safe", "titles_differentiated", "titles_longtail",
+               "titles_viral"):
+        if synth.get(_k):
+            synth[_k] = _astra_filter(synth[_k], concept)
+
     # ── Stage 10: Focused title pass ──
     try:
         cfg = get_category_config(family)
@@ -570,12 +586,16 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
 
-    # The focused pass can reintroduce wearable nouns; re-apply the gate.
+    # The focused pass can reintroduce wearable nouns or platform words.
     if is_static_prop(concept):
         for _k in ("titles_safe", "titles_differentiated",
                    "titles_longtail", "titles_viral"):
             if synth.get(_k):
                 synth[_k] = _sanitize_titles(synth[_k])
+    for _k in ("titles_safe", "titles_differentiated", "titles_longtail",
+               "titles_viral"):
+        if synth.get(_k):
+            synth[_k] = _astra_filter(synth[_k], concept)
 
     # ── Stage 10b: Staged verification ──
     verification_audit = None
@@ -663,6 +683,7 @@ OUTPUT — ONLY JSON:
             print("[chain] using deterministic title fallback", flush=True)
         if is_static_prop(concept):
             all_titles = _sanitize_titles(all_titles)
+        all_titles = _astra_filter(all_titles, concept)
         all_titles = _diverse_titles(all_titles)
         if all_titles:
             scored_titles = score_titles_batch(all_titles, family=family)
@@ -1055,8 +1076,44 @@ def format_chain(result):
     except Exception:
         pass
 
-    final_lines.append("**If you choose it:** overlay the name on one TikTok")
+    final_lines.append("**If you choose it:** overlay the name on one short-form video")
     final_lines.append("**Later check:** run `!verdict <new_item_id>` in 14 days")
+
+    try:
+        from astra import format_astra
+        analysis = {
+            "culture": f"{family} niche; {s.get('direct_matches', 0)} direct matches",
+            "buyer_intent": f"searches combining '{concept[:50]}' with style words",
+            "keyword_plan": f"anchor '{result.get('best_niche_kw') or concept[:40]}'",
+            "evidence_limits": "limited live sample; DB favorites coverage is partial",
+        }
+        angles = ["safe", "differentiated", "longtail", "viral"]
+        astra_titles = [{"title": x["title"], "angle": angles[min(i, 3)]}
+                        for i, x in enumerate(scored[:5])]
+        brief = {
+            "showcase": "3-second reveal, one rotation, title overlay.",
+            "experiment": "one variant vs control for 7 days; compare favorites and units.",
+        }
+        final_lines.append("\n" + format_astra(analysis, astra_titles,
+                                               merged or "", brief))
+    except Exception as e:
+        print(f"[chain] astra block skipped: {e}", flush=True)
+
+    # Auto-record the generated run (angles/titles/chosen) for attribution.
+    try:
+        from creator_memory import record_run
+        conn_r = get_db(); cur_r = conn_r.cursor()
+        try:
+            record_run(
+                cur_r, concept, [x["title"] for x in scored[:5]],
+                chosen_title=(scored[0]["title"] if scored else None),
+                asset_type=family, item_id=parent_id)
+            conn_r.commit()
+            print("[chain] astra run recorded", flush=True)
+        finally:
+            cur_r.close(); conn_r.close()
+    except Exception as e:
+        print(f"[chain] astra record skipped: {e}", flush=True)
 
     chunks.append("\n".join(final_lines))
 

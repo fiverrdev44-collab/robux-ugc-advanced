@@ -1300,6 +1300,16 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
             except Exception as e:
                 print(f"[autopsy] title scoring failed: {e}", flush=True)
 
+            try:
+                from astra import emit_astra
+                _titles = [sc["title"] for sc in scored_recovery][:5]
+                await emit_astra(
+                    ctx, name, family, _titles,
+                    (data.get("description_seo")
+                     or data.get("description_short") or ""))
+            except Exception:
+                pass
+
             # COHORT EVIDENCE — comparable cohort, not a guarantee
             try:
                 from confidence import build_confidence, format_confidence
@@ -1928,6 +1938,15 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
             print(f"[revive] experiment save failed: {e}", flush=True)
 
         await ctx.send("\n".join(plan)[:1900])
+        try:
+            from astra import emit_astra
+            _revive_titles = [
+                sc.get("title") for sc in (result.get("scored_titles") or [])
+            ][:5]
+            await emit_astra(ctx, name, family, _revive_titles,
+                             result.get("merged_description") or "")
+        except Exception:
+            pass
 
     # =========================================================
     # !creator_brain — systematic review of the creator cohort

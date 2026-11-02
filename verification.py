@@ -169,6 +169,13 @@ def _phrase_metrics(cur, title, family=None):
 
 
 def verify_title_deep(cur, title, allow_list, family=None, seen=None):
+    try:
+        from astra import contains_banned_platform
+        if contains_banned_platform(title):
+            return {"title": title, "passed": False, "stage": "platform",
+                    "reasons": ["platform/promo word (tiktok/youtube/viral/trending)"]}
+    except Exception:
+        pass
     allowed = allow_set(allow_list)
     seen = seen if seen is not None else set()
     toks, reasons = _token_reasons(title, allowed, seen)
