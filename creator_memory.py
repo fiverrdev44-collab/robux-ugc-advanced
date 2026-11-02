@@ -1,3 +1,6 @@
+import os
+from difflib import SequenceMatcher
+
 """creator_memory.py — Astra runs, asset linking, and launch outcomes.
 
 A generated recommendation is not applied automatically. !link connects a run
@@ -249,3 +252,140 @@ def outcome_summary(cur, item_id=None, limit=10):
     return [{"rec_id": r[0], "item_id": r[1], "maturity": r[2],
              "outcome": r[3], "measured_at": str(r[4])}
             for r in cur.fetchall()]
+
+
+# ── Auto-linker (Phase 3 automation) ──
+
+def _norm_family(family):
+    f = (family or "").lower()
+    if f in ("emote", "emotes"):
+        return "emote"
+    if f in ("clothing", "classic", "tops", "shirt", "pants", "jacket"):
+        return "clothing"
+    if f in ("accessory", "waist", "neck", "back", "front", "shoulder",
+             "gear", "back accessory"):
+        return "accessory"
+    if f in ("hat", "hats"):
+        return "headwear"
+    return f
+
+
+def match_run_to_items(run, items, threshold=0.80):
+    """Best matching owned item for one run, respecting family."""
+    title = (run.get("chosen_title") or run.get("concept") or "").strip()
+    if not title:
+        return None
+    run_fam = _norm_family(run.get("asset_type"))
+    best = None
+    for it in items:
+        from category_configs import detect_family_from_asset_type
+        item_fam = _norm_family(
+            detect_family_from_asset_type(it.get("asset_type_id")))
+        if run_fam and item_fam and run_fam != item_fam:
+            continue
+        ratio = SequenceMatcher(
+            None, title.lower(), (it.get("name") or "").lower()).ratio()
+        if ratio >= threshold and (best is None or ratio > best["ratio"]):
+            best = {"item": it, "ratio": round(ratio, 3)}
+    return best
+
+
+def _owned_items(cur):
+    """Portfolio ids plus group-owned catalog items."""
+    items = {}
+    try:
+        cur.execute("select item_id from my_portfolio")
+        ids = [r[0] for r in cur.fetchall() if r[0]]
+    except Exception:
+        ids = []
+    if ids:
+        cur.execute("""
+            select id, name, favorite_count, total_sales, created_at,
+                   asset_type_id
+            from items where id = any(%s)
+        """, (ids,))
+        for r in cur.fetchall():
+            items[r[0]] = {"id": r[0], "name": r[1], "favorite_count": r[2],
+                           "total_sales": r[3], "created_at": r[4],
+                           "asset_type_id": r[5]}
+    groups = [g.strip() for g in
+              (os.getenv("MY_GROUP_NAMES") or "").split(",") if g.strip()]
+    if groups:
+        cur.execute("""
+            select id, name, favorite_count, total_sales, created_at,
+                   asset_type_id
+            from items where creator_name = any(%s)
+        """, (groups,))
+        for r in cur.fetchall():
+            items[r[0]] = {"id": r[0], "name": r[1], "favorite_count": r[2],
+                           "total_sales": r[3], "created_at": r[4],
+                           "asset_type_id": r[5]}
+    return list(items.values())
+
+
+def auto_link_recent_runs(days=30, threshold=0.80, notifier=None,
+                          db_factory=None):
+    """Match recent unlinked chain runs to owned, newer catalog items."""
+    if db_factory is None:
+        from bot_core import get_db as db_factory
+    conn = db_factory(); cur = conn.cursor()
+    matches = []
+    try:
+        cur.execute("SET statement_timeout='20s'")
+        cur.execute("""
+            select id, chosen_title, asset_type, created_at, concept
+            from astra_runs
+            where linked_item_id is null
+              and created_at > now() - make_interval(days => %s)
+            order by created_at
+        """, (int(days),))
+        runs = [{"id": r[0], "chosen_title": r[1], "asset_type": r[2],
+                 "created_at": r[3], "concept": r[4]} for r in cur.fetchall()]
+        if not runs:
+            return {"runs": 0, "matches": []}
+        items = _owned_items(cur)
+        used = set()
+        for run in runs:
+            candidates = [it for it in items
+                          if it["id"] not in used
+                          and (it.get("created_at") is None
+                               or run["created_at"] is None
+                               or it["created_at"] >= run["created_at"])]
+            best = match_run_to_items(run, candidates, threshold=threshold)
+            if not best:
+                continue
+            item = best["item"]
+            res = link_run(cur, run["id"], item["id"],
+                           heuristic_version="astra-fit-v1")
+            if res.get("ok"):
+                used.add(item["id"])
+                matches.append({
+                    "run_id": run["id"], "title": run["chosen_title"],
+                    "item_id": item["id"], "item_name": item["name"],
+                    "ratio": best["ratio"],
+                })
+        conn.commit()
+        for m in matches:
+            text = (f"🤖 Auto-Linked! Run #{m['run_id']} "
+                    f"('{m['title']}') was matched to your new item "
+                    f"'{m['item_name']}' (ID: {m['item_id']}). "
+                    f"Tracking started.")
+            if notifier:
+                try:
+                    notifier(text)
+                except Exception as e:
+                    print(f"[auto-link] notify failed: {e}", flush=True)
+            print(f"[auto-link] {text}", flush=True)
+        return {"runs": len(runs), "matches": matches}
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"[auto-link] failed: {type(e).__name__}: {e}", flush=True)
+        return {"error": f"{type(e).__name__}: {e}", "matches": []}
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass

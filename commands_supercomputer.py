@@ -1228,8 +1228,9 @@ def register_supercomputer_commands(bot):
         )
         await ctx.send(embed=embed)
         await ctx.send(
-            "Item launched! Was this based on a VANTA recommendation? "
-            f"Use `!link <run_id> {result['id']}` to track its success.")
+            "Item launched! VANTA will automatically scan your catalog "
+            "over the next 2 hours to link this to any recent "
+            "recommendations.")
 
     @bot.command(name="ledger_sync", aliases=["sync_ledger"])
     async def ledger_sync_command(ctx):
