@@ -257,6 +257,17 @@ def _run_experiment_watch():
              f"{type(e).__name__}: {e}")
 
 
+def _run_market_research():
+    """Every 6h: priority marketplace refresh (does not touch Discord loop)."""
+    _log("🔬 [scheduler] Marketplace research cycle triggered.")
+    try:
+        from market_research_worker import run_cycle
+        summary = run_cycle()
+        _log(f"✅ [scheduler] Research: {summary}")
+    except Exception as e:
+        _log(f"❌ [scheduler] Research failed: {type(e).__name__}: {e}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -306,6 +317,11 @@ def start_scheduler():
     _scheduler.add_job(_run_experiment_watch, "interval", minutes=15,
         id="experiment_watch", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=600)
+
+    _scheduler.add_job(_run_market_research, "cron",
+        hour="*/6", minute=15,
+        id="market_research", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=3600)
 
     _scheduler.add_job(_run_favorites_backfill, "cron",
         hour=2, minute=30,
