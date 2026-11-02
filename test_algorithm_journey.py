@@ -38,7 +38,7 @@ def main():
 
     # 2) Launch ledger has the launched item with 120 favorites.
     outcome_cur = ScriptedCur([
-        (42, 99610366014241, "Super Saiyan Battle Pose",
+        (42, 99610366014241, None, "Super Saiyan Battle Pose",
          "super saiyan battle pose", "2026-11-02"),
         (99610366014241, "Super Saiyan Battle Pose", 120, 240, 26, 33,
          391, 497, None),
@@ -53,7 +53,8 @@ def main():
     print("PASS algorithmic outcome:", msg)
 
     # 3) Unlaunched recommendation is reported honestly.
-    pending = ScriptedCur([(43, None, "Another Pose", "another pose", "2026-11-02"),
+    pending = ScriptedCur([(43, None, None, "Another Pose",
+                            "another pose", "2026-11-02"),
                            None, None])
     out2 = cm.algorithm_outcome(pending, 43)
     assert out2["launched"] is False

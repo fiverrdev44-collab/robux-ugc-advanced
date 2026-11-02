@@ -16,6 +16,9 @@ MOTION_TOKENS = {
 
 BANNED_PLATFORM_WORDS = ("tiktok", "youtube", "viral", "trending")
 
+# Frozen formula version: changing weights must bump this.
+ASTRA_HEURISTIC_VERSION = "astra-fit-v1"
+
 
 def _squash(text):
     """NFKC + keep only alphanumerics so T.i.k.T.o.k becomes tiktok."""
@@ -111,6 +114,7 @@ def algorithmic_fit_heuristic(results, concept, asset_type=None,
     return {
         "available": True, "score": round(score, 1),
         "label": "algorithmic_fit_heuristic", "not_probability": True,
+        "heuristic_version": ASTRA_HEURISTIC_VERSION,
         "components": {
             "relevance": round(relevance, 3),
             "product_fit": round(product_fit, 3),
