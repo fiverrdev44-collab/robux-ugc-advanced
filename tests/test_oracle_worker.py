@@ -365,7 +365,8 @@ def test_t17_existing_systems_regression():
     import commands_intel
     src = open(commands_intel.__file__, encoding="utf-8").read()
     assert 'name="verified_scan"' in src and 'name="creator_brain"' in src
-    for fn in ("search_creator", "run_batch", "discover_verified"):
+    for fn in ("search_creator", "search_creator_complete",
+               "run_batch", "discover_verified"):
         assert hasattr(creator_tracker, fn)
     sched = open(os.path.join(os.path.dirname(creator_tracker.__file__),
                               "scheduler.py"), encoding="utf-8").read()
@@ -389,9 +390,10 @@ def test_t19_manual_module_entrypoint():
     import subprocess
     env = os.environ.copy()
     env.pop("ORACLE_ENABLED", None)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     proc = subprocess.run(
-        [sys.executable, ow.__file__],
-        env=env, text=True, capture_output=True, timeout=15
+        [sys.executable, "-m", "oracle_worker"],
+        cwd=repo_root, env=env, text=True, capture_output=True, timeout=15
     )
     assert proc.returncode == 0, proc.stderr
     assert '"status": "disabled"' in proc.stdout
