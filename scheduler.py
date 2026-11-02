@@ -295,15 +295,16 @@ def _run_auto_link():
         _log(f"❌ [scheduler] Auto-link failed: {type(e).__name__}: {e}")
 
 
-def _run_rename_watcher():
-    """Every 15 min: detect renamed items and capture a fresh baseline."""
-    _log("🏷️ [scheduler] Rename watcher scan triggered.")
+def _run_portfolio_change_watcher():
+    """Every 15 min: track title/description changes across the full portfolio."""
+    _log("🧭 [scheduler] Portfolio change scan triggered.")
     try:
-        from rename_watcher import auto_rename_watcher
-        result = auto_rename_watcher(notifier=_notify_alert)
-        _log(f"✅ [scheduler] Rename watcher: {result}")
+        from rename_watcher import portfolio_change_watcher
+        result = portfolio_change_watcher(notifier=_notify_alert)
+        _log(f"✅ [scheduler] Portfolio change watcher: {result}")
     except Exception as e:
-        _log(f"❌ [scheduler] Rename watcher failed: {type(e).__name__}: {e}")
+        _log(f"❌ [scheduler] Portfolio change watcher failed: {type(e).__name__}: {e}")
+
 
 
 def start_scheduler():
@@ -365,8 +366,8 @@ def start_scheduler():
         id="auto_link", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=3600)
 
-    _scheduler.add_job(_run_rename_watcher, "interval", minutes=15,
-        id="rename_watcher", replace_existing=True,
+    _scheduler.add_job(_run_portfolio_change_watcher, "interval", minutes=15,
+        id="portfolio_change_watcher", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=600)
 
     _scheduler.add_job(_run_favorites_backfill, "cron",
