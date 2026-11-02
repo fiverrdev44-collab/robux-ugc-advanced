@@ -1,0 +1,158 @@
+name: ORACLE Read-Only Production Audit
+
+on:
+  push:
+    branches:
+      - oracle-readonly-audit
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Inspect ORACLE production state (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect schema, process flag, counts, and scheduler logs
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: 129.213.137.177
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          command_timeout: 4m
+          script: |
+            cd ~/robux-ugc-advanced || exit 1
+            ~/ugc_env/bin/python - <<'PY'
+            import subprocess
+            from pathlib import Path
+            
+            def heading(label):
+                print("\n" + "=" * 12 + " " + label + " " + "=" * 12, flush=True)
+            
+            def run_cmd(args, timeout=20):
+                try:
+                    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+                except Exception:
+                    return None
+            
+            def database_url_from_env():
+                env_path = Path.home() / "robux-ugc-advanced" / ".env"
+                try:
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                except OSError:
+                    return None
+                for raw in lines:
+                    row = raw.strip()
+                    if row.startswith("export "):
+                        row = row[7:].strip()
+                    key, sep, value = row.partition("=")
+                    if sep and key.strip() == "DATABASE_URL":
+                        value = value.strip()
+                        if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+                            value = value[1:-1]
+                        return value or None
+                return None
+            
+            def print_select(conn, title, sql):
+                print("\n-- " + title, flush=True)
+                if conn is None:
+                    print("NOT_RUN: database connection unavailable")
+                    return
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(sql)
+                        print("\t".join(col.name for col in cur.description))
+                        rows = cur.fetchall()
+                        for row in rows:
+                            print("\t".join("NULL" if val is None else str(val) for val in row))
+                        print(f"({len(rows)} rows)", flush=True)
+                except Exception as exc:
+                    code = getattr(exc, "pgcode", None) or "UNKNOWN"
+                    diag = getattr(exc, "diag", None)
+                    message = getattr(diag, "message_primary", None) if diag else None
+                    print(f"SQL_ERROR: {code} {message or type(exc).__name__}", flush=True)
+            
+            heading("BLOCK A - PRODUCTION DATABASE SCHEMA")
+            conn = None
+            try:
+                import psycopg2
+                dsn = database_url_from_env()
+                if not dsn:
+                    print("DATABASE_URL: NOT_FOUND_IN_ENV_FILE")
+                else:
+                    conn = psycopg2.connect(dsn, connect_timeout=10)
+                    conn.set_session(readonly=True, autocommit=True)
+                    print("DATABASE_CONNECTION: OK (read-only session)")
+            except Exception as exc:
+                print("DATABASE_CONNECTION: FAILED (" + type(exc).__name__ + ")")
+            
+            print_select(conn, "Eight observation columns", """SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='trend_item_observations'
+            AND column_name IN (
+              'scan_run_id', 'favorites', 'created_at', 'sales_count',
+              'item_type', 'favorites_delta', 'hours_since_last', 'favorites_velocity'
+            )
+            ORDER BY column_name;""")
+            print_select(conn, "Scan runs table", "SELECT to_regclass('public.trend_scan_runs');")
+            print_select(conn, "Cohort creator_type column", """SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='trend_creator_cohorts'
+            AND column_name='creator_type';""")
+            
+            heading("BLOCK B - LIVE BOT PROCESS FLAG")
+            result = run_cmd(["systemctl", "show", "-p", "MainPID", "--value", "ugc-bot"])
+            pid = result.stdout.strip() if result and result.returncode == 0 else ""
+            if not pid.isdecimal() or int(pid) < 2:
+                print("ORACLE_ENABLED=<PROCESS PID UNAVAILABLE>")
+            else:
+                probe = """import pathlib,sys
+            try:
+                entries = pathlib.Path('/proc/' + sys.argv[1] + '/environ').read_bytes().split(b'\\0')
+                values = [e.split(b'=',1)[1] for e in entries if e.startswith(b'ORACLE_ENABLED=')]
+                if not values:
+                    print('ORACLE_ENABLED=<UNSET>')
+                elif values[-1] in (b'0', b'1'):
+                    print('ORACLE_ENABLED=' + values[-1].decode('ascii'))
+                else:
+                    print('ORACLE_ENABLED=<OTHER VALUE>')
+            except Exception:
+                print('ORACLE_ENABLED=<PROCESS ENVIRONMENT UNREADABLE>')
+            """
+                result = run_cmd(["sudo", "-n", "python3", "-c", probe, pid])
+                if result and result.returncode == 0:
+                    print(result.stdout.strip() or "ORACLE_ENABLED=<NO OUTPUT>")
+                else:
+                    print("ORACLE_ENABLED=<PROCESS ENVIRONMENT UNREADABLE>")
+            
+            heading("BLOCK C - PRODUCTION DATA STATE")
+            print_select(conn, "Cohort record count", "SELECT count(*) FROM trend_creator_cohorts;")
+            print_select(conn, "Observation record count", "SELECT count(*) FROM trend_item_observations;")
+            print_select(conn, "Five latest scan runs", """SELECT
+                scan_run_id, status, started_at, finished_at, creators_eligible, observations_inserted
+            FROM trend_scan_runs
+            ORDER BY scan_run_id DESC
+            LIMIT 5;""")
+            if conn is not None:
+                conn.close()
+            
+            heading("BLOCK D - RUNNING SCHEDULER")
+            state = run_cmd(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", "ugc-bot"])
+            since = state.stdout.strip() if state and state.returncode == 0 else ""
+            if not since:
+                print("SERVICE_START: UNAVAILABLE")
+            else:
+                print("SERVICE_START: " + since)
+                cmd = ["sudo", "-n", "journalctl", "-u", "ugc-bot", "--since", since, "--no-pager", "-o", "cat"]
+                logs = run_cmd(cmd, timeout=30)
+                if logs is None or logs.returncode != 0:
+                    print("JOURNAL: UNREADABLE")
+                else:
+                    matches = [line for line in logs.stdout.splitlines() if "'oracle_scan' next run:" in line]
+                    if matches:
+                        for line in matches:
+                            print(line)
+                    else:
+                        print("ORACLE_JOB_LINE: NOT_FOUND_IN_CURRENT_SERVICE_LOGS")
+            PY
