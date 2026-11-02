@@ -199,55 +199,51 @@ def _snapshot_top_items_inner():
         cur.close(); conn.close()
         return True
 
-    log(f"🔄 Fetching with {TOTAL_WORKERS} workers, {DELAY}s delay...")
     id_to_data = {r[0]: {"total_sales": r[1], "price": r[2]} for r in rows}
     ids = list(id_to_data.keys())
 
-    fresh_favs = {}
-    completed = [0]
-    deadline = time.monotonic() + FETCH_DEADLINE_SECONDS
+    log(f"🔄 Fetching {len(ids)} items via 30-item batch client...")
+    from roblox_batch_client import fetch_many_items_sync
 
-    def _worker(worker_ids):
-        out = {}
-        for iid in worker_ids:
-            if time.monotonic() >= deadline:
-                log("⏱️ Snapshot fetch deadline reached — stopping early.")
-                break
-            _, favs = fetch_fresh_favs(iid, deadline=deadline)
-            if favs is not None:
-                out[iid] = favs
-            completed[0] += 1
-            if completed[0] % 25 == 0:
-                log(f"   {completed[0]}/{len(ids)} fetched · "
-                    f"ok={_stats['ok']} 403={_stats['403']} "
-                    f"429={_stats['429']} exc={_stats['exc']}")
-            time.sleep(DELAY)
-        return out
+    items, failed = fetch_many_items_sync(
+        ids,
+        max_batch=30,
+        rate_per_min=int(os.getenv("SNAPSHOT_BATCH_RATE", "60")),
+        max_concurrency=int(os.getenv("SNAPSHOT_BATCH_CONCURRENCY", "3")),
+    )
+    fresh_favs, fresh_prices = {}, {}
+    for iid, d in (items or {}).items():
+        if d.get("favorite_count") is not None:
+            fresh_favs[iid] = d["favorite_count"]
+        if d.get("price") is not None:
+            fresh_prices[iid] = d["price"]
+    log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items "
+        f"({len(failed)} failed / not returned)")
 
-    chunks = [[] for _ in range(TOTAL_WORKERS)]
-    for i, iid in enumerate(ids):
-        chunks[i % TOTAL_WORKERS].append(iid)
-
-    with ThreadPoolExecutor(max_workers=TOTAL_WORKERS) as ex:
-        futures = [ex.submit(_worker, chunk) for chunk in chunks]
-        for f in as_completed(futures):
-            try:
-                fresh_favs.update(f.result(timeout=3600))
-            except Exception as e:
-                log(f"   worker error: {e}")
-
-    log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items")
-    if len(fresh_favs) < len(ids):
-        log(f"⚠️ {len(ids) - len(fresh_favs)} items skipped "
-            f"(deadline/rate limit) — next run will retry them.")
-    log(f"📊 Stats: {_stats}")
-
-    for iid, favs in fresh_favs.items():
+    if fresh_favs:
         try:
-            cur.execute("UPDATE items SET favorite_count = %s WHERE id = %s",
+            id_list = list(fresh_favs.keys())
+            fav_list = [int(fresh_favs[i]) for i in id_list]
+            price_list = [fresh_prices.get(i) for i in id_list]
+            cur.execute("""
+                UPDATE items AS i
+                SET favorite_count = v.favs,
+                    price = COALESCE(v.price, i.price),
+                    favorite_status = 'known'
+                FROM (SELECT unnest(%s::bigint[]) AS id,
+                             unnest(%s::int[]) AS favs,
+                             unnest(%s::int[]) AS price) AS v
+                WHERE i.id = v.id
+            """, (id_list, fav_list, price_list))
+        except Exception as e:
+            log(f"⚠️ bulk item update failed: {e}")
+            for iid, favs in fresh_favs.items():
+                try:
+                    cur.execute(
+                        "UPDATE items SET favorite_count = %s WHERE id = %s",
                         (favs, iid))
-        except Exception:
-            pass
+                except Exception:
+                    pass
     conn.commit()
 
     log("💾 Inserting snapshots...")
@@ -257,7 +253,8 @@ def _snapshot_top_items_inner():
         favs = fresh_favs.get(iid)
         if favs is None:
             continue
-        batch.append((iid, favs, data["total_sales"] or 0, data["price"] or 0))
+        price = fresh_prices.get(iid, data["price"] or 0)
+        batch.append((iid, favs, data["total_sales"] or 0, price))
         if len(batch) >= BATCH_SIZE:
             cur.executemany("""
                 INSERT INTO item_history (item_id, favorite_count, total_sales, price)
