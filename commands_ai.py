@@ -1162,6 +1162,14 @@ def register_ai_commands(bot):
             await ctx.send(body[i:i + 1900])
             await asyncio.sleep(0.3)
 
+        try:
+            from astra import emit_astra
+            _titles = [t for g in verified_groups.values() for t in g][:5]
+            await emit_astra(ctx, description, family, _titles,
+                             synth.get("description_seo") or "")
+        except Exception:
+            pass
+
     @bot.command(name="rescue")
     async def rescue(ctx, *, description: str = ""):
         """Rebuild a failing item with verified alternatives."""
@@ -1376,6 +1384,17 @@ RULES:
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
             await asyncio.sleep(0.3)
+
+        try:
+            from astra import emit_astra
+            _titles = [t for k in ("titles_safe", "titles_differentiated",
+                                   "titles_longtail", "titles_viral")
+                       for t in (synth.get(k) or [])][:5]
+            await emit_astra(ctx, description, family, _titles,
+                             synth.get("new_description")
+                             or synth.get("description_seo") or "")
+        except Exception:
+            pass
 
     @bot.command(name="analyze_image")
     async def analyze_image(ctx, *, description: str = ""):
@@ -1623,6 +1642,16 @@ RULES:
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
             await asyncio.sleep(0.3)
+
+        try:
+            from astra import emit_astra
+            _titles = [t for k in ("titles_safe", "titles_differentiated",
+                                   "titles_longtail", "titles_viral")
+                       for t in (synth.get(k) or [])][:5]
+            await emit_astra(ctx, description, family, _titles,
+                             synth.get("description_seo") or "")
+        except Exception:
+            pass
 
         # Offer a follow-up chain seeded from this vision read (VANTA threads).
         vanta_state = getattr(ctx, "vanta_state", None)

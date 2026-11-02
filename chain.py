@@ -1099,6 +1099,22 @@ def format_chain(result):
     except Exception as e:
         print(f"[chain] astra block skipped: {e}", flush=True)
 
+    # Auto-record the generated run (angles/titles/chosen) for attribution.
+    try:
+        from creator_memory import record_run
+        conn_r = get_db(); cur_r = conn_r.cursor()
+        try:
+            record_run(
+                cur_r, concept, [x["title"] for x in scored[:5]],
+                chosen_title=(scored[0]["title"] if scored else None),
+                asset_type=family, item_id=parent_id)
+            conn_r.commit()
+            print("[chain] astra run recorded", flush=True)
+        finally:
+            cur_r.close(); conn_r.close()
+    except Exception as e:
+        print(f"[chain] astra record skipped: {e}", flush=True)
+
     chunks.append("\n".join(final_lines))
 
     return chunks

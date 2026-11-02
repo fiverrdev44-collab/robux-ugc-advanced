@@ -621,3 +621,5 @@ def register_sales_commands(bot, get_db):
             lines.append("\n_No unmatched embeds in this window._")
 
         await ctx.send("\n".join(lines)[:1900])
+
+

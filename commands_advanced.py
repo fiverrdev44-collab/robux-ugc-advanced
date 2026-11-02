@@ -488,24 +488,27 @@ def register_advanced_commands(bot, get_db):
                 if live_body:
                     await ctx.send(live_body[:1900])
                 try:
-                    from astra import rankability_heuristic
-                    h = rankability_heuristic(
+                    from astra import algorithmic_fit_heuristic
+                    h = algorithmic_fit_heuristic(
                         live.get("top") or [], champ,
                         asset_type=None,
                         exact_count=live.get("exact") or 0,
                         checked=live.get("results") or 0,
+                        results_count=live.get("total")
+                        or live.get("results") or 0,
                         ok=bool(live.get("ok")))
                     if h.get("available"):
                         c = h["components"]
                         await ctx.send(
-                            f"**Rankability (heuristic, not probability):** "
+                            f"**Algorithmic Fit Heuristic (not a prediction):** "
                             f"{h['score']}/100 — relevance {c['relevance']}, "
                             f"fit {c['product_fit']}, motion {c['motion_fit']}, "
                             f"differentiation {c['differentiation']}, "
-                            f"coverage {c['coverage']}")
+                            f"retrieval {h['checked']}/{h['result_count']}")
                     else:
                         await ctx.send(
-                            "**Rankability:** unavailable (live evidence failed)")
+                            "**Algorithmic Fit Heuristic:** unavailable "
+                            "(live evidence failed)")
                 except Exception as he:
                     print(f"[chain] rankability failed: {he}", flush=True)
         except Exception as e:

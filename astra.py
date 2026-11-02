@@ -1,9 +1,10 @@
-"""astra.py — Rankability heuristic, platform-name guard, identity lock,
+"""astra.py — Listing-fit heuristic, platform-name guard, identity lock,
 provider JSON config, and the Astra output structure.
 
-All scores here are explicitly heuristic (never probabilities). When live
-evidence is unavailable the heuristic returns unavailable, not a number.
+The listing-fit score is a heuristic measure of fit, never a prediction or a
+probability. When live evidence is unavailable it returns unavailable.
 """
+import asyncio
 import re
 import unicodedata
 
@@ -37,7 +38,11 @@ def _motions(text):
 
 
 def identity_lock_ok(concept, title):
-    """Reject titles that swap the requested motion for a different one."""
+    """Reject titles that swap the requested motion for a different one.
+
+    The concept text is the user's explicit request, so if the user asked for
+    "stance", titles using "stance" are allowed (override by wording).
+    """
     concept_motions = _motions(concept)
     if not concept_motions:
         return True
@@ -46,7 +51,6 @@ def identity_lock_ok(concept, title):
 
 
 def provider_json_config(provider):
-    """Provider-specific structured-output configuration."""
     p = (provider or "").lower()
     if p in ("gemini", "google"):
         return {"response_mime_type": "application/json"}
@@ -55,20 +59,24 @@ def provider_json_config(provider):
     return {}
 
 
-def rankability_heuristic(results, concept, asset_type=None,
-                          exact_count=0, checked=None, ok=True):
-    """Heuristic 0–100 rankability score with explicit components.
+def algorithmic_fit_heuristic(results, concept, asset_type=None,
+                          exact_count=0, checked=None, results_count=None,
+                          ok=True):
+    """Heuristic 0–100 listing-fit score with explicit components.
 
-    Returns available=False when live evidence is missing/failed.
+    result_count = items Roblox returned for this search.
+    checked      = items we actually examined.
+    retrieval_completeness = checked / result_count.
     """
     if not ok or results is None:
-        return {"available": False, "label": "heuristic",
+        return {"available": False, "label": "algorithmic_fit_heuristic",
                 "not_probability": True,
                 "reason": "live evidence unavailable"}
     results = list(results)
     checked = int(checked if checked is not None else len(results))
-    if checked <= 0:
-        return {"available": False, "label": "heuristic",
+    result_count = int(results_count if results_count is not None else checked)
+    if checked <= 0 or result_count <= 0:
+        return {"available": False, "label": "algorithmic_fit_heuristic",
                 "not_probability": True, "reason": "no sampled results"}
 
     concept_tokens = _tokens(concept)
@@ -93,28 +101,33 @@ def rankability_heuristic(results, concept, asset_type=None,
     relevance = relevance_hits / checked
     product_fit = (fit_hits / fit_known) if fit_known else 0.5
     motion_fit = (motion_hits / checked) if concept_motions else 0.5
-    # Modest penalty for exact competitors; zero exact is not rewarded blindly.
     differentiation = max(0.35, 1.0 - 0.12 * max(0, int(exact_count)))
-    coverage = min(1.0, checked / 30.0)
+    retrieval_completeness = min(1.0, checked / max(result_count, 1))
 
     score = 100.0 * (
         0.30 * relevance + 0.25 * product_fit + 0.20 * motion_fit +
-        0.15 * differentiation + 0.10 * coverage
+        0.15 * differentiation + 0.10 * retrieval_completeness
     )
     return {
-        "available": True, "score": round(score, 1), "label": "heuristic",
-        "not_probability": True,
+        "available": True, "score": round(score, 1),
+        "label": "algorithmic_fit_heuristic", "not_probability": True,
         "components": {
             "relevance": round(relevance, 3),
             "product_fit": round(product_fit, 3),
             "motion_fit": round(motion_fit, 3),
             "differentiation": round(differentiation, 3),
-            "coverage": round(coverage, 3),
+            "retrieval_completeness": round(retrieval_completeness, 3),
         },
         "checked": checked,
+        "result_count": result_count,
         "exact_count": int(exact_count),
-        "note": "Heuristic only; exact=0 is not proof of an open market.",
+        "note": "Algorithmic-fit heuristic only; exact=0 is not proof of an open market.",
     }
+
+
+# Backwards-compatible alias for existing imports.
+rankability_heuristic = algorithmic_fit_heuristic
+listing_fit_heuristic = algorithmic_fit_heuristic
 
 
 def to_three_sentences(text):
@@ -126,7 +139,6 @@ def to_three_sentences(text):
 
 
 def format_astra(analysis, titles, description, brief):
-    """Astra output: analysis, titled angles, 3-sentence description, brief."""
     desc, ok = to_three_sentences(description)
     lines = ["# ASTRA OUTPUT", "", "## Analysis Summary",
              f"- Culture: {analysis.get('culture', 'not available')}",
@@ -144,3 +156,27 @@ def format_astra(analysis, titles, description, brief):
               f"- Showcase: {brief.get('showcase', 'not specified')}",
               f"- Experiment: {brief.get('experiment', 'not specified')}"]
     return "\n".join(lines)
+
+
+async def emit_astra(ctx, concept, family, titles, description,
+                     analysis=None, brief=None):
+    """Send the Astra structure for a creative command (best-effort)."""
+    try:
+        rows = [{"title": t, "angle": "candidate"} for t in titles if t][:5]
+        text = format_astra(
+            analysis or {
+                "culture": f"{family} niche",
+                "buyer_intent": (concept or "")[:80],
+                "keyword_plan": "verified allow-list",
+                "evidence_limits": "database evidence; live coverage limited",
+            },
+            rows, description or "",
+            brief or {
+                "showcase": "3-second reveal, one rotation.",
+                "experiment": "7-day variant vs control; compare favorites/units.",
+            })
+        for i in range(0, len(text), 1900):
+            await ctx.send(text[i:i + 1900])
+            await asyncio.sleep(0.15)
+    except Exception as e:
+        print(f"[astra] emit skipped: {e}", flush=True)
