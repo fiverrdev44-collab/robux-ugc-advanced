@@ -568,7 +568,23 @@ def register_advanced_commands(bot, get_db):
         if result.get("error"):
             return await progress.edit(content=f"❌ {result['error']}")
 
-        chunks = format_chain(result)
+        # Astra-v3 Analyst Report replaces the old metric-dump blocks.
+        live = None
+        champ = ((result.get("scored_titles") or [{}])[0] or {}).get("title")
+        if champ:
+            try:
+                from live_market import check_title
+                live = await asyncio.to_thread(check_title, champ)
+            except Exception as e:
+                print(f"[chain] live check failed: {e}", flush=True)
+        try:
+            from astra_report import build_analyst_report
+            from product_understanding import merge as _pu_merge
+            _pu = _pu_merge(concept, api_family=result.get("family"))
+            chunks = build_analyst_report(result, live=live, understanding=_pu)
+        except Exception as e:
+            print(f"[chain] report fallback: {e}", flush=True)
+            chunks = format_chain(result)
 
         try:
             await progress.delete()

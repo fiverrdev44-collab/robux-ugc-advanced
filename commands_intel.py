@@ -1028,6 +1028,22 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                             if len(t.split()) >= 2
                         ]
 
+            # Shared product understanding: no motion on static accessories;
+            # emote identity lock based on the item's own wording.
+            try:
+                from product_understanding import merge as _pu_merge, \
+                    validate_title as _vtitle
+                _pu = _pu_merge(f"{name} {desc or ''}", api_family=family)
+                for _k in ("titles_safe", "titles_differentiated",
+                           "titles_longtail", "titles_viral"):
+                    if isinstance(data.get(_k), list):
+                        data[_k] = [
+                            t for t in data[_k]
+                            if _vtitle(name, t, _pu["family"], _pu)[0]
+                        ]
+            except Exception as _ue:
+                print(f"[autopsy] understanding skipped: {_ue}", flush=True)
+
             try:
                 from gemini_brain import _strip_promo_from_description
                 for dk in ("description_seo", "description_hype", "description_short"):
@@ -1661,6 +1677,13 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
         favs = favs or 0
         age_days = float(age_days or 0)
         family = detect_family_from_asset_type(atype)
+        try:
+            from product_understanding import merge as _pu_merge
+            _pu = _pu_merge(str(name), api_family=family)
+            if family in ("unknown", "", None) and _pu["family"] != "unknown":
+                family = _pu["family"]
+        except Exception as _ue:
+            print(f"[revive] understanding skipped: {_ue}", flush=True)
 
         await progress.edit(content=(
             f"🧟 **REVIVING** `{(name or '?')[:60]}`\n"
