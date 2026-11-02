@@ -487,6 +487,27 @@ def register_advanced_commands(bot, get_db):
                 live_body = format_check(live)
                 if live_body:
                     await ctx.send(live_body[:1900])
+                try:
+                    from astra import rankability_heuristic
+                    h = rankability_heuristic(
+                        live.get("top") or [], champ,
+                        asset_type=None,
+                        exact_count=live.get("exact") or 0,
+                        checked=live.get("results") or 0,
+                        ok=bool(live.get("ok")))
+                    if h.get("available"):
+                        c = h["components"]
+                        await ctx.send(
+                            f"**Rankability (heuristic, not probability):** "
+                            f"{h['score']}/100 — relevance {c['relevance']}, "
+                            f"fit {c['product_fit']}, motion {c['motion_fit']}, "
+                            f"differentiation {c['differentiation']}, "
+                            f"coverage {c['coverage']}")
+                    else:
+                        await ctx.send(
+                            "**Rankability:** unavailable (live evidence failed)")
+                except Exception as he:
+                    print(f"[chain] rankability failed: {he}", flush=True)
         except Exception as e:
             print(f"[chain] live marketplace check failed: {e}", flush=True)
 
