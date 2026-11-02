@@ -1,7 +1,8 @@
 """Identity, alias and reporting-window tests.
 
-Pure tests run everywhere. Database fixture tests run only when DATABASE_URL
-is set (they open a read-only transaction and never write).
+Pure tests run everywhere. Database tests run only with DATABASE_URL and use
+independent SQL to verify the reporting/resolver math instead of hardcoding a
+frozen snapshot.
 """
 import os
 import sys
@@ -55,26 +56,42 @@ def test_db_fixtures():
     cur = con.cursor()
     try:
         cur.execute("SET statement_timeout='20s'")
-        expected = {"7": (27, 422), "30": (149, 2465), "90": (495, 8828)}
-        for days, (records, robux) in expected.items():
-            s, e, _ = window_bounds(cur, int(days), anchor=date(2026, 10, 30))
+
+        # Windows must match an independent SQL sum, whatever the data is now.
+        for days in (7, 30, 90):
+            s, e, _ = window_bounds(cur, days, anchor=date(2026, 10, 30))
             data = sales_breakdown(cur, s, e)
+            cur.execute("""
+                select count(*), coalesce(sum(amount_robux), 0)
+                from my_sales
+                where sale_date >= %s and sale_date < %s
+            """, (s, e))
+            sql_records, sql_robux = cur.fetchone()
             t = data["totals"]
-            assert (t["records"], t["robux"]) == (records, robux), (days, t)
+            assert t["records"] == int(sql_records), (days, t, sql_records)
+            assert t["robux"] == int(sql_robux), (days, t, sql_robux)
             assert (t["mapped_records"] + t["unresolved_records"]
                     + t["ambiguous_records"]) == t["records"]
-        print("PASS frozen window fixtures")
+        print("PASS dynamic window reconciliation (7/30/90)")
 
         a = resolve_name(cur, "Cute Beanie w paws")
         b = resolve_name(cur, "Cute Kitty Fluffy Beanie")
         assert a["item_id"] == b["item_id"] == 130928797494687, (a, b)
         assert a["status"] == b["status"] == "confirmed"
 
-        data = sales_breakdown(cur, date(2026, 1, 1), date(2026, 10, 31))
+        data = sales_breakdown(cur, date(2026, 1, 1), date(2026, 11, 2))
         beanie = next(g for g in data["items"]
                       if g["item_id"] == 130928797494687)
-        assert (beanie["records"], beanie["robux"]) == (139, 4045), beanie
-        print("PASS creator-confirmed beanie fixture (139 / 4045)")
+        cur.execute("""
+            select count(*), coalesce(sum(amount_robux), 0)
+            from my_sales
+            where lower(item_name) in ('cute beanie w paws',
+                                       'cute kitty fluffy beanie')
+        """)
+        sql_records, sql_robux = cur.fetchone()
+        assert beanie["records"] == int(sql_records), (beanie, sql_records)
+        assert beanie["robux"] == int(sql_robux), (beanie, sql_robux)
+        print(f"PASS beanie lifetime reconciles ({sql_records} / {sql_robux})")
 
         flip = resolve_name(cur, "Smooth 360 flip Rizz")
         assert flip["item_id"] == 92364796546749 and flip["status"] == "candidate"
