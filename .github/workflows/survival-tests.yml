@@ -1,0 +1,32 @@
+name: Survival Intelligence Tests
+
+on:
+  push:
+    branches:
+      - survival-intelligence
+
+jobs:
+  offline-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run survival intelligence regression tests
+        run: python test_survival_intelligence.py
+      - name: Run JARVIS and interpretation regressions
+        run: python test_jarvis_cases.py
+      - name: Run shared engine regressions
+        run: python test_shared_repairs.py
+      - name: Run Astra and product understanding regressions
+        run: |
+          python test_astra.py
+          python test_product_understanding.py
+      - name: Run recommendation lifecycle regressions
+        run: python test_recommendation_lifecycle.py

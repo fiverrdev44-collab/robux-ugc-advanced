@@ -75,8 +75,8 @@ def test_d30_family_cohort_requires_minimum_and_uses_family_only():
                                        velocity=1)
     assert result["available"] is False and result["cohort_n"] == 19
     assert "at least 20" in result["reason"]
-    assert "lower(trim(family))" in small.sql
-    assert small.params == ("emote",)
+    assert "asset_type_id IN" in small.sql
+    assert small.params == [61]
 
     mature = FakeCur(range(0, 200, 10))
     result = d30_milestone_probability(mature, "emote", favs=50, age_days=10,

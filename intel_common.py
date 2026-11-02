@@ -10,6 +10,7 @@ FIXES in this version:
   - _family_clause translates category_configs → convergence_engine.
 """
 import re
+import math
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY, FAMILIES
 
@@ -214,182 +215,233 @@ def portfolio_context(cur, top_n=5):
     }
 
 
-# ── Multi-signal verdict ──
+# ── Maturity-aware survival intelligence ─────────────────────────────
+def d30_milestone_probability(cur, family, favs=None, age_days=None,
+                              velocity=None, min_cohort=20):
+    """Estimate the chance of reaching the family D30-favorites median.
+
+    Uses only mature, observed launch_ledger.favs_d30 values for this family.
+    The returned percentage is an explicitly uncalibrated logistic heuristic,
+    not a trained probability. It is withheld when fewer than min_cohort
+    mature outcomes exist.
+    """
+    family = str(family or "").strip().lower()
+    if not family or family == "unknown":
+        return {
+            "available": False, "family": family or "unknown",
+            "cohort_n": 0, "reason": "No reliable category family is available.",
+        }
+
+    try:
+        from convergence_engine import resolve_family_ids
+        family_ids = resolve_family_ids(family)
+        if not family_ids:
+            return {
+                "available": False, "family": family, "cohort_n": 0,
+                "reason": f"No asset-type mapping is available for {family}.",
+            }
+        placeholders = ",".join(["%s"] * len(family_ids))
+        cur.execute(f"""
+            SELECT favs_d30
+            FROM launch_ledger
+            WHERE asset_type_id IN ({placeholders})
+              AND favs_d30 IS NOT NULL
+              AND favs_d30 >= 0
+              AND COALESCE(published_at, launched_at)
+                    <= NOW() - INTERVAL '30 days'
+            ORDER BY favs_d30
+        """, list(family_ids))
+        outcomes = sorted(
+            float(row[0]) for row in cur.fetchall()
+            if row and row[0] is not None and float(row[0]) >= 0
+        )
+    except Exception as exc:
+        try:
+            cur.connection.rollback()
+        except Exception:
+            pass
+        return {
+            "available": False, "family": family, "cohort_n": 0,
+            "reason": f"D30 family cohort unavailable ({type(exc).__name__}).",
+        }
+
+    n = len(outcomes)
+    if n < int(min_cohort):
+        return {
+            "available": False, "family": family, "cohort_n": n,
+            "reason": (
+                f"Only {n} mature {family} D30 outcomes; "
+                f"at least {int(min_cohort)} are required."
+            ),
+        }
+
+    mid = n // 2
+    milestone = (
+        outcomes[mid] if n % 2 else
+        (outcomes[mid - 1] + outcomes[mid]) / 2.0
+    )
+    age = max(0.0, float(age_days or 0.0))
+    current_favs = max(0.0, float(favs or 0.0))
+    pace = max(0.0, float(velocity or 0.0))
+    # Linear pace projection is a transparent baseline, not an ML forecast.
+    projected = (
+        current_favs + pace * max(0.0, 30.0 - age)
+        if age < 30.0 else current_favs
+    )
+
+    deviations = sorted(abs(value - milestone) for value in outcomes)
+    mad_mid = n // 2
+    mad = (
+        deviations[mad_mid] if n % 2 else
+        (deviations[mad_mid - 1] + deviations[mad_mid]) / 2.0
+    )
+    scale = max(1.0, 1.4826 * mad)
+    z = max(-20.0, min(20.0, (projected - milestone) / scale))
+    probability = 100.0 / (1.0 + math.exp(-z))
+
+    return {
+        "available": True,
+        "family": family,
+        "cohort_n": n,
+        "milestone_favs": round(milestone, 1),
+        "projected_favs_d30": round(projected, 1),
+        "probability": round(probability, 1),
+        "probability_label": "uncalibrated family-cohort heuristic",
+        "not_calibrated": True,
+        "method": "current lifetime pace projected to D30; logistic MAD scale",
+    }
+
+
 def decide_verdict(percentile, age_days=None, favs=None, velocity=None,
-                   total_sales=None, sample_size=None):
+                   total_sales=None, sample_size=None, d30_probability=None):
+    """Return a maturity-aware state, emoji, and evidence-based explanation.
+
+    States:
+      TOO_EARLY, WATCH, RECOVERING, STAGNATING, KILL_CANDIDATE, WINNER.
+
+    KILL_CANDIDATE is a review state only; it never authorizes an automatic
+    removal. Sparse peer samples prevent a candidate classification.
     """
-    Priority:
-      1. Sales data (>= 10 → DOUBLE_DOWN, >= 3 → KEEP, 0 & old → KILL)
-      2. Fast riser velocity (>= 10/day)
-      3. Hard-kill rules (age × favs)
-      4. Freefaller detection
-      5. TOO_NEW (with velocity exception)
-      6. Percentile buckets
-    """
-    p = percentile if percentile is not None else 0
+    p = float(percentile) if percentile is not None else 0.0
     age = float(age_days) if age_days is not None else None
     f = int(favs) if favs is not None else None
-    v = float(velocity) if velocity is not None else 0.0
+    v = max(0.0, float(velocity or 0.0))
     sales = int(total_sales) if total_sales is not None else None
     sample = int(sample_size) if sample_size is not None else None
+    d30_p = (
+        float(d30_probability)
+        if d30_probability is not None else None
+    )
 
-    low_conf = ""
-    if sample is not None and sample < 20:
-        low_conf = f" (⚠️ only {sample} peers — low confidence)"
+    low_conf = (
+        f" (⚠️ only {sample} peers — low confidence)"
+        if sample is not None and sample < 20 else ""
+    )
+    viral = (
+        v >= 10.0
+        or (sales is not None and sales >= 3)
+        or (p >= 95.0 and f is not None and f >= 25
+            and sample is not None and sample >= 20)
+        or (d30_p is not None and d30_p >= 90.0 and v >= 1.0)
+    )
 
-    # PRIORITY 1: SALES
-    if sales is not None and sales >= 10:
-        return ("DOUBLE_DOWN", "🔥",
-                f"{sales} sales in 30d. Real money. Ship a variant.{low_conf}")
-    if sales is not None and sales >= 3:
-        return ("KEEP", "✅",
-                f"{sales} sales in 30d. Steady revenue.{low_conf}")
-    if (sales is not None and sales == 0
-            and age is not None and age >= 30
-            and f is not None and f >= 5):
-        return ("KILL", "🪦",
-                f"{age:.0f}d · {f}♥ · 0 sales in 30d. "
-                f"Favorites don't convert.{low_conf}")
+    if age is None:
+        return (
+            "WATCH", "👀",
+            "Item age is unavailable. Keep observing until its maturity window can be established."
+            + low_conf,
+        )
 
-    # PRIORITY 2: FAST RISER
-    if v >= 10 and age is not None and age >= 3:
-        return ("DOUBLE_DOWN", "🔥",
-                f"{v}/day at {age:.0f}d. Velocity alone wins.{low_conf}")
+    if age < 14.0:
+        wait_days = max(1, int(math.ceil(14.0 - age)))
+        if viral:
+            return (
+                "WINNER", "🏆",
+                f"Breakout signal at {age:.1f}d ({v:.2f} favorites/day). "
+                "Keep monitoring; this early signal is promising."
+                + low_conf,
+            )
+        return (
+            "TOO_EARLY", "⏳",
+            f"This item is too young to judge. The data is still maturing. "
+            f"We should WATCH it for another {wait_days} days."
+            + low_conf,
+        )
 
-    # PRIORITY 3: HARD KILL
-    if age is not None and f is not None:
-        if age >= 60 and f < 20:
-            return ("KILL", "🪦",
-                    f"{age:.0f}d and only {f}♥. That one's not coming back.{low_conf}")
-        if age >= 30 and f < 10:
-            return ("KILL", "🪦",
-                    f"{age:.0f}d · {f}♥. Peer median is higher. "
-                    f"Move on.{low_conf}")
-        if age >= 21 and f < 5:
-            return ("KILL", "🪦",
-                    f"{age:.0f}d · {f}♥. Not being discovered.{low_conf}")
-        if age >= 14 and f < 3:
-            return ("KILL", "🪦",
-                    f"{age:.0f}d · {f}♥. Zero traction after two weeks.{low_conf}")
+    # Strong observed performance can earn WINNER status at any mature age.
+    if (sales is not None and sales >= 3) or (
+        p >= 95.0 and sample is not None and sample >= 20
+    ) or (d30_p is not None and d30_p >= 90.0 and v >= 1.0):
+        return (
+            "WINNER", "🏆",
+            f"Strong family-relative performance: {p:.1f}th percentile, "
+            f"{v:.2f} favorites/day."
+            + low_conf,
+        )
 
-    # PRIORITY 4: GRACE WINDOW — slow starters get 30 days before a velocity kill.
-    # Roblox discovery often needs a few weeks; killing at 14d was too eager.
-    if (v < 0.3 and age is not None and 14 <= age < 30
-            and f is not None and f < 50):
-        return ("TOO_NEW", "⏳",
-                f"{age:.0f}d · {f}♥ · {v}/day. Too early to bury it — "
-                f"judge again at 30d.{low_conf}")
+    if age < 30.0:
+        if v > 0.0:
+            if v >= 0.25 or p >= 60.0 or (d30_p is not None and d30_p >= 60.0):
+                return (
+                    "RECOVERING", "📈",
+                    f"Still gaining traction at {v:.2f} favorites/day. "
+                    "The item is within its first 30 days; monitor the next snapshots."
+                    + low_conf,
+                )
+            return (
+                "WATCH", "👀",
+                f"Some positive activity ({v:.2f} favorites/day), but not enough "
+                "evidence yet to call a sustained recovery."
+                + low_conf,
+            )
+        return (
+            "WATCH", "👀",
+            f"{age:.1f}d old with flat recent pace. Continue observation through "
+            "the 30-day maturity window."
+            + low_conf,
+        )
 
-    # PRIORITY 4b: FREEFALLER (post-grace)
-    if (v < 0.3 and age is not None and age >= 30
-            and f is not None and f < 50):
-        return ("KILL", "🪦",
-                f"{v}/day at {age:.0f}d · {f}♥. Trajectory has "
-                f"flatlined.{low_conf}")
+    # Past D30, flat items stagnate. Only well-supported, prolonged low
+    # traction becomes a candidate for manual review.
+    if v > 0.05:
+        if v >= 0.25 or p >= 40.0 or (d30_p is not None and d30_p >= 50.0):
+            return (
+                "RECOVERING", "📈",
+                f"Positive ongoing pace ({v:.2f} favorites/day). "
+                "The trajectory is not flat."
+                + low_conf,
+            )
+        return (
+            "WATCH", "👀",
+            f"Low but non-zero activity ({v:.2f} favorites/day). "
+            "Keep monitoring before changing the listing."
+            + low_conf,
+        )
 
-    # PRIORITY 5: TOO_NEW
-    if age is not None and age < 7:
-        if f is None:
-            return ("TOO_NEW", "⏳",
-                    f"Only {age:.1f}d old. No data yet.")
-        if v >= 5:
-            return ("DOUBLE_DOWN", "🔥",
-                    f"{v}/day at {age:.1f}d · {f}♥. Fast riser.{low_conf}")
-        if f < 30:
-            days_left = max(1, int(7 - age))
-            return ("TOO_NEW", "⏳",
-                    f"{age:.1f}d old · {f}♥. "
-                    f"Re-run in {days_left} days.")
+    if (
+        age >= 45.0
+        and sales == 0
+        and f is not None and f < 50
+        and sample is not None and sample >= 20
+        and p < 20.0
+    ):
+        return (
+            "KILL_CANDIDATE", "⚠️",
+            f"{age:.0f}d old with near-flat pace, {f} favorites and "
+            f"bottom-{int(p)}th-percentile performance. Manual review only; "
+            "this is not an automatic removal decision."
+            + low_conf,
+        )
 
-    # PRIORITY 6: PERCENTILE
-    if p >= 90:
-        return ("DOUBLE_DOWN", "🔥",
-                f"Top {100 - int(p)}% of peers. Strong.{low_conf}")
-    if p >= 75 and f is not None and f >= 50:
-        return ("DOUBLE_DOWN", "🔥",
-                f"Top {100 - int(p)}% · {f}♥. Strong traction.{low_conf}")
-    if p >= 60:
-        return ("KEEP", "✅",
-                f"Top {100 - int(p)}% of peers. Above median.{low_conf}")
-    if p >= 45 and f is not None and f >= 20:
-        return ("KEEP", "✅",
-                f"Top {100 - int(p)}% · {f}♥. Steady.{low_conf}")
-    if p >= 25:
-        return ("RENAME", "🔧",
-                f"Top {100 - int(p)}% — item has demand, "
-                f"title/thumbnail blocking conversion.{low_conf}")
-
-    return ("KILL", "🪦",
-            f"Bottom {int(p)}% of peers. No signal to salvage.{low_conf}")
+    return (
+        "STAGNATING", "🟠",
+        f"{age:.0f}d old with near-flat pace ({v:.2f} favorites/day). "
+        "The item is stagnating, but evidence does not justify an automatic removal."
+        + low_conf,
+    )
 
 
 # ── DETERMINISTIC PIVOT PICKER ──
-def pick_pivot_from_data(niche_data, keyword_intel=None):
-    """
-    Deterministic pivot picker. Uses real DB data, not AI opinion.
-    Same input → same output. Returns (keyword, confidence, reason).
-
-    Confidence is ABSOLUTE (based on winning score), not margin-based.
-    Margin-based was giving ~3% when all candidates were NEUTRAL with
-    similar scores, even when the winning score was high.
-    """
-    if not niche_data:
-        return (None, 0.0, "no niche data")
-
-    scored = []
-    for k in niche_data:
-        bucket = k.get("bucket", "NEUTRAL")
-        median = k.get("median_favs", 0)
-        supply = k.get("supply", 0)
-        demand = k.get("demand_live", k.get("demand", 0))
-
-        # No live demand or a saturated/ghost lane is not a pivot.
-        if demand == 0 or bucket in ("SATURATED", "GHOST", "DEAD"):
-            continue
-        bmap = {"GOLD": 100, "OPPORTUNITY": 80, "VIRGIN": 70,
-                "NEUTRAL": 40, "SATURATED": 20, "GHOST": 5}
-        b = bmap.get(bucket, 40)
-
-        m = min(median / 50.0, 3.0) * 15
-        d = min(demand / 100.0, 2.0) * 10
-
-        if supply < 5:
-            s = -20
-        elif supply <= 50:
-            s = 20
-        elif supply <= 150:
-            s = 5
-        else:
-            s = -10
-
-        total = b + m + d + s
-        scored.append({
-            "keyword": k["keyword"],
-            "score": total,
-            "bucket": bucket,
-            "median": median,
-            "supply": supply,
-            "demand": demand,
-        })
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    if not scored:
-        return (None, 0.0, "no demand-backed pivot")
-    best = scored[0]
-
-    # ── ABSOLUTE CONFIDENCE ────────────────────────────────────
-    # 120 = practical top score (100 base + 20 supply + 10 demand - small)
-    # Cap at 90% — no system should be 100% confident.
-    confidence = min(best["score"] / 120.0, 0.9)
-    if len(scored) == 1:
-        confidence = 0.5
-    # ────────────────────────────────────────────────────────────
-
-    reason = (
-        f"bucket={best['bucket']} · supply={best['supply']} · "
-        f"median={best['median']} · demand={best['demand']}"
-    )
-    return (best["keyword"], round(confidence, 2), reason)# ── DETERMINISTIC PIVOT PICKER ──
 def pick_pivot_from_data(niche_data, keyword_intel=None):
     """
     Deterministic pivot picker. Uses real DB data, not AI opinion.
