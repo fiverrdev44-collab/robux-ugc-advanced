@@ -108,7 +108,7 @@ def test_change_classification():
 
 def test_all_items_event_baselines_and_duplicate_prevention():
     ids = list(range(1, 10))
-    old = {i: [f"Item {i}", f"Desc {i}", 100+i, 61, 700+i] for i in ids}
+    old = {i: [f"Item {i}", f"Desc {i}", 100+i, 61, (None if i == 2 else 700+i)] for i in ids}
     live = {
         i: {
             "id": i,
