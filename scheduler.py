@@ -307,6 +307,33 @@ def _run_portfolio_change_watcher():
 
 
 
+def _run_rename_watcher():
+    """Every 15 min: detect renamed items and capture a fresh baseline."""
+    _log("🏷️ [scheduler] Rename watcher scan triggered.")
+    try:
+        from rename_watcher import auto_rename_watcher
+        result = auto_rename_watcher(notifier=_notify_alert)
+        _log(f"✅ [scheduler] Rename watcher: {result}")
+    except Exception as e:
+        _log(f"❌ [scheduler] Rename watcher failed: {type(e).__name__}: {e}")
+
+
+def _run_trend_cohorts():
+    """ORACLE: build/freeze creator cohorts (disabled unless ORACLE_ENABLED=1)."""
+    _log("🔭 [scheduler] ORACLE cohort build triggered.")
+    try:
+        from bot_core import get_db
+        from trend_cohorts import build_cohorts
+        conn = get_db(); cur = conn.cursor()
+        try:
+            result = build_cohorts(cur)
+        finally:
+            cur.close(); conn.close()
+        _log(f"✅ [scheduler] ORACLE cohorts: {result}")
+    except Exception as e:
+        _log(f"❌ [scheduler] ORACLE cohorts failed: {type(e).__name__}: {e}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -369,6 +396,15 @@ def start_scheduler():
     _scheduler.add_job(_run_portfolio_change_watcher, "interval", minutes=15,
         id="portfolio_change_watcher", replace_existing=True,
         max_instances=1, coalesce=True, misfire_grace_time=600)
+
+    _scheduler.add_job(_run_rename_watcher, "interval", minutes=15,
+        id="rename_watcher", replace_existing=True,
+        max_instances=1, coalesce=True, misfire_grace_time=600)
+
+    if os.getenv("ORACLE_ENABLED", "0") == "1":
+        _scheduler.add_job(_run_trend_cohorts, "cron", hour=5, minute=30,
+            id="trend_cohorts", replace_existing=True,
+            max_instances=1, coalesce=True, misfire_grace_time=3600)
 
     _scheduler.add_job(_run_favorites_backfill, "cron",
         hour=2, minute=30,

@@ -421,3 +421,58 @@ def run_batch(cur, limit=10):
         time.sleep(DELAY + random.uniform(0, 0.8))
 
     return scanned, upserted, new_creators, LAST_ERROR
+
+
+# ── Project ORACLE helpers (additive; existing tracker untouched) ──
+
+def filter_recent_assets(items, max_age_days=30, now=None):
+    """Keep assets whose real creation timestamp is within the window (UTC)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max_age_days)
+    out = []
+    for it in items:
+        created = it.get("created_at")
+        if created is None:
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created >= cutoff:
+            out.append(it)
+    return out
+
+
+def search_creator_complete(s, creator_id, creator_type="User", max_pages=10):
+    """Paginated creator search that reports truncation instead of silently
+    treating the first page(s) as the complete catalogue.
+
+    SortType=3 is recently *updated* ordering; recency filtering must use the
+    itemCreatedUtc timestamp, not the sort order.
+    """
+    items = []
+    cursor = None
+    pages = 0
+    while pages < max(1, int(max_pages)):
+        params = {
+            "CreatorTargetId": creator_id,
+            "CreatorType": creator_type,
+            "Limit": PAGE_SIZE,
+            "SortType": 3,
+        }
+        if cursor:
+            params["Cursor"] = cursor
+        data = _get_json(s, params)
+        if not data:
+            break
+        for d in (data.get("data") or []):
+            item = _to_item(d)
+            item["creator_id"] = creator_id
+            # Keep missing favorites as None (never coerce to zero).
+            item["favorites"] = d.get("favoriteCount")
+            items.append(item)
+        pages += 1
+        cursor = data.get("nextPageCursor")
+        if not cursor:
+            break
+        time.sleep(DELAY)
+    return {"creator_id": creator_id, "items": items, "pages": pages,
+            "truncated": bool(cursor) and pages >= max_pages}
