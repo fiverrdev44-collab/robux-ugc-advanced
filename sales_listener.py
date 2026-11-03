@@ -390,16 +390,20 @@ def duplicate_reason(sale, existing_rows):
     existing row, else None. Never flags two rows with distinct stable
     event ids as duplicates.
 
-    Legacy ids and fingerprints are buyer-sensitive: two different buyers
-    purchasing the same item at the same price never collapse just because
-    they share a legacy source-event id.
+    Buyer handling:
+      * a known buyer equal to the existing row -> confirmed duplicate;
+      * a known buyer that differs -> a *different* sale (never a duplicate);
+      * a missing/unknown buyer on either side -> ``"ambiguous_buyer"``
+        (multiple legitimate purchases are possible, so the sale is not
+        automatically discarded and not automatically counted — it is held
+        for reconciliation).
     """
     sid = sale.get("source_event_id")
     txid = sale.get("transaction_id")
     legacy = sale.get("_legacy_id")
     buyer = sale.get("buyer")
-    ntime = sale.get("notification_time")
-    stime = sale.get("sale_time")
+
+    ambiguous = False
 
     for r in existing_rows:
         rsid = r.get("source_event_id")
@@ -416,34 +420,52 @@ def duplicate_reason(sale, existing_rows):
             if not sid and txid and r.get("transaction_id") != txid:
                 continue
 
-        # Same buyer required before treating a legacy id as already captured.
-        if (legacy and rsid == legacy
-                and _same_buyer(buyer, r.get("buyer"))):
-            return "legacy_source_event_id"
+        cmp = _buyer_comparison(buyer, r.get("buyer"))
 
-        # Fingerprint fallback only applies to legacy/unknown rows, and only
-        # when the buyer is consistent (unknown buyer is not a distinguishing
-        # signal, so it still matches).
-        if (ntime is not None and r.get("notification_time") is not None
-                and _same_buyer(buyer, r.get("buyer"))):
-            if _same_instant(ntime, r["notification_time"]):
-                return "notification_fingerprint"
-        if (stime is not None and r.get("sale_time") is not None
-                and ntime is None and r.get("notification_time") is None
-                and _same_buyer(buyer, r.get("buyer"))):
-            if _same_instant(stime, r["sale_time"]):
-                return "sale_time_fingerprint"
+        if legacy and rsid == legacy:
+            if cmp == "match":
+                return "legacy_source_event_id"
+            if cmp == "mismatch":
+                continue
+            ambiguous = True
+            continue
 
+        # Fingerprint fallback only applies to legacy/unknown rows.
+        fp_kind = _fingerprint_kind(sale, r)
+        if fp_kind is None:
+            continue
+        if cmp == "match":
+            return fp_kind
+        if cmp == "mismatch":
+            continue
+        ambiguous = True
+
+    if ambiguous:
+        return "ambiguous_buyer"
     return None
 
 
-def _same_buyer(a, b):
-    """Buyers match when both are empty or equal (case-insensitive)."""
+def _fingerprint_kind(sale, r):
+    """Which fingerprint (if any) links ``sale`` to an existing row."""
+    ntime = sale.get("notification_time")
+    stime = sale.get("sale_time")
+    if (ntime is not None and r.get("notification_time") is not None
+            and _same_instant(ntime, r["notification_time"])):
+        return "notification_fingerprint"
+    if (stime is not None and r.get("sale_time") is not None
+            and ntime is None and r.get("notification_time") is None
+            and _same_instant(stime, r["sale_time"])):
+        return "sale_time_fingerprint"
+    return None
+
+
+def _buyer_comparison(a, b):
+    """Tri-state buyer comparison: 'match', 'mismatch', or 'unknown'."""
     a = (a or "").strip().lower()
     b = (b or "").strip().lower()
     if not a or not b:
-        return True
-    return a == b
+        return "unknown"
+    return "match" if a == b else "mismatch"
 
 
 def _same_instant(a, b):
@@ -645,7 +667,8 @@ def _save_sale_single(sale):
         ok, reason = _insert_sale_result(cur, sale)
         conn.commit()
         if not ok:
-            print(f"[sales_listener] dup ({reason}): "
+            label = "ambiguous" if reason == "ambiguous_buyer" else "dup"
+            print(f"[sales_listener] {label} ({reason}): "
                   f"{sale.get('item_name', '?')[:40]}", flush=True)
         return ok
     except Exception as e:
@@ -759,8 +782,12 @@ def window_coverage_stats(cur, start, end):
     """Read-only, window-scoped counts of how complete/trustworthy totals are.
 
     Distinguishes *event-id completeness* (every row in the window has a
-    source_event_id) from *source-history completeness* (every row has an id
-    AND there are no duplicate ids or legacy fingerprints in the window).
+    source_event_id) from *internal integrity* (every row has an id AND there
+    are no duplicate ids or legacy fingerprints in the window).
+
+    ``internally_consistent`` is an internal-only check; it does NOT reconcile
+    against an independent export and therefore must not be read as proof of
+    complete source-history coverage.
     """
     where = "sale_date >= %s and sale_date < %s"
     p = (start, end)
@@ -817,7 +844,7 @@ def window_coverage_stats(cur, start, end):
         "duplicate_fingerprints": dup_fp,
         "coverage_pct": round(100.0 * event_id / max(total, 1), 1),
         "event_id_complete": total > 0 and event_id == total,
-        "source_complete": (
+        "internally_consistent": (
             total > 0 and event_id == total
             and dup_event == 0 and dup_fp == 0
         ),
@@ -826,15 +853,15 @@ def window_coverage_stats(cur, start, end):
 
 def _coverage_note(cov):
     parts = []
-    if not cov.get("source_complete"):
-        parts.append("source history incomplete")
+    if not cov.get("internally_consistent"):
+        parts.append("internal integrity incomplete (not reconciled against an export)")
     if cov.get("fallback_fingerprint"):
         parts.append(f"{cov['fallback_fingerprint']} rows lack a source event id")
     if cov.get("duplicate_event_ids"):
         parts.append(f"{cov['duplicate_event_ids']} duplicate event id groups")
     if cov.get("duplicate_fingerprints"):
         parts.append(f"{cov['duplicate_fingerprints']} duplicate legacy fingerprints")
-    return "; ".join(parts) or "source history complete"
+    return "; ".join(parts) or "internal integrity complete (not reconciled against an export)"
 
 
 def sales_summary(days=30):
@@ -866,7 +893,7 @@ def sales_summary(days=30):
 
         coverage = window_coverage_stats(cur, start, end)
         coverage.update(totals)
-        coverage["complete"] = coverage["source_complete"]
+        coverage["complete"] = coverage["internally_consistent"]
         coverage["note"] = _coverage_note(coverage)
 
         return {

@@ -56,8 +56,8 @@ def register_sales_commands(bot, get_db):
             f"missing {cov.get('fallback_fingerprint', 0):,}",
             f"**Event-id completeness:** "
             f"{'✅ complete' if cov.get('event_id_complete') else '⚠️ incomplete'}",
-            f"**Source history:** "
-            f"{'✅ complete' if cov.get('complete') else '⚠️ incomplete — ' + cov.get('note', '')}",
+            f"**Internal integrity (not reconciled against an export):** "
+            f"{'✅ consistent' if cov.get('complete') else '⚠️ ' + cov.get('note', '')}",
             "_Recorded amount is not verified gross revenue, creator proceeds, "
             "or profit._",
             "",

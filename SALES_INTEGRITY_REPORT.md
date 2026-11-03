@@ -108,11 +108,11 @@ The CLI opens a `BEGIN TRANSACTION READ ONLY` and rolls back; it never writes.
 
 ## 5. Test results
 
-New suite `test_sales_integrity.py` (17 tests) — all passing:
+New suite `test_sales_integrity.py` (20 tests) — all passing:
 
 ```
 python -m unittest test_sales_integrity
-Ran 17 tests in 0.004s
+Ran 20 tests in 0.004s
 OK
 ```
 
@@ -127,7 +127,9 @@ Coverage of the required regression scenarios:
 | Renamed item name preservation | `test_renamed_item_preserves_original_name` |
 | Legacy records / legacy ids | `test_legacy_source_event_id_recognised`, `test_legacy_null_event_id_fingerprint`, `test_distinct_stable_ids_never_collide` |
 | Same item+price, different buyers (legacy record) | `test_legacy_same_item_price_different_buyers_not_collapsed`, `test_legacy_same_buyer_still_deduplicated` |
+| Missing buyer is ambiguous, not auto-discarded | `test_missing_buyer_legacy_is_ambiguous`, `test_both_missing_buyer_is_ambiguous` |
 | Transaction id match ignores timestamp | `test_transaction_id_match_ignores_timestamp` |
+| Txn-id match reserved before fingerprint | `test_delayed_txn_match_reserved_before_fingerprint` |
 | Fingerprint does not pair different buyers | `test_fingerprint_does_not_pair_different_buyers` |
 | Asset identity from URL | `test_asset_id_extracted_from_url` |
 | Reconciliation engine | `test_reconcile_counts_and_duplicates` |
@@ -156,7 +158,24 @@ Also: merged `main` (6 commits) into the branch and added
 `.github/workflows/sales-integrity-tests.yml` running the repair suite on
 `fix/sales-integrity-repair` pushes and `main` PRs.
 
-## 7. Safety status & next steps (need approval)
+## 7. Reviewer corrections (round 3)
+
+1. **Reconciliation reservation order** — `reconcile()` now reserves
+   transaction-id matches first, then event-id matches, then fingerprint
+   matches, each computed only over records not already reserved. Regression:
+   `test_delayed_txn_match_reserved_before_fingerprint`.
+2. **Missing-buyer ambiguity** — `duplicate_reason` uses a tri-state buyer
+   comparison. A known-equal buyer is a confirmed duplicate; a known-different
+   buyer is a distinct sale; a missing/unknown buyer on either side returns
+   `"ambiguous_buyer"` (held for reconciliation, neither auto-discarded nor
+   auto-counted). Regressions: `test_missing_buyer_legacy_is_ambiguous`,
+   `test_both_missing_buyer_is_ambiguous`.
+3. **Qualified completeness** — `source_complete` renamed to
+   `internally_consistent`, and `!sales_report` now labels it
+   "Internal integrity (not reconciled against an export)". It no longer
+   implies complete source-history coverage.
+
+## 8. Safety status & next steps (need approval)
 
 - [x] Worked on a separate branch (`fix/sales-integrity-repair`).
 - [x] No production data modified/deleted/migrated.

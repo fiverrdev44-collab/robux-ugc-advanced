@@ -167,25 +167,7 @@ def reconcile(db_rows, export_rows, tolerance=TOLERANCE_DEFAULT):
     matched = []
     used_db = set()
 
-    # Round 1: transaction id (authoritative; ignores timestamps entirely).
-    txn_pairs = _match_one_round(
-        db,
-        [er for er in ex if er["transaction_id"]],
-        lambda r: r["transaction_id"], "sale_time", None)
-    # Round 2: source event id (exact, ignores timestamps).
-    ev_pairs = _match_one_round(
-        [dr for dr in db if id(dr) not in used_db],
-        [er for er in ex if not er.get("_matched") and er["event_id"]],
-        lambda r: r["event_id"], "sale_time", None)
-    # Round 3: timestamp-tolerated fingerprint, buyer/group-consistent.
-    fp_pairs = _match_one_round(
-        [dr for dr in db if id(dr) not in used_db],
-        [er for er in ex if not er.get("_matched")],
-        _fingerprint_key, "sale_time", tolerance, verify=_fp_consistent)
-
-    for pairs, method in ((txn_pairs, "transaction_id"),
-                          (ev_pairs, "source_event_id"),
-                          (fp_pairs, "fingerprint")):
+    def _apply(pairs, method):
         for er, dr in pairs:
             if id(dr) in used_db or er.get("_matched"):
                 continue
@@ -193,6 +175,30 @@ def reconcile(db_rows, export_rows, tolerance=TOLERANCE_DEFAULT):
             er["_matched"] = True
             dr["_matched"] = True
             matched.append({"export": er, "db": dr, "method": method})
+
+    # Round 1: transaction id (authoritative; ignores timestamps entirely).
+    # Reserve these matches before anything else so a delayed transaction-id
+    # match cannot be stolen by a fingerprint-only competitor.
+    txn_pairs = _match_one_round(
+        db,
+        [er for er in ex if er["transaction_id"]],
+        lambda r: r["transaction_id"], "sale_time", None)
+    _apply(txn_pairs, "transaction_id")
+
+    # Round 2: source event id (exact) — only among records not yet reserved.
+    ev_pairs = _match_one_round(
+        [dr for dr in db if id(dr) not in used_db],
+        [er for er in ex if not er.get("_matched") and er["event_id"]],
+        lambda r: r["event_id"], "sale_time", None)
+    _apply(ev_pairs, "source_event_id")
+
+    # Round 3: timestamp-tolerated fingerprint, buyer/group-consistent — only
+    # among records not already reserved by txn-id or event-id matching.
+    fp_pairs = _match_one_round(
+        [dr for dr in db if id(dr) not in used_db],
+        [er for er in ex if not er.get("_matched")],
+        _fingerprint_key, "sale_time", tolerance, verify=_fp_consistent)
+    _apply(fp_pairs, "fingerprint")
 
     missing_in_db = [er for er in ex if not er.get("_matched")]
     extra_in_db = [dr for dr in db if id(dr) not in used_db]

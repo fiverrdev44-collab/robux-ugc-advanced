@@ -111,7 +111,7 @@ def analyze_sales(days=7):
         from sales_listener import window_coverage_stats
         start, end, _anchor = window_bounds(cur, 7)
         cov = window_coverage_stats(cur, start, end)
-        cov["complete"] = cov["source_complete"]
+        cov["complete"] = cov["internally_consistent"]
 
         return {
             "today_units": today_units or 0, "today_robux": today_robux or 0,

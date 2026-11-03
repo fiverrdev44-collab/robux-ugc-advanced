@@ -212,6 +212,32 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(sl.duplicate_reason(incoming, existing),
                          "legacy_source_event_id")
 
+    def test_missing_buyer_legacy_is_ambiguous(self):
+        existing = [{"source_event_id": "discord:123:My Hat:50",
+                     "transaction_id": None, "notification_time": None,
+                     "sale_time": dt("2026-10-31T10:00:00Z"),
+                     "item_name": "My Hat", "buyer": None, "amount_robux": 50}]
+        incoming = {"source_event_id": "discord:123:0", "transaction_id": None,
+                    "notification_time": dt("2026-10-31T10:00:00Z"),
+                    "sale_time": dt("2026-10-31T10:00:00Z"),
+                    "item_name": "My Hat", "buyer": "buyerA", "amount_robux": 50,
+                    "_legacy_id": "discord:123:My Hat:50"}
+        self.assertEqual(sl.duplicate_reason(incoming, existing),
+                         "ambiguous_buyer")
+
+    def test_both_missing_buyer_is_ambiguous(self):
+        existing = [{"source_event_id": "discord:123:My Hat:50",
+                     "transaction_id": None, "notification_time": None,
+                     "sale_time": dt("2026-10-31T10:00:00Z"),
+                     "item_name": "My Hat", "buyer": "", "amount_robux": 50}]
+        incoming = {"source_event_id": "discord:123:0", "transaction_id": None,
+                    "notification_time": dt("2026-10-31T10:00:00Z"),
+                    "sale_time": dt("2026-10-31T10:00:00Z"),
+                    "item_name": "My Hat", "buyer": "", "amount_robux": 50,
+                    "_legacy_id": "discord:123:My Hat:50"}
+        self.assertEqual(sl.duplicate_reason(incoming, existing),
+                         "ambiguous_buyer")
+
 
 class ReconciliationTests(unittest.TestCase):
     def test_reconcile_counts_and_duplicates(self):
@@ -293,6 +319,28 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(r["matched"], 0)
         self.assertEqual(len(r["missing_in_db"]), 1)
         self.assertEqual(len(r["extra_in_db"]), 1)
+
+    def test_delayed_txn_match_reserved_before_fingerprint(self):
+        # One DB record is claimable by a delayed transaction-id match AND by
+        # a fingerprint-only competitor. The txn-id match must reserve the row
+        # first, leaving the fingerprint competitor unmatched.
+        db_rows = [{
+            "id": 1, "source_event_id": "txn:roblox:T1", "transaction_id": "T1",
+            "sale_time": "2026-10-31T10:00:00Z", "item_name": "Hat",
+            "amount_robux": 50,
+        }]
+        export_rows = [
+            {"source_event_id": "txn:roblox:T1", "transaction_id": "T1",
+             "transaction_time": "2026-11-02T18:00:00Z", "item_name": "Hat",
+             "amount_robux": 50},
+            {"source_event_id": "discord:9:0", "transaction_id": None,
+             "transaction_time": "2026-10-31T10:00:00Z", "item_name": "Hat",
+             "amount_robux": 50},
+        ]
+        r = sr.reconcile(db_rows, export_rows)
+        self.assertEqual(r["matched"], 1)
+        self.assertEqual(len(r["missing_in_db"]), 1)  # fingerprint competitor
+        self.assertEqual(len(r["extra_in_db"]), 0)
 
 
 if __name__ == "__main__":
