@@ -268,7 +268,7 @@ def register_advanced_commands(bot, get_db):
     @bot.command(name="converge")
     async def converge_cmd(ctx, family: str = "all", limit: int = 10):
         """!converge | !converge emotes | !converge all_families"""
-        from convergence_engine import scan_convergence, scan_all_families, FAMILIES
+        from convergence_engine import scan_all_families, FAMILIES
 
         if family == "all_families":
             await ctx.send("🧠 Scanning all categories...")
@@ -282,10 +282,14 @@ def register_advanced_commands(bot, get_db):
                     continue
                 lines = [f"**🎯 `{fam}`**"]
                 for i, r in enumerate(rows, 1):
-                    snipe = " 🔥" if (r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1) else ""
+                    vel = (f"{r['velocity']}/d" if r.get("velocity_measured")
+                           else "n/a")
+                    snipe = (" 🔥" if (r["recent"] == 0 and 5 <= r["supply"] <= 30
+                                       and r.get("velocity_measured")
+                                       and r["velocity"] > 1) else "")
                     lines.append(
                         f"`{r['score']}` **{r['keyword']}**{snipe} — "
-                        f"vel {r['velocity']}/d · supply {r['supply']} · recent {r['recent']}"
+                        f"vel {vel} · supply {r['supply']} · recent {r['recent']}"
                     )
                 await ctx.send("\n".join(lines)[:1900])
             return
@@ -298,33 +302,24 @@ def register_advanced_commands(bot, get_db):
             )
 
         label = f"`{family}`" if family != "all" else "all categories"
-        await ctx.send(f"🧠 Convergence scan — {label}...")
+        await ctx.send(f"🧠 Convergence scan + live verification — {label}...")
+
+        def _run():
+            from convergence_engine import scan_convergence_detailed
+            from convergence_live import verify_shortlist, format_report
+            detailed = scan_convergence_detailed(family, limit, shortlist=8)
+            shortlist = (detailed.get("shortlist") or
+                         detailed.get("candidates") or [])
+            verified = verify_shortlist(
+                [c["keyword"] for c in shortlist], family=family)
+            return format_report(detailed, verified, family)
 
         try:
-            rows = await asyncio.to_thread(scan_convergence, family, limit)
+            body = await asyncio.to_thread(_run)
         except Exception as e:
             return await ctx.send(f"❌ {e}")
 
-        if not rows:
-            return await ctx.send(
-                f"No convergence found for {label}.\n"
-                f"Run `!converge_debug movement` to see why."
-            )
-
-        lines = [f"**🎯 CONVERGENCE — {label}**\n"
-                 "_Weighted: demand · velocity · supply · freshness · competition_\n"]
-
-        for i, r in enumerate(rows, 1):
-            snipe = " 🔥 SNIPE ZONE" if (r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1) else ""
-            lines.append(
-                f"**#{i}  [{r['score']}]**  `{r['keyword']}`{snipe}\n"
-                f"  📈 demand {r['demand']} · ⚡ vel {r['velocity']}/d\n"
-                f"  📦 supply {r['supply']} · 🆕 recent {r['recent']} · "
-                f"🎯 avg {r['avg_favs']}♥ · 👑 top {int(r['concentration']*100)}%"
-            )
-
-        out = "\n".join(lines)
-        for chunk in [out[i:i+1900] for i in range(0, len(out), 1900)]:
+        for chunk in [body[i:i+1900] for i in range(0, len(body), 1900)]:
             await ctx.send(chunk)
 
     # ────────────────────────────────────────────────────────

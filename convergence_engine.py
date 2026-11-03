@@ -13,6 +13,7 @@ FIXES in this version:
 import math
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from bot_core import get_db
 
 
@@ -90,6 +91,33 @@ _GENERIC_BLOCK = {
     "wonderful", "fantastic", "perfect", "special", "unique", "fashion",
     "styles", "styled", "designer", "creator",
 }
+
+# Generic/ambiguous single-word concepts that are NOT actionable niches.
+# Observed from manual testing: "fairy", "waist", "emote", "float", "music",
+# "matching", "confess", "farming", "heart", "model" all scored highly as
+# standalone keywords but name a broad theme, not a concrete product concept.
+_NICHE_GENERIC = {
+    "emote", "emotes", "dance", "dancing", "animation", "animate", "pose",
+    "fairy", "waist", "float", "music", "matching", "confess", "farming",
+    "heart", "model", "models", "theme", "themes", "concept", "concepts",
+    "aesthetic", "vibe", "vibes", "core", "mood",
+}
+
+
+def _is_generic(keyword):
+    """True when a keyword is a generic term rather than an actionable niche."""
+    kw = (keyword or "").strip().lower()
+    if not kw:
+        return True
+    if kw in _NICHE_GENERIC or kw in _GENERIC_BLOCK:
+        return True
+    tokens = kw.split()
+    if len(tokens) > 1 and all(
+        t in _GENERIC_BLOCK or t in _NICHE_GENERIC or len(t) < 4
+        for t in tokens
+    ):
+        return True
+    return False
 
 
 def _family_clause(family):
@@ -170,9 +198,12 @@ def _gather_keywords(cur, family=None):
                         if w not in _GENERIC_BLOCK
                     ]
                     for w in set(words):
-                        counter[w] += 1
+                        if not _is_generic(w):
+                            counter[w] += 1
                     for i in range(len(words) - 1):
-                        counter[f"{words[i]} {words[i+1]}"] += 1
+                        bigram = f"{words[i]} {words[i+1]}"
+                        if not _is_generic(bigram):
+                            counter[bigram] += 1
                 for kw, cnt in counter.most_common(250):
                     if cnt >= 3:
                         keywords.add(kw)
@@ -215,7 +246,8 @@ def _gather_keywords(cur, family=None):
                 if t not in _GENERIC_BLOCK:
                     token_counter[t] += 1
         for t, _ in token_counter.most_common(150):
-            keywords.add(t)
+            if not _is_generic(t):
+                keywords.add(t)
     except Exception as e:
         print(f"[convergence] search_suggestions read failed: {e}", flush=True)
 
@@ -223,16 +255,25 @@ def _gather_keywords(cur, family=None):
     return list(keywords)
 
 
-def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
+def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
+                   debug=False):
+    def _reject(reason):
+        if debug:
+            print(f"[conv-debug] reject '{keyword}': {reason}", flush=True)
+        return None
+
     kw_clean = (keyword or "").strip().lower()
     if not kw_clean or len(kw_clean) < 5:
-        return None
+        return _reject("too short")
+    if _is_generic(kw_clean):
+        return _reject("generic (non-actionable term)")
     if kw_clean in _GENERIC_BLOCK:
-        return None
+        return _reject("generic stopword")
     if " " in kw_clean:
         tokens = kw_clean.split()
-        if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
-            return None
+        if all(t in _GENERIC_BLOCK or t in _NICHE_GENERIC or len(t) < 3
+               for t in tokens):
+            return _reject("all tokens generic")
 
     pat = _kw_pattern(keyword)
     is_phrase = " " in keyword.strip()
@@ -256,10 +297,10 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    if supply < 3:                 return None
-    if supply > 500:               return None
-    if median_favs > 50_000:       return None
-    if median_favs < min_median:   return None
+    if supply < 3:                 return _reject("supply < 3")
+    if supply > 500:               return _reject("supply > 500 (saturated)")
+    if median_favs > 50_000:       return _reject("median favorites too high")
+    if median_favs < min_median:   return _reject("median favorites below threshold")
 
     cur.execute(f"""
         select count(*),
@@ -278,7 +319,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     demand_reliable = demand_live > 0
     demand = demand_live if demand_reliable else demand_all
     volume = volume_live if demand_reliable else volume_all
-    if demand < min_demand:        return None
+    if demand < min_demand:        return _reject("no autocomplete occurrences")
 
     cur.execute(f"""
         select count(*) from items
@@ -304,10 +345,37 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
                    (max(ih.snapshot_at) - min(ih.snapshot_at))
                    )/86400.0 >= 2
         )
-        select avg(delta / days) from s where delta >= 1
+        select count(*),
+               avg(delta / days) filter (where delta >= 1)
+        from s
     """, [pat] + fam_params)
-    velocity = float(cur.fetchone()[0] or 0)
-    velocity = min(velocity, 20.0)
+    vel_row = cur.fetchone()
+    observations = int(vel_row[0] or 0)
+    velocity_measured = observations > 0
+    velocity = (float(vel_row[1]) if velocity_measured and vel_row[1] is not None
+                else None)
+    if velocity_measured:
+        velocity = min(velocity, 20.0)
+
+    # Staleness: age of the most recent observation for this niche.
+    cur.execute(f"""
+        select max(ih.snapshot_at)
+        from item_history ih
+        join items i on i.id = ih.item_id
+        where i.name {match_op} %s
+          {fam_sql.replace('asset_type_id', 'i.asset_type_id')}
+    """, [pat] + fam_params)
+    last_obs = cur.fetchone()[0]
+    if last_obs is not None:
+        try:
+            last_obs_age_days = (
+                (datetime.now(timezone.utc) - last_obs).total_seconds() / 86400.0
+            )
+        except Exception:
+            last_obs_age_days = None
+    else:
+        last_obs_age_days = None
+    stale = last_obs_age_days is not None and last_obs_age_days > 14
 
     cur.execute(f"""
         with cf as (
@@ -325,7 +393,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
     concentration = (top_favs / total_favs) if total_favs else 0.0
 
     if concentration > 0.65:
-        return None
+        return _reject("creator concentration > 0.65")
 
     if demand_reliable:
         count_score = min(math.log1p(demand) / math.log1p(30.0), 1.0)
@@ -338,7 +406,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
             demand_score = count_score
     else:
         demand_score = min(demand / 30.0, 1.0) * 0.25
-    velocity_score = min(velocity / 5.0, 1.0)
+    velocity_score = min(velocity / 5.0, 1.0) if velocity_measured else 0.0
 
     if supply <= 5:      supply_score = 0.3
     elif supply <= 15:   supply_score = 1.0
@@ -362,10 +430,17 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1):
         "demand_live": demand_live,
         "demand_reliable": demand_reliable,
         "demand_volume": volume,
-        "velocity": round(velocity, 2),
+        "autocomplete_occurrences": demand,
+        "autocomplete_volume": volume,
+        "autocomplete_verified": False,
+        "velocity": round(velocity, 2) if velocity is not None else None,
+        "velocity_measured": velocity_measured,
+        "observations": observations,
+        "stale": stale,
         "supply": supply,
         "recent": recent,
         "avg_favs": round(median_favs, 1),
+        "median_favs": round(median_favs, 1),
         "p90_favs": round(p90_favs, 1),
         "concentration": round(concentration, 2),
     }
@@ -383,32 +458,71 @@ def family_for_asset(asset_type_id):
     return ASSET_TO_FAMILY.get(asset_type_id)
 
 
+def qualifies(r):
+    """Evidence gate for a scored candidate. Returns (ok, reason).
+
+    Rejects generic terms and candidates with no measured growth AND no fresh
+    supply. Zero historical observations are never interpreted as zero growth.
+    """
+    if not r:
+        return False, "no data"
+    if _is_generic(r.get("keyword")):
+        return False, "generic (non-actionable term)"
+    if not r.get("velocity_measured"):
+        if (r.get("recent") or 0) == 0:
+            return False, "velocity unmeasured and no fresh supply"
+        return True, "fresh supply (velocity unmeasured)"
+    return True, "measured velocity"
+
+
+def _fmt_velocity(r):
+    if not r.get("velocity_measured"):
+        return "unavailable"
+    return f"{r['velocity']}/d"
+
+
 def format_brief(r):
     if r is None:
         return "⚠️ *No items found in this category — no signal.*"
     zone = ""
-    if r["recent"] == 0 and 5 <= r["supply"] <= 30 and r["velocity"] > 1:
+    if (r["recent"] == 0 and 5 <= r["supply"] <= 30
+            and r.get("velocity_measured") and r["velocity"] > 1):
         zone = " 🔥 **SNIPE ZONE**"
-    elif r["velocity"] > 3 and r["recent"] < 5:
+    elif r.get("velocity_measured") and r["velocity"] > 3 and r["recent"] < 5:
         zone = " ⚡ **RISING**"
     elif r["supply"] > 200 or r["concentration"] > 0.5:
         zone = " 💀 **SATURATED**"
-    elif r["velocity"] < 0.3 and r["demand"] < 5:
-        zone = " 🪦 **DEAD**"
+    elif (not r.get("velocity_measured")
+          or (r["velocity"] is not None and r["velocity"] < 0.3 and r["demand"] < 5)):
+        zone = " 🪦 **NO EVIDENCE**"
 
     fam = (f" · `{r['family']}`"
            if r.get("family") and r["family"] != "all" else "")
+    vel = _fmt_velocity(r)
     return (
         f"**🎯 `{r['keyword']}`{fam} — [{r['score']}]**{zone}\n"
-        f"  📈 demand {r['demand']} live / "
-        f"{r.get('demand_volume', 0):,} volume · "
-        f"⚡ vel {r['velocity']}/d · "
-        f"📦 supply {r['supply']} · 🆕 recent {r['recent']} · "
-        f"🎯 median {r['avg_favs']}♥ · "
+        f"  🔎 autocomplete {r['demand']} occurrences "
+        f"(unverified) / {r.get('demand_volume', 0):,} volume · "
+        f"⚡ velocity {vel} · "
+        f"📦 supply {r['supply']} (favs>5, sampled) · 🆕 recent {r['recent']} · "
+        f"🎯 median {r['median_favs']}♥ · "
         f"👑 top {int(r['concentration']*100)}%"
-        + ("" if r.get("demand_reliable", True)
-           else " · _demand low-confidence_")
+        + ("" if r.get("velocity_measured")
+           else " · _velocity unavailable (insufficient history)_")
     )
+
+
+def qualifies_all(results):
+    """Split scored candidates into qualified and rejected buckets."""
+    ok, rejected = [], []
+    for r in results:
+        passed, reason = qualifies(r)
+        if passed:
+            ok.append(r)
+        else:
+            rejected.append({"keyword": r.get("keyword"), "reason": reason,
+                             "score": r.get("score")})
+    return ok, rejected
 
 
 def scan_convergence(family=None, limit=15):
@@ -432,14 +546,51 @@ def scan_convergence(family=None, limit=15):
 
         print(f"[convergence] {label} tier (median>={min_med}, demand>={min_dem}): {len(results)}", flush=True)
 
-        if len(results) >= 3:
+        qualified, _ = qualifies_all(results)
+        if len(qualified) >= 3:
             cur.close(); conn.close()
-            results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:limit]
+            qualified.sort(key=lambda x: x["score"], reverse=True)
+            return qualified[:limit]
 
     cur.close(); conn.close()
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:limit]
+    qualified, _ = qualifies_all(results)
+    qualified.sort(key=lambda x: x["score"], reverse=True)
+    return qualified[:limit]
+
+
+def scan_convergence_detailed(family=None, limit=15, shortlist=8):
+    """Two-stage Stage A: scored candidates + evidence-gate summary."""
+    conn = get_db(); cur = conn.cursor()
+    try:
+        keywords = _gather_keywords(cur, family=family)
+        scored = []
+        rejected = []
+        tiers = [(25, 2, "strict"), (20, 1, "mid"), (15, 1, "loose")]
+        for min_med, min_dem, _label in tiers:
+            for kw in keywords:
+                try:
+                    r = _score_keyword(cur, kw, family,
+                                       min_median=min_med, min_demand=min_dem)
+                except Exception:
+                    continue
+                if r is None:
+                    continue
+                if r["keyword"] not in {s["keyword"] for s in scored}:
+                    scored.append(r)
+            if len(scored) >= shortlist:
+                break
+
+        qualified, gated = qualifies_all(scored)
+        qualified.sort(key=lambda x: x["score"], reverse=True)
+        return {
+            "family": family or "all",
+            "candidates": qualified[:limit],
+            "shortlist": qualified[:shortlist],
+            "gated": gated,
+            "scanned": len(keywords),
+        }
+    finally:
+        cur.close(); conn.close()
 
 
 def scan_all_families(limit_each=5):
