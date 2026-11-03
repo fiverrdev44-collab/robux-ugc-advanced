@@ -4,8 +4,10 @@ Used to verify that a generated title is not already an exact catalog name and
 to show what the live search returns. It is a first-page sample (30 results),
 not a full catalog count.
 """
+import email.utils
 import re
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -42,10 +44,21 @@ def _get_with_backoff(url, params, max_attempts=3, timeout=12):
         wait = 2 ** attempt
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
+            parsed = None
             try:
-                wait = float(retry_after)
+                parsed = float(retry_after)
             except (TypeError, ValueError):
-                pass
+                try:
+                    dt = email.utils.parsedate_to_datetime(retry_after)
+                    if dt is not None:
+                        parsed = max(
+                            0.0,
+                            (dt - datetime.now(timezone.utc)).total_seconds(),
+                        )
+                except (TypeError, ValueError, OverflowError):
+                    parsed = None
+            if parsed is not None:
+                wait = parsed
         time.sleep(min(max(wait, 1.0), 60.0))
     return resp
 

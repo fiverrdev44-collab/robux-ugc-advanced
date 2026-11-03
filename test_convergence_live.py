@@ -4,9 +4,10 @@ Stage A gate logic (generic rejection, evidence qualification, median/velocity
 labeling) is tested as pure functions. Stage B live verification is tested with
 mocked Roblox responses — no network, no database writes.
 """
+import email.utils
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
@@ -174,7 +175,8 @@ class StageAFixTests(unittest.TestCase):
         self.assertTrue(r["stale"])
 
     def test_fresh_history_freshness(self):
-        recent = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        # Relative timestamp: stays "recent" regardless of the wall clock.
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
         r = self._score((3, 1.5), recent)
         self.assertEqual(r["freshness"], "recent")
         self.assertFalse(r["stale"])
@@ -221,6 +223,18 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertEqual(r["category_mismatched"], 1)
         self.assertTrue(all(c["asset_type_id"] == 61
                             for c in r["top_competitors"]))
+
+    def test_verify_sorts_related_competitors_first(self):
+        rows = [
+            {"name": "Levitation Float", "favoriteCount": 10, "price": 50,
+             "assetType": 61, "creatorName": "a"},
+            {"name": "Random Dance", "favoriteCount": 9999, "price": 50,
+             "assetType": 61, "creatorName": "b"},
+        ]
+        with self._patch([_FakeResp(200, {"data": rows, "nextPageCursor": None})]):
+            r = cl.verify_niche("levitation", family="emotes")
+        self.assertTrue(r["top_competitors"][0]["related"])
+        self.assertEqual(r["top_competitors"][0]["name"], "Levitation Float")
 
     def test_timeout_forwarded(self):
         resp = _FakeResp(200, {"data": self._items(n=1), "nextPageCursor": None})
@@ -304,6 +318,68 @@ class ReportTests(unittest.TestCase):
         level, why = cl._confidence(c, live)
         self.assertEqual(level, "low")
         self.assertIn("correct-category", why)
+
+    def test_zero_category_results_verdict_is_negative(self):
+        c = _candidate()
+        live = {"ok": True, "keyword": "levitation pose", "sampled_results": 30,
+                "category_correct": 0, "category_mismatched": 30,
+                "exact_title_matches": 0, "conceptual_matches": 0,
+                "top_competitors": [], "verification_timestamp": "2026-11-03T00:00:00",
+                "sample_note": "first 30", "capped": False}
+        text = cl.format_recommendation(c, live)
+        self.assertIn("do not pursue", text)
+        self.assertNotIn("investigate further", text)
+
+    def test_competitor_examples_are_concept_related(self):
+        live = {"ok": True, "keyword": "levitation", "sampled_results": 2,
+                "category_correct": 2, "category_mismatched": 0,
+                "exact_title_matches": 0, "conceptual_matches": 1,
+                "top_competitors": [
+                    {"name": "Levitation Float", "favorites": 100, "price": 50,
+                     "asset_type_id": 61, "creator": "a", "related": True},
+                    {"name": "Random Dance Party", "favorites": 9000, "price": 50,
+                     "asset_type_id": 61, "creator": "b", "related": False},
+                ],
+                "verification_timestamp": "2026-11-03T00:00:00",
+                "sample_note": "first 2", "capped": False}
+        text = cl.format_recommendation(_candidate(), live)
+        self.assertIn("Levitation Float", text)
+        self.assertNotIn("Random Dance Party", text)
+
+
+class RetryAfterTests(unittest.TestCase):
+    def setUp(self):
+        cl.clear_cache()
+        cl._reset_circuit()
+
+    def test_numeric_retry_after(self):
+        self.assertEqual(cl._parse_retry_after("120"), 120.0)
+        self.assertEqual(cl._parse_retry_after("0"), 0.0)
+
+    def test_http_date_retry_after(self):
+        future = datetime.now(timezone.utc) + timedelta(seconds=90)
+        header = email.utils.format_datetime(future, usegmt=True)
+        seconds = cl._parse_retry_after(header)
+        self.assertIsNotNone(seconds)
+        self.assertGreater(seconds, 60)
+        self.assertLess(seconds, 120)
+
+    def test_invalid_retry_after_is_none(self):
+        self.assertIsNone(cl._parse_retry_after(None))
+        self.assertIsNone(cl._parse_retry_after(""))
+        self.assertIsNone(cl._parse_retry_after("not-a-date"))
+
+    def test_http_date_429_trips_circuit_without_exception(self):
+        cl._reset_circuit()
+        future = datetime.now(timezone.utc) + timedelta(seconds=60)
+        header = email.utils.format_datetime(future, usegmt=True)
+        with mock.patch.object(
+                cl, "_get_with_backoff",
+                return_value=_FakeResp(429, {}, {"Retry-After": header})):
+            r = cl.verify_niche("levitation", family="emotes")
+        self.assertFalse(r["ok"])
+        self.assertTrue(cl._circuit_open())
+        cl._reset_circuit()
 
 
 if __name__ == "__main__":

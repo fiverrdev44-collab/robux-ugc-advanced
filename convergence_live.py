@@ -38,10 +38,34 @@ def _circuit_open():
         return time.time() < _CIRCUIT["open_until"]
 
 
+def _parse_retry_after(value):
+    """Parse a Retry-After header into seconds (numeric or HTTP-date)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return max(0.0, float(s))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt is not None:
+            return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
 def _trip_circuit(seconds=None):
-    seconds = max(1.0, float(seconds or CIRCUIT_BREAK_COOLDOWN))
+    wait = _parse_retry_after(seconds)
+    if wait is None:
+        wait = CIRCUIT_BREAK_COOLDOWN
+    wait = max(1.0, min(wait, 300.0))
     with _CIRCUIT_LOCK:
-        _CIRCUIT["open_until"] = max(_CIRCUIT["open_until"], time.time() + seconds)
+        _CIRCUIT["open_until"] = max(_CIRCUIT["open_until"], time.time() + wait)
 
 
 def _reset_circuit():
@@ -161,7 +185,8 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         name = (x.get("name") or "").strip()
         if name.lower() == kw_low:
             exact += 1
-        if q_tokens & set(_tokens(name)):
+        related = bool(q_tokens & set(_tokens(name)))
+        if related:
             conceptual += 1
         competitors.append({
             "name": name[:48],
@@ -169,8 +194,10 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             "price": int(x.get("price") or 0),
             "asset_type_id": int(atype or 0),
             "creator": (x.get("creatorName") or "")[:40],
+            "related": related,
         })
-    competitors.sort(key=lambda c: c["favorites"], reverse=True)
+    # Concept-related competitors first, then by popularity.
+    competitors.sort(key=lambda c: (not c["related"], -c["favorites"]))
 
     result = {
         "ok": True,
@@ -292,14 +319,20 @@ def format_recommendation(candidate, live=None):
             f"({live.get('sample_note')}) · verified "
             f"{live.get('verification_timestamp', '?')[:19]}"
         )
-    # 4. competitor examples
-    if live and live.get("ok") and live.get("top_competitors"):
-        lines.append("• **Competitor examples:**")
-        for c in live["top_competitors"]:
-            lines.append(
-                f"  - `{c['name']}` — {c['favorites']:,}♥ · R${c['price']} · "
-                f"{_asset_label(c['asset_type_id'])}"
-            )
+    # 4. competitor examples (concept-related only)
+    if live and live.get("ok"):
+        related = [c for c in (live.get("top_competitors") or [])
+                   if c.get("related")]
+        if related:
+            lines.append("• **Competitor examples (concept-related):**")
+            for c in related:
+                lines.append(
+                    f"  - `{c['name']}` — {c['favorites']:,}♥ · R${c['price']} · "
+                    f"{_asset_label(c['asset_type_id'])}"
+                )
+        else:
+            lines.append("• **Competitor examples:** none concept-related "
+                         "in the live sample")
     else:
         lines.append("• **Competitor examples:** none verified")
     # 5. competition assessment
@@ -334,10 +367,19 @@ def format_recommendation(candidate, live=None):
     if live and live.get("ok") and live.get("category_mismatched"):
         risks.append(f"{live['category_mismatched']} live results in wrong category")
     lines.append(f"• **Risks:** {'; '.join(risks) if risks else 'none identified'}")
-    lines.append(
-        f"• **Recommendation:** "
-        f"{'investigate further' if level in ('medium', 'low') and live and live.get('ok') else 'do not pursue without more evidence'}"
-    )
+    # Recommendation must be negative when live verification finds no
+    # correct-category results, regardless of the confidence level.
+    if live is None or not live.get("ok"):
+        verdict = "do not pursue without more evidence (live verification unavailable)"
+    elif live.get("category_correct", 0) == 0:
+        verdict = "do not pursue — no correct-category live results"
+    elif live.get("exact_title_matches", 0) > 0:
+        verdict = "investigate cautiously — exact title already exists live"
+    elif level == "medium":
+        verdict = "investigate further"
+    else:
+        verdict = "investigate with caution (limited evidence)"
+    lines.append(f"• **Recommendation:** {verdict}")
     return "\n".join(lines)
 
 
