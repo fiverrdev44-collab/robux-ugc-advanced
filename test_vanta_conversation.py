@@ -113,6 +113,18 @@ def test_family_and_concept():
     print("PASS family and concept extraction")
 
 
+def test_convergence_family_normalization():
+    assert vc._convergence_family("emote") == "emotes"
+    assert vc._convergence_family("hair") == "hair"
+    assert vc._convergence_family("headwear") == "headwear"
+    assert vc._convergence_family("face") == "face"
+    assert vc._convergence_family("accessory") == "accessory"
+    assert vc._convergence_family("clothing") == "clothing"
+    assert vc._convergence_family("gear") == "gear"
+    assert vc._convergence_family(None) is None
+    print("PASS convergence family normalization")
+
+
 def test_signed_thread_names():
     name = thread_name(121930221694467)
     assert parse_thread_name(name) == 121930221694467
@@ -168,6 +180,21 @@ class _FakeBot:
         return self.cmd if name == "verdict" else None
 
 
+class _FakeConvergeCommand:
+    def __init__(self):
+        self.called = None
+    async def callback(self, ctx, **kwargs):
+        self.called = kwargs
+        await ctx.send("Convergence scan")
+
+
+class _FakeConvergeBot:
+    def __init__(self):
+        self.cmd = _FakeConvergeCommand()
+    def get_command(self, name):
+        return self.cmd if name == "converge" else None
+
+
 def test_registry_execution_and_context():
     channel = _FakeChannel()
     message = _FakeMessage(channel)
@@ -181,6 +208,32 @@ def test_registry_execution_and_context():
     assert state.last_intent == "inspect_item"
     assert any("Checked item" in m for m in channel.messages)
     print("PASS registry execution and context capture")
+
+
+def test_find_opportunities_family_normalization_end_to_end():
+    cases = [
+        ("Find me a profitable Roblox emote niche with low competition.",
+         "emote", "emotes"),
+        ("Find me a low competition beanie niche", "headwear", "headwear"),
+        ("Find me a low competition accessory niche", "accessory", "accessory"),
+        ("Find me a low competition clothing niche", "clothing", "clothing"),
+    ]
+    for text, expected_detected, expected_convergence in cases:
+        route = classify_intent(text, use_ai=False)
+        assert route["intent"] == "find_opportunities", (text, route)
+        assert route["family"] == expected_detected, (text, route)
+
+        channel = _FakeChannel()
+        message = _FakeMessage(channel)
+        bot = _FakeConvergeBot()
+        state = ConversationState(user_id=1)
+        asyncio.run(_run_registry(bot, message, route, state))
+
+        assert bot.cmd.called == {"family": expected_convergence}, (
+            text, bot.cmd.called)
+        assert any("Scanning for open niches" in m for m in channel.messages)
+        assert any("Convergence scan" in m for m in channel.messages)
+    print("PASS find_opportunities family normalization end-to-end")
 
 
 def test_ai_planner_validation():
@@ -483,9 +536,11 @@ if __name__ == "__main__":
     test_image_and_help()
     test_followups()
     test_family_and_concept()
+    test_convergence_family_normalization()
     test_signed_thread_names()
     test_store_isolation()
     test_registry_execution_and_context()
+    test_find_opportunities_family_normalization_end_to_end()
     test_ai_planner_validation()
     test_selection_skips_ai()
     test_rename_routing()

@@ -290,11 +290,11 @@ def register_advanced_commands(bot, get_db):
                 await ctx.send("\n".join(lines)[:1900])
             return
 
-        if family != "all" and family not in FAMILIES:
+        if family != "all" and family != "accessory" and family not in FAMILIES:
             valid = ", ".join(FAMILIES.keys())
             return await ctx.send(
                 f"❌ Unknown family `{family}`.\n"
-                f"Valid: `all`, `all_families`, {valid}"
+                f"Valid: `all`, `all_families`, `accessory`, {valid}"
             )
 
         label = f"`{family}`" if family != "all" else "all categories"

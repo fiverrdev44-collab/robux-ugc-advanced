@@ -31,8 +31,10 @@ FAMILIES = {
     "hair": ("hair", "wig"),
     "headwear": ("hat", "beanie", "cap", "crown", "beret", "headwear"),
     "face": ("face", "mask", "glasses", "eyes", "eyelash", "eyebrow"),
-    "accessory": ("wings", "backpack", "necklace", "chain", "scarf", "tail"),
-    "clothing": ("shirt", "pants", "dress", "jacket", "hoodie", "shoes"),
+    "accessory": ("accessory", "accessories", "wings", "backpack",
+                  "necklace", "chain", "scarf", "tail"),
+    "clothing": ("clothing", "clothes", "shirt", "pants", "dress",
+                 "jacket", "hoodie", "shoes"),
     "gear": ("sword", "staff", "shield", "wand", "gear"),
 }
 
@@ -251,6 +253,26 @@ def detect_family(text):
         if any(re.search(rf"\b{re.escape(w)}\b", low) for w in words):
             return family
     return None
+
+
+def _convergence_family(family):
+    """Map a conversational category name to the convergence command's family.
+
+    ``emote`` -> ``emotes`` and the other renames come from
+    ``category_configs.to_convergence_family``. ``accessory`` is kept as-is so
+    convergence_engine's accessory special-case (neck + shoulder + front + back
+    + waist) is used instead of narrowing broad accessory requests to neck.
+    """
+    if not family:
+        return family
+    key = str(family).strip().lower()
+    if key == "accessory":
+        return "accessory"
+    try:
+        from category_configs import to_convergence_family
+        return to_convergence_family(key)
+    except Exception:
+        return key
 
 
 def clean_concept(text, item_id=None):
@@ -769,7 +791,7 @@ async def _run_registry(bot, message, route, state):
             kwargs = {"args": title}
         elif arg_kind == "family":
             if family:
-                kwargs = {"family": family}
+                kwargs = {"family": _convergence_family(family)}
     else:
         await message.channel.send("I didn't catch that. Try naming the task.")
         return
