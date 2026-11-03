@@ -107,6 +107,15 @@ def analyze_sales(days=7):
             elif week_units < prev_units * 0.85:
                 trend = "down"
 
+        from data_audit import sales_integrity
+        cov = sales_integrity(cur)
+        cov["complete"] = (
+            (cov["total"] or 0) > 0
+            and (cov["duplicate_event_ids"] or 0) == 0
+            and (cov["duplicate_fingerprints"] or 0) == 0
+            and (cov["event_id"] or 0) == (cov["total"] or 0)
+        )
+
         return {
             "today_units": today_units or 0, "today_robux": today_robux or 0,
             "week_units": week_units or 0, "week_robux": week_robux or 0,
@@ -116,6 +125,7 @@ def analyze_sales(days=7):
             "report_date": datetime.now(timezone.utc).date().isoformat(),
             "last24_units": last24_units or 0,
             "last24_robux": last24_robux or 0,
+            "coverage": cov,
         }
     finally:
         cur.close(); conn.close()
@@ -132,6 +142,22 @@ def format_report(data):
         f"• This week: **{data['week_units']}** · **R${data['week_robux']:,}**\n"
         f"• Last week: {data['prev_units']} · R${data['prev_robux']:,}",
     ]
+
+    cov = data.get("coverage") or {}
+    if cov:
+        lines.append(
+            "\n## Coverage\n"
+            f"• {cov.get('event_id', 0):,}/{cov.get('total', 0):,} rows have a "
+            f"source event id · duplicate event ids "
+            f"**{cov.get('duplicate_event_ids', 0)}** · duplicate fingerprints "
+            f"**{cov.get('duplicate_fingerprints', 0)}**"
+        )
+        if not cov.get("complete"):
+            lines.append(
+                "• ⚠️ coverage incomplete — recorded amounts may under- or "
+                "over-count (see !sales_report)."
+            )
+        lines.append("_Recorded amount is not verified gross revenue._")
 
     if data["week_units"] and data["prev_units"]:
         pct = ((data["week_units"] - data["prev_units"]) / data["prev_units"]) * 100

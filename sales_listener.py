@@ -2,21 +2,126 @@
 sales_listener.py — reads Roblox sale webhook embeds from Discord,
 saves to my_sales, and provides summary functions.
 
+Ingestion identity model
+------------------------
+Each *individual* sale embed gets a deterministic ``source_event_id``:
+
+  * ``txn:<provider>:<transaction_id>``  when a provider transaction ID is
+    present in the embed (preferred — stable across reposts);
+  * ``discord:<message_id>:<embed_index>`` otherwise (embed index makes two
+    same-price sales inside one Discord message distinct).
+
+Legacy rows imported before this change carry the old format
+``discord:<message_id>:<item_name>:<amount_robux>``. They are never blindly
+re-imported: a message whose legacy ID already exists is treated as already
+captured (see ``duplicate_reason``) and flagged in the reconciliation report
+instead of silently re-adding rows.
+
+Timestamps
+----------
+``sale_time`` is the *marketplace* transaction timestamp when the webhook
+provides one (a dated field, ``embed.timestamp``, or the message time as a
+last resort). ``notification_time`` always records the Discord notification
+timestamp, so the two are never conflated. ``sale_date`` is the UTC calendar
+date of ``sale_time``.
+
 All DB writes batch or run via asyncio.to_thread — no event loop blocking.
-Verbose logging so we can trace exactly what happens.
 """
 import os
 import re
 import asyncio
 from datetime import datetime, timezone
+
 from bot_core import get_db
 
 
+# ════════════════════════════════════════════════════════════════════
+# Event identity
+# ════════════════════════════════════════════════════════════════════
+
+# Legacy format: discord:<message_id>:<item_name>:<amount>
+LEGACY_EVENT_RE = re.compile(r"^discord:(\d+):(.+):(\d+)$")
+# v2 embed-index format: discord:<message_id>:<embed_index>
+V2_EVENT_RE = re.compile(r"^discord:(\d+):(\d+)$")
+# Transaction format: txn:<provider>:<transaction_id>
+TXN_EVENT_RE = re.compile(r"^txn:([^:]+):(.+)$")
+
+
+def legacy_source_event_id(message_id, item_name, amount_robux):
+    """Recreate the historical (v1) source event id for a message+embed."""
+    return f"discord:{message_id}:{item_name}:{amount_robux}"
+
+
+def build_source_event_id(message_id, embed_index, transaction_id=None,
+                          provider="roblox"):
+    """Deterministic, per-embed id. Provider transaction id wins."""
+    if transaction_id:
+        return f"txn:{provider}:{transaction_id}"
+    return f"discord:{message_id}:{embed_index}"
+
+
+def is_legacy_event_id(value):
+    return bool(value) and LEGACY_EVENT_RE.match(str(value)) is not None
+
+
+def is_v2_event_id(value):
+    return bool(value) and V2_EVENT_RE.match(str(value)) is not None
+
+
+def is_txn_event_id(value):
+    return bool(value) and TXN_EVENT_RE.match(str(value)) is not None
+
+
+# ════════════════════════════════════════════════════════════════════
+# Field parsing helpers
+# ════════════════════════════════════════════════════════════════════
+
+TXN_TIME_FIELD_NAMES = (
+    "date", "time", "sold at", "purchased at", "purchase time", "sale time",
+    "transaction date", "transaction time", "transaction timestamp",
+    "created at", "timestamp", "when", "completed at", "purchase date",
+)
+
+TXN_ID_FIELD_KEYS = (
+    "transaction id", "transaction", "order id", "order", "order number",
+    "sale id", "purchase id", "receipt id", "receipt", "txn id",
+    "transaction number",
+)
+
+ASSET_FIELD_KEYS = ("asset id", "item id", "asset", "catalog id", "assetid")
+GROUP_FIELD_KEYS = ("group id", "group", "groupid", "seller id")
+
+TXN_ID_TEXT_RE = re.compile(
+    r"(?:transaction|order|sale|purchase|receipt|txn)\s*"
+    r"(?:id|no\.?|number|#)?\s*[:#]\s*([A-Za-z0-9][A-Za-z0-9_\-]{3,})",
+    re.IGNORECASE,
+)
+
+ASSET_URL_RE = re.compile(r"roblox\.com/(?:catalog|library)/(\d+)", re.IGNORECASE)
+
+_DT_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%y %H:%M:%S",
+    "%m/%d/%y %H:%M",
+    "%b %d, %Y %I:%M %p",
+    "%B %d, %Y %I:%M %p",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%Y-%m-%d",
+)
+
+
 def _parse_revenue(raw):
+    """Parse a Robux amount. Handles thousands separators, ignores decimals."""
     if not raw:
         return 0
-    m = re.search(r"(\d+)", str(raw))
-    return int(m.group(1)) if m else 0
+    m = re.search(r"([0-9][0-9,]*)", str(raw))
+    if not m:
+        return 0
+    return int(m.group(1).replace(",", ""))
 
 
 def _strip_emoji(s):
@@ -32,7 +137,118 @@ def _safe_str(v):
     return str(v).strip()
 
 
-def _extract_sale_from_embed(embed, message):
+def _embed_footer(embed):
+    footer = getattr(embed, "footer", None)
+    return _safe_str(getattr(footer, "text", None))
+
+
+def _parse_datetime(value):
+    """Parse a webhook timestamp into a tz-aware UTC datetime, or None."""
+    s = str(value).strip()
+    if not s:
+        return None
+
+    m = re.match(r"<t:(\d+)(?::[a-zA-Z])?>", s)
+    if m:
+        return _epoch_to_utc(m.group(1))
+    if re.match(r"^\d{9,13}$", s):
+        return _epoch_to_utc(s)
+
+    dt = None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    if dt is None:
+        for fmt in _DT_FORMATS:
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _epoch_to_utc(epoch_str):
+    try:
+        v = float(epoch_str)
+    except (TypeError, ValueError):
+        return None
+    if v > 1e11:  # milliseconds
+        v /= 1000.0
+    return datetime.fromtimestamp(v, tz=timezone.utc)
+
+
+def _extract_transaction_id(embed, title, desc):
+    """Provider transaction ID from fields, footer, or body text."""
+    for field in (embed.fields or []):
+        name = _safe_str(field.name).lower()
+        if any(k in name for k in TXN_ID_FIELD_KEYS) or name.strip() == "id":
+            val = _safe_str(field.value)
+            m = re.search(r"([A-Za-z0-9][A-Za-z0-9_\-]{3,})", val)
+            if m:
+                return m.group(1)
+    text = "\n".join(x for x in (desc, title, _embed_footer(embed)) if x)
+    m = TXN_ID_TEXT_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _extract_asset_id(embed, title, desc):
+    """Roblox catalog asset id from fields or URLs."""
+    for field in (embed.fields or []):
+        name = _safe_str(field.name).lower()
+        if any(k in name for k in ASSET_FIELD_KEYS):
+            m = re.search(r"(\d{6,})", _safe_str(field.value))
+            if m:
+                return int(m.group(1))
+    for text in (title, desc):
+        m = ASSET_URL_RE.search(text or "")
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _extract_group_id(embed, title):
+    for field in (embed.fields or []):
+        name = _safe_str(field.name).lower()
+        if any(k in name for k in GROUP_FIELD_KEYS):
+            m = re.search(r"(\d{4,})", _safe_str(field.value))
+            if m:
+                return int(m.group(1))
+    m = re.search(r"group\s*(?:id)?\s*[:#]?\s*(\d{4,})", title or "",
+                  re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _extract_buyer_id(embed):
+    for field in (embed.fields or []):
+        name = _safe_str(field.name).lower()
+        if any(k in name for k in ("buyer id", "user id", "customer id")):
+            m = re.search(r"(\d{4,})", _safe_str(field.value))
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _as_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+# ════════════════════════════════════════════════════════════════════
+# Embed -> sale
+# ════════════════════════════════════════════════════════════════════
+
+def _extract_sale_from_embed(embed, message, embed_index=0):
     if not embed:
         return None
 
@@ -41,9 +257,6 @@ def _extract_sale_from_embed(embed, message):
     tl = title.lower()
     dl = desc.lower()
 
-    # Match on title OR description. Broader than before: sale webhooks
-    # change wording ("purchase", "sold", "transaction", "order"), and a
-    # strict match silently drops every new sale.
     sale_markers = (
         "new sale", "thank you for your purchase", "purchase",
         "sold", "sale", "transaction", "order",
@@ -54,17 +267,16 @@ def _extract_sale_from_embed(embed, message):
         return None
 
     item_name = ""
+    raw_item_name = ""
     revenue = 0
     buyer = ""
     group_name = ""
 
-    # Group from title: "💰 New Sale — Eroseris UGC Group"
     if "—" in title:
         group_name = title.split("—", 1)[1].strip()
     elif "-" in title and "new sale" in tl:
         group_name = title.split("-", 1)[1].strip()
 
-    # Parse fields
     for field in (embed.fields or []):
         name = _safe_str(field.name).lower()
         value = _safe_str(field.value)
@@ -75,6 +287,7 @@ def _extract_sale_from_embed(embed, message):
             or name.strip() in ("name", "item name", "product name")
         )
         if not item_name and item_like:
+            raw_item_name = value
             item_name = _strip_emoji(value)
         elif revenue == 0 and any(k in name for k in
                                   ("revenue", "amount", "price", "robux", "total")):
@@ -86,64 +299,263 @@ def _extract_sale_from_embed(embed, message):
                                     ("group", "seller", "store")):
             group_name = _strip_emoji(value)
 
-    # Fallback: try to extract item name from title/description
     if not item_name:
-        # Try "Item: X" pattern
         m = re.search(r"item[:\s]+(.+?)(?:\n|$)", desc, re.IGNORECASE)
         if m:
-            item_name = _strip_emoji(m.group(1))
+            raw_item_name = m.group(1).strip()
+            item_name = _strip_emoji(raw_item_name)
 
     if not item_name:
-        # Last resort: log the embed so we can see what we missed
         print(f"[sales_listener] SKIP — no item name found. "
               f"title={title[:60]!r} fields="
               f"{[(f.name, f.value[:30]) for f in (embed.fields or [])]}",
               flush=True)
         return None
 
-    sale_time = message.created_at
-    if sale_time.tzinfo is None:
-        sale_time = sale_time.replace(tzinfo=timezone.utc)
+    transaction_id = _extract_transaction_id(embed, title, desc)
+    asset_id = _extract_asset_id(embed, title, desc)
+    group_id = _extract_group_id(embed, title)
+    buyer_id = _extract_buyer_id(embed)
 
+    notification_time = _as_utc(getattr(message, "created_at", None))
+
+    # Marketplace transaction time: dated field > embed.timestamp > message time.
+    sale_time = None
+    time_source = "message_created"
+    for field in (embed.fields or []):
+        name = _safe_str(field.name).lower()
+        if name.strip() in TXN_TIME_FIELD_NAMES:
+            parsed = _parse_datetime(field.value)
+            if parsed is not None:
+                sale_time = parsed
+                time_source = "transaction_field"
+                break
+    if sale_time is None:
+        embed_ts = getattr(embed, "timestamp", None)
+        if isinstance(embed_ts, datetime):
+            sale_time = _as_utc(embed_ts)
+            time_source = "embed_timestamp"
+    if sale_time is None:
+        sale_time = notification_time or _as_utc(datetime.now(timezone.utc))
+        time_source = "message_created"
+
+    message_id = str(getattr(message, "id", ""))
     return {
         "sale_date": sale_time.date(),
-        "sale_time": sale_time,
+        "sale_time": sale_time,                 # marketplace transaction time
+        "notification_time": notification_time, # Discord notification time
+        "time_source": time_source,
         "item_name": item_name,
+        "raw_item_name": raw_item_name or item_name,
         "buyer": buyer,
         "amount_robux": revenue,
         "status": "Complete",
         "group_name": group_name,
-        "source_event_id": f"discord:{message.id}:{item_name}:{revenue}",
+        "transaction_id": transaction_id,
+        "asset_id": asset_id,
+        "group_id": group_id,
+        "buyer_id": buyer_id,
+        "embed_index": embed_index,
+        "message_id": message_id,
+        "source_event_id": build_source_event_id(
+            message_id, embed_index, transaction_id),
+        "source_event_version": "v2",
         "source": "discord",
+        "_legacy_id": legacy_source_event_id(message_id, item_name, revenue)
+        if message_id else None,
     }
 
 
-def _insert_sale(cur, sale):
-    """Insert one sale without relying on an ON CONFLICT unique constraint.
+def extract_sales_from_message(message):
+    """Parse every sale embed in a message with a stable per-embed index."""
+    sales = []
+    for index, embed in enumerate(message.embeds or []):
+        try:
+            sale = _extract_sale_from_embed(embed, message, embed_index=index)
+        except Exception as e:
+            print(f"[sales_listener] embed parse failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            continue
+        if sale:
+            sales.append(sale)
+    return sales
 
-    A hand-created my_sales table may lack the unique index that
-    ON CONFLICT requires, which makes every insert fail silently.
+
+# ════════════════════════════════════════════════════════════════════
+# Deduplication / conflict resolution
+# ════════════════════════════════════════════════════════════════════
+
+def duplicate_reason(sale, existing_rows):
+    """Return a string reason if ``sale`` is already represented by an
+    existing row, else None. Never flags two rows with distinct stable
+    event ids as duplicates.
     """
-    params = (
-        sale["sale_date"], sale["sale_time"], sale["item_name"],
-        sale["buyer"], sale["amount_robux"], sale["status"],
-        sale.get("source_event_id"), sale.get("source"),
+    sid = sale.get("source_event_id")
+    txid = sale.get("transaction_id")
+    legacy = sale.get("_legacy_id")
+    ntime = sale.get("notification_time")
+    stime = sale.get("sale_time")
+
+    for r in existing_rows:
+        rsid = r.get("source_event_id")
+
+        if sid and rsid == sid:
+            return "source_event_id"
+        if txid and r.get("transaction_id") == txid:
+            return "transaction_id"
+
+        # A stable, non-legacy id that differs is a *different* sale.
+        if rsid and not is_legacy_event_id(rsid):
+            if sid and sid != rsid:
+                continue
+            if not sid and txid and r.get("transaction_id") != txid:
+                continue
+
+        if legacy and rsid == legacy:
+            return "legacy_source_event_id"
+
+        # Fingerprint fallback only applies to legacy/unknown rows.
+        if ntime is not None and r.get("notification_time") is not None:
+            if _same_instant(ntime, r["notification_time"]):
+                return "notification_fingerprint"
+        if (stime is not None and r.get("sale_time") is not None
+                and ntime is None and r.get("notification_time") is None):
+            if _same_instant(stime, r["sale_time"]):
+                return "sale_time_fingerprint"
+
+    return None
+
+
+def _same_instant(a, b):
+    if a is None or b is None:
+        return False
+    try:
+        return _as_utc(a) == _as_utc(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
+# ════════════════════════════════════════════════════════════════════
+# Schema awareness + insert
+# ════════════════════════════════════════════════════════════════════
+
+_BASE_COLUMNS = ("sale_date", "sale_time", "item_name", "buyer",
+                 "amount_robux", "status")
+
+# python key -> column name (only inserted when the column exists)
+_OPTIONAL_COLUMNS = (
+    ("source_event_id", "source_event_id"),
+    ("source", "source"),
+    ("group_name", "group_name"),
+    ("notification_time", "notification_time"),
+    ("transaction_id", "transaction_id"),
+    ("source_event_version", "source_event_version"),
+    ("embed_index", "embed_index"),
+    ("asset_id", "asset_id"),
+    ("group_id", "group_id"),
+    ("buyer_id", "buyer_id"),
+    ("raw_item_name", "raw_item_name"),
+    ("time_source", "time_source"),
+)
+
+_DEFAULT_COLUMNS = set(_BASE_COLUMNS) | {"source_event_id", "source"}
+
+
+def _sales_columns(cur):
+    """Detect which my_sales columns exist so inserts work pre/post migration."""
+    try:
+        cur.execute(
+            "select column_name from information_schema.columns "
+            "where table_name = 'my_sales'"
+        )
+        rows = cur.fetchall()
+        cols = {r[0] for r in (rows or [])}
+    except Exception:
+        cols = set()
+    if not cols:
+        cols = set(_DEFAULT_COLUMNS)
+    return cols
+
+
+def _conflict_rows(cur, sale, columns):
+    """Fetch existing rows that could represent the same sale."""
+    clauses = []
+    params = []
+    if "source_event_id" in columns:
+        clauses.append("source_event_id = %s")
+        params.append(sale.get("source_event_id"))
+    if "transaction_id" in columns and sale.get("transaction_id"):
+        clauses.append("transaction_id = %s")
+        params.append(sale["transaction_id"])
+    if sale.get("item_name") and sale.get("amount_robux") is not None:
+        clauses.append(
+            "(item_name IS NOT DISTINCT FROM %s "
+            "AND amount_robux IS NOT DISTINCT FROM %s)"
+        )
+        params += [sale["item_name"], sale["amount_robux"]]
+    if not clauses:
+        return []
+
+    select = ["source_event_id", "sale_time", "item_name", "buyer",
+              "amount_robux"]
+    for col in ("transaction_id", "notification_time", "source_event_version"):
+        if col in columns:
+            select.append(col)
+
+    cur.execute(
+        "select " + ", ".join(select) + " from my_sales where "
+        + " or ".join(clauses),
+        params,
     )
-    cur.execute("""
-        insert into my_sales
-          (sale_date, sale_time, item_name, buyer, amount_robux, status,
-           source_event_id, source)
-        values (%s, %s, %s, %s, %s, %s, %s, %s)
-        on conflict do nothing
-    """, params)
+    rows = cur.fetchall() or []
+    return [dict(zip(select, r)) for r in rows]
+
+
+def _do_insert(cur, sale, columns):
+    cols = []
+    vals = []
+    for col in _BASE_COLUMNS:
+        if col in columns:
+            cols.append(col)
+            vals.append(sale.get(col))
+    for py_key, col in _OPTIONAL_COLUMNS:
+        if col in columns and py_key in sale:
+            cols.append(col)
+            vals.append(sale[py_key])
+    if not cols:
+        return 0
+    placeholders = ", ".join(["%s"] * len(cols))
+    cur.execute(
+        f"insert into my_sales ({', '.join(cols)}) "
+        f"values ({placeholders}) on conflict do nothing",
+        vals,
+    )
     return cur.rowcount > 0
 
 
+def _insert_sale_result(cur, sale, columns=None):
+    """Insert if not already present. Returns (inserted: bool, reason: str)."""
+    columns = columns or _sales_columns(cur)
+    existing = _conflict_rows(cur, sale, columns)
+    reason = duplicate_reason(sale, existing)
+    if reason:
+        return False, reason
+    inserted = _do_insert(cur, sale, columns)
+    return (True, "inserted") if inserted else (False, "unique_conflict")
+
+
+def _insert_sale(cur, sale):
+    """Backwards-compatible single-sale insert. Returns True if inserted."""
+    inserted, _ = _insert_sale_result(cur, sale)
+    return inserted
+
+
+# ════════════════════════════════════════════════════════════════════
+# Persistence
+# ════════════════════════════════════════════════════════════════════
+
 def _save_sales_batch(sales_list):
-    """
-    Insert many sales with ONE connection. Used by backfill.
-    Returns (inserted, skipped).
-    """
+    """Insert many sales with ONE connection. Returns (inserted, skipped)."""
     if not sales_list:
         return 0, 0
 
@@ -157,12 +569,16 @@ def _save_sales_batch(sales_list):
     try:
         conn = get_db()
         cur = conn.cursor()
+        columns = _sales_columns(cur)
         for sale in sales_list:
             try:
                 cur.execute("SAVEPOINT sp_sale")
-                if _insert_sale(cur, sale):
+                ok, reason = _insert_sale_result(cur, sale, columns)
+                if ok:
                     inserted += 1
                 else:
+                    print(f"[sales_listener] skip ({reason}): "
+                          f"{sale.get('item_name', '?')[:40]}", flush=True)
                     skipped += 1
                 cur.execute("RELEASE SAVEPOINT sp_sale")
             except Exception as e:
@@ -206,9 +622,12 @@ def _save_sale_single(sale):
     try:
         conn = get_db()
         cur = conn.cursor()
-        is_new = _insert_sale(cur, sale)
+        ok, reason = _insert_sale_result(cur, sale)
         conn.commit()
-        return is_new
+        if not ok:
+            print(f"[sales_listener] dup ({reason}): "
+                  f"{sale.get('item_name', '?')[:40]}", flush=True)
+        return ok
     except Exception as e:
         print(f"[sales_listener] save failed for "
               f"'{sale.get('item_name', '?')[:40]}': "
@@ -230,31 +649,26 @@ def _save_sale_single(sale):
             pass
 
 
+# ════════════════════════════════════════════════════════════════════
+# Live listener + backfill
+# ════════════════════════════════════════════════════════════════════
+
 async def handle_sale_message(message):
-    """Called from on_message — runs DB write off the event loop."""
+    """Called from on_message — runs DB writes off the event loop."""
     if not message.embeds:
         return False
     saved_any = False
-    for embed in message.embeds:
-        try:
-            sale = _extract_sale_from_embed(embed, message)
-            if not sale:
-                continue
-            is_new = await asyncio.to_thread(_save_sale_single, sale)
-            if is_new:
-                print(
-                    f"[sales_listener] OK {sale['item_name'][:40]} "
-                    f"R${sale['amount_robux']} "
-                    f"({sale.get('group_name', '?')})",
-                    flush=True,
-                )
-                saved_any = True
-            else:
-                print(f"[sales_listener] dup: "
-                      f"{sale['item_name'][:40]}", flush=True)
-        except Exception as e:
-            print(f"[sales_listener] embed parse failed: "
-                  f"{type(e).__name__}: {e}", flush=True)
+    for sale in extract_sales_from_message(message):
+        is_new = await asyncio.to_thread(_save_sale_single, sale)
+        if is_new:
+            print(
+                f"[sales_listener] OK {sale['item_name'][:40]} "
+                f"R${sale['amount_robux']} "
+                f"({sale.get('group_name', '?')}) "
+                f"idx={sale['embed_index']}",
+                flush=True,
+            )
+            saved_any = True
     return saved_any
 
 
@@ -281,15 +695,7 @@ async def backfill_channel(bot, channel_id, limit=200):
     try:
         async for msg in ch.history(limit=limit):
             scanned += 1
-            for embed in (msg.embeds or []):
-                try:
-                    sale = _extract_sale_from_embed(embed, msg)
-                    if sale:
-                        sales_batch.append(sale)
-                except Exception as e:
-                    print(f"[backfill] parse err on msg {msg.id}: {e}",
-                          flush=True)
-                    continue
+            sales_batch.extend(extract_sales_from_message(msg))
     except Exception as e:
         print(f"[backfill] history read failed: {e}", flush=True)
         return scanned, 0
@@ -329,6 +735,59 @@ async def auto_backfill(bot, limit=500):
 # Summary queries
 # ════════════════════════════════════════════════════════════════════
 
+def _coverage_stats(cur):
+    """Read-only counts describing how complete/trustworthy totals are."""
+    from data_audit import sales_integrity
+    base = sales_integrity(cur)
+
+    def _count(sql):
+        try:
+            cur.execute(sql)
+            return int(cur.fetchone()[0] or 0)
+        except Exception:
+            return 0
+
+    base["legacy_event_ids"] = _count(
+        "select count(*) from my_sales where source_event_id "
+        "is not null and source_event_id ~ '^discord:[0-9]+:[^:]+:[0-9]+$'"
+    )
+    base["v2_event_ids"] = _count(
+        "select count(*) from my_sales where source_event_id "
+        "is not null and source_event_id ~ '^discord:[0-9]+:[0-9]+$'"
+    )
+    base["txn_event_ids"] = _count(
+        "select count(*) from my_sales where source_event_id "
+        "is not null and source_event_id ~ '^txn:'"
+    )
+    base["transaction_evidence"] = _count(
+        "select count(*) from my_sales where transaction_id is not null"
+    ) if "transaction_id" in _sales_columns(cur) else 0
+
+    total = base["total"] or 0
+    base["coverage_pct"] = round(
+        100.0 * (base["event_id"] or 0) / max(total, 1), 1)
+    base["complete"] = (
+        total > 0
+        and (base["duplicate_event_ids"] or 0) == 0
+        and (base["duplicate_fingerprints"] or 0) == 0
+        and (base["event_id"] or 0) == total
+    )
+    return base
+
+
+def _coverage_note(cov):
+    parts = []
+    if not cov.get("complete"):
+        parts.append("coverage is incomplete")
+    if cov.get("fallback_fingerprint"):
+        parts.append(f"{cov['fallback_fingerprint']} rows have no source event id")
+    if cov.get("duplicate_event_ids"):
+        parts.append(f"{cov['duplicate_event_ids']} duplicate event id groups")
+    if cov.get("duplicate_fingerprints"):
+        parts.append(f"{cov['duplicate_fingerprints']} duplicate legacy fingerprints")
+    return "; ".join(parts) or "coverage complete"
+
+
 def sales_summary(days=30):
     conn = None; cur = None
     try:
@@ -356,6 +815,11 @@ def sales_summary(days=30):
                      for g in data["items"][:10] if g["item_id"]]
         unresolved = [g for g in data["items"] if not g["item_id"]]
 
+        coverage = _coverage_stats(cur)
+        coverage.update(totals)
+        coverage["complete"] = coverage.get("complete", False)
+        coverage["note"] = _coverage_note(coverage)
+
         return {
             "days": days,
             "window": describe_window(start, end, anchor),
@@ -363,7 +827,7 @@ def sales_summary(days=30):
             "total_robux": totals["robux"],
             "top_items": top_items,
             "unresolved": unresolved,
-            "coverage": totals,
+            "coverage": coverage,
             "amount_semantics": AMOUNT_SEMANTICS,
             "daily": daily,
         }

@@ -38,6 +38,8 @@ def register_sales_commands(bot, get_db):
                               + cov.get("ambiguous_records", 0))
         unresolved_robux = (cov.get("unresolved_robux", 0)
                             + cov.get("ambiguous_robux", 0))
+        covered = cov.get("event_id", 0)
+        total_units = data["total_units"] or 1
         lines = [
             f"# 📊 SALES REPORT — last {days} days",
             f"**Window:** {win.get('start')} → {win.get('end_exclusive')} "
@@ -48,6 +50,12 @@ def register_sales_commands(bot, get_db):
             f"R${cov.get('mapped_robux', 0):,}",
             f"**Unresolved/ambiguous:** {unresolved_records:,} records · "
             f"R${unresolved_robux:,}",
+            f"**Coverage:** {covered:,}/{data['total_units']:,} rows have a "
+            f"source event id · legacy {cov.get('legacy_event_ids', 0):,} · "
+            f"transaction-id {cov.get('txn_event_ids', 0):,} · "
+            f"missing {cov.get('fallback_fingerprint', 0):,}",
+            f"**Completeness:** "
+            f"{'✅ complete' if cov.get('complete') else '⚠️ incomplete — ' + cov.get('note', '')}",
             "_Recorded amount is not verified gross revenue, creator proceeds, "
             "or profit._",
             "",
@@ -583,10 +591,10 @@ def register_sales_commands(bot, get_db):
                 newest_ts = ts
             if oldest_ts is None or ts < oldest_ts:
                 oldest_ts = ts
-            for e in (msg.embeds or []):
+            for ei, e in enumerate(msg.embeds or []):
                 embeds += 1
                 try:
-                    sale = _extract_sale_from_embed(e, msg)
+                    sale = _extract_sale_from_embed(e, msg, ei)
                 except Exception as ex:
                     if len(samples) < 5:
                         samples.append((f"ERROR {type(ex).__name__}", []))
