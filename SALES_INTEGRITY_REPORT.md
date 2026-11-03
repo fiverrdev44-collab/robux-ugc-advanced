@@ -108,11 +108,11 @@ The CLI opens a `BEGIN TRANSACTION READ ONLY` and rolls back; it never writes.
 
 ## 5. Test results
 
-New suite `test_sales_integrity.py` (13 tests) — all passing:
+New suite `test_sales_integrity.py` (17 tests) — all passing:
 
 ```
 python -m unittest test_sales_integrity
-Ran 13 tests in 0.001s
+Ran 17 tests in 0.004s
 OK
 ```
 
@@ -126,6 +126,9 @@ Coverage of the required regression scenarios:
 | Duplicate repost vs legitimate repeat purchase | `test_repost_same_transaction_id_is_duplicate`, `test_legit_repeat_purchase_not_duplicate` |
 | Renamed item name preservation | `test_renamed_item_preserves_original_name` |
 | Legacy records / legacy ids | `test_legacy_source_event_id_recognised`, `test_legacy_null_event_id_fingerprint`, `test_distinct_stable_ids_never_collide` |
+| Same item+price, different buyers (legacy record) | `test_legacy_same_item_price_different_buyers_not_collapsed`, `test_legacy_same_buyer_still_deduplicated` |
+| Transaction id match ignores timestamp | `test_transaction_id_match_ignores_timestamp` |
+| Fingerprint does not pair different buyers | `test_fingerprint_does_not_pair_different_buyers` |
 | Asset identity from URL | `test_asset_id_extracted_from_url` |
 | Reconciliation engine | `test_reconcile_counts_and_duplicates` |
 
@@ -133,11 +136,32 @@ Existing offline suites still pass: `test_identity_and_windows.py`,
 `test_shared_repairs.py` (`ALL ... PASSED`; DB fixtures skipped — no
 `DATABASE_URL`).
 
-## 6. Safety status & next steps (need approval)
+## 6. Reviewer corrections (round 2)
+
+1. **Legacy multi-embed dedup** — `duplicate_reason` now requires buyer
+   consistency before treating a legacy id or fingerprint as already captured;
+   two buyers buying the same item at the same price no longer collapse.
+2. **Closed cursor** — `sales_reconciliation.main` resolves every distinct
+   name inside the read-only transaction and passes the resulting status
+   counts to `format_report`, so the cursor is never used after `close()`.
+3. **Transaction-id matching** — the txn-id round matches on id alone (no
+   time constraint); any timestamp gap is reported separately under
+   "Timestamp discrepancies". The fingerprint round now also verifies buyer
+   and group consistency so unrelated purchases are not paired.
+4. **Window-scoped coverage** — `sales_summary`/`post_monitor` compute
+   coverage for the requested window only and report *event-id completeness*
+   separately from *source-history completeness*.
+
+Also: merged `main` (6 commits) into the branch and added
+`.github/workflows/sales-integrity-tests.yml` running the repair suite on
+`fix/sales-integrity-repair` pushes and `main` PRs.
+
+## 7. Safety status & next steps (need approval)
 
 - [x] Worked on a separate branch (`fix/sales-integrity-repair`).
 - [x] No production data modified/deleted/migrated.
 - [x] No destructive deduplication run.
+- [x] Branch brought up to date with `main`; CI check added.
 - [ ] **Awaiting approval** to apply `migrations/2026-11-03_sales_integrity_columns.sql`
       (additive columns + indexes only).
 - [ ] After the reconciliation report shows `duplicate_event_ids = 0` and

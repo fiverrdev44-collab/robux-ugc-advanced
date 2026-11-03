@@ -185,6 +185,33 @@ class DedupeTests(unittest.TestCase):
                  "_legacy_id": None}
         self.assertIsNone(sl.duplicate_reason(other, existing))
 
+    def test_legacy_same_item_price_different_buyers_not_collapsed(self):
+        # Two buyers bought the same item at the same price in one message.
+        # They share a legacy id but must not collapse into one sale.
+        existing = [{"source_event_id": "discord:123:My Hat:50",
+                     "transaction_id": None, "notification_time": None,
+                     "sale_time": dt("2026-10-31T10:00:00Z"),
+                     "item_name": "My Hat", "buyer": "buyerA", "amount_robux": 50}]
+        incoming = {"source_event_id": "discord:123:0", "transaction_id": None,
+                    "notification_time": dt("2026-10-31T10:00:00Z"),
+                    "sale_time": dt("2026-10-31T10:00:00Z"),
+                    "item_name": "My Hat", "buyer": "buyerB", "amount_robux": 50,
+                    "_legacy_id": "discord:123:My Hat:50"}
+        self.assertIsNone(sl.duplicate_reason(incoming, existing))
+
+    def test_legacy_same_buyer_still_deduplicated(self):
+        existing = [{"source_event_id": "discord:123:My Hat:50",
+                     "transaction_id": None, "notification_time": None,
+                     "sale_time": dt("2026-10-31T10:00:00Z"),
+                     "item_name": "My Hat", "buyer": "buyerA", "amount_robux": 50}]
+        incoming = {"source_event_id": "discord:123:0", "transaction_id": None,
+                    "notification_time": dt("2026-10-31T10:00:00Z"),
+                    "sale_time": dt("2026-10-31T10:00:00Z"),
+                    "item_name": "My Hat", "buyer": "buyerA", "amount_robux": 50,
+                    "_legacy_id": "discord:123:My Hat:50"}
+        self.assertEqual(sl.duplicate_reason(incoming, existing),
+                         "legacy_source_event_id")
+
 
 class ReconciliationTests(unittest.TestCase):
     def test_reconcile_counts_and_duplicates(self):
@@ -232,6 +259,40 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(r["matched"], 1)
         kinds = {d.get("kind") for d in r["timestamp_discrepancies"]}
         self.assertIn("utc_date_boundary", kinds)
+
+    def test_transaction_id_match_ignores_timestamp(self):
+        db_rows = [{
+            "id": 1, "source_event_id": "txn:roblox:T1", "transaction_id": "T1",
+            "sale_time": "2026-10-31T10:00:00Z", "item_name": "Hat",
+            "amount_robux": 50,
+        }]
+        export_rows = [{
+            "source_event_id": "txn:roblox:T1", "transaction_id": "T1",
+            "transaction_time": "2026-11-02T18:00:00Z", "item_name": "Hat",
+            "amount_robux": 50,
+        }]
+        r = sr.reconcile(db_rows, export_rows)
+        self.assertEqual(r["matched"], 1)
+        self.assertEqual(len(r["missing_in_db"]), 0)
+        self.assertEqual(len(r["extra_in_db"]), 0)
+        self.assertTrue(any(d.get("delta_seconds")
+                            for d in r["timestamp_discrepancies"]))
+
+    def test_fingerprint_does_not_pair_different_buyers(self):
+        db_rows = [{
+            "id": 1, "source_event_id": "discord:1:0", "transaction_id": None,
+            "sale_time": "2026-10-31T10:00:00Z", "item_name": "Hat",
+            "buyer": "buyerA", "amount_robux": 50,
+        }]
+        export_rows = [{
+            "source_event_id": "discord:2:0", "transaction_id": None,
+            "transaction_time": "2026-10-31T10:00:00Z", "item_name": "Hat",
+            "buyer": "buyerB", "amount_robux": 50,
+        }]
+        r = sr.reconcile(db_rows, export_rows)
+        self.assertEqual(r["matched"], 0)
+        self.assertEqual(len(r["missing_in_db"]), 1)
+        self.assertEqual(len(r["extra_in_db"]), 1)
 
 
 if __name__ == "__main__":

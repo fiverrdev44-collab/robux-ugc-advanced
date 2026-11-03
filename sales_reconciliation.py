@@ -89,16 +89,6 @@ def _norm_row(row):
 # Matching
 # ════════════════════════════════════════════════════════════════════
 
-def _key_by(rows, keyfn):
-    out = {}
-    for r in rows:
-        k = keyfn(r)
-        if k is None:
-            continue
-        out.setdefault(k, []).append(r)
-    return out
-
-
 def _fingerprint_key(r):
     if r["item_name"] is None and r["amount_robux"] is None:
         return None
@@ -115,10 +105,36 @@ def _pop_index(lst, idx):
     return lst.pop(idx)
 
 
-def _match_one_round(db_rows, export_rows, keyfn, time_key, tol):
-    """Match export rows to DB rows on keyfn; optionally require close times."""
+def _buyer_consistent(dr, er):
+    a = (dr.get("buyer") or "").strip().lower()
+    b = (er.get("buyer") or "").strip().lower()
+    return (not a or not b) or a == b
+
+
+def _group_consistent(dr, er):
+    a = (dr.get("group_name") or "").strip().lower()
+    b = (er.get("group_name") or "").strip().lower()
+    return (not a or not b) or a == b
+
+
+def _fp_consistent(dr, er):
+    return _buyer_consistent(dr, er) and _group_consistent(dr, er)
+
+
+def _match_one_round(db_rows, export_rows, keyfn, time_key, tol, verify=None):
+    """Match export rows to DB rows on keyfn.
+
+    tol=None disables the time constraint (used for transaction-id and
+    event-id matching, which must hold regardless of timestamp). ``verify``
+    is an optional extra predicate for fingerprint rounds.
+    """
     matched = []
-    db_by_key = _key_by(db_rows, keyfn)
+    db_by_key = {}
+    for r in db_rows:
+        k = keyfn(r)
+        if k is None:
+            continue
+        db_by_key.setdefault(k, []).append(r)
     for er in export_rows:
         k = keyfn(er)
         bucket = db_by_key.get(k)
@@ -127,9 +143,12 @@ def _match_one_round(db_rows, export_rows, keyfn, time_key, tol):
         hit = None
         hit_i = None
         for i, dr in enumerate(bucket):
-            if tol is None or _within(dr[time_key], er[time_key], tol):
-                hit, hit_i = dr, i
-                break
+            if tol is not None and not _within(dr[time_key], er[time_key], tol):
+                continue
+            if verify is not None and not verify(dr, er):
+                continue
+            hit, hit_i = dr, i
+            break
         if hit is not None:
             matched.append((er, _pop_index(bucket, hit_i)))
     return matched
@@ -148,30 +167,21 @@ def reconcile(db_rows, export_rows, tolerance=TOLERANCE_DEFAULT):
     matched = []
     used_db = set()
 
-    def _apply(pairs):
-        for er, dr in pairs:
-            if id(dr) in used_db:
-                continue
-            matched.append({"export": er, "db": dr, "method": None})
-            used_db.add(id(dr))
-            er["_matched"] = True
-            dr["_matched"] = True
-
-    # Round 1: transaction id (strongest).
-    ex_by_txn = [er for er in ex if er["transaction_id"]]
-    txn_pairs = _match_one_round(db, ex_by_txn,
-                                 lambda r: r["transaction_id"],
-                                 "sale_time", tolerance)
-    # Round 2: source event id.
+    # Round 1: transaction id (authoritative; ignores timestamps entirely).
+    txn_pairs = _match_one_round(
+        db,
+        [er for er in ex if er["transaction_id"]],
+        lambda r: r["transaction_id"], "sale_time", None)
+    # Round 2: source event id (exact, ignores timestamps).
     ev_pairs = _match_one_round(
         [dr for dr in db if id(dr) not in used_db],
         [er for er in ex if not er.get("_matched") and er["event_id"]],
         lambda r: r["event_id"], "sale_time", None)
-    # Round 3: timestamp-tolerated fingerprint.
+    # Round 3: timestamp-tolerated fingerprint, buyer/group-consistent.
     fp_pairs = _match_one_round(
         [dr for dr in db if id(dr) not in used_db],
         [er for er in ex if not er.get("_matched")],
-        _fingerprint_key, "sale_time", tolerance)
+        _fingerprint_key, "sale_time", tolerance, verify=_fp_consistent)
 
     for pairs, method in ((txn_pairs, "transaction_id"),
                           (ev_pairs, "source_event_id"),
@@ -364,7 +374,7 @@ def _brief(rows, limit=8):
     return "\n".join(lines)
 
 
-def format_report(result, resolver=None, export_path=None):
+def format_report(result, identity_statuses=None, export_path=None):
     t = result["totals"]
     lines = [
         "# SALES RECONCILIATION (dry-run, read-only)",
@@ -418,19 +428,11 @@ def format_report(result, resolver=None, export_path=None):
         lines.append(_brief(result["extra_in_db"]))
         lines.append("")
 
-    if resolver is not None:
-        from collections import Counter
-        names = {r["item_name"] for r in
-                 (result["missing_in_db"] + result["extra_in_db"])}
-        statuses = Counter()
-        for n in names:
-            if n:
-                statuses[resolver(n).get("status", "unknown")] += 1
-        if names:
-            lines.append("## Unresolved identities")
-            for s, c in sorted(statuses.items()):
-                lines.append(f"  • {s}: {c} names")
-            lines.append("")
+    if identity_statuses:
+        lines.append("## Unresolved identities")
+        for s, c in sorted(identity_statuses.items()):
+            lines.append(f"  • {s}: {c} names")
+        lines.append("")
 
     lines.append("_Nothing was written, deleted, or deduplicated._")
     return "\n".join(lines)
@@ -455,7 +457,7 @@ def main(argv=None):
         export_rows = load_export(args.export)
 
     db_rows = []
-    resolver = None
+    identity_statuses = None
     if args.db_json:
         db_rows = load_db_offline(args.db_json)
     elif get_db is not None:
@@ -464,16 +466,24 @@ def main(argv=None):
         try:
             cur.execute("BEGIN TRANSACTION READ ONLY")
             db_rows = _read_db_rows(cur)
-            resolver = None
+            # Resolve every distinct name BEFORE the read-only transaction is
+            # closed, so the cursor stays valid for the resolver.
             try:
+                from collections import Counter
                 from item_resolver import resolve_name
-                def resolver(name):
-                    return resolve_name(cur, name)
+                names = {r.get("item_name") for r in db_rows
+                         if r.get("item_name")}
+                if export_rows:
+                    names |= {r.get("item_name") for r in export_rows
+                              if r.get("item_name")}
+                statuses = Counter()
+                for n in names:
+                    statuses[resolve_name(cur, n).get("status", "unknown")] += 1
+                identity_statuses = statuses
             except Exception:
-                resolver = None
+                identity_statuses = None
             if args.self_check and not export_rows:
                 export_rows = db_rows  # compare DB against itself
-                resolver = None
         finally:
             conn.rollback()
             cur.close()
@@ -484,7 +494,8 @@ def main(argv=None):
         return 2
 
     result = reconcile(db_rows, export_rows, args.tolerance)
-    print(format_report(result, resolver=resolver, export_path=args.export))
+    print(format_report(result, identity_statuses=identity_statuses,
+                        export_path=args.export))
     return 0
 
 

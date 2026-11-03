@@ -50,11 +50,13 @@ def register_sales_commands(bot, get_db):
             f"R${cov.get('mapped_robux', 0):,}",
             f"**Unresolved/ambiguous:** {unresolved_records:,} records · "
             f"R${unresolved_robux:,}",
-            f"**Coverage:** {covered:,}/{data['total_units']:,} rows have a "
-            f"source event id · legacy {cov.get('legacy_event_ids', 0):,} · "
+            f"**Coverage:** {covered:,}/{data['total_units']:,} rows in this "
+            f"window have a source event id · legacy {cov.get('legacy_event_ids', 0):,} · "
             f"transaction-id {cov.get('txn_event_ids', 0):,} · "
             f"missing {cov.get('fallback_fingerprint', 0):,}",
-            f"**Completeness:** "
+            f"**Event-id completeness:** "
+            f"{'✅ complete' if cov.get('event_id_complete') else '⚠️ incomplete'}",
+            f"**Source history:** "
             f"{'✅ complete' if cov.get('complete') else '⚠️ incomplete — ' + cov.get('note', '')}",
             "_Recorded amount is not verified gross revenue, creator proceeds, "
             "or profit._",

@@ -389,10 +389,15 @@ def duplicate_reason(sale, existing_rows):
     """Return a string reason if ``sale`` is already represented by an
     existing row, else None. Never flags two rows with distinct stable
     event ids as duplicates.
+
+    Legacy ids and fingerprints are buyer-sensitive: two different buyers
+    purchasing the same item at the same price never collapse just because
+    they share a legacy source-event id.
     """
     sid = sale.get("source_event_id")
     txid = sale.get("transaction_id")
     legacy = sale.get("_legacy_id")
+    buyer = sale.get("buyer")
     ntime = sale.get("notification_time")
     stime = sale.get("sale_time")
 
@@ -411,19 +416,34 @@ def duplicate_reason(sale, existing_rows):
             if not sid and txid and r.get("transaction_id") != txid:
                 continue
 
-        if legacy and rsid == legacy:
+        # Same buyer required before treating a legacy id as already captured.
+        if (legacy and rsid == legacy
+                and _same_buyer(buyer, r.get("buyer"))):
             return "legacy_source_event_id"
 
-        # Fingerprint fallback only applies to legacy/unknown rows.
-        if ntime is not None and r.get("notification_time") is not None:
+        # Fingerprint fallback only applies to legacy/unknown rows, and only
+        # when the buyer is consistent (unknown buyer is not a distinguishing
+        # signal, so it still matches).
+        if (ntime is not None and r.get("notification_time") is not None
+                and _same_buyer(buyer, r.get("buyer"))):
             if _same_instant(ntime, r["notification_time"]):
                 return "notification_fingerprint"
         if (stime is not None and r.get("sale_time") is not None
-                and ntime is None and r.get("notification_time") is None):
+                and ntime is None and r.get("notification_time") is None
+                and _same_buyer(buyer, r.get("buyer"))):
             if _same_instant(stime, r["sale_time"]):
                 return "sale_time_fingerprint"
 
     return None
+
+
+def _same_buyer(a, b):
+    """Buyers match when both are empty or equal (case-insensitive)."""
+    a = (a or "").strip().lower()
+    b = (b or "").strip().lower()
+    if not a or not b:
+        return True
+    return a == b
 
 
 def _same_instant(a, b):
@@ -735,57 +755,86 @@ async def auto_backfill(bot, limit=500):
 # Summary queries
 # ════════════════════════════════════════════════════════════════════
 
-def _coverage_stats(cur):
-    """Read-only counts describing how complete/trustworthy totals are."""
-    from data_audit import sales_integrity
-    base = sales_integrity(cur)
+def window_coverage_stats(cur, start, end):
+    """Read-only, window-scoped counts of how complete/trustworthy totals are.
 
-    def _count(sql):
+    Distinguishes *event-id completeness* (every row in the window has a
+    source_event_id) from *source-history completeness* (every row has an id
+    AND there are no duplicate ids or legacy fingerprints in the window).
+    """
+    where = "sale_date >= %s and sale_date < %s"
+    p = (start, end)
+
+    def _one(sql, params=()):
         try:
-            cur.execute(sql)
+            cur.execute(sql, params)
             return int(cur.fetchone()[0] or 0)
         except Exception:
             return 0
 
-    base["legacy_event_ids"] = _count(
-        "select count(*) from my_sales where source_event_id "
-        "is not null and source_event_id ~ '^discord:[0-9]+:[^:]+:[0-9]+$'"
-    )
-    base["v2_event_ids"] = _count(
-        "select count(*) from my_sales where source_event_id "
-        "is not null and source_event_id ~ '^discord:[0-9]+:[0-9]+$'"
-    )
-    base["txn_event_ids"] = _count(
-        "select count(*) from my_sales where source_event_id "
-        "is not null and source_event_id ~ '^txn:'"
-    )
-    base["transaction_evidence"] = _count(
-        "select count(*) from my_sales where transaction_id is not null"
-    ) if "transaction_id" in _sales_columns(cur) else 0
+    total = _one(f"select count(*) from my_sales where {where}", p)
+    event_id = _one(
+        f"select count(*) from my_sales where {where} "
+        f"and source_event_id is not null", p)
+    legacy = _one(
+        f"select count(*) from my_sales where {where} "
+        f"and source_event_id is not null "
+        f"and source_event_id ~ '^discord:[0-9]+:[^:]+:[0-9]+$'", p)
+    v2 = _one(
+        f"select count(*) from my_sales where {where} "
+        f"and source_event_id is not null "
+        f"and source_event_id ~ '^discord:[0-9]+:[0-9]+$'", p)
+    txn = _one(
+        f"select count(*) from my_sales where {where} "
+        f"and source_event_id is not null "
+        f"and source_event_id ~ '^txn:'", p)
+    dup_event = _one(
+        f"select count(*) from ("
+        f"select source_event_id from my_sales where {where} "
+        f"and source_event_id is not null "
+        f"group by 1 having count(*) > 1) t", p)
+    dup_fp = _one(
+        f"select count(*) from ("
+        f"select sale_time, item_name, buyer, amount_robux from my_sales "
+        f"where {where} and source_event_id is null "
+        f"group by 1, 2, 3, 4 having count(*) > 1) t", p)
 
-    total = base["total"] or 0
-    base["coverage_pct"] = round(
-        100.0 * (base["event_id"] or 0) / max(total, 1), 1)
-    base["complete"] = (
-        total > 0
-        and (base["duplicate_event_ids"] or 0) == 0
-        and (base["duplicate_fingerprints"] or 0) == 0
-        and (base["event_id"] or 0) == total
-    )
-    return base
+    has_txn = "transaction_id" in _sales_columns(cur)
+    transaction_evidence = _one(
+        f"select count(*) from my_sales where {where} "
+        f"and transaction_id is not null", p) if has_txn else 0
+
+    fallback = total - event_id
+    return {
+        "total": total,
+        "event_id": event_id,
+        "fallback_fingerprint": fallback,
+        "legacy_event_ids": legacy,
+        "v2_event_ids": v2,
+        "txn_event_ids": txn,
+        "transaction_evidence": transaction_evidence,
+        "duplicate_event_ids": dup_event,
+        "duplicate_fingerprints": dup_fp,
+        "coverage_pct": round(100.0 * event_id / max(total, 1), 1),
+        "event_id_complete": total > 0 and event_id == total,
+        "source_complete": (
+            total > 0 and event_id == total
+            and dup_event == 0 and dup_fp == 0
+        ),
+    }
 
 
 def _coverage_note(cov):
     parts = []
-    if not cov.get("complete"):
-        parts.append("coverage is incomplete")
+    if not cov.get("source_complete"):
+        parts.append("source history incomplete")
     if cov.get("fallback_fingerprint"):
-        parts.append(f"{cov['fallback_fingerprint']} rows have no source event id")
+        parts.append(f"{cov['fallback_fingerprint']} rows lack a source event id")
     if cov.get("duplicate_event_ids"):
         parts.append(f"{cov['duplicate_event_ids']} duplicate event id groups")
     if cov.get("duplicate_fingerprints"):
         parts.append(f"{cov['duplicate_fingerprints']} duplicate legacy fingerprints")
-    return "; ".join(parts) or "coverage complete"
+    return "; ".join(parts) or "source history complete"
 
 
 def sales_summary(days=30):
@@ -815,9 +864,9 @@ def sales_summary(days=30):
                      for g in data["items"][:10] if g["item_id"]]
         unresolved = [g for g in data["items"] if not g["item_id"]]
 
-        coverage = _coverage_stats(cur)
+        coverage = window_coverage_stats(cur, start, end)
         coverage.update(totals)
-        coverage["complete"] = coverage.get("complete", False)
+        coverage["complete"] = coverage["source_complete"]
         coverage["note"] = _coverage_note(coverage)
 
         return {

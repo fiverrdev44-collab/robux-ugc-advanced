@@ -107,14 +107,11 @@ def analyze_sales(days=7):
             elif week_units < prev_units * 0.85:
                 trend = "down"
 
-        from data_audit import sales_integrity
-        cov = sales_integrity(cur)
-        cov["complete"] = (
-            (cov["total"] or 0) > 0
-            and (cov["duplicate_event_ids"] or 0) == 0
-            and (cov["duplicate_fingerprints"] or 0) == 0
-            and (cov["event_id"] or 0) == (cov["total"] or 0)
-        )
+        from reporting import window_bounds
+        from sales_listener import window_coverage_stats
+        start, end, _anchor = window_bounds(cur, 7)
+        cov = window_coverage_stats(cur, start, end)
+        cov["complete"] = cov["source_complete"]
 
         return {
             "today_units": today_units or 0, "today_robux": today_robux or 0,
