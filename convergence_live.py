@@ -26,6 +26,28 @@ CACHE_TTL_SECONDS = 300
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
 
+# Circuit breaker: short cooldown after a 429/5xx so a burst of failures stops
+# issuing requests instead of hammering the endpoint.
+CIRCUIT_BREAK_COOLDOWN = 30.0
+_CIRCUIT = {"open_until": 0.0}
+_CIRCUIT_LOCK = threading.Lock()
+
+
+def _circuit_open():
+    with _CIRCUIT_LOCK:
+        return time.time() < _CIRCUIT["open_until"]
+
+
+def _trip_circuit(seconds=None):
+    seconds = max(1.0, float(seconds or CIRCUIT_BREAK_COOLDOWN))
+    with _CIRCUIT_LOCK:
+        _CIRCUIT["open_until"] = max(_CIRCUIT["open_until"], time.time() + seconds)
+
+
+def _reset_circuit():
+    with _CIRCUIT_LOCK:
+        _CIRCUIT["open_until"] = 0.0
+
 
 def _expected_asset_types(family):
     if not family or family == "all":
@@ -75,6 +97,10 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             cached["cached"] = True
             return cached
 
+    if _circuit_open():
+        return {"ok": False, "error": "circuit open (rate limited)",
+                "keyword": keyword, "cached": False}
+
     expected = _expected_asset_types(family)
     rows, pages, cursor = [], 0, None
     try:
@@ -83,12 +109,22 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
                       "SortType": "Relevance"}
             if cursor:
                 params["Cursor"] = cursor
-            r = _get_with_backoff(SEARCH_URL, params, max_attempts=1)
+            r = _get_with_backoff(SEARCH_URL, params, max_attempts=2,
+                                  timeout=timeout)
             pages += 1
             if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                _trip_circuit(retry_after)
                 if rows:
                     break
                 return {"ok": False, "error": "rate limited (429)",
+                        "retry_after": retry_after,
+                        "keyword": keyword, "cached": False}
+            if r.status_code >= 500:
+                _trip_circuit()
+                if rows:
+                    break
+                return {"ok": False, "error": f"server error {r.status_code}",
                         "keyword": keyword, "cached": False}
             if r.status_code != 200:
                 if rows:
@@ -109,14 +145,19 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     capped = bool(cursor)
     kw_low = keyword.lower()
     q_tokens = set(_tokens(keyword))
-    correct = 0
+
+    # Only correct-category results count as competitors / evidence.
+    category_rows = rows
+    if expected is not None:
+        category_rows = [x for x in rows
+                         if (x.get("assetType") or 0) in expected]
+    correct = len(category_rows)
+
     exact = 0
     conceptual = 0
     competitors = []
-    for x in rows:
+    for x in category_rows:
         atype = x.get("assetType")
-        if expected is not None and atype in expected:
-            correct += 1
         name = (x.get("name") or "").strip()
         if name.lower() == kw_low:
             exact += 1
@@ -140,7 +181,7 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         "pages": pages,
         "capped": capped,
         "category_correct": correct,
-        "category_mismatched": len(rows) - correct if expected is not None else None,
+        "category_mismatched": (len(rows) - correct) if expected is not None else None,
         "exact_title_matches": exact,
         "conceptual_matches": conceptual,
         "top_competitors": competitors[:3],
@@ -204,7 +245,9 @@ def _confidence(candidate, live):
         reasons.append("measured velocity")
     if candidate.get("recent"):
         reasons.append("fresh supply")
-    if candidate.get("stale"):
+    if candidate.get("freshness") == "none":
+        reasons.append("no historical observations")
+    elif candidate.get("stale"):
         reasons.append("stale history")
     if live is None:
         level = "low"; reasons.append("no live verification")
@@ -271,9 +314,11 @@ def format_recommendation(candidate, live=None):
     # 6. momentum
     lines.append(f"• **Momentum:** velocity {vel}")
     # 7. completeness/freshness
+    fresh = {"none": "no history", "stale": "stale history",
+             "recent": "recent history"}.get(candidate.get("freshness"),
+                                             "recent history")
     lines.append(
-        f"• **Completeness/freshness:** "
-        f"{'stale history' if candidate.get('stale') else 'recent history'} · "
+        f"• **Completeness/freshness:** {fresh} · "
         f"velocity {'measured' if candidate.get('velocity_measured') else 'unmeasured'}"
     )
     # 8-10. confidence + risks + recommendation

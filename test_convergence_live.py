@@ -6,6 +6,7 @@ mocked Roblox responses — no network, no database writes.
 """
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
@@ -129,9 +130,60 @@ class ConvergeDebugTests(unittest.TestCase):
         self.assertEqual(r.get("median_favs"), 42.0)
 
 
+class StageAFixTests(unittest.TestCase):
+    class _Cursor:
+        def __init__(self, rows):
+            self._rows = list(rows)
+        def execute(self, *a, **k):
+            pass
+        def fetchone(self):
+            return self._rows.pop(0) if self._rows else None
+        def close(self):
+            pass
+
+    def _score(self, vel_row, last_obs):
+        cur = self._Cursor([
+            (18, 42, 120),            # supply, median, p90
+            (4, 120, 4, 120),         # demand, volume
+            (2,),                     # recent
+            vel_row,                  # observations, avg velocity
+            (last_obs,),              # last observation timestamp
+            (5000, 1000),             # total favs, top favs
+        ])
+        return ce._score_keyword(cur, "levitation pose", "emotes")
+
+    def test_flat_velocity_no_none_exception(self):
+        # Observations exist but every delta is zero -> avg is NULL. Must not
+        # raise and must report a measured (flat) 0.0 velocity.
+        r = self._score((3, None), None)
+        self.assertIsNotNone(r)
+        self.assertTrue(r["velocity_measured"])
+        self.assertEqual(r["velocity"], 0.0)
+        self.assertIn("velocity 0.0/d", ce.format_brief(r))
+
+    def test_no_history_freshness_is_none(self):
+        r = self._score((0, None), None)
+        self.assertFalse(r["velocity_measured"])
+        self.assertEqual(r["freshness"], "none")
+        self.assertFalse(r["stale"])
+
+    def test_stale_history_freshness(self):
+        old = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        r = self._score((3, 1.5), old)
+        self.assertEqual(r["freshness"], "stale")
+        self.assertTrue(r["stale"])
+
+    def test_fresh_history_freshness(self):
+        recent = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        r = self._score((3, 1.5), recent)
+        self.assertEqual(r["freshness"], "recent")
+        self.assertFalse(r["stale"])
+
+
 class LiveVerificationTests(unittest.TestCase):
     def setUp(self):
         cl.clear_cache()
+        cl._reset_circuit()
 
     def _patch(self, responses):
         return mock.patch.object(cl, "_get_with_backoff", side_effect=responses)
@@ -156,6 +208,42 @@ class LiveVerificationTests(unittest.TestCase):
             r = cl.verify_niche("levitation", family="emotes")
         self.assertEqual(r["category_correct"], 0)
         self.assertEqual(r["category_mismatched"], 3)
+
+    def test_wrong_category_competitors_excluded(self):
+        # A high-favorite hat must not appear as a competitor for an emote.
+        rows = self._items(n=2, asset_type=61, name="levitation", favs=50)
+        rows.append({"name": "levitation hat", "favoriteCount": 999999,
+                     "price": 10, "assetType": 8, "creatorName": "hatmaker"})
+        payload = {"data": rows, "nextPageCursor": None}
+        with self._patch([_FakeResp(200, payload)]):
+            r = cl.verify_niche("levitation", family="emotes")
+        self.assertEqual(r["category_correct"], 2)
+        self.assertEqual(r["category_mismatched"], 1)
+        self.assertTrue(all(c["asset_type_id"] == 61
+                            for c in r["top_competitors"]))
+
+    def test_timeout_forwarded(self):
+        resp = _FakeResp(200, {"data": self._items(n=1), "nextPageCursor": None})
+        m = mock.Mock(return_value=resp)
+        with mock.patch.object(cl, "_get_with_backoff", m):
+            cl.verify_niche("levitation", family="emotes", timeout=7)
+        self.assertEqual(m.call_args.kwargs.get("timeout"), 7)
+        self.assertEqual(m.call_args.kwargs.get("max_attempts"), 2)
+
+    def test_429_trips_circuit(self):
+        calls = {"n": 0}
+
+        def fake(*a, **k):
+            calls["n"] += 1
+            return _FakeResp(429, {}, {"Retry-After": "60"})
+
+        with mock.patch.object(cl, "_get_with_backoff", side_effect=fake):
+            r1 = cl.verify_niche("levitation", family="emotes")
+            r2 = cl.verify_niche("levitation", family="emotes")
+        self.assertFalse(r1["ok"])
+        self.assertFalse(r2["ok"])
+        self.assertIn("circuit open", r2["error"])
+        self.assertEqual(calls["n"], 1)
 
     def test_http_429(self):
         with self._patch([_FakeResp(429, {}, {"Retry-After": "1"})]):

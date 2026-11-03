@@ -356,10 +356,13 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     vel_row = cur.fetchone()
     observations = int(vel_row[0] or 0)
     velocity_measured = observations > 0
-    velocity = (float(vel_row[1]) if velocity_measured and vel_row[1] is not None
-                else None)
-    if velocity_measured:
-        velocity = min(velocity, 20.0)
+    if not velocity_measured:
+        velocity = None
+    elif vel_row[1] is None:
+        # Measured, but flat: items had >=2 snapshots with zero positive growth.
+        velocity = 0.0
+    else:
+        velocity = min(float(vel_row[1]), 20.0)
 
     # Staleness: age of the most recent observation for this niche.
     cur.execute(f"""
@@ -370,16 +373,18 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
           {fam_sql.replace('asset_type_id', 'i.asset_type_id')}
     """, [pat] + fam_params)
     last_obs = cur.fetchone()[0]
-    if last_obs is not None:
+    if last_obs is None:
+        freshness = "none"
+        stale = False
+    else:
         try:
             last_obs_age_days = (
                 (datetime.now(timezone.utc) - last_obs).total_seconds() / 86400.0
             )
         except Exception:
             last_obs_age_days = None
-    else:
-        last_obs_age_days = None
-    stale = last_obs_age_days is not None and last_obs_age_days > 14
+        stale = (last_obs_age_days is not None and last_obs_age_days > 14)
+        freshness = "stale" if stale else "recent"
 
     cur.execute(f"""
         with cf as (
@@ -441,6 +446,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
         "velocity_measured": velocity_measured,
         "observations": observations,
         "stale": stale,
+        "freshness": freshness,
         "supply": supply,
         "recent": recent,
         "avg_favs": round(median_favs, 1),

@@ -30,11 +30,11 @@ def _tokens(text):
             if w not in CONCEPT_STOP and len(w) >= 2]
 
 
-def _get_with_backoff(url, params, max_attempts=3):
+def _get_with_backoff(url, params, max_attempts=3, timeout=12):
     """GET with exponential backoff that honours Retry-After on 429."""
     resp = None
     for attempt in range(max_attempts):
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
         if resp.status_code != 429:
             return resp
         if attempt == max_attempts - 1:
