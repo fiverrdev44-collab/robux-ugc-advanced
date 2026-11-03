@@ -11,10 +11,12 @@ NOW = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
 
 
 class FakeStore:
-    def __init__(self, cohort_rows, types, error_creators=None):
+    def __init__(self, cohort_rows, types, error_creators=None,
+                 fail_creator_types=False):
         self.cohort_rows = cohort_rows
         self.types = types
         self.error_creators = set(error_creators or [])
+        self.fail_creator_types = fail_creator_types
         self.observations = {}      # item_id -> [row dicts]
         self.inserted = []
         self.too_recent = 0
@@ -40,6 +42,8 @@ class FakeStore:
         return "ORACLE-20261101", self.cohort_rows
 
     def creator_types(self, ids):
+        if self.fail_creator_types:
+            raise RuntimeError("simulated fatal cohort-type lookup failure")
         return {cid: self.types[cid] for cid in ids if cid in self.types}
 
     def create_scan_run(self, ref):
@@ -106,13 +110,16 @@ def make_worker(store, search_map=None, batch_items=None, failed=None,
     search_calls = search_calls if search_calls is not None else []
     batch_calls = batch_calls if batch_calls is not None else []
 
-    def search_fn(session, cid, creator_type="User", pages=4):
+    def search_fn(session, cid, creator_type="User", max_pages=4):
         search_calls.append({"creator_id": cid, "creator_type": creator_type,
-                             "pages": pages})
+                             "max_pages": max_pages})
         val = search_map.get(cid, [])
         if isinstance(val, Exception):
             raise val
-        return val
+        if isinstance(val, dict):
+            return val
+        return {"creator_id": cid, "items": val,
+                "pages": (len(val) + 29) // 30, "truncated": False}
 
     def batch_fn(ids, **kwargs):
         batch_calls.append(list(ids))
@@ -281,13 +288,15 @@ def test_t11_truncation_flag():
     enable()
     rows, types = base_setup()
     store = FakeStore(rows, types)
-    items = [item(600 + i) for i in range(4 * 30)]
-    w = make_worker(store, search_map={1: items},
-                    batch_items={i["id"]: i for i in items})
+    # The discovery API reports a remaining cursor even when a page is short.
+    response = {"creator_id": 1, "items": [item(600)],
+                "pages": 4, "truncated": True}
+    w = make_worker(store, search_map={1: response},
+                    batch_items={600: item(600)})
     out = ow.run_oracle_scan(**w)
-    assert "1" in out["truncated_creators"]
-    assert out["truncated_creators"]["1"] == "possibly_truncated"
-    print("T11 PASS truncation reported at pages*30")
+    assert out["truncated_creators"]["1"]["reason"] == "page_cap_reached"
+    assert out["status"] == "partial"
+    print("T11 PASS exact API truncation flag makes scan partial")
 
 
 def test_t12_failed_id_rate_limited():
@@ -336,7 +345,8 @@ def test_t15_unknown_creator_type_skipped():
     out = ow.run_oracle_scan(**w)
     assert out["skipped_unknown_type"] == 1
     assert all(c["creator_id"] != 3 for c in calls)
-    print("T15 PASS unknown creator_type skipped, never defaulted")
+    assert out["status"] == "partial"
+    print("T15 PASS unknown creator_type skipped and scan marked partial")
 
 
 def test_t16_scan_run_id_shared():
@@ -355,12 +365,39 @@ def test_t17_existing_systems_regression():
     import commands_intel
     src = open(commands_intel.__file__, encoding="utf-8").read()
     assert 'name="verified_scan"' in src and 'name="creator_brain"' in src
-    for fn in ("search_creator", "run_batch", "discover_verified"):
+    for fn in ("search_creator", "search_creator_complete",
+               "run_batch", "discover_verified"):
         assert hasattr(creator_tracker, fn)
     sched = open(os.path.join(os.path.dirname(creator_tracker.__file__),
                               "scheduler.py"), encoding="utf-8").read()
     assert "verified_scan_" in sched
     print("T17 PASS existing creator commands/tracker/scheduler intact")
+
+
+def test_t18_fatal_run_is_finalized():
+    enable()
+    rows, types = base_setup()
+    store = FakeStore(rows, types, fail_creator_types=True)
+    out = ow.run_oracle_scan(**make_worker(store))
+    assert out["status"] == "failed"
+    assert store.scan_runs and store.scan_runs[0]["scan_run_id"] == out["scan_run_id"]
+    assert store.updates and store.updates[-1]["status"] == "failed"
+    assert store.updates[-1]["error_summary"]["fatal"]
+    print("T18 PASS fatal scan updates trend_scan_runs to failed")
+
+
+def test_t19_manual_module_entrypoint():
+    import subprocess
+    env = os.environ.copy()
+    env.pop("ORACLE_ENABLED", None)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.run(
+        [sys.executable, "-m", "oracle_worker"],
+        cwd=repo_root, env=env, text=True, capture_output=True, timeout=15
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert '"status": "disabled"' in proc.stdout
+    print("T19 PASS python oracle_worker.py executes safely with feature disabled")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,10 @@ on:
     branches:
       - survival-intelligence
       - portfolio-change-intelligence
+      - project-oracle-phase2-1
+  pull_request:
+    branches:
+      - main
 
 jobs:
   offline-regression:
@@ -19,6 +23,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Run Project ORACLE regressions
+        run: |
+          python test_project_oracle.py
+          python tests/test_oracle_worker.py
       - name: Run portfolio change watcher regressions
         run: |
           python test_rename_watcher.py

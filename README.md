@@ -318,11 +318,53 @@ bot-side jobs. All times UTC.
 | `experiment_measure` | 08:00 (scheduler) | Measure due 7/14/30 checkpoints |
 | `experiment_watch` | Every 15 min (scheduler) | Auto-detect renames/price changes and measure |
 | `verified_scan` | 01:15/07:15/13:15/19:15 | Crawl verified creators |
-| `creator_brain` | 05:00 | Study creator cohorts |
+| `creator_brain` | 05:00 | Study creator cohorts (existing verified-creator system) |
+| `trend_cohorts` | 05:30, when `ORACLE_ENABLED=1` | Build/freeze ORACLE creator cohorts |
+| `oracle_scan` | Every 6 h, when `ORACLE_ENABLED=1` | Discover cohort assets, batch-fetch current metadata, append observations and calculate favorites/day velocity |
 | `daily_ml_train` | 04:00 | Retrain the title predictor |
 | `post_monitor` | 18:00 | Post the 7-day sales report |
 | `visibility` | 04:30/16:30 | Sample marketplace search positions |
 | `sales_listener.py` | Live | Parse sale notifications into `my_sales` |
+
+### Project ORACLE — Phase 1 and Phase 2
+
+ORACLE is an additive research subsystem. It does not replace the existing
+`tracked_creators`, `creator_tracker.py`, `creator_brain.py`, `!verified_scan`,
+or `!creator_brain` workflows.
+
+- **Discovery:** `oracle_worker.py` uses `creator_tracker.search_creator_complete()`.
+  Roblox `SortType=3` means recently updated, not recently created; the worker filters
+  with the discovery response's actual `itemCreatedUtc` timestamp (stored as
+  `created_at`). Missing creation timestamps are retained as unknown rather than
+  being silently interpreted as recent launches.
+- **Fetch:** discovered numeric asset IDs are fetched in one batch-client call per scan.
+  The original asset ID and discovery creation timestamp are preserved.
+- **Velocity:** `favorites_delta`, `hours_since_last`, and
+  `favorites_velocity` are derived from timestamped favorite observations.
+  `favorites_velocity` is favorites per day, not lifetime favorites divided by age.
+  Missing favorites remain NULL; ORACLE does not infer sales for other creators.
+- **Coverage:** creator type is never guessed. Unknown User/Group types are skipped and
+  counted; page-cap truncation, discovery rate limits and failed asset fetches make
+  the scan partial rather than silently reporting complete coverage.
+- **Scheduling:** `oracle_scan` runs every six hours only when
+  `ORACLE_ENABLED=1` at scheduler startup. The worker checks the flag again at runtime.
+  A PostgreSQL advisory lock prevents overlapping scans.
+- **Scan history:** `trend_scan_runs` records each run; `trend_item_observations`
+  is append-only and unique per `(scan_run_id, item_id)`.
+
+**Migration and production boundary:** Phase 2 schema changes are in
+`migrations/2026-11-02_project_oracle_phase2.sql`. The normal deploy workflow
+does not apply SQL migrations. Verify that the Phase 1 migration (including
+`trend_item_observations.scan_run_id`) is present before applying Phase 2.
+Apply the Phase 2 migration through the Council-approved database pipeline only.
+Do not set `ORACLE_ENABLED=1` until the required Phase 1 and Phase 2 tables/columns
+are confirmed in the target database.
+
+**Manual smoke run:** after migrations are applied and the Council authorizes a live
+scan, activate the same environment used by the bot and run
+`python -m oracle_worker`. The module prints a JSON summary. With
+`ORACLE_ENABLED` unset or not equal to `1`, it returns a disabled summary and
+does not connect to the database. The manual command does not apply migrations.
 
 ---
 
@@ -343,7 +385,10 @@ bot-side jobs. All times UTC.
 | `launch_ledger` | Launches, D1/D7/D30 favorites, units, revenue, features, labels |
 | `recommendation_ledger` | Advice lifecycle, baselines, outcomes, matched-control results |
 | `experiment_controls` | Matched control items and pre-intervention distances |
-| `creator_patterns`, `tracked_creators` | Creator findings and verified-creator queue |
+| `creator_patterns`, `tracked_creators` | Existing creator findings and verified-creator queue |
+| `trend_creator_cohorts` | Frozen ORACLE ELITE / EMERGING / CONTROL creator snapshots |
+| `trend_item_observations` | Append-only, timestamped creator-item metadata and favorite observations |
+| `trend_scan_runs` | ORACLE scan lifecycle, coverage counts, skips, truncation and errors |
 | `astra_runs` | Generated concepts/titles, chosen title, `linked_item_id`, `linked_at` |
 | `astra_outcomes` | Per-run launch/rename baseline and `launched_at` for D7/D30 deltas |
 | `sales_name_aliases` | Confirmed/candidate sale-name → asset aliases (beanie rename fixture) |
@@ -471,7 +516,9 @@ throughput guarantee.
 ## Testing
 
 ```
-python test_vanta_conversation.py        # router/planner, rename/selection, memory, pending chain
+python test_project_oracle.py           # ORACLE Phase 1 cohorts, append-only observations and velocity
+python tests/test_oracle_worker.py        # ORACLE Phase 2 worker, coverage, retries, transactions and CLI
+python test_vanta_conversation.py         # router/planner, rename/selection, memory, pending chain
 python test_identity_and_windows.py      # alias resolver + dynamic DB window reconciliation
 python test_recommendation_lifecycle.py  # application evidence, maturity, rec-10 marker
 python test_shared_repairs.py            # visibility 429, backoff, batch client, chain fallback, prop gate
