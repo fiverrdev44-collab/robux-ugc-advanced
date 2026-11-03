@@ -315,7 +315,13 @@ def register_advanced_commands(bot, get_db):
             return format_report(detailed, verified, family)
 
         try:
-            body = await asyncio.to_thread(_run)
+            from execution_policy import budget_seconds
+            body = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("converge"))
+        except asyncio.TimeoutError:
+            return await ctx.send(
+                "⏱️ Convergence exceeded its research budget; no result was "
+                "fabricated. Re-run or narrow the category.")
         except Exception as e:
             return await ctx.send(f"❌ {e}")
 

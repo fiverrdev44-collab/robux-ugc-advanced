@@ -319,86 +319,95 @@ def register_market_commands(bot):
     @bot.command(name="gap")
     async def gap(ctx, *, keyword: str = ""):
         """Show golden, sweet, and saturated keyword gaps."""
+        from execution_policy import budget_seconds
         kw = (keyword or "").strip().lower()
-        try:
+
+        def _run():
             conn = get_db(); cur = conn.cursor()
+            try:
+                cur.execute("""
+                    SELECT name, favorite_count 
+                    FROM items 
+                    WHERE favorite_count > 50
+                      AND asset_type_id = 61
+                    LIMIT 5000
+                """)
+                rows = cur.fetchall()
+                if not rows:
+                    return None, "⚠️ No emote data in DB."
 
-            cur.execute("""
-                SELECT name, favorite_count 
-                FROM items 
-                WHERE favorite_count > 50
-                  AND asset_type_id = 61
-                LIMIT 5000
-            """)
-            rows = cur.fetchall()
-            if not rows:
-                await ctx.send("⚠️ No emote data in DB.")
-                cur.close(); conn.close(); return
+                stats = defaultdict(lambda: {"favs": 0, "count": 0})
+                for name, favs in rows:
+                    for w in set(extract_words(name)):
+                        stats[w]["favs"] += (favs or 0)
+                        stats[w]["count"] += 1
 
-            stats = defaultdict(lambda: {"favs": 0, "count": 0})
-            for name, favs in rows:
-                for w in set(extract_words(name)):
-                    stats[w]["favs"] += (favs or 0)
-                    stats[w]["count"] += 1
+                candidates = []
+                for w, s in stats.items():
+                    if s["count"] < 3: continue
+                    if s["count"] > 100: continue
+                    af = s["favs"] / s["count"]
+                    if af < 500: continue
+                    candidates.append((w, af))
 
-            candidates = []
-            for w, s in stats.items():
-                if s["count"] < 3: continue
-                if s["count"] > 100: continue
-                af = s["favs"] / s["count"]
-                if af < 500: continue
-                candidates.append((w, af))
+                if not candidates:
+                    return None, "⚠️ No gaps found."
 
-            if not candidates:
-                await ctx.send("⚠️ No gaps found.")
-                cur.close(); conn.close(); return
+                word_list = [c[0] for c in candidates]
+                patterns = [f"%{w}%" for w in word_list]
+                cur.execute("""
+                    SELECT LOWER(name) FROM items 
+                    WHERE favorite_count > 0 
+                      AND LOWER(name) LIKE ANY(%s)
+                """, (patterns,))
+                matched_names = cur.fetchall()
 
-            word_list = [c[0] for c in candidates]
-            patterns = [f"%{w}%" for w in word_list]
-            cur.execute("""
-                SELECT LOWER(name) FROM items 
-                WHERE favorite_count > 0 
-                  AND LOWER(name) LIKE ANY(%s)
-            """, (patterns,))
-            matched_names = cur.fetchall()
-            cur.close(); conn.close()
+                comp_map = defaultdict(int)
+                for (name,) in matched_names:
+                    for w in word_list:
+                        if re.search(r'\b' + re.escape(w) + r'\b', name):
+                            comp_map[w] += 1
 
-            comp_map = defaultdict(int)
-            for (name,) in matched_names:
-                for w in word_list:
-                    if re.search(r'\b' + re.escape(w) + r'\b', name):
-                        comp_map[w] += 1
-
-            gaps = []
-            for w, af in candidates:
-                c = comp_map.get(w, 0)
-                if c < 1: continue
-                if c > 50: continue
-                score = af / math.log1p(c)
-                if kw and kw not in w.lower():
-                    continue
-                gaps.append((w, af, c, score))
-
-            if not gaps and kw:
+                gaps = []
                 for w, af in candidates:
                     c = comp_map.get(w, 0)
-                    if c < 1 or c > 50: continue
+                    if c < 1: continue
+                    if c > 50: continue
                     score = af / math.log1p(c)
+                    if kw and kw not in w.lower():
+                        continue
                     gaps.append((w, af, c, score))
 
-            gaps.sort(key=lambda x: x[3], reverse=True)
-            if not gaps:
-                await ctx.send("⚠️ No gaps found."); return
+                if not gaps and kw:
+                    for w, af in candidates:
+                        c = comp_map.get(w, 0)
+                        if c < 1 or c > 50: continue
+                        score = af / math.log1p(c)
+                        gaps.append((w, af, c, score))
 
-            gaps = gaps[:30]
-            title = f"filter: {kw}" if kw else "all emotes"
-            view = SimplePaginator(title, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
-            await ctx.send(embed=view.build_embed(), view=view)
+                gaps.sort(key=lambda x: x[3], reverse=True)
+                if not gaps:
+                    return None, "⚠️ No gaps found."
+                return gaps[:30], None
+            finally:
+                cur.close(); conn.close()
+
+        try:
+            gaps, empty_msg = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("gap"))
+        except asyncio.TimeoutError:
+            return await ctx.send(
+                "⏱️ Gap analysis exceeded its research budget; no result was "
+                "fabricated.")
         except Exception as e:
-            try:
-                await ctx.send(f"❌ Error: {e}")
-            except Exception:
-                pass
+            return await ctx.send(f"❌ Error: {e}")
+
+        if not gaps:
+            return await ctx.send(empty_msg or "⚠️ No gaps found.")
+
+        title = f"filter: {kw}" if kw else "all emotes"
+        view = SimplePaginator(title, gaps, "🕳️ Market Gaps", 0x00ffcc, per_page=10)
+        await ctx.send(embed=view.build_embed(), view=view)
 
 
     @bot.command(name="velocity")

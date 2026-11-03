@@ -15,6 +15,8 @@ import asyncio
 import math
 from datetime import datetime
 
+from execution_policy import budget_seconds
+
 from momentum import find_momentum_keywords, format_momentum_report
 from predictor import predict_success, format_prediction
 from oracle import (forecast_trend, format_oracle_forecast,
@@ -143,7 +145,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             finally:
                 cur.close(); conn.close()
         try:
-            words = await asyncio.to_thread(_run)
+            words = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("momentum"))
+        except asyncio.TimeoutError:
+            await progress.edit(content=(
+                "⏱️ Momentum scan exceeded its research budget; no result "
+                "was fabricated.")); return
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
         if not words:
@@ -171,7 +178,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             finally:
                 cur.close(); conn.close()
         try:
-            pred = await asyncio.to_thread(_run)
+            pred = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("predict"))
+        except asyncio.TimeoutError:
+            await progress.edit(content=(
+                "⏱️ Prediction exceeded its research budget; no result was "
+                "fabricated.")); return
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
         if not pred:
@@ -196,7 +208,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             finally:
                 cur.close(); conn.close()
         try:
-            f = await asyncio.to_thread(_run)
+            f = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("oracle"))
+        except asyncio.TimeoutError:
+            await progress.edit(content=(
+                "⏱️ Forecast exceeded its research budget; no result was "
+                "fabricated.")); return
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
         if not f:
@@ -218,7 +235,12 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             finally:
                 cur.close(); conn.close()
         try:
-            ranked = await asyncio.to_thread(_run)
+            ranked = await asyncio.wait_for(
+                asyncio.to_thread(_run), timeout=budget_seconds("nextwave"))
+        except asyncio.TimeoutError:
+            await progress.edit(content=(
+                "⏱️ Next-wave scan exceeded its research budget; no result "
+                "was fabricated.")); return
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
         try: await progress.delete()
@@ -241,7 +263,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             finally:
                 cur.close(); conn.close()
         try:
-            plays, next_wave = await asyncio.to_thread(_run)
+            plays, next_wave = await asyncio.wait_for(
+                asyncio.to_thread(_run),
+                timeout=budget_seconds("opportunities"))
+        except asyncio.TimeoutError:
+            await progress.edit(content=(
+                "⏱️ Opportunity scan exceeded its research budget; no result "
+                "was fabricated.")); return
         except Exception as e:
             await progress.edit(content=f"❌ Failed: `{e}`"); return
         try: await progress.delete()

@@ -75,12 +75,24 @@ MIN_PRICE = 5
 MAX_PRICE = 10000
 
 
+def _env_int(name, default):
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+STATEMENT_TIMEOUT_MS = max(1000, _env_int("DB_STATEMENT_TIMEOUT_MS", 20000))
+CONNECT_TIMEOUT_S = max(3, _env_int("DB_CONNECT_TIMEOUT_SECONDS", 10))
+
+
 def get_db():
     return psycopg2.connect(
         DATABASE_URL,
         sslmode='require',
-        connect_timeout=10,
-        options='-c statement_timeout=20000 -c TimeZone=UTC',
+        connect_timeout=CONNECT_TIMEOUT_S,
+        options=(f'-c statement_timeout={STATEMENT_TIMEOUT_MS} '
+                 f'-c TimeZone=UTC'),
     )
 
 

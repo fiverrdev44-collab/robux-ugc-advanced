@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from live_market import SEARCH_URL, _get_with_backoff
 from convergence_engine import FAMILIES
+from execution_policy import RobloxScheduler
 
 # Accessory covers the five sub-types; the engine aggregates them.
 _EXPECTED_ASSET_TYPES = dict(FAMILIES)
@@ -25,6 +26,28 @@ _EXPECTED_ASSET_TYPES["accessory"] = [43, 44, 45, 46, 47]
 CACHE_TTL_SECONDS = 300
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
+
+_SCHEDULER = None
+_SCHEDULER_LOCK = threading.Lock()
+
+
+def _get_scheduler():
+    """Central endpoint-aware scheduler for catalog searches.
+
+    Retries stay in live_market's Retry-After-aware helper; the scheduler adds
+    pacing, concurrency control and in-flight deduplication. This module keeps
+    its own result cache and circuit, so the scheduler cache is disabled.
+    """
+    global _SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER is None:
+            _SCHEDULER = RobloxScheduler(
+                request_fn=lambda url, params=None, headers=None, timeout=12:
+                _get_with_backoff(url, params, max_attempts=2, timeout=timeout))
+            _SCHEDULER.configure(
+                "catalog_search", rate_per_min=120, max_concurrency=3,
+                cache_ttl=0, max_retries=0, circuit_threshold=10 ** 9)
+        return _SCHEDULER
 
 # Circuit breaker: short cooldown after a 429/5xx so a burst of failures stops
 # issuing requests instead of hammering the endpoint.
@@ -71,6 +94,8 @@ def _trip_circuit(seconds=None):
 def _reset_circuit():
     with _CIRCUIT_LOCK:
         _CIRCUIT["open_until"] = 0.0
+    if _SCHEDULER is not None:
+        _SCHEDULER.reset()
 
 
 def _expected_asset_types(family):
@@ -104,6 +129,8 @@ def _cache_put(key, value):
 def clear_cache():
     with _CACHE_LOCK:
         _CACHE.clear()
+    if _SCHEDULER is not None:
+        _SCHEDULER.reset()
 
 
 def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
@@ -133,29 +160,35 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
                       "SortType": "Relevance"}
             if cursor:
                 params["Cursor"] = cursor
-            r = _get_with_backoff(SEARCH_URL, params, max_attempts=2,
-                                  timeout=timeout)
+            r = _get_scheduler().request(
+                "catalog_search", SEARCH_URL, params=params, timeout=timeout)
             pages += 1
-            if r.status_code == 429:
-                retry_after = r.headers.get("Retry-After")
-                _trip_circuit(retry_after)
+            status = r.status or 0
+            if not r.ok:
+                if status == 429:
+                    retry_after = (r.headers or {}).get("Retry-After")
+                    _trip_circuit(retry_after)
+                    if rows:
+                        break
+                    return {"ok": False, "error": "rate limited (429)",
+                            "retry_after": retry_after,
+                            "keyword": keyword, "cached": False}
+                if status >= 500:
+                    _trip_circuit()
+                    if rows:
+                        break
+                    return {"ok": False, "error": f"server error {status}",
+                            "keyword": keyword, "cached": False}
+                if status:
+                    if rows:
+                        break
+                    return {"ok": False, "error": f"HTTP {status}",
+                            "keyword": keyword, "cached": False}
                 if rows:
                     break
-                return {"ok": False, "error": "rate limited (429)",
-                        "retry_after": retry_after,
+                return {"ok": False, "error": r.error or "request failed",
                         "keyword": keyword, "cached": False}
-            if r.status_code >= 500:
-                _trip_circuit()
-                if rows:
-                    break
-                return {"ok": False, "error": f"server error {r.status_code}",
-                        "keyword": keyword, "cached": False}
-            if r.status_code != 200:
-                if rows:
-                    break
-                return {"ok": False, "error": f"HTTP {r.status_code}",
-                        "keyword": keyword, "cached": False}
-            data = r.json()
+            data = r.data or {}
             batch = data.get("data") or []
             rows.extend(batch)
             cursor = data.get("nextPageCursor")
