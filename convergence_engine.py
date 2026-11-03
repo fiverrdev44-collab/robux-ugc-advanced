@@ -105,7 +105,13 @@ _NICHE_GENERIC = {
 
 
 def _is_generic(keyword):
-    """True when a keyword is a generic term rather than an actionable niche."""
+    """True when a keyword is a generic term rather than an actionable niche.
+
+    Single-word themes (``fairy``, ``float``, ``music``) are gated, but they
+    remain valid seeds for multi-word concepts (``fairy levitation``,
+    ``floating pose``). A multi-word keyword is only rejected when every token
+    is a stopword/filler, never merely because its tokens are themed.
+    """
     kw = (keyword or "").strip().lower()
     if not kw:
         return True
@@ -113,8 +119,7 @@ def _is_generic(keyword):
         return True
     tokens = kw.split()
     if len(tokens) > 1 and all(
-        t in _GENERIC_BLOCK or t in _NICHE_GENERIC or len(t) < 4
-        for t in tokens
+        t in _GENERIC_BLOCK or len(t) < 3 for t in tokens
     ):
         return True
     return False
@@ -271,8 +276,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
         return _reject("generic stopword")
     if " " in kw_clean:
         tokens = kw_clean.split()
-        if all(t in _GENERIC_BLOCK or t in _NICHE_GENERIC or len(t) < 3
-               for t in tokens):
+        if all(t in _GENERIC_BLOCK or len(t) < 3 for t in tokens):
             return _reject("all tokens generic")
 
     pat = _kw_pattern(keyword)

@@ -48,6 +48,15 @@ class GenericRejectionTests(unittest.TestCase):
         self.assertFalse(ce._is_generic("floating battle stance"))
         self.assertFalse(ce._is_generic("levitation"))
 
+    def test_generic_seed_kept_as_multiword_concept(self):
+        # "float"/"fairy"/"heart" are gated standalone but survive as concepts.
+        self.assertTrue(ce._is_generic("float"))
+        self.assertFalse(ce._is_generic("floating pose"))
+        self.assertTrue(ce._is_generic("fairy"))
+        self.assertFalse(ce._is_generic("fairy levitation"))
+        self.assertTrue(ce._is_generic("heart"))
+        self.assertFalse(ce._is_generic("heart pose"))
+
     def test_qualifies_rejects_generic(self):
         ok, reason = ce.qualifies(_candidate(keyword="fairy"))
         self.assertFalse(ok)
