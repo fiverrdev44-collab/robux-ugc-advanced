@@ -170,6 +170,96 @@ async def deliver(ctx, content, *, embed=None, view=None):
     return None
 
 
+class ResearchCancelled(Exception):
+    """Raised cooperatively inside a research worker after its budget expires."""
+
+
+class CancellationToken:
+    """Cooperative cancellation + underlying DB connection cancellation.
+
+    Threads cannot be killed in Python, so a timed-out research worker is asked
+    to stop cooperatively (``check_cancelled``), and any database connection it
+    registered is cancelled server-side (psycopg2 ``conn.cancel()``) so a long
+    query is aborted instead of continuing to consume resources.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._connections = []
+
+    @property
+    def cancelled(self):
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self):
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            conns = list(self._connections)
+        for conn in conns:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+
+    def check(self):
+        if self.cancelled:
+            raise ResearchCancelled("research budget expired")
+
+    def register(self, conn):
+        with self._lock:
+            already = self._cancelled
+            if not already:
+                self._connections.append(conn)
+        if already:
+            try:
+                conn.cancel()
+            except Exception:
+                pass
+            raise ResearchCancelled("research budget expired")
+
+    def unregister(self, conn):
+        with self._lock:
+            try:
+                self._connections.remove(conn)
+            except ValueError:
+                pass
+
+
+_WORKER_STATE = threading.local()
+
+
+def current_token():
+    return getattr(_WORKER_STATE, "token", None)
+
+
+def check_cancelled():
+    """Cooperative cancellation checkpoint for research workers."""
+    token = current_token()
+    if token is not None:
+        token.check()
+
+
+def register_research_connection(conn):
+    """Register a DB connection so a timeout can cancel it server-side."""
+    token = current_token()
+    if token is not None:
+        token.register(conn)
+    return conn
+
+
+def _run_worker(work, token):
+    _WORKER_STATE.token = token
+    try:
+        token.check()
+        return work()
+    finally:
+        _WORKER_STATE.token = None
+
+
 async def run_research(ctx, command, work, *, stages=None, send_result=True):
     """Run blocking research off the event loop under a bounded budget.
 
@@ -179,21 +269,28 @@ async def run_research(ctx, command, work, *, stages=None, send_result=True):
     abandoned.
     """
     budget = budget_seconds(command)
+    token = CancellationToken()
     if budget >= 30:
         await deliver(ctx, f"🔎 `!{command}` is running (budget {int(budget)}s)…")
     try:
         async with _typing_ctx(ctx):
-            result = await asyncio.wait_for(asyncio.to_thread(work), timeout=budget)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_run_worker, work, token), timeout=budget)
     except asyncio.TimeoutError:
+        # Ask the worker to stop and abort any registered DB query server-side.
+        token.cancel()
         await deliver(
             ctx,
             f"⏱️ `!{command}` reached its {int(budget)}s research budget. "
-            "No result was fabricated; narrow the scope or raise the budget.",
+            "The worker was asked to stop and its database statement was "
+            "cancelled; no result was fabricated.",
         )
         return None
     except asyncio.CancelledError:
+        token.cancel()
         raise
     except Exception as e:
+        token.cancel()
         await deliver(ctx, f"❌ `!{command}` failed: {type(e).__name__}: {e}")
         return None
     if send_result and result is not None:
@@ -287,17 +384,22 @@ class _Bucket:
         self.capacity = max(1.0, self.rate * 5)
         self.tokens = self.capacity
         self.updated = clock()
+        self._lock = threading.Lock()
 
     def acquire(self, clock, sleep):
         while True:
-            now = clock()
-            self.tokens = min(self.capacity,
-                              self.tokens + (now - self.updated) * self.rate)
-            self.updated = now
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                return
-            sleep(max((1.0 - self.tokens) / self.rate, 0.01))
+            with self._lock:
+                now = clock()
+                self.tokens = min(
+                    self.capacity,
+                    self.tokens + (now - self.updated) * self.rate)
+                self.updated = now
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                wait = max((1.0 - self.tokens) / self.rate, 0.01)
+            # Sleep outside the lock so waiting acquirers re-check fairly.
+            sleep(wait)
 
 
 class RobloxScheduler:
@@ -368,12 +470,18 @@ class RobloxScheduler:
         with self._lock:
             self._circuit_fails[endpoint] = 0
 
-    def _failure(self, endpoint, pol):
+    def _failure(self, endpoint, pol, retry_after=None):
         with self._lock:
             self._circuit_fails[endpoint] = self._circuit_fails.get(endpoint, 0) + 1
             fails = self._circuit_fails[endpoint]
         if fails >= pol.circuit_threshold:
-            self._trip(endpoint, pol)
+            self._trip(endpoint, pol, retry_after)
+
+    def is_circuit_open(self, endpoint):
+        return self._circuit_open(endpoint)
+
+    def trip(self, endpoint, retry_after=None):
+        self._trip(endpoint, self._policy(endpoint), retry_after)
 
     def _cache_get(self, key, pol):
         if pol.cache_ttl <= 0:
@@ -406,7 +514,15 @@ class RobloxScheduler:
 
     def request(self, endpoint, url, params=None, headers=None, timeout=12,
                 method="GET", cache_key=None, use_cache=True):
-        """Perform one logical request with pacing, retries, and dedup."""
+        """Perform one logical request with pacing, retries, and dedup.
+
+        Only GET is supported (read-only policy). Any other method is rejected
+        rather than silently executed as GET by the default transport.
+        """
+        method = str(method or "GET").upper()
+        if method != "GET":
+            return SchedulerResult(ok=False, endpoint=endpoint,
+                                   error=f"unsupported HTTP method: {method}")
         pol = self._policy(endpoint)
         if self._circuit_open(endpoint):
             return SchedulerResult(ok=False, endpoint=endpoint,
@@ -490,7 +606,9 @@ class RobloxScheduler:
                         self._sleep(self._backoff(attempt, pol, ra))
                         continue
                     result.error = "rate limited (429)"
-                    self._trip(endpoint, pol, ra)
+                    # Threshold-based so backoff and the circuit breaker are
+                    # coordinated rather than tripping on a single blip.
+                    self._failure(endpoint, pol, ra)
                     break
                 if 500 <= status < 600:
                     if attempt < retries:

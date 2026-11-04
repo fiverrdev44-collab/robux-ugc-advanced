@@ -6,6 +6,7 @@ on:
       - survival-intelligence
       - portfolio-change-intelligence
       - project-oracle-phase2-1
+      - feat/accuracy-first-execution-policy
   pull_request:
     branches:
       - main

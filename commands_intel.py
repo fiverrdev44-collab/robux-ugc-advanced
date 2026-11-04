@@ -16,6 +16,7 @@ import math
 from datetime import datetime
 
 from execution_policy import budget_seconds
+from bot_core import get_research_db
 
 from momentum import find_momentum_keywords, format_momentum_report
 from predictor import predict_success, format_prediction
@@ -139,7 +140,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         days = max(3, min(days, 30))
         progress = await ctx.send("🚀 **Scanning momentum...**")
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 return find_momentum_keywords(cur, days=days, min_items=2, top_n=30)
             finally:
@@ -172,7 +173,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
             await ctx.send("❌ Need at least one word."); return
         progress = await ctx.send("🎯 **Computing success probability...**")
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 return predict_success(cur, words)
             finally:
@@ -202,7 +203,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         kw = keyword.strip().lower().split()[0]
         progress = await ctx.send(f"🔮 **Forecasting `{kw}`...**")
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 return forecast_trend(cur, kw)
             finally:
@@ -229,7 +230,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         """Find emerging next-wave keywords."""
         progress = await ctx.send("🌊 **Scanning for next-wave keywords...**")
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 return find_next_wave_opportunities(cur, top_n=10)
             finally:
@@ -254,7 +255,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         """Show today's ranked opportunity feed."""
         progress = await ctx.send("📅 **Scanning today's best plays...**")
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 plays = build_daily_feed(cur, top_n=5)
                 try: nw = find_next_wave_opportunities(cur, top_n=5)

@@ -181,17 +181,18 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(r2.error, "circuit open")
         self.assertEqual(calls["n"], calls_before)
 
-    def test_post_is_not_retried(self):
+    def test_unsupported_method_rejected(self):
         calls = {"n": 0}
         def rf(*a, **k):
             calls["n"] += 1
-            return _Resp(429, {}, {"Retry-After": "1"})
+            return _Resp(200, {})
         s = ep.RobloxScheduler(request_fn=rf, clock=self.clock.now,
                                sleep=self.clock.sleep)
-        s.configure("e", cache_ttl=0, max_retries=3)
+        s.configure("e", cache_ttl=0)
         r = s.request("e", "u", method="POST")
         self.assertFalse(r.ok)
-        self.assertEqual(calls["n"], 1)
+        self.assertIn("unsupported HTTP method", r.error)
+        self.assertEqual(calls["n"], 0)
 
     def test_exception_reported(self):
         def rf(*a, **k):
@@ -257,6 +258,132 @@ class SchedulerTests(unittest.TestCase):
         s.request("e", "u", params={"a": 1})
         s.request("e", "u", params={"a": 2})
         self.assertTrue(self.clock.sleeps)
+
+    def test_concurrent_requests_respect_pacing(self):
+        # 60 concurrent acquisitions at 10/s with capacity 50 must take ~1s.
+        s = ep.RobloxScheduler(request_fn=lambda *a, **k: _Resp(200, {}),
+                               clock=time.monotonic, sleep=time.sleep)
+        s.configure("e", rate_per_min=600, max_concurrency=20, cache_ttl=0)
+        start = time.monotonic()
+        threads = [threading.Thread(
+            target=lambda i=i: s.request("e", "u", params={"i": i},
+                                         use_cache=False))
+            for i in range(60)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        elapsed = time.monotonic() - start
+        self.assertFalse(any(t.is_alive() for t in threads))
+        self.assertGreaterEqual(elapsed, 0.7)
+
+
+class CancellationTests(unittest.TestCase):
+    def test_timeout_cancels_worker_cooperatively(self):
+        ctx = _Ctx()
+        counter = {"n": 0}
+        done = threading.Event()
+
+        def work():
+            try:
+                while counter["n"] < 2000:
+                    ep.check_cancelled()
+                    counter["n"] += 1
+                    time.sleep(0.002)
+            finally:
+                done.set()
+
+        with mock.patch.object(ep, "budget_seconds", return_value=0.05):
+            out = asyncio.run(ep.run_research(ctx, "converge", work))
+        self.assertIsNone(out)
+        self.assertTrue(done.wait(2.0))
+        snapshot = counter["n"]
+        time.sleep(0.1)
+        self.assertEqual(counter["n"], snapshot)  # stopped consuming
+        self.assertLess(snapshot, 2000)          # did not run to completion
+
+    def test_cancel_token_cancels_registered_connection(self):
+        token = ep.CancellationToken()
+
+        class FakeConn:
+            def __init__(self):
+                self.cancelled = 0
+            def cancel(self):
+                self.cancelled += 1
+
+        conn = FakeConn()
+        token.register(conn)
+        token.cancel()
+        self.assertEqual(conn.cancelled, 1)
+        self.assertTrue(token.cancelled)
+        with self.assertRaises(ep.ResearchCancelled):
+            token.check()
+
+    def test_register_after_cancel_raises(self):
+        token = ep.CancellationToken()
+        token.cancel()
+
+        class FakeConn:
+            def cancel(self):
+                pass
+
+        with self.assertRaises(ep.ResearchCancelled):
+            token.register(FakeConn())
+
+
+class ResearchDbTests(unittest.TestCase):
+    def test_research_connection_read_only_larger_timeout(self):
+        import bot_core
+        captured = {}
+
+        class FakeConn:
+            def cancel(self):
+                pass
+
+        def fake_connect(url, **kw):
+            captured.update(kw)
+            return FakeConn()
+
+        with mock.patch.object(bot_core.psycopg2, "connect",
+                               side_effect=fake_connect):
+            bot_core.get_research_db()
+        opts = captured["options"]
+        self.assertIn("default_transaction_read_only=on", opts)
+        self.assertIn(str(bot_core.RESEARCH_STATEMENT_TIMEOUT_MS), opts)
+        self.assertGreater(bot_core.RESEARCH_STATEMENT_TIMEOUT_MS,
+                           bot_core.STATEMENT_TIMEOUT_MS)
+
+    def test_routine_connection_keeps_strict_default(self):
+        import bot_core
+        captured = {}
+
+        class FakeConn:
+            pass
+
+        def fake_connect(url, **kw):
+            captured.update(kw)
+            return FakeConn()
+
+        with mock.patch.object(bot_core.psycopg2, "connect",
+                               side_effect=fake_connect):
+            bot_core.get_db()
+        opts = captured["options"]
+        self.assertIn(str(bot_core.STATEMENT_TIMEOUT_MS), opts)
+        self.assertNotIn("default_transaction_read_only=on", opts)
+        self.assertEqual(bot_core.STATEMENT_TIMEOUT_MS, 20000)
+
+    def test_research_timeout_env_override(self):
+        import importlib
+        import bot_core
+        try:
+            with mock.patch.dict(os.environ, {
+                    "DB_RESEARCH_STATEMENT_TIMEOUT_MS": "90000",
+                    "DB_STATEMENT_TIMEOUT_MS": "15000"}):
+                importlib.reload(bot_core)
+                self.assertEqual(bot_core.STATEMENT_TIMEOUT_MS, 15000)
+                self.assertEqual(bot_core.RESEARCH_STATEMENT_TIMEOUT_MS, 90000)
+        finally:
+            importlib.reload(bot_core)
 
 
 if __name__ == "__main__":

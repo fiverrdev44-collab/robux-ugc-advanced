@@ -34,9 +34,10 @@ _SCHEDULER_LOCK = threading.Lock()
 def _get_scheduler():
     """Central endpoint-aware scheduler for catalog searches.
 
-    Retries stay in live_market's Retry-After-aware helper; the scheduler adds
-    pacing, concurrency control and in-flight deduplication. This module keeps
-    its own result cache and circuit, so the scheduler cache is disabled.
+    Retries stay in live_market's Retry-After-aware helper (one retry loop
+    only); the scheduler adds pacing, concurrency control, in-flight dedup and
+    the circuit breaker. Conservative pacing (30/min, 2 concurrent) reflects
+    the historical HTTP 429 incidents.
     """
     global _SCHEDULER
     with _SCHEDULER_LOCK:
@@ -45,8 +46,9 @@ def _get_scheduler():
                 request_fn=lambda url, params=None, headers=None, timeout=12:
                 _get_with_backoff(url, params, max_attempts=2, timeout=timeout))
             _SCHEDULER.configure(
-                "catalog_search", rate_per_min=120, max_concurrency=3,
-                cache_ttl=0, max_retries=0, circuit_threshold=10 ** 9)
+                "catalog_search", rate_per_min=30, max_concurrency=2,
+                cache_ttl=0, max_retries=0, circuit_threshold=1,
+                circuit_cooldown=30.0)
         return _SCHEDULER
 
 # Circuit breaker: short cooldown after a 429/5xx so a burst of failures stops
@@ -57,8 +59,8 @@ _CIRCUIT_LOCK = threading.Lock()
 
 
 def _circuit_open():
-    with _CIRCUIT_LOCK:
-        return time.time() < _CIRCUIT["open_until"]
+    s = _SCHEDULER
+    return bool(s is not None and s.is_circuit_open("catalog_search"))
 
 
 def _parse_retry_after(value):
@@ -83,19 +85,15 @@ def _parse_retry_after(value):
 
 
 def _trip_circuit(seconds=None):
-    wait = _parse_retry_after(seconds)
-    if wait is None:
-        wait = CIRCUIT_BREAK_COOLDOWN
-    wait = max(1.0, min(wait, 300.0))
-    with _CIRCUIT_LOCK:
-        _CIRCUIT["open_until"] = max(_CIRCUIT["open_until"], time.time() + wait)
+    s = _SCHEDULER
+    if s is not None:
+        s.trip("catalog_search", seconds)
 
 
 def _reset_circuit():
-    with _CIRCUIT_LOCK:
-        _CIRCUIT["open_until"] = 0.0
-    if _SCHEDULER is not None:
-        _SCHEDULER.reset()
+    s = _SCHEDULER
+    if s is not None:
+        s.reset()
 
 
 def _expected_asset_types(family):
@@ -167,14 +165,12 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             if not r.ok:
                 if status == 429:
                     retry_after = (r.headers or {}).get("Retry-After")
-                    _trip_circuit(retry_after)
                     if rows:
                         break
                     return {"ok": False, "error": "rate limited (429)",
                             "retry_after": retry_after,
                             "keyword": keyword, "cached": False}
                 if status >= 500:
-                    _trip_circuit()
                     if rows:
                         break
                     return {"ok": False, "error": f"server error {status}",

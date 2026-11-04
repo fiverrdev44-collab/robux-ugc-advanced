@@ -83,10 +83,13 @@ def _env_int(name, default):
 
 
 STATEMENT_TIMEOUT_MS = max(1000, _env_int("DB_STATEMENT_TIMEOUT_MS", 20000))
+RESEARCH_STATEMENT_TIMEOUT_MS = max(
+    5000, _env_int("DB_RESEARCH_STATEMENT_TIMEOUT_MS", 110000))
 CONNECT_TIMEOUT_S = max(3, _env_int("DB_CONNECT_TIMEOUT_SECONDS", 10))
 
 
 def get_db():
+    """Routine connection: strict statement timeout, read-write allowed."""
     return psycopg2.connect(
         DATABASE_URL,
         sslmode='require',
@@ -94,6 +97,26 @@ def get_db():
         options=(f'-c statement_timeout={STATEMENT_TIMEOUT_MS} '
                  f'-c TimeZone=UTC'),
     )
+
+
+def get_research_db():
+    """Read-only research connection with a larger, configurable timeout.
+
+    The session is forced read-only, so this cannot modify production data.
+    Registered with the current cancellation token so a timed-out research
+    worker has its query cancelled server-side.
+    """
+    from execution_policy import check_cancelled, register_research_connection
+    check_cancelled()
+    conn = psycopg2.connect(
+        DATABASE_URL,
+        sslmode='require',
+        connect_timeout=CONNECT_TIMEOUT_S,
+        options=(f'-c statement_timeout={RESEARCH_STATEMENT_TIMEOUT_MS} '
+                 f'-c TimeZone=UTC -c default_transaction_read_only=on'),
+    )
+    register_research_connection(conn)
+    return conn
 
 
 def rollback_quietly(cur):

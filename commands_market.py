@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 
 from bot_ui import SimplePaginator, MultiViewPaginator
 from bot_core import (
-    get_db, get_db_stats, rollback_quietly, extract_words,
+    get_db, get_research_db, get_db_stats, rollback_quietly, extract_words,
     word_boundary_pattern, analyze_opportunity,
     ASSET_TYPE_NAMES,
 )
@@ -323,7 +323,7 @@ def register_market_commands(bot):
         kw = (keyword or "").strip().lower()
 
         def _run():
-            conn = get_db(); cur = conn.cursor()
+            conn = get_research_db(); cur = conn.cursor()
             try:
                 cur.execute("""
                     SELECT name, favorite_count 

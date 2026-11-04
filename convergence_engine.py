@@ -14,7 +14,7 @@ import math
 import re
 from collections import Counter
 from datetime import datetime, timezone
-from bot_core import get_db
+from bot_core import get_db, get_research_db
 
 
 FAMILIES = {
@@ -570,7 +570,7 @@ def scan_convergence(family=None, limit=15):
 
 def scan_convergence_detailed(family=None, limit=15, shortlist=8):
     """Two-stage Stage A: scored candidates + evidence-gate summary."""
-    conn = get_db(); cur = conn.cursor()
+    conn = get_research_db(); cur = conn.cursor()
     try:
         keywords = _gather_keywords(cur, family=family)
         scored = []
