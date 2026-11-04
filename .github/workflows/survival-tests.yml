@@ -7,6 +7,7 @@ on:
       - portfolio-change-intelligence
       - project-oracle-phase2-1
       - feat/accuracy-first-execution-policy
+      - feature/emote-title-engine
   pull_request:
     branches:
       - main
