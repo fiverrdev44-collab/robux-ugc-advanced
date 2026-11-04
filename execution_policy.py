@@ -64,7 +64,7 @@ DB_ANALYSIS_COMMANDS = {
 
 LIVE_RESEARCH_COMMANDS = {
     "converge", "xray", "verified_scan", "scan_verified", "creative",
-    "desc_forge", "analyze_image", "rescue", "tags",
+    "desc_forge", "analyze_image", "rescue", "tags", "emote_title",
 }
 
 AI_REASONING_COMMANDS = {

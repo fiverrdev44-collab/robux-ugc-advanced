@@ -123,6 +123,10 @@ try:
     register_advanced_commands(bot, get_db)
     print("✅ Advanced commands loaded.", flush=True)
 
+    from commands_emote import register_emote_commands
+    register_emote_commands(bot, get_db)
+    print("✅ Emote title engine loaded.", flush=True)
+
     from commands_experiments import register_experiment_commands
     register_experiment_commands(bot, get_db)
     print("✅ Experiment commands loaded.", flush=True)
