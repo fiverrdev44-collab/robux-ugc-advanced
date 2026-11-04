@@ -34,20 +34,20 @@ _SCHEDULER_LOCK = threading.Lock()
 def _get_scheduler():
     """Central endpoint-aware scheduler for catalog searches.
 
-    Retries stay in live_market's Retry-After-aware helper (one retry loop
-    only); the scheduler adds pacing, concurrency control, in-flight dedup and
-    the circuit breaker. Conservative pacing (30/min, 2 concurrent) reflects
-    the historical HTTP 429 incidents.
+    The scheduler owns the single retry loop, so every physical retry attempt
+    re-acquires a pacing token; it also provides concurrency control, in-flight
+    dedup and the circuit breaker. Conservative pacing (30/min, 2 concurrent)
+    reflects the historical HTTP 429 incidents.
     """
     global _SCHEDULER
     with _SCHEDULER_LOCK:
         if _SCHEDULER is None:
             _SCHEDULER = RobloxScheduler(
                 request_fn=lambda url, params=None, headers=None, timeout=12:
-                _get_with_backoff(url, params, max_attempts=2, timeout=timeout))
+                _get_with_backoff(url, params, max_attempts=1, timeout=timeout))
             _SCHEDULER.configure(
                 "catalog_search", rate_per_min=30, max_concurrency=2,
-                cache_ttl=0, max_retries=0, circuit_threshold=1,
+                cache_ttl=0, max_retries=1, circuit_threshold=1,
                 circuit_cooldown=30.0)
         return _SCHEDULER
 

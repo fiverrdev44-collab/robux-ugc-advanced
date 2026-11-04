@@ -314,16 +314,14 @@ def register_advanced_commands(bot, get_db):
                 [c["keyword"] for c in shortlist], family=family)
             return format_report(detailed, verified, family)
 
-        try:
-            from execution_policy import budget_seconds
-            body = await asyncio.wait_for(
-                asyncio.to_thread(_run), timeout=budget_seconds("converge"))
-        except asyncio.TimeoutError:
+        from execution_policy import to_thread_cancellable
+        body, timed_out, err = await to_thread_cancellable("converge", _run)
+        if timed_out:
             return await ctx.send(
                 "⏱️ Convergence exceeded its research budget; no result was "
                 "fabricated. Re-run or narrow the category.")
-        except Exception as e:
-            return await ctx.send(f"❌ {e}")
+        if err is not None:
+            return await ctx.send(f"❌ {err}")
 
         for chunk in [body[i:i+1900] for i in range(0, len(body), 1900)]:
             await ctx.send(chunk)

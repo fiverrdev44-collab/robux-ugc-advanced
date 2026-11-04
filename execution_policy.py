@@ -260,6 +260,31 @@ def _run_worker(work, token):
         _WORKER_STATE.token = None
 
 
+async def to_thread_cancellable(command, work):
+    """Run ``work`` off-loop with a cancellation token and the command budget.
+
+    Returns ``(value, timed_out, error)`` and sends no Discord messages, so a
+    command can keep its existing progress/formatting and edit exactly once.
+    On timeout/error the token is cancelled, aborting any read-only database
+    statements the worker registered.
+    """
+    budget = budget_seconds(command)
+    token = CancellationToken()
+    try:
+        value = await asyncio.wait_for(
+            asyncio.to_thread(_run_worker, work, token), timeout=budget)
+        return value, False, None
+    except asyncio.TimeoutError:
+        token.cancel()
+        return None, True, None
+    except asyncio.CancelledError:
+        token.cancel()
+        raise
+    except Exception as e:
+        token.cancel()
+        return None, False, e
+
+
 async def run_research(ctx, command, work, *, stages=None, send_result=True):
     """Run blocking research off the event loop under a bounded budget.
 

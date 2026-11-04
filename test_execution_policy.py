@@ -259,6 +259,22 @@ class SchedulerTests(unittest.TestCase):
         s.request("e", "u", params={"a": 2})
         self.assertTrue(self.clock.sleeps)
 
+    def test_retry_attempts_are_paced(self):
+        self.clock = _FakeClock()
+        seq = [_Resp(429, {}, {"Retry-After": "0"}), _Resp(200, {"v": 1})]
+
+        def rf(*a, **k):
+            return seq.pop(0)
+
+        s = ep.RobloxScheduler(request_fn=rf, clock=self.clock.now,
+                               sleep=self.clock.sleep)
+        s.configure("e", rate_per_min=1, cache_ttl=0, max_retries=1,
+                    backoff_base=0.001, backoff_cap=0.001)
+        r = s.request("e", "u")
+        self.assertTrue(r.ok)
+        self.assertEqual(r.attempts, 2)
+        self.assertTrue(self.clock.sleeps)
+
     def test_concurrent_requests_respect_pacing(self):
         # 60 concurrent acquisitions at 10/s with capacity 50 must take ~1s.
         s = ep.RobloxScheduler(request_fn=lambda *a, **k: _Resp(200, {}),

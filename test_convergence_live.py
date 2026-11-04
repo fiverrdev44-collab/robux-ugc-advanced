@@ -16,6 +16,15 @@ import convergence_engine as ce
 import convergence_live as cl
 
 
+def _fast_scheduler():
+    """Reconfigure the shared scheduler for fast, non-sleeping tests."""
+    s = cl._get_scheduler()
+    s.configure("catalog_search", rate_per_min=100000, max_concurrency=5,
+                cache_ttl=0, max_retries=1, circuit_threshold=1,
+                circuit_cooldown=30.0, backoff_base=0.001, backoff_cap=0.001)
+    return s
+
+
 class _FakeResp:
     def __init__(self, status, payload=None, headers=None):
         self.status_code = status
@@ -186,6 +195,7 @@ class LiveVerificationTests(unittest.TestCase):
     def setUp(self):
         cl.clear_cache()
         cl._reset_circuit()
+        _fast_scheduler()
 
     def _patch(self, responses):
         return mock.patch.object(cl, "_get_with_backoff", side_effect=responses)
@@ -242,7 +252,7 @@ class LiveVerificationTests(unittest.TestCase):
         with mock.patch.object(cl, "_get_with_backoff", m):
             cl.verify_niche("levitation", family="emotes", timeout=7)
         self.assertEqual(m.call_args.kwargs.get("timeout"), 7)
-        self.assertEqual(m.call_args.kwargs.get("max_attempts"), 2)
+        self.assertEqual(m.call_args.kwargs.get("max_attempts"), 1)
 
     def test_429_trips_circuit(self):
         calls = {"n": 0}
@@ -257,10 +267,13 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertFalse(r1["ok"])
         self.assertFalse(r2["ok"])
         self.assertIn("circuit open", r2["error"])
-        self.assertEqual(calls["n"], 1)
+        self.assertEqual(calls["n"], 2)  # scheduler retries once before tripping
 
     def test_http_429(self):
-        with self._patch([_FakeResp(429, {}, {"Retry-After": "1"})]):
+        with mock.patch.object(
+                cl, "_get_with_backoff",
+                side_effect=lambda *a, **k: _FakeResp(
+                    429, {}, {"Retry-After": "1"})):
             r = cl.verify_niche("levitation", family="emotes")
         self.assertFalse(r["ok"])
         self.assertIn("429", r["error"])
@@ -351,6 +364,7 @@ class RetryAfterTests(unittest.TestCase):
     def setUp(self):
         cl.clear_cache()
         cl._reset_circuit()
+        _fast_scheduler()
 
     def test_numeric_retry_after(self):
         self.assertEqual(cl._parse_retry_after("120"), 120.0)

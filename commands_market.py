@@ -319,7 +319,7 @@ def register_market_commands(bot):
     @bot.command(name="gap")
     async def gap(ctx, *, keyword: str = ""):
         """Show golden, sweet, and saturated keyword gaps."""
-        from execution_policy import budget_seconds
+        from execution_policy import to_thread_cancellable
         kw = (keyword or "").strip().lower()
 
         def _run():
@@ -392,16 +392,15 @@ def register_market_commands(bot):
             finally:
                 cur.close(); conn.close()
 
-        try:
-            gaps, empty_msg = await asyncio.wait_for(
-                asyncio.to_thread(_run), timeout=budget_seconds("gap"))
-        except asyncio.TimeoutError:
+        result, timed_out, err = await to_thread_cancellable("gap", _run)
+        if timed_out:
             return await ctx.send(
                 "⏱️ Gap analysis exceeded its research budget; no result was "
                 "fabricated.")
-        except Exception as e:
-            return await ctx.send(f"❌ Error: {e}")
+        if err is not None:
+            return await ctx.send(f"❌ Error: {err}")
 
+        gaps, empty_msg = result if result else (None, None)
         if not gaps:
             return await ctx.send(empty_msg or "⚠️ No gaps found.")
 
