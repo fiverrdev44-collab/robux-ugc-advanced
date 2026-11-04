@@ -68,7 +68,7 @@ COMMAND_ARGS = {
     "create_ideas": ("chain", "concept"),
     "improve_metadata": ("autopsy", "item"),
     "tags": ("desc_forge", "title"),
-    "check_sales": ("sales_report", None),
+    "check_sales": ("sales_report", "days"),
     "check_experiments": ("experiments", None),
     "check_visibility": ("visibility", None),
     "data_audit": ("data_audit", None),
@@ -337,6 +337,12 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         r"\b(\d{1,2}|first|1st|one|second|2nd|two|third|3rd|three|"
         r"fourth|4th|four|fifth|5th|five|the other one)\b", low
     )
+    if ordinal:
+        # A number inside a time window ("last 7 days") is not item selection.
+        token = re.escape(ordinal.group(1))
+        if (re.search(r"\b(?:last|past|previous|next|over)\s+" + token + r"\b", low)
+                or re.search(r"\b" + token + r"\s*(?:day|days|week|weeks|month|months|hour|hours)\b", low)):
+            ordinal = None
     if ordinal and state.results:
         words = {
             "first": 0, "1st": 0, "one": 0, "1": 0,
@@ -422,7 +428,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("list_my_items", confidence="high")
 
     if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
-        return _intent("check_sales", confidence="high")
+        return _intent("check_sales", confidence="high",
+                       days=parse_sales_window(low))
 
     if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
         return _intent("check_experiments", confidence="high")
@@ -434,7 +441,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("data_audit", confidence="high")
 
     if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
-        return _intent("check_sales", confidence="high")
+        return _intent("check_sales", confidence="high",
+                       days=parse_sales_window(low))
 
     if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
         return _intent("check_experiments", confidence="high")
@@ -534,7 +542,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
 
 def _intent(name, item_id=None, concept=None, family=None,
-            confidence="high", question=None):
+            confidence="high", question=None, days=None):
     return {
         "intent": name if name in INTENTS else "clarify",
         "item_id": item_id,
@@ -542,7 +550,29 @@ def _intent(name, item_id=None, concept=None, family=None,
         "family": family,
         "confidence": confidence,
         "question": question,
+        "days": days,
     }
+
+
+def parse_sales_window(text):
+    """Map a natural-language time phrase to a trailing UTC day window.
+
+    Returns an int number of days, or None when no explicit window is given.
+    """
+    low = (text or "").lower()
+    m = re.search(r"\b(?:last|past|previous)\s+(\d{1,3})\s*days?\b", low)
+    if m:
+        return max(1, min(int(m.group(1)), 365))
+    m = re.search(r"\b(\d{1,3})\s*[- ]?days?\b", low)
+    if m and re.search(r"\b(last|past|previous|over)\b", low):
+        return max(1, min(int(m.group(1)), 365))
+    if re.search(r"\btoday\b|\bso far\b|\btonight\b", low):
+        return 1
+    if re.search(r"\bthis week\b|\blast week\b|\bpast week\b|\bweekly\b", low):
+        return 7
+    if re.search(r"\bthis month\b|\blast month\b|\bpast month\b|\bmonthly\b", low):
+        return 30
+    return None
 
 
 def _ai_route(text):
@@ -681,6 +711,10 @@ async def _run_registry(bot, message, route, state):
     item_id = route.get("item_id")
     concept = route.get("concept")
     family = route.get("family")
+    days = route.get("days")
+    if intent == "check_sales" and not days:
+        # Fallback for AI/planner routes: honour "today"/"last 7 days" etc.
+        days = parse_sales_window(getattr(message, "content", ""))
 
     if intent == "greeting":
         await message.channel.send(
@@ -792,6 +826,9 @@ async def _run_registry(bot, message, route, state):
         elif arg_kind == "family":
             if family:
                 kwargs = {"family": _convergence_family(family)}
+        elif arg_kind == "days":
+            if days:
+                kwargs = {"days": int(days)}
     else:
         await message.channel.send("I didn't catch that. Try naming the task.")
         return

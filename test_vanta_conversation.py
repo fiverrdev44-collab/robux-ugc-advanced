@@ -4,7 +4,7 @@ import vanta_conversation as vc
 from vanta_conversation import (
     ConversationState, ConversationStore, classify_intent, clean_concept,
     extract_item_id, _intent, INTENTS, _run_registry,
-    thread_name, parse_thread_name,
+    thread_name, parse_thread_name, parse_sales_window,
 )
 
 
@@ -111,6 +111,48 @@ def test_family_and_concept():
     assert item_tags["intent"] == "tags" and item_tags["concept"] is None
     assert item_tags["item_id"] == 121930221694467
     print("PASS family and concept extraction")
+
+
+def test_sales_window_parsing_and_routing():
+    assert parse_sales_window("Whats the sales today") == 1
+    assert parse_sales_window("what are today's sales?") == 1
+    assert parse_sales_window("sales last 7 days") == 7
+    assert parse_sales_window("revenue past 14 days") == 14
+    assert parse_sales_window("how are my sales") is None
+
+    route = classify_intent("Whats the sales today", use_ai=False)
+    assert route["intent"] == "check_sales" and route["days"] == 1
+    route_week = classify_intent("show me sales for the last 7 days", use_ai=False)
+    assert route_week["intent"] == "check_sales" and route_week["days"] == 7
+
+    class _SalesCmd:
+        def __init__(self):
+            self.called = None
+        async def callback(self, ctx, **kwargs):
+            self.called = kwargs
+            await ctx.send("Sales report")
+
+    class _SalesBot:
+        def __init__(self):
+            self.cmd = _SalesCmd()
+        def get_command(self, name):
+            return self.cmd if name == "sales_report" else None
+
+    channel = _FakeChannel()
+    message = _FakeMessage(channel)
+    bot = _SalesBot()
+    state = ConversationState(user_id=1)
+    asyncio.run(_run_registry(bot, message, route, state))
+    assert bot.cmd.called == {"days": 1}, bot.cmd.called
+
+    # Default (no window phrase) must not force a 1-day window.
+    channel2 = _FakeChannel()
+    message2 = _FakeMessage(channel2)
+    bot2 = _SalesBot()
+    route_default = classify_intent("how are my sales", use_ai=False)
+    asyncio.run(_run_registry(bot2, message2, route_default, state))
+    assert bot2.cmd.called == {}, bot2.cmd.called
+    print("PASS sales window parsing and routing")
 
 
 def test_convergence_family_normalization():
@@ -536,6 +578,7 @@ if __name__ == "__main__":
     test_image_and_help()
     test_followups()
     test_family_and_concept()
+    test_sales_window_parsing_and_routing()
     test_convergence_family_normalization()
     test_signed_thread_names()
     test_store_isolation()

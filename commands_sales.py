@@ -16,7 +16,8 @@ def register_sales_commands(bot, get_db):
         from sales_listener import sales_summary
 
         days = max(1, min(days, 365))
-        progress = await ctx.send(f"📊 Building {days}-day sales report...")
+        period = "today" if days == 1 else f"last {days} days"
+        progress = await ctx.send(f"📊 Building sales report — {period}...")
 
         try:
             data = await asyncio.to_thread(sales_summary, days)
@@ -26,7 +27,7 @@ def register_sales_commands(bot, get_db):
         if not data["total_units"]:
             return await progress.edit(
                 content=(
-                    f"📊 No sales data for last {days} days.\n"
+                    f"📊 No sales data for {period}.\n"
                     f"Run `!sales_backfill` to import past sales from "
                     f"the sales channel."
                 )
@@ -41,7 +42,7 @@ def register_sales_commands(bot, get_db):
         covered = cov.get("event_id", 0)
         total_units = data["total_units"] or 1
         lines = [
-            f"# 📊 SALES REPORT — last {days} days",
+            f"# 📊 SALES REPORT — {period}",
             f"**Window:** {win.get('start')} → {win.get('end_exclusive')} "
             f"(exclusive, UTC; today {'partial' if win.get('today_partial') else 'complete'})",
             f"**Sale records:** {data['total_units']:,}  ·  "
