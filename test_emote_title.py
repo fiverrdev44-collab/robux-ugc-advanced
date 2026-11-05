@@ -21,6 +21,22 @@ LIVE_INPUT = (
     "I created a new Roblox emote inspired by Jabbawockeez. It's a mysterious, "
     "energetic street dance with a powerful hip-hop performance style.")
 
+PRODUCTION_INPUT = (
+    "I created a new Roblox emote inspired by Jabbawockeez. It's a mysterious, "
+    "energetic hip-hop street dance with a confident, powerful performance style.")
+
+PRODUCTION_INPUT_NO_PERIOD = (
+    "I created a new Roblox emote inspired by Jabbawockeez, it's a mysterious, "
+    "energetic hip-hop street dance with a confident, powerful performance style.")
+
+PROD_GOOD = [
+    ("Search", "Confident Street Dance"),
+    ("Branding", "Mysterious Hip Hop Dance"),
+    ("Aesthetic", "Energetic Street Dance Emote"),
+    ("Community", "Powerful Hip Hop Dance Emote"),
+    ("Balanced", "Confident Hip Hop Street Dance"),
+]
+
 FIVE = [
     ("Search", "Mysterious Street Dance Emote"),
     ("Branding", "Energetic Street Dance Emote"),
@@ -322,6 +338,110 @@ class RealDiscordExampleTests(unittest.TestCase):
                                  "Mysterious Street Dance"))
         self.assertIn(order[-1], ("Mysterious Energetic Emote",
                                   "Mysterious Emote"))
+
+
+class ProductionAcceptanceTests(unittest.TestCase):
+    def test_redundant_phrase_deduped(self):
+        calls = []
+
+        def fake_verify(phrase, **kw):
+            calls.append(phrase)
+            return {"ok": True, "category_correct": 3,
+                    "category_mismatched": 0, "exact_title_matches": 0,
+                    "conceptual_matches": 1, "top_competitors": [],
+                    "verification_timestamp": "2026-11-05T00:00:00Z"}
+
+        with mock.patch("convergence_live.verify_niche",
+                        side_effect=fake_verify):
+            out = ete.research_live(["hip hop street dance",
+                                     "hop street dance"])
+        self.assertEqual(calls, ["hip hop street dance"])
+        self.assertEqual(len(out), 1)
+
+    def test_sufficiency_skips_distinct_second_query(self):
+        calls = []
+
+        def fake_verify(phrase, **kw):
+            calls.append(phrase)
+            return {"ok": True, "category_correct": 24,
+                    "category_mismatched": 0, "exact_title_matches": 0,
+                    "conceptual_matches": 2, "top_competitors": [],
+                    "verification_timestamp": "2026-11-05T00:00:00Z"}
+
+        with mock.patch("convergence_live.verify_niche",
+                        side_effect=fake_verify):
+            out = ete.research_live(["hip hop street dance", "robot dance"])
+        self.assertEqual(calls, ["hip hop street dance"])
+        self.assertEqual(out[0].get("skipped_for_sufficiency"),
+                         ["robot dance"])
+
+    def test_second_distinct_query_when_insufficient(self):
+        calls = []
+
+        def fake_verify(phrase, **kw):
+            calls.append(phrase)
+            return {"ok": True, "category_correct": 3,
+                    "category_mismatched": 0, "exact_title_matches": 0,
+                    "conceptual_matches": 1, "top_competitors": [],
+                    "verification_timestamp": "2026-11-05T00:00:00Z"}
+
+        with mock.patch("convergence_live.verify_niche",
+                        side_effect=fake_verify):
+            out = ete.research_live(["hip hop street dance", "robot dance"])
+        self.assertEqual(calls, ["hip hop street dance", "robot dance"])
+        self.assertEqual(len(out), 2)
+
+    def test_unsupported_claims_rejected_metaphors_allowed(self):
+        protected = ete.extract_protected_names(PRODUCTION_INPUT)
+        bad, why = ete._validate_candidate(PRODUCTION_INPUT,
+                                           "Masked Groove Dance", protected)
+        self.assertIsNone(bad)
+        self.assertIn("unsupported claim", why)
+
+        good, why_good = ete._validate_candidate(
+            PRODUCTION_INPUT, "Enigma Street Dance", protected)
+        self.assertEqual(good, "Enigma Street Dance")
+        self.assertIsNone(why_good)
+
+        bad2, _ = ete._validate_candidate(PRODUCTION_INPUT,
+                                          "Glowing Aura Emote", protected)
+        self.assertIsNone(bad2)
+
+        confident, _ = ete._validate_candidate(
+            PRODUCTION_INPUT, "Confident Street Dance", protected)
+        self.assertEqual(confident, "Confident Street Dance")
+
+    def test_description_preserves_identity(self):
+        for desc in (PRODUCTION_INPUT, PRODUCTION_INPUT_NO_PERIOD):
+            with self.subTest(desc=desc[:45]):
+                res = ete.generate(
+                    desc, db_fn=_db_clean, live_fn=_live_ok,
+                    generate_fn=_ai(PROD_GOOD), title_db_fn=_title_db,
+                    title_live_budget=0)
+                text = res["description"]
+                low = text.lower()
+                self.assertIn("street dance", low)
+                self.assertTrue("hip-hop" in low or "hip hop" in low, text)
+                self.assertIn("mysterious", low)
+                self.assertIn("confident", low)
+                self.assertIn("powerful", low)
+                for bad in ("created", "jabbawockeez", "centered on",
+                            "built around", "keyword"):
+                    self.assertNotIn(bad, low)
+
+    def test_provenance_provider_and_fallback(self):
+        res = _generate()
+        prov = res["provenance"]
+        self.assertEqual(prov["provider"], "mock")
+        self.assertFalse(prov["fallback_used"])
+        self.assertGreater(prov["ai_generated"], 0)
+        self.assertGreater(prov["deterministic_generated"], 0)
+
+        res2 = _generate(generate_fn=lambda *a, **k: None)
+        prov2 = res2["provenance"]
+        self.assertTrue(prov2["fallback_used"])
+        self.assertEqual(prov2["ai_generated"], 0)
+        self.assertGreater(prov2["deterministic_generated"], 0)
 
 
 class SecureTikTokTests(unittest.TestCase):

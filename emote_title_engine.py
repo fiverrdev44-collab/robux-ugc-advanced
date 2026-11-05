@@ -89,6 +89,24 @@ GENERIC_CONCEPT_WORDS = {
 PRODUCT_HEADS = {"emote", "dance", "pose", "performance", "style"}
 MAX_CANDIDATES = 12
 MIN_CANDIDATES = 10
+LIVE_SUFFICIENT_RESULTS = 10
+
+# Concrete props/costumes/effects/movement claims that must be grounded in the
+# creator's description. Creative metaphors (e.g. "Enigma") are not listed.
+CLAIM_REQUIREMENTS = {
+    "mask": {"mask"}, "masked": {"mask"}, "cape": {"cape"},
+    "sword": {"sword"}, "wings": {"wings", "wing"}, "wing": {"wing", "wings"},
+    "halo": {"halo"}, "aura": {"aura"}, "fire": {"fire"}, "ice": {"ice"},
+    "lightning": {"lightning"}, "sparkle": {"sparkle", "sparkles"},
+    "sparkles": {"sparkle", "sparkles"}, "neon": {"neon"},
+    "smoke": {"smoke"}, "shadow": {"shadow"}, "tail": {"tail"},
+    "crown": {"crown"}, "glasses": {"glasses"}, "robot": {"robot", "robotic"},
+    "robotic": {"robot", "robotic"}, "zombie": {"zombie"},
+    "vampire": {"vampire"}, "angel": {"angel"}, "demon": {"demon"},
+    "glow": {"glow", "glowing"}, "glowing": {"glow", "glowing"},
+    "groove": {"groove"}, "moonwalk": {"moonwalk"}, "freeze": {"freeze"},
+    "breakdance": {"breakdance"}, "breakdancing": {"breakdance"},
+}
 
 MAX_TIKTOK_BYTES = 512 * 1024
 TIKTOK_HOST_SUFFIX = ".tiktok.com"
@@ -117,6 +135,18 @@ def _motions(text):
 def motion_grounded(description, title):
     """Reject any movement in a title that the description did not state."""
     return not (_motions(title) - _motions(description))
+
+
+def unsupported_claims(title, description):
+    """Concrete props/effects/movement words not grounded in the description."""
+    toks = set(w.lower() for w in _word_list(title))
+    source = set(w.lower() for w in _word_list(description))
+    bad = []
+    for word in sorted(toks):
+        required = CLAIM_REQUIREMENTS.get(word)
+        if required and not (required & source):
+            bad.append(word)
+    return bad
 
 
 def extract_protected_names(text):
@@ -368,15 +398,45 @@ def research_db(concepts):
             pass
 
 
-def research_live(phrases, max_queries=2):
+def _dedupe_live_phrases(phrases):
+    """Drop token-subset / near-duplicate phrases, preferring specificity."""
+    items = []
+    for phrase in phrases or []:
+        toks = set(re.findall(r"[a-z0-9']+", str(phrase).lower()))
+        if toks:
+            items.append((phrase, toks))
+    items.sort(key=lambda x: (len(x[1]), len(x[0])), reverse=True)
+    kept = []
+    for phrase, toks in items:
+        duplicate = False
+        for _kept_phrase, kept_toks in list(kept):
+            if toks <= kept_toks:
+                duplicate = True
+                break
+            if kept_toks <= toks:
+                kept = [k for k in kept if k[1] != kept_toks]
+                break
+            j = len(toks & kept_toks) / max(1, len(toks | kept_toks))
+            if j >= 0.85:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((phrase, toks))
+    order = {p: i for i, p in enumerate(phrases or [])}
+    return [p for p, _ in sorted(kept, key=lambda x: order.get(x[0], 999))]
+
+
+def research_live(phrases, max_queries=2,
+                  min_sufficient=LIVE_SUFFICIENT_RESULTS):
     """Bounded live Roblox emote (asset type 61) keyword search.
 
-    Stops after the first rate-limit/outage so optional verification is
-    deferred instead of hammering the endpoint. Each record carries an honest
-    checked_at timestamp; remaining phrases are listed on the deferred record.
+    Overlapping phrases are deduplicated, and once the first query returns
+    sufficient category-correct evidence, additional live queries are skipped.
+    Stops after a rate limit/outage so verification is deferred rather than
+    hammering the endpoint. Each record carries an honest checked_at timestamp.
     """
     from convergence_live import verify_niche
-    wanted = [p for p in (phrases or []) if p][:max_queries]
+    wanted = _dedupe_live_phrases(phrases)[:max_queries]
     out = []
     for idx, phrase in enumerate(wanted):
         r = verify_niche(phrase, family="emotes", max_pages=1)
@@ -400,6 +460,10 @@ def research_live(phrases, max_queries=2):
             rec["deferred"] = True
             if remaining:
                 rec["deferred_phrases"] = remaining
+            break
+        if ((rec.get("category_correct") or 0) >= min_sufficient
+                and idx + 1 < len(wanted)):
+            rec["skipped_for_sufficiency"] = wanted[idx + 1:]
             break
     return out
 
@@ -656,6 +720,9 @@ def _validate_candidate(description, title, protected):
         return None, "protected performer/brand"
     if not motion_grounded(description, clean):
         return None, "invented movement"
+    claims = unsupported_claims(clean, description)
+    if claims:
+        return None, "unsupported claim: " + ", ".join(claims[:3])
     ok, why = validate_title(description, clean)
     if not ok:
         return None, why
@@ -1201,7 +1268,7 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     return {
         "description": _build_description(
             raw_description, concepts, protected=protected,
-            title=top5[0]["title"] if top5 else None),
+            title=top5[0]["title"] if top5 else None, identity=identity),
         "titles": top5,
         "recommended": top5[0]["title"] if top5 else None,
         "recommended_verification": recommended_verification,
@@ -1236,11 +1303,14 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
 
 
 def _clean_descriptive_clause(description, protected=None):
-    """Remove creator instructions/references; keep natural product copy."""
+    """Remove only creator instructions/references; keep product characteristics."""
     text = str(description or "")
+    # Remove the instruction lead-in but stop at "emote" so the descriptive
+    # clause after it survives even when there is no sentence period.
     text = re.sub(
         r"^\s*(?:i|we|he|she|they)\s+"
-        r"(?:created|made|built|designed|want|wanted)\b[^.]*?\bemote\b[^.]*\.?\s*",
+        r"(?:created|made|built|designed|want|wanted)\s+"
+        r"(?:a|an|the)?\s*(?:new\s+)?(?:roblox\s+)?emote\b",
         " ", text, flags=re.IGNORECASE)
     text = re.sub(
         r"\b(?:inspired by|based on|in the style of|styled after)\s+"
@@ -1250,31 +1320,40 @@ def _clean_descriptive_clause(description, protected=None):
         text = re.sub(rf"\b{re.escape(name)}\b", " ", text, flags=re.IGNORECASE)
     for word in sorted(INSTRUCTION_WORDS | set(BANNED), key=len, reverse=True):
         text = re.sub(rf"\b{re.escape(word)}\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip(" .,:;-")
     text = re.sub(r"^[^\w]+", "", text)
+    if text:
+        text = text[0].upper() + text[1:]
     return text
 
 
-def _build_description(description, concepts, protected=None, title=None):
+def _build_description(description, concepts, protected=None, title=None,
+                       identity=None):
     """Natural marketplace copy; never instructions or a keyword dump."""
     display_title = title or "This Emote"
     clause = _clean_descriptive_clause(description, protected)
-    if clause and len(clause.split()) >= 3:
+    identity_ok = (not identity or not identity.get("primary")
+                   or _has_identity(clause, identity))
+    if clause and len(clause.split()) >= 3 and identity_ok:
         body = (f"Meet {display_title}. {clause.rstrip('.')}. "
                 "Add it to your collection and favorite it if it fits your style.")
     else:
-        primary = (concepts or ["your chosen style"])[0]
-        secondary = next((c for c in (concepts or [])[1:]
-                          if c not in primary), None)
-        theme = f"{primary} with {secondary}" if secondary else primary
-        body = (f"Meet {display_title} — {theme}. "
-                "Add it to your collection and favorite it if it fits your style.")
+        primary = (identity or {}).get("primary") or (concepts or [None])[0]
+        if primary:
+            mods = [c for c in (concepts or [])
+                    if c and c.lower() not in primary.lower()][:2]
+            theme = primary + ((" with " + " and ".join(mods)) if mods else "")
+            body = (f"Meet {display_title}. This emote features {theme}. "
+                    "Add it to your collection and favorite it if it fits your style.")
+        else:
+            body = (f"Meet {display_title}. "
+                    "Add it to your collection and favorite it if it fits your style.")
     if (_has_banned(body)
             or (_tokens(body) & _protected_tokens(protected))
             or re.search(r"\b(created|centered on|built around|inspired by|"
                          r"based on|extracted|keywords?)\b", body,
                          re.IGNORECASE)):
-        body = ("Discover a new emote for your avatar. "
+        body = (f"Meet {display_title}. An emote for your avatar. "
                 "Add it to your collection and favorite it if it fits your style.")
     return body
 
@@ -1431,6 +1510,11 @@ def format_report(result):
                     f"was invented."
                     + (" Remaining optional verification was deferred."
                        if r.get("deferred") else ""))
+        skipped = [p for r in live
+                   for p in (r.get("skipped_for_sufficiency") or [])]
+        if skipped:
+            lines.append("- Additional live queries skipped (sufficient "
+                         f"evidence): {', '.join(skipped)}")
     else:
         lines.append("- Live keyword research: not run.")
     if research.get("live_deferred"):
