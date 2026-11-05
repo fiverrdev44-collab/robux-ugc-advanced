@@ -61,6 +61,8 @@ jobs:
         run: python test_creator_intelligence_phase1.py
       - name: Run Phase 2 market intelligence Milestone 1 regressions
         run: python test_phase2_milestone1.py
+      - name: Run Phase 2 creator discovery Milestone 2 regressions
+        run: python test_phase2_milestone2.py
       - name: Run Astra and product understanding regressions
         run: |
           python test_astra.py
