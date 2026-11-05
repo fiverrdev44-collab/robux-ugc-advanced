@@ -68,6 +68,32 @@ def _verification(values):
     return "unknown", "missing"
 
 
+def resolve_creator_type(item_type, tracked_type, item_name, tracked_name):
+    """Resolve a creator type without relying on numeric ID alone.
+
+    The catalog item's own creator_type is authoritative. A tracked creator's
+    type is used only when the display name corroborates the composite
+    identity. Otherwise the type stays unknown.
+    """
+    if item_type:
+        return item_type, "item_catalog"
+    if (tracked_type and item_name and tracked_name
+            and item_name.strip().lower() == tracked_name.strip().lower()):
+        return tracked_type, "tracked_name_match"
+    return "unknown", "missing"
+
+
+def _items_has_creator_type(cur):
+    try:
+        cur.execute(
+            "select 1 from information_schema.columns "
+            "where table_schema = current_schema() "
+            "and table_name = 'items' and column_name = 'creator_type'")
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 def build_registry_rows(item_rows, now=None):
     """Aggregate item-level rows into registry rows (pure).
 
@@ -219,14 +245,21 @@ _UPSERT_SQL = """
         snapshot_item_count = EXCLUDED.snapshot_item_count,
         max_snapshots = EXCLUDED.max_snapshots,
         missing_favorite_items = EXCLUDED.missing_favorite_items,
-        previous_names = (
-            creator_registry.previous_names || EXCLUDED.previous_names ||
-            CASE
-                WHEN creator_registry.display_name IS DISTINCT FROM
-                     EXCLUDED.display_name
-                THEN jsonb_build_array(creator_registry.display_name)
-                ELSE '[]'::jsonb
-            END),
+        previous_names = COALESCE((
+            SELECT jsonb_agg(DISTINCT n ORDER BY n)
+            FROM jsonb_array_elements_text(
+                creator_registry.previous_names
+                || EXCLUDED.previous_names
+                || CASE
+                    WHEN creator_registry.display_name IS DISTINCT FROM
+                         EXCLUDED.display_name
+                    THEN jsonb_build_array(creator_registry.display_name)
+                    ELSE '[]'::jsonb
+                END
+            ) AS t(n)
+            WHERE n IS NOT NULL
+              AND n <> COALESCE(EXCLUDED.display_name, '')
+        ), '[]'::jsonb),
         updated_at = CURRENT_TIMESTAMP
 """
 
@@ -255,15 +288,23 @@ _REFRESH_SQL = """
         SELECT i.id, i.creator_id, i.creator_name, i.creator_verified,
                i.asset_type_id, i.price, i.favorite_count, i.created_at,
                i.fetched_at,
-               COALESCE(t.creator_type, 'unknown') AS creator_type,
-               CASE WHEN t.creator_type IS NULL THEN 'missing'
-                    ELSE 'tracked_creator' END AS type_provenance
+               COALESCE(NULLIF(i.creator_type, ''),
+                        t.creator_type,
+                        'unknown') AS creator_type,
+               CASE
+                   WHEN NULLIF(i.creator_type, '') IS NOT NULL
+                       THEN 'item_catalog'
+                   WHEN t.creator_type IS NOT NULL
+                       THEN 'tracked_name_match'
+                   ELSE 'missing'
+               END AS type_provenance
         FROM items i
         LEFT JOIN LATERAL (
             SELECT t2.creator_type
             FROM tracked_creators t2
             WHERE t2.creator_id = i.creator_id
               AND t2.creator_type IS NOT NULL
+              AND lower(t2.creator_name) = lower(i.creator_name)
             ORDER BY t2.creator_type
             LIMIT 1
         ) t ON true
@@ -293,23 +334,34 @@ _REFRESH_SQL = """
 """
 
 
-def refresh_from_items(cur, batch_size=500, max_batches=None, now=None):
+def refresh_from_items(cur, batch_size=500, max_batches=None, cursor=None,
+                       now=None):
     """Rebuild the registry from stored items in resumable creator batches.
+
+    ``cursor`` is an explicit continuation key ``(creator_type, creator_id)``
+    returned as ``next_cursor`` by a previous invocation. Ordering is stable by
+    ``(creator_type, creator_id)``; each key is visited at most once per sweep.
+    If the source gains creators with keys below the cursor, they are picked up
+    by the next full sweep from ``cursor=None``.
 
     No Roblox API calls are made. The caller owns the transaction/commit and
     must have approval before writing to the registry.
     """
     batch_size = max(1, int(batch_size))
-    after_type, after_id = None, None
+    start_type, start_id = (cursor if cursor else (None, None))
+    after_type, after_id = start_type, start_id
+    done = False
     totals = {"batches": 0, "creators": 0, "items": 0,
               "items_missing_creator_id": 0,
               "items_missing_creator_type": 0,
-              "duplicate_item_rows_removed": 0}
+              "duplicate_item_rows_removed": 0,
+              "started_after": (list(cursor) if cursor else None)}
     while True:
         cur.execute(_REFRESH_SQL,
                     (after_type, after_type, after_id, batch_size))
         rows = cur.fetchall() or []
         if not rows:
+            done = True
             break
         built = build_registry_rows(rows, now=now)
         upsert_registry(cur, built["rows"])
@@ -324,6 +376,9 @@ def refresh_from_items(cur, batch_size=500, max_batches=None, now=None):
         after_type, after_id = last[1], last[2]
         if max_batches is not None and totals["batches"] >= int(max_batches):
             break
+    totals["done"] = done
+    totals["next_cursor"] = ([after_type, after_id]
+                             if after_type is not None else None)
     return totals
 
 
@@ -363,7 +418,7 @@ def discover_nonverified(cur, limit=50):
 
 
 _COMPARISON_SQL = """
-    SELECT i.id, COALESCE(t.creator_type, 'unknown') AS creator_type,
+    SELECT i.id, {type_expr} AS creator_type,
            i.creator_id, i.creator_name, i.creator_verified,
            i.asset_type_id, i.price, i.favorite_count, i.created_at,
            i.fetched_at,
@@ -374,6 +429,7 @@ _COMPARISON_SQL = """
         FROM tracked_creators t2
         WHERE t2.creator_id = i.creator_id
           AND t2.creator_type IS NOT NULL
+          AND lower(t2.creator_name) = lower(i.creator_name)
         ORDER BY t2.creator_type
         LIMIT 1
     ) t ON true
@@ -385,6 +441,7 @@ _COMPARISON_SQL = """
     WHERE i.creator_id IS NOT NULL
       AND i.created_at >= NOW() - make_interval(days => %s)
       {family_clause}
+    ORDER BY i.id
     LIMIT %s
 """
 
@@ -504,7 +561,9 @@ def summarize_comparison(item_rows, family=None, now=None):
         },
         "selection": {
             "population": ("stored catalog items with creator IDs in the "
-                           "window; sampled, not probability-representative"),
+                           "category/age window; deterministic item-id "
+                           "ordering; sampled convenience sample, not "
+                           "probability-representative"),
             "favorites_not_sales": True,
             "representative": False,
             "growth_only_from_snapshots": True,
@@ -513,8 +572,9 @@ def summarize_comparison(item_rows, family=None, now=None):
     }
 
 
-def creator_comparison(cur, family=None, days=180, limit=5000, now=None):
-    """Fetch a bounded item sample and summarize category-aware segments."""
+def creator_comparison(cur, family=None, days=180, limit=5000, now=None,
+                       has_creator_type=None):
+    """Fetch a bounded, deterministically ordered item sample and summarize."""
     from category_configs import get_category_config
     family_clause = ""
     params = [int(days)]
@@ -527,13 +587,24 @@ def creator_comparison(cur, family=None, days=180, limit=5000, now=None):
             family_clause = "AND i.asset_type_id = ANY(%s)"
             params.append(list(asset_ids))
     params.append(int(limit))
-    cur.execute(_COMPARISON_SQL.format(family_clause=family_clause),
+    if has_creator_type is None:
+        has_creator_type = _items_has_creator_type(cur)
+    type_expr = ("COALESCE(NULLIF(i.creator_type, ''), t.creator_type, "
+                 "'unknown')" if has_creator_type
+                 else "COALESCE(t.creator_type, 'unknown')")
+    cur.execute(_COMPARISON_SQL.format(family_clause=family_clause,
+                                       type_expr=type_expr),
                 tuple(params))
     rows = cur.fetchall() or []
     summary = summarize_comparison(rows, family=family, now=now)
-    summary["sample"] = {"requested_limit": int(limit),
-                         "returned_items": len(rows),
-                         "window_days": int(days)}
+    summary["sample"] = {
+        "requested_limit": int(limit),
+        "returned_items": len(rows),
+        "window_days": int(days),
+        "order": "item_id",
+        "deterministic": True,
+        "representative": False,
+    }
     return summary
 
 

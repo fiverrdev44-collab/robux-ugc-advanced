@@ -171,16 +171,108 @@ class RegistryPersistenceTests(unittest.TestCase):
         self.assertEqual(json.loads(params[17]), [])
 
     def test_refresh_is_resumable_and_idempotent(self):
-        batch = [reg_row(1, "User", 10, "A", True),
-                 reg_row(2, "Group", 20, "B", None)]
+        batch = [reg_row(2, "Group", 20, "B", None),
+                 reg_row(1, "User", 10, "A", True)]
         cur = StubCursor([batch, []])
         totals = cr.refresh_from_items(cur, batch_size=10, now=NOW)
         self.assertEqual(totals["batches"], 1)
         self.assertEqual(totals["creators"], 2)
         self.assertEqual(totals["items"], 2)
+        self.assertTrue(totals["done"])
+        self.assertEqual(totals["next_cursor"], ["User", 10])
         self.assertIn("WITH typed", cur.executed[0][0])
         self.assertEqual(cur.executed[0][1][0], None)
         self.assertEqual(cur.executed[0][1][3], 10)
+
+    def test_refresh_cursor_resumes_across_invocations(self):
+        first = cr.refresh_from_items(
+            StubCursor([[reg_row(1, "Group", 10, "A", None)]]),
+            batch_size=1, max_batches=1, now=NOW)
+        self.assertFalse(first["done"])
+        self.assertEqual(first["next_cursor"], ["Group", 10])
+        self.assertEqual(first["started_after"], None)
+
+        cur2 = StubCursor([[reg_row(2, "User", 20, "B", True)], []])
+        second = cr.refresh_from_items(
+            cur2, batch_size=1, cursor=first["next_cursor"], now=NOW)
+        self.assertEqual(second["started_after"], ["Group", 10])
+        self.assertEqual(second["next_cursor"], ["User", 20])
+        self.assertTrue(second["done"])
+        params = cur2.executed[0][1]
+        self.assertEqual(params[0], "Group")
+        self.assertEqual(params[2], 10)
+
+    def test_composite_creator_type_resolution(self):
+        self.assertEqual(
+            cr.resolve_creator_type("User", "Group", "A", "A"),
+            ("User", "item_catalog"))
+        self.assertEqual(
+            cr.resolve_creator_type(None, "Group", "Same", "Same"),
+            ("Group", "tracked_name_match"))
+        self.assertEqual(
+            cr.resolve_creator_type(None, "Group", "Item Name", "Other"),
+            ("unknown", "missing"))
+        self.assertEqual(
+            cr.resolve_creator_type(None, None, "Same", "Same"),
+            ("unknown", "missing"))
+
+    def test_refresh_sql_requires_composite_name_match(self):
+        sql = cr._REFRESH_SQL
+        self.assertIn("i.creator_type", sql)
+        self.assertIn("lower(t2.creator_name) = lower(i.creator_name)", sql)
+        self.assertIn("NULLIF(i.creator_type", sql)
+
+    def test_upsert_previous_names_is_deduplicated(self):
+        sql = cr._UPSERT_SQL
+        self.assertIn("jsonb_agg(DISTINCT", sql)
+        self.assertIn("jsonb_array_elements_text", sql)
+        self.assertIn("n <> COALESCE(EXCLUDED.display_name", sql)
+
+    def test_comparison_sql_is_deterministic_and_composite(self):
+        sql = cr._COMPARISON_SQL
+        self.assertIn("ORDER BY i.id", sql)
+        self.assertIn("LIMIT %s", sql)
+        self.assertIn("lower(t2.creator_name) = lower(i.creator_name)", sql)
+
+    def test_comparison_pre_migration_type_fallback(self):
+        cur = StubCursor([[]])
+        cr.creator_comparison(cur, family=None, has_creator_type=False)
+        sql = cur.executed[0][0]
+        self.assertNotIn("i.creator_type", sql)
+        self.assertIn("lower(t2.creator_name)", sql)
+        self.assertIn("ORDER BY i.id", sql)
+
+    def test_tracker_verification_tristate_and_type(self):
+        from creator_tracker import _to_item
+        missing = _to_item({"id": 1, "name": "A", "creatorTargetId": 10})
+        self.assertIsNone(missing["creator_verified"])
+        self.assertIsNone(missing["creator_type"])
+        explicit_true = _to_item({
+            "id": 2, "name": "B", "creatorTargetId": 20,
+            "creatorType": "Group", "creatorHasVerifiedBadge": True})
+        self.assertTrue(explicit_true["creator_verified"])
+        self.assertEqual(explicit_true["creator_type"], "Group")
+        explicit_false = _to_item({
+            "id": 3, "name": "C", "creatorTargetId": 30,
+            "creatorHasVerifiedBadge": False})
+        self.assertFalse(explicit_false["creator_verified"])
+
+    def test_tracker_upsert_preserves_unknown_and_composite(self):
+        from creator_tracker import upsert_items
+        cur = StubCursor([[(1,)]])  # information_schema: creator_type exists
+        upsert_items(cur, [{
+            "id": 1, "name": "A", "description": "",
+            "favorite_count": 10, "price": 50, "creator_name": "Creator",
+            "creator_id": 10, "creator_type": "Group",
+            "creator_verified": None, "asset_type_id": 61,
+            "created_at": NOW,
+        }])
+        sql, params = cur.executed[-1]
+        self.assertIn("creator_type", sql)
+        self.assertIn("COALESCE(EXCLUDED.creator_type", sql)
+        self.assertIn("COALESCE(EXCLUDED.creator_verified", sql)
+        self.assertEqual(params[7], "Group")
+        self.assertIsNone(params[8])
 
     def test_discover_nonverified_reuses_stored_data(self):
         rows = [("User", 10, "A", "nonverified", "catalog_flag",
@@ -276,13 +368,15 @@ class ComparisonTests(unittest.TestCase):
         counts = (20, 5, 10, 5, 2, 100, 40)
         comparison_rows = self._rows()
         coverage = (10, 3, 2, 5, 4, 20)
-        cur = StubCursor([counts, comparison_rows, coverage])
+        cur = StubCursor([counts, (1,), comparison_rows, coverage])
         evidence = cr.creator_evidence(
             cur, family="emotes", days=180, limit=100)
         self.assertEqual(evidence["registry"]["creators"], 20)
         self.assertEqual(evidence["registry"]["verified"], 5)
         self.assertEqual(evidence["registry"]["nonverified"], 10)
         self.assertEqual(evidence["comparison"]["creators"], 4)
+        self.assertEqual(evidence["comparison"]["sample"]["order"], "item_id")
+        self.assertFalse(evidence["comparison"]["sample"]["representative"])
         self.assertEqual(evidence["snapshot_coverage"]["valid_growth_pct"],
                          40.0)
         self.assertTrue(evidence["contract"]["favorites_not_sales"])

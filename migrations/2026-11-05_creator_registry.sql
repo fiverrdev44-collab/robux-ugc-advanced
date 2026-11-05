@@ -10,6 +10,11 @@
 
 BEGIN;
 
+-- Composite creator identity support on items. Additive and nullable.
+-- Deliberately no backfill from tracked_creators by numeric ID: historical
+-- items keep creator_type NULL (unknown) because User/Group IDs can collide.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS creator_type TEXT;
+
 CREATE TABLE IF NOT EXISTS creator_registry (
     creator_type            TEXT        NOT NULL,
     creator_id              BIGINT      NOT NULL,
