@@ -198,7 +198,7 @@ class Phase2PostgresTests(unittest.TestCase):
         self.assertEqual(first[0], "Old Name")
 
         self.cur.execute("""
-            UPDATE items SET name = 'New Name', fetched_at = NOW()
+            UPDATE items SET creator_name = 'New Name', fetched_at = NOW()
             WHERE id = 30
         """)
         self._refresh()
@@ -310,6 +310,10 @@ class Phase2PostgresTests(unittest.TestCase):
             self.conn.rollback()
             self.assertIsNone(self._registry("User", 990))
         finally:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
             self.conn.autocommit = True
 
 

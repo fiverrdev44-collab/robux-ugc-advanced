@@ -157,10 +157,15 @@ def build_registry_rows(item_rows, now=None):
         previous_names = [n for n in names_seen if n != display_name]
 
         verification, provenance = _verification([row[4] for row in group])
-        type_prov = ("tracked_creator"
-                     if any((row[11] or "") == "tracked_creator"
-                            for row in group)
-                     else "missing")
+        incoming_provenances = {row[11] for row in group if row[11]}
+        if "item_catalog" in incoming_provenances:
+            type_prov = "item_catalog"
+        elif "tracked_name_match" in incoming_provenances:
+            type_prov = "tracked_name_match"
+        elif "tracked_creator" in incoming_provenances:
+            type_prov = "tracked_creator"
+        else:
+            type_prov = "missing"
 
         observed_times = [
             _as_utc(row[9]) or _as_utc(row[8]) for row in group]
