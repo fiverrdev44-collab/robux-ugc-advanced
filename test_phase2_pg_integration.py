@@ -426,10 +426,13 @@ class Phase2PostgresTests(unittest.TestCase):
             self.assertEqual(self.cur.fetchone()[0], 1)
             self.conn.rollback()
         finally:
-            self.conn.rollback()
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            self.conn.autocommit = True
             self.cur.execute("SELECT set_config('search_path', %s, false)",
                              (self.schema,))
-            self.conn.autocommit = True
 
     def test_evidence_in_normal_transaction(self):
         self._item(120, 1200, "User", "TX", True)
