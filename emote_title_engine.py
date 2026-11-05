@@ -46,6 +46,8 @@ STOPWORDS = {
     "it's", "its", "be", "are", "was", "were", "has", "have", "had", "do",
     "does", "did", "so", "up", "down", "out", "about", "around", "through",
     "made", "make", "based", "inspired", "using", "use", "used",
+    "against", "toward", "towards", "across", "beside", "behind", "between",
+    "onto", "upon", "within", "along", "past", "near", "off", "while",
 }
 # Unlicensed performers/brands that must never appear in a title. Proper-noun
 # extraction below also catches capitalised references not in this list.
@@ -80,6 +82,9 @@ GENERIC_ADJECTIVES = {
 GENERIC_CONCEPT_WORDS = {
     "hip", "hop", "street", "dance", "style", "performance", "power",
     "powerful", "emote", "pose", "move", "moves", "groove", "music",
+    "reaction", "idle", "walk", "float", "floating", "celebrate",
+    "celebration", "spin", "kick", "wave", "lean", "stance", "trip",
+    "wobble", "clumsy", "shiver", "fidget",
 }
 PRODUCT_HEADS = {"emote", "dance", "pose", "performance", "style"}
 MAX_CANDIDATES = 12
@@ -506,19 +511,22 @@ CREATOR DESCRIPTION (the ONLY source of truth for what the emote does):
 \"\"\"{description}\"\"\"
 
 Verified keywords: {keywords}
+PRIMARY PRODUCT IDENTITY (make this recognizable): {identity}
 Protected references (must NOT appear): {protected}
 
 Write at least 10 internally distinct Roblox emote title candidates using
 varied strategies (Search, Branding, Aesthetic, Community, Balanced, etc.).
+Create distinct angles, not endless adjective rearrangements.
 
 RULES:
 - Only use what the description states. Never invent movement, effects, colours, or facts.
+- Most titles must make the movement/style recognizable (include the primary identity or a clear variant).
 - Never name performers or brands (if the description says "inspired by X", never write X).
 - Never use VANTA, Roblox, TikTok, YouTube, or any other brand name.
 - Never use: viral, trending, tiktok, youtube.
 - Never use "Made", "Based", or "Inspired" in a title.
 - Avoid generic filler such as "Powerful ... Style" or "Amazing ... Performance".
-- Prefer titles ending in "Emote" or "Dance" so the product is clear.
+- Prefer titles ending in "Emote", "Dance", "Pose", or the movement noun so the product is clear.
 - Avoid awkward stacked noun phrases; each title should read like a product name.
 - Natural product-style names, 2-6 words, Title Case.
 - Each title must be meaningfully different from the others.
@@ -533,18 +541,31 @@ def _default_generate(prompt, **kwargs):
     return _generate(prompt, **kwargs)
 
 
-def ai_titles(description, keywords, protected, generate_fn=None):
+def _ai_provider(generate_fn):
+    if generate_fn is not None:
+        return "mock"
+    try:
+        from gemini_brain import get_last_usage
+        return (get_last_usage() or {}).get("provider") or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def ai_titles(description, keywords, protected, generate_fn=None,
+              identity=None):
     prompt = AI_PROMPT.format(
         description=strip_banned(description)[:1200],
         keywords=", ".join(keywords[:10]) or "none",
+        identity=(identity or {}).get("primary") or "not specified",
         protected=", ".join(sorted(protected)) or "none")
     fn = generate_fn or _default_generate
     try:
-        raw = fn(prompt, json_mode=True, temperature=0.8, max_tokens=900)
+        raw = fn(prompt, json_mode=True, temperature=0.8, max_tokens=1200)
     except Exception:
-        return []
+        return [], "unknown"
+    provider = _ai_provider(generate_fn)
     if not raw:
-        return []
+        return [], provider
     data = None
     try:
         data = json.loads(raw)
@@ -566,14 +587,14 @@ def ai_titles(description, keywords, protected, generate_fn=None):
             strategy = "AI"
         if title:
             out.append({"strategy": strategy, "title": title})
-    return out[:MAX_CANDIDATES]
+    return out[:MAX_CANDIDATES], provider
 
 
 def _title(words):
     return " ".join(w.capitalize() for w in words if w)
 
 
-def _candidates(description, keywords):
+def _candidates(description, keywords, identity=None):
     """Deterministic fallback: only description words + the category word."""
     kws = [k for k in keywords if k] or [
         w for w in re.findall(r"[A-Za-z]{3,}", strip_banned(description))
@@ -600,6 +621,16 @@ def _candidates(description, keywords):
         ("Grounded", _title([k1, k2, k3, "Emote"])),
         ("Grounded", _title([k3, k0, "Emote"])),
     ]
+    primary = (identity or {}).get("primary")
+    if primary:
+        id_words = primary.split()
+        mods = [k for k in kws if k not in id_words] or [k0]
+        raw = [
+            ("Identity", _title(mods[:1] + id_words + ["Emote"])),
+            ("Identity", _title(id_words + mods[:1] + ["Emote"])),
+            ("Identity", _title(id_words + ["Emote"])),
+            ("Identity", _title(mods[:2] + id_words)),
+        ] + raw
     out, seen = [], set()
     for strategy, title in raw:
         low = title.lower()
@@ -647,24 +678,38 @@ def _too_similar(a, b):
 
 
 def gather_candidates(description, keywords, protected, concepts=None,
-                      generate_fn=None):
-    ai = ai_titles(description, concepts or keywords, protected, generate_fn)
-    merged = list(ai) + _candidates(description, keywords)
-    considered = len(merged)
+                      generate_fn=None, identity=None):
+    ai, provider = ai_titles(description, concepts or keywords, protected,
+                             generate_fn, identity=identity)
+    det = _candidates(description, keywords, identity=identity)
+    merged = ([("ai", c) for c in ai]
+              + [("deterministic", c) for c in det])
     out, rejected = [], []
-    for c in merged:
+    deduplicated = 0
+    for source, c in merged:
         if len(out) >= MAX_CANDIDATES:
             break
         clean, why = _validate_candidate(description, c["title"], protected)
         if not clean:
-            rejected.append({"title": c["title"], "reason": why})
+            rejected.append({"title": c["title"], "reason": why,
+                             "source": source})
             continue
         if any(_too_similar(clean, v["title"]) for v in out):
-            rejected.append({"title": clean, "reason": "too similar"})
+            deduplicated += 1
             continue
         out.append({"strategy": c.get("strategy") or "AI", "title": clean,
-                    "validation": "passed"})
-    return out, rejected, considered
+                    "validation": "passed", "source": source,
+                    "provider": provider if source == "ai" else None})
+    stats = {
+        "ai_generated": len(ai),
+        "deterministic_generated": len(det),
+        "considered": len(merged),
+        "provider": provider,
+        "fallback_used": not ai,
+        "collected_eligible": len(out),
+        "deduplicated": deduplicated,
+    }
+    return out, rejected, stats
 
 
 # ── Marketplace-aware ranking ──────────────────────────────────────
@@ -783,25 +828,103 @@ def _word_list(title):
     return re.findall(r"[A-Za-z0-9']+", title or "")
 
 
-def _product_clarity(title):
-    """Does the name read as a clear emote product?"""
+IDENTITY_PATTERNS = [
+    ("street dance", ("street", "dance", "dances", "dancing")),
+    ("hip hop dance", ("hip", "hop", "dance", "dances", "dancing")),
+    ("hip hop", ("hip", "hop")),
+    ("dance", ("dance", "dances", "dancing")),
+    ("pose", ("pose", "poses", "posing")),
+    ("idle", ("idle",)),
+    ("walk", ("walk", "walks", "walking")),
+    ("floating", ("float", "floats", "floating")),
+    ("reaction", ("reaction", "reactions", "shock", "shocked", "gasp")),
+    ("comedic movement", ("trip", "trips", "tripping", "wobble",
+                          "wobbling", "clumsy", "stumble", "stumbling")),
+    ("lean", ("lean", "leans", "leaning")),
+    ("stance", ("stance", "stances", "stancing")),
+    ("spin", ("spin", "spins", "spinning")),
+    ("flip", ("flip", "flips", "flipping")),
+    ("kick", ("kick", "kicks", "kicking")),
+    ("wave", ("wave", "waves", "waving")),
+    ("shuffle", ("shuffle", "shuffles", "shuffling")),
+    ("breakdance", ("breakdance", "breakdances", "breakdancing")),
+    ("freeze", ("freeze", "freezes", "freezing")),
+    ("stretch", ("stretch", "stretches", "stretching")),
+    ("shiver", ("shiver", "shivers", "shivering")),
+    ("fidget", ("fidget", "fidgets", "fidgeting")),
+    ("celebration", ("celebrate", "celebrates", "celebrating",
+                     "celebration")),
+    ("fist pump", ("fist", "pump", "pumps", "pumping")),
+    ("power up", ("power", "powers", "powered", "glowing")),
+]
+
+VAGUE_ADJECTIVES = GENERIC_ADJECTIVES | {
+    "mysterious", "energetic", "vibrant", "bold", "dramatic", "dynamic",
+    "graceful", "playful", "quirky", "stylish", "iconic", "unique",
+}
+
+
+def extract_product_identity(description, concepts=None):
+    """Identify the movement/style buyers should recognize in a title."""
+    toks = set(re.findall(r"[a-z0-9']+", str(description or "").lower()))
+    phrases, terms = [], set()
+    for label, pattern in IDENTITY_PATTERNS:
+        if any(p in toks for p in pattern):
+            terms.update(pattern)
+            if all(w in toks for w in label.split() if w != "movement"):
+                phrases.append(label)
+    if not phrases and concepts:
+        for c in concepts:
+            ct = set(re.findall(r"[a-z0-9']+", c.lower()))
+            if ct:
+                phrases.append(c)
+                terms.update(ct)
+                break
+    primary = max(phrases, key=lambda p: (len(p.split()), len(p))) if phrases else None
+    return {"primary": primary, "phrases": phrases, "terms": terms}
+
+
+def _has_identity(title, identity):
+    tokens = set(w.lower() for w in _word_list(title))
+    for phrase in (identity or {}).get("phrases") or []:
+        parts = phrase.split()
+        if parts and all(p in tokens for p in parts):
+            return True
+    return bool(tokens & ((identity or {}).get("terms") or set()))
+
+
+def _product_clarity(title, identity=None):
+    """Recognizable movement/style, not merely an 'Emote' suffix."""
     words = [w.lower() for w in _word_list(title)]
     if not words:
         return 0.0
+    tokens = set(words)
+    phrases = sorted((identity or {}).get("phrases") or [],
+                     key=lambda p: len(p.split()), reverse=True)
+    phrase_hit = None
+    for phrase in phrases:
+        parts = phrase.split()
+        if parts and all(p in tokens for p in parts):
+            phrase_hit = phrase
+            break
+    if phrase_hit:
+        base = 1.0 if len(phrase_hit.split()) >= 2 else 0.85
+    else:
+        base = 0.65 if (tokens & ((identity or {}).get("terms") or set())) else 0.0
     if words[-1] in ("emote", "emotes"):
-        return 1.0
-    if words[-1] in ("dance", "dances"):
-        return 0.9
-    if words[-1] in ("pose", "poses"):
-        return 0.8
-    if any(w in ("emote", "dance") for w in words):
-        return 0.7
-    if words[-1] in ("performance", "style"):
-        return 0.3
-    return 0.2
+        # "Emote" alone is not product clarity.
+        base = max(base, 0.35)
+        if phrase_hit:
+            base = max(base, 0.9)
+    elif words[-1] in ("dance", "dances", "pose", "poses", "walk", "idle",
+                       "float", "floating"):
+        base = max(base, 1.0 if phrase_hit else 0.8)
+    elif words[-1] in ("performance", "style"):
+        base = min(base, 0.5 if base > 0 else 0.2)
+    return max(0.0, min(1.0, base))
 
 
-def _memorability(title):
+def _memorability(title, identity=None):
     words = [w.lower() for w in _word_list(title)]
     content = [w for w in words if w not in ("emote", "emotes")]
     n = len(words)
@@ -815,16 +938,19 @@ def _memorability(title):
         base = 0.6
     else:
         base = 0.35
+    if not _has_identity(title, identity):
+        # Short and vague is not memorable by itself.
+        base = min(base, 0.55)
     initials = [w[0] for w in content if w]
     if len(initials) >= 2 and len(set(initials)) == 1:
         base = min(1.0, base + 0.1)
     if len(content) != len(set(content)):
         base -= 0.2
-    base -= 0.08 * sum(1 for w in content if w in GENERIC_ADJECTIVES)
+    base -= 0.08 * sum(1 for w in content if w in VAGUE_ADJECTIVES)
     return max(0.0, min(1.0, base))
 
 
-def _naturalness(title):
+def _naturalness(title, identity=None):
     words = [w.lower() for w in _word_list(title)]
     n = len(words)
     if n < 2:
@@ -832,20 +958,21 @@ def _naturalness(title):
     base = 1.0 if 2 <= n <= 5 else 0.7 if n == 6 else 0.4
     content = [w for w in words if w not in ("emote", "emotes")]
     if len(content) <= 1:
-        # "<one adjective> Emote" is too terse/generic to be a strong name.
+        base = min(base, 0.6)
+    if not _has_identity(title, identity):
         base = min(base, 0.6)
     if len(content) != len(set(content)):
         base -= 0.2
-    generic = sum(1 for w in content if w in GENERIC_ADJECTIVES)
-    base -= 0.12 * generic
-    if generic >= 3:
+    vague = sum(1 for w in content if w in VAGUE_ADJECTIVES)
+    base -= 0.12 * vague
+    if vague >= 3:
         base -= 0.2
     if words[-1] in PRODUCT_HEADS:
         base += 0.05
     return max(0.0, min(1.0, base))
 
 
-def _originality(title, db, live):
+def _originality(title, db, live, identity=None):
     tokens = _title_tokens(title)
     if not tokens:
         return 0.0
@@ -859,6 +986,13 @@ def _originality(title, db, live):
     # Titles made only of broad concept words are generic even when grounded.
     if not (tokens - GENERIC_CONCEPT_WORDS):
         base -= 0.55
+    vague = sum(1 for w in tokens if w in VAGUE_ADJECTIVES)
+    base -= 0.35 * (vague / max(1, len(tokens)))
+    if tokens and all(w in VAGUE_ADJECTIVES for w in tokens):
+        # An adjective pair is not an original angle.
+        base = min(base, 0.25)
+    if not _has_identity(title, identity):
+        base -= 0.2
     if any((n or "").strip().lower() == title.strip().lower() for n in names):
         base = 0.0
     return max(0.0, min(1.0, base))
@@ -872,34 +1006,36 @@ def _relevance(title, description, concepts):
     for c in concepts or []:
         source.update(re.findall(r"[a-z0-9']+", c.lower()))
     overlap = len(tokens & source) / len(tokens)
-    # Bounded groundedness, not a market/demand signal.
-    return min(1.0, 0.4 + 0.6 * overlap)
+    # Bounded groundedness; word overlap is not exceptional quality.
+    return min(0.9, 0.4 + 0.5 * overlap)
 
 
-def rank_titles(titles, description, concepts, db, live, title_checks=None):
-    """Creative-quality ranking. Eligibility is a gate, not a perfect score.
+def rank_titles(titles, description, concepts, db, live, title_checks=None,
+                identity=None):
+    """Creative-quality ranking calibrated to recognizable product identity.
 
-    Quality components (naturalness, memorability, product clarity,
-    originality, relevance) are compared across candidates before ranking.
-    Description overlap is only a small relevance signal, so a generic title
-    cannot win merely by sharing the most words with the input. Evidence is
-    tracked separately and discounts the score when incomplete. No CTR or
-    sales probabilities are produced.
+    Eligibility (ASTRA, motion grounding, protected names) remains a hard gate.
+    Quality components are compared across candidates: naturalness,
+    memorability, product clarity (recognizable movement/style), originality,
+    and relevance. An "Emote" suffix alone cannot earn clarity, short adjective
+    pairs cannot earn memorability, and description overlap cannot earn
+    exceptional quality. Scores are transparent heuristics, not CTR or sales.
     """
+    identity = identity or extract_product_identity(description, concepts)
     checks = _title_check_map(title_checks)
     retrieval = _retrieval_score(db, live)
     for t in titles:
-        natural = _naturalness(t["title"])
-        memory = _memorability(t["title"])
-        clarity = _product_clarity(t["title"])
-        original = _originality(t["title"], db, live)
+        natural = _naturalness(t["title"], identity)
+        memory = _memorability(t["title"], identity)
+        clarity = _product_clarity(t["title"], identity)
+        original = _originality(t["title"], db, live, identity)
         relevance = _relevance(t["title"], description, concepts)
         check = checks.get(t["title"])
         vsim, vcomp, verified, status = _verified_components(check)
         completeness = 0.5 * retrieval + 0.5 * verified
         kw_context = _keyword_context_score(t["title"], db, live)
-        base = (0.25 * natural + 0.20 * memory + 0.20 * clarity
-                + 0.20 * original + 0.15 * relevance)
+        base = (0.25 * natural + 0.20 * memory + 0.25 * clarity
+                + 0.20 * original + 0.10 * relevance)
         score = 100 * base * (0.6 + 0.4 * completeness)
         if status == "exact":
             score *= 0.5   # an existing exact title is a serious negative
@@ -907,6 +1043,8 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None):
             score *= 0.7
         comps = {
             "eligible": True,
+            "identity": identity.get("primary"),
+            "identity_recognized": _has_identity(t["title"], identity),
             "natural_readability": round(natural, 3),
             "natural": round(natural, 3),
             "memorability": round(memory, 3),
@@ -952,6 +1090,7 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     protected = extract_protected_names(description)
     keywords = extract_keywords(raw_description, exclude=protected)
     concepts = extract_concepts(raw_description, exclude=protected)
+    identity = extract_product_identity(raw_description, concepts)
 
     meta = (meta_fn or fetch_tiktok_meta)(url) if url else {
         "ok": False, "error": "no url provided"}
@@ -974,25 +1113,29 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
                       or research_concepts[:2])[:2]
     live = (live_fn or research_live)(live_shortlist)
 
-    titles, rejected, considered = gather_candidates(
+    titles, rejected, stats = gather_candidates(
         raw_description, keywords, protected, concepts=concepts,
-        generate_fn=generate_fn)
+        generate_fn=generate_fn, identity=identity)
+    considered = stats["considered"]
 
     # Ensure at least MIN_CANDIDATES distinct eligible candidates if possible.
     if len(titles) < MIN_CANDIDATES:
-        for c in _candidates(raw_description, keywords):
+        for c in _candidates(raw_description, keywords, identity=identity):
             if len(titles) >= MIN_CANDIDATES:
                 break
             clean, why = _validate_candidate(raw_description, c["title"],
                                              protected)
             if not clean:
-                rejected.append({"title": c["title"], "reason": why})
+                rejected.append({"title": c["title"], "reason": why,
+                                 "source": "deterministic"})
                 continue
             if any(_too_similar(clean, t["title"]) for t in titles):
-                rejected.append({"title": clean, "reason": "too similar"})
+                stats["deduplicated"] = stats.get("deduplicated", 0) + 1
                 continue
             titles.append({"strategy": c["strategy"], "title": clean,
-                           "validation": "passed"})
+                           "validation": "passed",
+                           "source": "deterministic", "provider": None})
+    stats["collected_eligible"] = len(titles)
 
     # Final ASTRA safety gate immediately before output.
     final = []
@@ -1002,7 +1145,8 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
                 and not (_tokens(t["title"]) & FORBIDDEN_BRANDS)):
             final.append(t)
 
-    initial = rank_titles(final, raw_description, concepts, db, live)
+    initial = rank_titles(final, raw_description, concepts, db, live,
+                          identity=identity)
 
     # Title verification budget. Interactive default is 0: local DB exact
     # checks only, no extra live requests after keyword research.
@@ -1022,13 +1166,18 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
                                live_fn=title_live_fn)
 
     ranked = rank_titles(final, raw_description, concepts, db, live,
-                         title_checks=checks)
+                         title_checks=checks, identity=identity)
     top5 = ranked[:5]
     not_selected = [
         {"title": t["title"], "score": t["score"],
          "reason": "ranked below top five by creative quality"}
         for t in ranked[5:]
     ]
+    stats.update({
+        "eligible_evaluated": len(final),
+        "rejected_count": len(rejected),
+        "not_selected_count": len(not_selected),
+    })
     live_ok = (bool(live) and all(r.get("ok") for r in live)
                and not any(r.get("deferred") for r in live))
     live_error = next((r.get("error") for r in live if not r.get("ok")), None)
@@ -1060,6 +1209,8 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
         "candidates_eligible": len(final),
         "title_live_budget": budget,
         "not_selected": not_selected,
+        "identity": identity,
+        "provenance": stats,
         "experiment": _build_experiment(top5, live_ok, live_error),
         "keywords": keywords,
         "concepts": concepts,
@@ -1075,6 +1226,8 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
             "candidates_generated": considered,
             "candidates_eligible": len(final),
             "title_live_budget": budget,
+            "identity": identity,
+            "provenance": stats,
             "tiktok": meta,
         },
         "banned_removed": sorted(
@@ -1156,9 +1309,20 @@ def format_report(result):
     lines = ["# 🎭 EMOTE TITLE ENGINE", ""]
     lines.append("## Recommended title")
     lines.append(f"**{rec}**" if rec else "_No title passed validation._")
-    lines.append(f"_Candidates evaluated: {result.get('candidates_generated', '?')} "
-                 f"generated · {result.get('candidates_eligible', '?')} eligible · "
-                 f"{len(result.get('rejected') or [])} rejected._")
+    prov = result.get("provenance") or research.get("provenance") or {}
+    identity = result.get("identity") or research.get("identity") or {}
+    lines.append(
+        f"_Generated {prov.get('considered', result.get('candidates_generated', '?'))} "
+        f"candidates (AI {prov.get('ai_generated', '?')} via "
+        f"{prov.get('provider', 'unknown')}"
+        f"{' · fallback used' if prov.get('fallback_used') else ''}; "
+        f"deterministic {prov.get('deterministic_generated', '?')}). "
+        f"Evaluated {result.get('candidates_eligible', '?')} eligible · "
+        f"{len(result.get('rejected') or [])} rejected · "
+        f"{prov.get('deduplicated', 0)} deduplicated · "
+        f"{len(result.get('not_selected') or [])} not selected._")
+    if identity.get("primary"):
+        lines.append(f"_Primary product identity: {identity['primary']}._")
     lines.append("")
 
     lines.append("## Ranked titles (creative quality; not CTR/sales/demand)")
