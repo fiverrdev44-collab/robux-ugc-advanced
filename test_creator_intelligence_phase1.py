@@ -188,30 +188,56 @@ class FabricatedMetricsTests(unittest.TestCase):
 
 
 class LearningReadinessTests(unittest.TestCase):
-    def test_thresholds_and_flag(self):
+    def test_eligible_population_thresholds_and_flag(self):
+        # total, eligible, mature, eligible_sales, verified_sales,
+        # unverified_sales, eligible_controls, leakage, explicitly_unverified
         ready = learning.learning_readiness(
-            StubCursor([(100, 50, 30, 20, 15, 10, 0, 0)]))
+            StubCursor([(100, 30, 20, 15, 15, 0, 10, 0, 0)]))
         self.assertTrue(ready["ready"])
         self.assertFalse(ready["recommended_flag"])
         self.assertTrue(all(ready["checks"].values()))
 
         leaking = learning.learning_readiness(
-            StubCursor([(100, 50, 30, 20, 15, 10, 2, 0)]))
+            StubCursor([(100, 30, 20, 15, 15, 0, 10, 2, 0)]))
         self.assertFalse(leaking["ready"])
-        self.assertFalse(leaking["recommended_flag"])
+        self.assertFalse(leaking["checks"]["no_temporal_leakage"])
 
-        thin = learning.learning_readiness(
-            StubCursor([(10, 5, 2, 1, 1, 0, 0, 0)]))
-        self.assertFalse(thin["ready"])
+    def test_disjoint_thresholds_cannot_produce_ready(self):
+        # Old aggregate counts would individually look sufficient, but they
+        # are not one eligible population.
+        result = learning.learning_readiness(
+            StubCursor([(100, 5, 3, 2, 2, 0, 1, 0, 0)]))
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["checks"]["eligible_outcomes"])
+        self.assertFalse(result["checks"]["mature_outcomes"])
+        self.assertFalse(result["checks"]["verified_sales_evidence"])
+        self.assertFalse(result["checks"]["eligible_controls"])
 
-    def test_load_excludes_unverified_and_uses_timing_guard(self):
+    def test_missing_sales_verification_does_not_count(self):
+        result = learning.learning_readiness(
+            StubCursor([(100, 30, 20, 15, 0, 15, 10, 0, 0)]))
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["checks"]["verified_sales_evidence"])
+        self.assertFalse(result["checks"]["no_unverified_sales"])
+
+    def test_thin_population_not_ready(self):
+        result = learning.learning_readiness(
+            StubCursor([(10, 5, 2, 1, 1, 0, 0, 0, 0)]))
+        self.assertFalse(result["ready"])
+
+    def test_load_requires_verified_sales_and_attribution(self):
         rows = [
             (1, 10, "rename", "applied", "mature",
              '{"post_units": 5, "verified": true}', '{}', 10, None, None),
             (2, 11, "rename", "applied", "mature",
+             '{"post_units": 5}', '{}', 10, None, None),
+            (3, None, "rename", "applied", "mature",
+             '{"post_units": 5, "verified": true}', '{}', 10, None, None),
+            (4, 12, "rename", "applied", "mature",
+             '{"post_units": 5, "verified": true}',
+             '{"insufficient": true}', 10, None, None),
+            (5, 13, "rename", "applied", "mature",
              '{"post_units": 5, "verified": false}', '{}', 10, None, None),
-            (3, 12, "rename", "applied", "mature",
-             '{"post_units": 5}', '{"insufficient": true}', 10, None, None),
         ]
         cur = StubCursor([rows])
         out = learning.load_measured_outcomes(cur, limit=10)
@@ -243,6 +269,78 @@ class CreatorComparisonTests(unittest.TestCase):
 
     def test_true_median(self):
         self.assertEqual(creator_brain._median([1, 2, 3, 4]), 2.5)
+
+    def _sample_findings(self):
+        cohort = [("alice", 10, 500, 900), ("bob", 3, 40, 50)]
+        items = [
+            ("alice", "glow hat", 100, 50, 10.0),
+            ("alice", "glow boots", 80, 40, 20.0),
+            ("bob", "plain hat", 5, 0, 30.0),
+        ]
+        comparison_rows = [
+            ("alice", 10, 500, True), ("bob", 3, 40, False),
+            ("carol", 8, 100, False), ("dave", 2, 5, False),
+            ("erin", 6, 250, True), ("frank", 4, 20, False),
+        ]
+        return creator_brain.learn(
+            StubCursor([cohort, items, comparison_rows]),
+            min_items=2, top_n=10)
+
+    def test_learn_labels_success_and_comparison(self):
+        findings = self._sample_findings()
+        self.assertEqual(findings["cohort_label"],
+                         "success_top_median_favorites")
+        self.assertFalse(findings["cohort_is_representative"])
+        self.assertIn("not representative", findings["cohort_selection"])
+        self.assertIsNotNone(findings["comparison"])
+        seg = findings["comparison"]["segments"]
+        self.assertEqual(seg["nonverified"]["creators"], 4)
+        self.assertGreater(seg["underperformers"]["creators"], 0)
+        self.assertFalse(findings["comparison_selection"]["representative"])
+        self.assertEqual(
+            findings["comparison"]["selection"]["population"],
+            "all creators with >= 3 items and non-null favorites")
+
+    def test_save_load_preserves_comparison(self):
+        import json
+        findings = self._sample_findings()
+        saver = StubCursor([])
+        creator_brain.save(saver, findings)
+        store = {}
+        for sql, params in saver.executed:
+            if "insert into creator_patterns" in sql.lower():
+                store[params[0]] = params[1]
+        self.assertIn("comparison", store)
+        self.assertEqual(
+            json.loads(store["comparison"])["segments"]
+            ["nonverified"]["creators"], 4)
+
+        stored_rows = [(k, v, None) for k, v in store.items()]
+        loaded = creator_brain.load_findings(StubCursor([stored_rows]))
+        self.assertIsNotNone(loaded["comparison"])
+        self.assertEqual(
+            loaded["comparison"]["segments"]["nonverified"]["creators"], 4)
+        self.assertFalse(loaded["cohort_is_representative"])
+        report = creator_brain.format_report(loaded)
+        self.assertIn("Comparison segments", report)
+        self.assertIn("not probability-representative", report.lower())
+
+    def test_cached_report_without_comparison_warns(self):
+        stored = [
+            ("cohort_size", "2", None), ("items", "3", None),
+            ("median_title_words", "2.0", None), ("emoji_rate", "0.0", None),
+            ("median_price", "45.0", None), ("median_favs", "80.0", None),
+            ("cadence_per_week", "0.5", None),
+            ("top_words", "", None), ("top_bigrams", "", None),
+            ("cohort_label", "success_top_median_favorites", None),
+            ("cohort_is_representative", "false", None),
+            ("cohort_selection", "all creators; not representative", None),
+        ]
+        loaded = creator_brain.load_findings(StubCursor([stored]))
+        report = creator_brain.format_report(loaded)
+        self.assertIn("Comparison summary unavailable", report)
+        self.assertIn("do not read the success cohort as representative",
+                      report.lower())
 
 
 class ConvergenceFailureTests(unittest.TestCase):

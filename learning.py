@@ -45,7 +45,15 @@ def load_measured_outcomes(cur, item_id=None, limit=5):
         if did_payload.get("insufficient") is True:
             continue
         if payload.get("verified") is False:
-            # Unverified sales/outcomes are not learning evidence.
+            # Explicitly unverified outcomes are not learning evidence.
+            continue
+        sales_evidence = any(k in payload for k in
+                             ("post_units", "sales_delta_pct"))
+        if sales_evidence and payload.get("verified") is not True:
+            # Missing verification is not proof of verified sales.
+            continue
+        if sales_evidence and iid is None:
+            # Sales evidence must be attributable to a catalog item.
             continue
         if not payload:
             continue
@@ -88,29 +96,50 @@ def format_learning_context(cur, item_id=None, limit=3):
 def learning_readiness(cur):
     """Read-only audit of whether measured feedback is safe to learn from.
 
-    Never enables ASTRA_LEARNING_IN_GENERATION; enabling it is a human decision
-    after independent review.
+    All thresholds are computed over ONE eligible-outcome population:
+    applied + measured + mature/partial + temporally valid. Sales evidence
+    additionally requires explicit ``verified: true`` and an attributed item.
+    Separate ledger records cannot satisfy different thresholds and produce a
+    false-positive READY.
+
+    Never enables ASTRA_LEARNING_IN_GENERATION.
     """
     try:
         cur.execute("""
+            with eligible as (
+                select *
+                from recommendation_ledger
+                where (applied_at is not null or status = 'applied')
+                  and measured_at is not null
+                  and outcome is not null
+                  and coalesce(maturity,'pending') in ('mature','partial')
+                  and (applied_at is null or measured_at >= applied_at)
+            )
             select
-              count(*),
-              count(*) filter (where applied_at is not null
-                                 or status = 'applied'),
-              count(*) filter (where measured_at is not null
-                                 and outcome is not null),
-              count(*) filter (where measured_at is not null
-                                 and outcome is not null
-                                 and coalesce(maturity,'pending')
-                                     in ('mature','partial')),
-              count(*) filter (where outcome ? 'post_units'
-                                 or outcome ? 'sales_delta_pct'),
-              count(*) filter (where coalesce(control_n,0) >= 10),
-              count(*) filter (where measured_at is not null
-                                 and applied_at is not null
-                                 and measured_at < applied_at),
-              count(*) filter (where outcome->>'verified' = 'false')
-            from recommendation_ledger
+              (select count(*) from recommendation_ledger),
+              (select count(*) from eligible),
+              (select count(*) from eligible where maturity = 'mature'),
+              (select count(*) from eligible
+                 where outcome ? 'post_units'
+                    or outcome ? 'sales_delta_pct'),
+              (select count(*) from eligible
+                 where (outcome ? 'post_units'
+                        or outcome ? 'sales_delta_pct')
+                   and outcome->>'verified' = 'true'
+                   and item_id is not null),
+              (select count(*) from eligible
+                 where (outcome ? 'post_units'
+                        or outcome ? 'sales_delta_pct')
+                   and coalesce(outcome->>'verified','') <> 'true'),
+              (select count(*) from eligible
+                 where coalesce(control_n,0) >= 10),
+              (select count(*) from recommendation_ledger
+                 where measured_at is not null
+                   and applied_at is not null
+                   and measured_at < applied_at),
+              (select count(*) from recommendation_ledger
+                 where outcome is not null
+                   and outcome->>'verified' = 'false')
         """)
         row = cur.fetchone()
     except Exception as e:
@@ -119,27 +148,32 @@ def learning_readiness(cur):
                 "reason": ("ledger not ready; ASTRA_LEARNING_IN_GENERATION "
                            "stays off")}
 
-    (total, applied, measured, mature, with_sales, with_controls,
-     leakage, unverified) = [int(x or 0) for x in row]
+    (total, eligible, mature, eligible_sales, verified_sales,
+     unverified_sales, eligible_controls, leakage,
+     explicitly_unverified) = [int(x or 0) for x in row]
     checks = {
-        "measured_outcomes": measured >= 20,
+        "eligible_outcomes": eligible >= 20,
         "mature_outcomes": mature >= 10,
-        "sales_evidence": with_sales >= 10,
-        "controls": with_controls >= 5,
+        "verified_sales_evidence": verified_sales >= 10,
+        "eligible_controls": eligible_controls >= 5,
         "no_temporal_leakage": leakage == 0,
-        "no_unverified_sales": unverified == 0,
+        "no_unverified_sales": unverified_sales == 0,
     }
     ready = all(checks.values())
     return {
-        "ok": True, "total": total, "applied": applied,
-        "measured": measured, "mature": mature,
-        "with_sales": with_sales, "with_controls": with_controls,
-        "leakage": leakage, "unverified": unverified,
+        "ok": True, "total": total, "eligible": eligible,
+        "mature": mature, "eligible_sales": eligible_sales,
+        "verified_sales": verified_sales,
+        "unverified_sales": unverified_sales,
+        "eligible_controls": eligible_controls,
+        "leakage": leakage,
+        "explicitly_unverified": explicitly_unverified,
         "checks": checks, "ready": ready,
         "recommended_flag": False,
-        "reason": ("thresholds met; keep ASTRA_LEARNING_IN_GENERATION off "
-                   "until independent review" if ready else
-                   "insufficient or unreliable evidence; keep "
+        "reason": ("eligible thresholds met; keep "
+                   "ASTRA_LEARNING_IN_GENERATION off until independent review"
+                   if ready else
+                   "insufficient or unreliable eligible evidence; keep "
                    "ASTRA_LEARNING_IN_GENERATION off"),
     }
 
@@ -149,13 +183,15 @@ def format_learning_readiness(report):
         return f"⚠️ Learning readiness unavailable: {report.get('error')}"
     lines = ["# 🎓 LEARNING READINESS (read-only audit)"]
     lines.append(
-        f"• Ledger rows: {report['total']:,} · applied {report['applied']:,} · "
-        f"measured {report['measured']:,} · mature {report['mature']:,}")
+        f"• Ledger rows: {report['total']:,} · eligible outcomes "
+        f"{report['eligible']:,} · mature {report['mature']:,}")
     lines.append(
-        f"• With sales evidence: {report['with_sales']:,} · "
-        f"with controls: {report['with_controls']:,} · "
-        f"temporal leakage: {report['leakage']:,} · "
-        f"unverified: {report['unverified']:,}")
+        f"• Eligible sales evidence: {report['eligible_sales']:,} · "
+        f"verified {report['verified_sales']:,} · "
+        f"unverified {report['unverified_sales']:,}")
+    lines.append(
+        f"• Eligible with controls: {report['eligible_controls']:,} · "
+        f"temporal leakage: {report['leakage']:,}")
     for name, passed in report["checks"].items():
         lines.append(f"• {name}: {'✅' if passed else '❌'}")
     lines.append(f"• Generation flag: **OFF** ({report['reason']})")

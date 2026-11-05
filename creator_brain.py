@@ -7,6 +7,7 @@ and stores the findings so the rest of the bot can use them.
 It does not scrape private data and it does not claim to know Roblox's
 ranking weights. It reports what the cohort demonstrably does.
 """
+import json
 import re
 from collections import Counter, defaultdict
 
@@ -106,6 +107,14 @@ def build_comparison_cohorts(cur, min_items=3):
         "sampled_creators": {
             k: [r[0] for r in sorted(v, key=lambda x: -x[2])[:5]]
             for k, v in segments.items() if v},
+        "selection": {
+            "population": (f"all creators with >= {min_items} items and "
+                           "non-null favorites"),
+            "segments": ("established/emerging by item count; verified by "
+                         "badge; top/average/underperformer by median-favorite "
+                         "terciles"),
+            "representative": False,
+        },
     }
 
 
@@ -176,8 +185,18 @@ def learn(cur, min_items=5, top_n=50, verified_only=False):
         "top_words": top_words,
         "top_bigrams": top_bigrams,
         "comparison": comparison,
-        "cohort_mode": ("verified_only" if verified_only
-                        else "representative_all"),
+        "comparison_selection": (comparison.get("selection")
+                                 if comparison else None),
+        "cohort_label": ("verified_only_success_cohort" if verified_only
+                         else "success_top_median_favorites"),
+        "cohort_mode": "success_top_median_favorites",
+        "cohort_is_representative": False,
+        "cohort_selection": (
+            "verified creators with >= min_items items, ranked by median "
+            "favorites, top_n; not representative"
+            if verified_only else
+            "all creators with >= min_items items, ranked by median favorites, "
+            "top_n; success/survivorship-biased, not representative"),
         "causal": False,
     }
 
@@ -195,6 +214,15 @@ def save(cur, findings):
         "cadence_per_week": findings["cadence_per_week"],
         "top_words": " | ".join(f"{w}:{n}:{m}" for w, n, m in findings["top_words"]),
         "top_bigrams": " | ".join(f"{b}:{n}:{m}" for b, n, m in findings["top_bigrams"]),
+        "cohort_label": findings.get("cohort_label",
+                                     "success_top_median_favorites"),
+        "cohort_is_representative": "false",
+        "cohort_selection": findings.get("cohort_selection", ""),
+        "comparison_selection": (
+            json.dumps(findings.get("comparison_selection"))
+            if findings.get("comparison_selection") else ""),
+        "comparison": (json.dumps(findings.get("comparison"))
+                       if findings.get("comparison") else ""),
     }
     for k, v in rows.items():
         cur.execute("""
@@ -228,6 +256,15 @@ def load_findings(cur):
                     pass
         return out
 
+    def _json(key):
+        raw = stored.get(key, ("", None))[0]
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
     return {
         "cohort_size": int(stored["cohort_size"][0]),
         "items": int(stored["items"][0]),
@@ -238,8 +275,13 @@ def load_findings(cur):
         "cadence_per_week": float(stored["cadence_per_week"][0]),
         "top_words": _pairs("top_words"),
         "top_bigrams": _pairs("top_bigrams"),
-        "comparison": None,
-        "cohort_mode": "cached",
+        "comparison": _json("comparison"),
+        "comparison_selection": _json("comparison_selection"),
+        "cohort_label": stored.get(
+            "cohort_label", ("success_top_median_favorites", None))[0],
+        "cohort_mode": "success_top_median_favorites",
+        "cohort_is_representative": False,
+        "cohort_selection": stored.get("cohort_selection", ("", None))[0],
         "causal": False,
         "updated_at": stored["cohort_size"][1],
     }
@@ -250,8 +292,10 @@ def format_report(f):
         return None
     lines = [
         "# 🧠 CREATOR BRAIN — systematic review",
-        f"_Cohort: **{f['cohort_size']}** creators · **{f['items']:,}** items · "
+        f"_Primary **success cohort** (top median favorites): "
+        f"**{f['cohort_size']}** creators · **{f['items']:,}** items · "
         f"median **{f['median_favs']:,}♥** per item_",
+        "_This success cohort is not representative of all creators._",
         "",
         f"• Median title: **{f['median_title_words']} words** · "
         f"emoji in **{f['emoji_rate']}%** of items",
@@ -262,13 +306,19 @@ def format_report(f):
     if comp and comp.get("segments"):
         s = comp["segments"]
         lines.append(
-            f"• Comparison: established {s['established']['creators']} · "
-            f"emerging {s['emerging']['creators']} · "
-            f"verified {s['verified']['creators']} · "
-            f"nonverified {s['nonverified']['creators']} · "
-            f"top/mid/low {s['top_performers']['creators']}/"
+            f"• Comparison segments (broader convenience sample, **not "
+            f"probability-representative**): established "
+            f"{s['established']['creators']} · emerging "
+            f"{s['emerging']['creators']} · verified "
+            f"{s['verified']['creators']} · nonverified "
+            f"{s['nonverified']['creators']} · top/mid/low "
+            f"{s['top_performers']['creators']}/"
             f"{s['average_performers']['creators']}/"
             f"{s['underperformers']['creators']} creators")
+    else:
+        lines.append(
+            "_Comparison summary unavailable in this cached study; do not "
+            "read the success cohort as representative._")
     if f["top_words"]:
         lines.append("\n**Words in their winners:**")
         for w, n, med in f["top_words"][:10]:
@@ -284,7 +334,8 @@ def format_report(f):
         "(length, one aesthetic word, type word last), not the exact words._"
     )
     lines.append(
-        "_Observational associations, not causal effects. The top cohort is "
-        "not a controlled comparison; use the comparison segments as context._"
+        "_Observational associations, not causal effects. The success cohort "
+        "is not a controlled or representative sample; comparison segments "
+        "are a broader convenience sample, not probability-representative._"
     )
     return "\n".join(lines)

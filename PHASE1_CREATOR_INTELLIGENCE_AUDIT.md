@@ -122,17 +122,40 @@ remain in the cohort. `creator_brain` still supports an explicit
 `verified_only=True` for a caller that asks for it.
 
 ### D6 — Success-only creator comparison
-Added `build_comparison_cohorts()` reporting established/emerging,
-verified/nonverified, and top/average/underperformer segments with creator and
-item counts. It is context, not a controlled experiment; the report says so.
+The primary pattern analysis still uses the top-median-favorites cohort, but it
+is now explicitly labelled a **success cohort** (`cohort_label`,
+`cohort_selection`, `cohort_is_representative=false`) and is never described as
+representative. `build_comparison_cohorts()` is kept separate and reports
+established/emerging, verified/nonverified, and top/average/underperformer
+segments with their own population and selection metadata
+(`selection.population`, `selection.segments`, `selection.representative=false`).
 
-### D7 — Learning readiness
-Added `learning_readiness()` (read-only audit) and a timing guard in
-`load_measured_outcomes` (`measured_at >= applied_at`), plus exclusion of
-explicitly unverified outcomes. The readiness report requires:
-measured ≥ 20, mature ≥ 10, sales evidence ≥ 10, controls ≥ 5, no temporal
-leakage, no unverified sales. `recommended_flag` is always **False** until
-independent review. `ASTRA_LEARNING_IN_GENERATION` remains off.
+`save()` persists the comparison summary and cohort labels, and
+`load_findings()` restores them. A cached study that lacks a comparison summary
+is labelled unavailable and explicitly warns not to read the success cohort as
+representative. Nonverified and underperforming creators remain visible in the
+comparison analysis.
+
+### D7 — Learning readiness (consistent eligible population)
+`learning_readiness()` now computes every threshold over **one eligible
+population** using a CTE:
+
+- applied (`applied_at` or `status='applied'`),
+- measured (`measured_at`, `outcome` present),
+- mature/partial,
+- temporally valid (`measured_at >= applied_at`).
+
+Within that population:
+- sales evidence requires explicit `outcome.verified = true` **and** a non-null
+  `item_id` (missing verification is not proof);
+- controls are counted only on eligible outcomes;
+- eligibility, maturity, verified-sales, and control thresholds all come from
+  the same rows.
+
+`load_measured_outcomes()` likewise excludes sales outcomes without explicit
+verification or item attribution, and retains the timing guard. The generation
+flag remains **OFF**. Separately satisfied ledger-wide counts can no longer
+produce a false-positive READY.
 
 ### D8 — Convergence evidence
 No redesign. The existing labels (observed DB evidence, sampled live results,
@@ -143,7 +166,7 @@ deferred/Retry-After) are documented in the Phase 2 contract below.
 
 ## 4. Regression tests
 
-`test_creator_intelligence_phase1.py` (16 tests, synthetic fixtures only):
+`test_creator_intelligence_phase1.py` (22 tests, synthetic fixtures only):
 
 - Favorite-value comparison trap → item membership; before/after lift.
 - Missing favorites skipped.
@@ -156,9 +179,15 @@ deferred/Retry-After) are documented in the Phase 2 contract below.
 - Zero-favorite items included in failure patterns.
 - `format_favorite` keeps missing unknown and zero as zero.
 - No synthetic favorite formula in the source.
-- Learning readiness thresholds and flag.
-- Learning excludes unverified outcomes and uses the timing guard.
-- Representative creator segments include nonverified/average creators.
+- Learning readiness: one eligible population; disjoint thresholds cannot
+  produce READY; missing sales verification does not count; thin population
+  fails; temporal leakage fails.
+- Learning retrieval excludes unverified sales, unattributed sales, and
+  insufficient DiD outcomes.
+- Representative creator segments include nonverified and underperforming
+  creators; success cohort is labelled and separate.
+- `save()`/`load_findings()` preserve the comparison summary and cohort labels;
+  cached reports without a comparison warn against success-only interpretation.
 - Partial Roblox API failure is marked incomplete.
 
 Existing suites (shared, JARVIS, ASTRA, product understanding, convergence,
@@ -176,9 +205,12 @@ No production data was touched.
   they are not causal effect estimates.
 - `creator_tracker` discovery is still verified-only; `creator_brain` now
   compares all creators present in `items`, but the underlying sample is not yet
-  a probability sample of the marketplace.
+  a probability sample of the marketplace. Comparison segments are a broader
+  convenience sample, not probability-representative, and cached legacy studies
+  may lack a comparison summary.
 - Learning readiness thresholds are conservative and not yet demonstrated on
-  production data; verified sales attribution is not proven.
+  production data; verified, attributed sales evidence is not proven. The
+  generation flag remains off.
 - `!converge` live results are samples; low competitor counts are not demand.
 - No AI calls were added; the system is not self-improving and does not claim to
   be.
@@ -257,8 +289,8 @@ Creator Intelligence **must not**:
 | Median | upper middle | true median |
 | Zero-favorite items | excluded from failure patterns | included |
 | Missing favorites | fabricated display fallback | `unknown`; zero stays zero |
-| Creator cohort | top-median / verified-only switch | representative segments; all creators by default |
-| Learning | no readiness gate | readiness audit + timing/verified guards; flag OFF |
+| Creator cohort | top-median / verified-only switch, unlabeled | success cohort explicitly labelled; separate comparison segments; persisted in cache |
+| Learning | ledger-wide aggregate counts; unverified sales could count | one eligible population; verified, attributed sales only; flag OFF |
 | Convergence | labels present but undocumented | documented Phase 2 evidence contract |
 
 ---
