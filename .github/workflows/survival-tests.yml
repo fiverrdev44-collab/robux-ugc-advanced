@@ -11,6 +11,7 @@ on:
       - fix/emote-title-live-defects
       - fix/emote-title-creative-quality
       - fix/emote-title-quality-calibration
+      - fix/emote-title-production-acceptance
   pull_request:
     branches:
       - main
