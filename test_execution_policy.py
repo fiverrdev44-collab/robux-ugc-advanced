@@ -162,6 +162,37 @@ class SchedulerTests(unittest.TestCase):
             self.assertEqual(r.attempts, 2)
             self.assertTrue(self.clock.sleeps, header)
 
+    def test_retry_after_is_honored_before_retry(self):
+        seq = [_Resp(429, {}, {"Retry-After": "7"}), _Resp(200, {"v": 1})]
+
+        def rf(*a, **k):
+            return seq.pop(0)
+
+        s = ep.RobloxScheduler(request_fn=rf, clock=self.clock.now,
+                               sleep=self.clock.sleep)
+        s.configure("e", cache_ttl=0, max_retries=1, retry_after_budget=60,
+                    honor_retry_after=True)
+        r = s.request("e", "u")
+        self.assertTrue(r.ok)
+        self.assertIn(7.0, self.clock.sleeps)
+
+    def test_long_retry_after_defers_without_early_retry(self):
+        calls = {"n": 0}
+
+        def rf(*a, **k):
+            calls["n"] += 1
+            return _Resp(429, {}, {"Retry-After": "120"})
+
+        s = ep.RobloxScheduler(request_fn=rf, clock=self.clock.now,
+                               sleep=self.clock.sleep)
+        s.configure("e", cache_ttl=0, max_retries=2, retry_after_budget=60)
+        r = s.request("e", "u")
+        self.assertFalse(r.ok)
+        self.assertTrue(r.deferred)
+        self.assertEqual(calls["n"], 1)          # no premature retry
+        self.assertEqual(self.clock.sleeps, [])  # no shortened backoff
+        self.assertTrue(s.is_circuit_open("e"))  # full deadline honoured
+
     def test_bounded_retries_and_circuit(self):
         calls = {"n": 0}
         def rf(*a, **k):

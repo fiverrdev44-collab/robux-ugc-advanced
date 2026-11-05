@@ -15,10 +15,21 @@ Pipeline:
 
 TikTok references are optional: only a bounded, host-validated public HTML GET
 is used for caption/hashtags. No video is downloaded or analysed.
+
+Rate-limit coordination
+-----------------------
+``RobloxBatchClient`` hydrates item details by asset ID (POST batch); catalog
+keyword search is a different endpoint and cannot be folded into an asset-ID
+batch. Other modules (``live_market.check_title``, ``live_enrich``,
+``creator_tracker``, ``enricher``) retain their own pacing. This engine uses
+the shared convergence endpoint-aware scheduler, shortlists phrases in
+PostgreSQL before live calls, and stops/defer on the first 429 rather than
+spending more of the shared quota.
 """
 import html as _html
 import json
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from astra import MOTION_TOKENS, contains_banned_platform
@@ -41,6 +52,21 @@ KNOWN_PROTECTED = {
     "jabbawockeez", "kinjaz", "les twins", "world of dance",
 }
 MECHANICAL_WORDS = {"made", "based", "inspired"}
+
+# Creator-instruction / filler words that are not product characteristics.
+INSTRUCTION_WORDS = {
+    "created", "create", "creating", "made", "make", "making", "new",
+    "want", "wanted", "original", "memorable", "searchable", "premium",
+    "inspired", "based", "using", "use", "used", "need", "needs", "looking",
+    "idea", "ideas", "concept", "concepts", "design", "designs", "please",
+    "help", "would", "could", "should", "give", "build", "building", "built",
+    "designed", "roblox", "ugc", "im", "ive", "we", "i",
+}
+# Heads that turn adjacent modifiers into a useful marketplace phrase.
+CONCEPT_HEADS = {
+    "dance", "emote", "pose", "movement", "choreography", "performance",
+    "style", "groove",
+}
 
 MAX_TIKTOK_BYTES = 512 * 1024
 TIKTOK_HOST_SUFFIX = ".tiktok.com"
@@ -102,21 +128,88 @@ def _protected_tokens(protected):
     return tokens
 
 
-def extract_keywords(text, limit=8, exclude=None):
-    """Ordered, unique description words: no stopwords, banned, or protected."""
+def _content_tokens(text, exclude=None):
+    """Ordered content tokens with instructions/stopwords/protected removed."""
     protected_tokens = _protected_tokens(exclude)
-    out, seen = [], set()
+    out = []
     for tok in re.findall(r"[A-Za-z][A-Za-z0-9']{2,}", str(text or "")):
         low = tok.lower()
-        if low in STOPWORDS or low in PLATFORM_BANNED or low in protected_tokens:
+        if (low in STOPWORDS or low in INSTRUCTION_WORDS
+                or low in PLATFORM_BANNED or low in protected_tokens
+                or _has_banned(low)):
             continue
-        if low in seen or _has_banned(low):
+        out.append(low)
+    return out
+
+
+def extract_keywords(text, limit=8, exclude=None):
+    """Ordered, unique product words (no instructions, stopwords, protected)."""
+    out, seen = [], set()
+    for low in _content_tokens(text, exclude):
+        if low in seen:
             continue
         seen.add(low)
         out.append(low)
         if len(out) >= limit:
             break
     return out
+
+
+def extract_concepts(text, limit=12, exclude=None):
+    """Multiword marketplace concepts grounded in the description.
+
+    Example: "I created ... a mysterious, energetic street dance with a
+    powerful hip-hop performance style" yields phrases such as
+    "mysterious energetic street dance", "energetic street dance",
+    "street dance", "hip hop dance", "mysterious dance".
+
+    Only words from the description are used; no choreography is invented.
+    """
+    toks = _content_tokens(text, exclude)
+    if not toks:
+        return []
+    concepts, seen = [], set()
+
+    def add(words):
+        phrase = " ".join(words).strip()
+        if len(phrase) < 4 or phrase in seen:
+            return
+        seen.add(phrase)
+        concepts.append(phrase)
+
+    # Contiguous n-grams (most natural phrases first).
+    for n in (3, 2):
+        for i in range(len(toks) - n + 1):
+            add(toks[i:i + n])
+
+    # Modifier + head combinations within the same clause.
+    for i, tok in enumerate(toks):
+        if tok not in CONCEPT_HEADS:
+            continue
+        for k in (1, 2, 3):
+            if i - k >= 0:
+                add(toks[i - k:i + 1])
+        for j in range(max(0, i - 4), i):
+            add([toks[j], tok])
+
+    # Known dance compounds, plus compound + head.
+    joined = " ".join(toks)
+    for comp in ("hip hop", "street dance"):
+        if comp in joined:
+            add(comp.split())
+            for head in ("dance", "emote", "pose"):
+                if head in toks and head not in comp.split():
+                    add(comp.split() + [head])
+
+    def rank(phrase):
+        words = phrase.split()
+        ends_head = 1 if words[-1] in CONCEPT_HEADS else 0
+        has_head = 1 if any(w in CONCEPT_HEADS for w in words) else 0
+        is_compound = 1 if phrase in ("hip hop", "street dance") else 0
+        return (ends_head, is_compound, has_head, len(words))
+
+    concepts.sort(key=rank, reverse=True)
+    return concepts[:limit]
 
 
 # ── Secure optional TikTok metadata ────────────────────────────────
@@ -164,33 +257,81 @@ def fetch_tiktok_meta(url, timeout=8, session=None):
 
 # ── Research ───────────────────────────────────────────────────────
 
-def research_db(keywords):
-    pats = [f"%{k.lower()}%" for k in keywords if k]
-    if not pats:
-        return {"ok": True, "matches": 0, "sampled": 0,
-                "note": "no keywords to query"}
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def research_db(concepts):
+    """Shortlist high-value phrases against emote listings before live calls.
+
+    Each phrase is matched only when ALL of its tokens occur in the item name
+    (phrase evidence), and exact-phrase hits are counted separately. This is a
+    read-only local sample, never total marketplace supply.
+    """
+    phrases = [p.strip().lower() for p in (concepts or []) if p and p.strip()]
+    if not phrases:
+        return {"ok": True, "matches": 0, "sampled": 0, "phrases": [],
+                "live_shortlist": [], "note": "no concepts to query"}
     conn = cur = None
     try:
         from bot_core import get_research_db
         conn = get_research_db()
         cur = conn.cursor()
-        cur.execute("""
-            select name, favorite_count, price
-            from items
-            where asset_type_id = 61
-              and favorite_count > 0
-              and lower(name) like any(%s)
-            order by favorite_count desc
-            limit 200
-        """, (pats,))
-        rows = cur.fetchall() or []
-        examples = [{"name": (r[0] or "")[:60], "favorites": int(r[1] or 0),
-                     "price": int(r[2] or 0)} for r in rows[:8]]
-        return {"ok": True, "matches": len(rows), "sampled": len(rows),
+        stats = []
+        all_exact = []
+        for phrase in phrases[:5]:
+            tokens = [t for t in phrase.split() if t]
+            if not tokens:
+                continue
+            exact_pat = f"%{phrase}%"
+            token_pats = [f"%{t}%" for t in tokens]
+            cur.execute("""
+                select count(*),
+                       count(*) filter (where lower(name) like %s)
+                from items
+                where asset_type_id = 61
+                  and favorite_count > 0
+                  and lower(name) like all(%s)
+            """, (exact_pat, token_pats))
+            total, exact = cur.fetchone()
+            stats.append({"phrase": phrase,
+                          "token_matches": int(total or 0),
+                          "exact_matches": int(exact or 0),
+                          "tokens": len(tokens)})
+            all_exact.append(exact_pat)
+
+        examples = []
+        if all_exact:
+            cur.execute("""
+                select name, favorite_count, price
+                from items
+                where asset_type_id = 61
+                  and favorite_count > 0
+                  and lower(name) like any(%s)
+                order by favorite_count desc
+                limit 8
+            """, (all_exact,))
+            examples = [{"name": (r[0] or "")[:60],
+                         "favorites": int(r[1] or 0),
+                         "price": int(r[2] or 0)} for r in (cur.fetchall() or [])]
+
+        shortlist = sorted(
+            [s for s in stats if s["token_matches"] > 0],
+            key=lambda s: (s["tokens"], s["token_matches"]),
+            reverse=True)
+        if not shortlist:
+            shortlist = sorted(stats, key=lambda s: s["tokens"], reverse=True)
+        return {"ok": True,
+                "matches": sum(s["token_matches"] for s in stats),
+                "sampled": sum(s["token_matches"] for s in stats),
+                "phrases": stats,
+                "live_shortlist": [s["phrase"] for s in shortlist[:3]],
                 "top_examples": examples,
-                "note": "database matches (favorites>0), sampled — not total supply"}
+                "note": ("database phrase matches (favorites>0), sampled — "
+                         "not total supply")}
     except Exception as e:
         return {"ok": False, "error": type(e).__name__,
+                "phrases": [], "live_shortlist": [],
                 "note": "database research unavailable"}
     finally:
         try:
@@ -205,22 +346,127 @@ def research_db(keywords):
             pass
 
 
-def research_live(keywords, max_keywords=2):
+def research_live(phrases, max_queries=2):
+    """Bounded live Roblox emote (asset type 61) keyword search.
+
+    Stops after the first rate-limit/outage so optional verification is
+    deferred instead of hammering the endpoint. Each record carries an honest
+    checked_at timestamp; remaining phrases are listed on the deferred record.
+    """
     from convergence_live import verify_niche
+    wanted = [p for p in (phrases or []) if p][:max_queries]
     out = []
-    for kw in list(keywords)[:max_keywords]:
-        r = verify_niche(kw, family="emotes", max_pages=1)
-        out.append({
-            "keyword": kw, "ok": bool(r.get("ok")), "error": r.get("error"),
+    for idx, phrase in enumerate(wanted):
+        r = verify_niche(phrase, family="emotes", max_pages=1)
+        rec = {
+            "keyword": phrase,
+            "ok": bool(r.get("ok")),
+            "error": r.get("error"),
             "sampled_results": r.get("sampled_results"),
             "category_correct": r.get("category_correct"),
             "category_mismatched": r.get("category_mismatched"),
             "exact_title_matches": r.get("exact_title_matches"),
             "conceptual_matches": r.get("conceptual_matches"),
             "top_competitors": (r.get("top_competitors") or [])[:5],
-            "verification_timestamp": r.get("verification_timestamp"),
-        })
+            "checked_at": r.get("verification_timestamp") or _utc_now(),
+        }
+        out.append(rec)
+        if not rec["ok"]:
+            remaining = wanted[idx + 1:]
+            rec["deferred"] = True
+            if remaining:
+                rec["deferred_phrases"] = remaining
+            break
     return out
+
+
+def title_db_exact(title):
+    """Local check for an exact emote title before any live request."""
+    conn = cur = None
+    try:
+        from bot_core import get_research_db
+        conn = get_research_db()
+        cur = conn.cursor()
+        cur.execute("""
+            select 1 from items
+            where asset_type_id = 61 and lower(name) = lower(%s)
+            limit 1
+        """, (title,))
+        return {"ok": True, "exact": cur.fetchone() is not None,
+                "checked_at": _utc_now(), "source": "database"}
+    except Exception as e:
+        return {"ok": False, "exact": False, "error": type(e).__name__,
+                "checked_at": _utc_now(), "source": "database"}
+    finally:
+        try:
+            if cur:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+
+def verify_titles(titles, max_titles=2, db_fn=None, live_fn=None):
+    """Verify the strongest final titles against actual Marketplace titles.
+
+    Local database exact-title evidence is checked first. At most two titles
+    are checked live; a rate limit/outage defers the rest and is reported as
+    insufficient evidence.
+    """
+    out = []
+    for t in list(titles or [])[:max_titles]:
+        title = t["title"]
+        local = (db_fn or title_db_exact)(title)
+        if local.get("ok") and local.get("exact"):
+            out.append({"title": title, "status": "exact",
+                        "source": "database", "exact": True,
+                        "similar": False, "conceptual": False,
+                        "checked_at": local.get("checked_at"),
+                        "error": None})
+            continue
+        r = (live_fn or _title_live_check)(title)
+        if not r.get("ok"):
+            out.append({"title": title, "status": "insufficient",
+                        "source": "live", "exact": False, "similar": False,
+                        "conceptual": False,
+                        "checked_at": r.get("checked_at") or _utc_now(),
+                        "error": r.get("error")})
+            break
+        exact = int(r.get("exact_title_matches") or 0) > 0
+        competitors = [c for c in (r.get("top_competitors") or [])
+                       if c.get("asset_type_id") in (61, "61")]
+        tt = _title_tokens(title)
+        similar = any(
+            tt and _title_tokens(c.get("name") or "")
+            and len(tt & _title_tokens(c.get("name") or ""))
+            / max(1, len(tt | _title_tokens(c.get("name") or ""))) >= 0.5
+            for c in competitors)
+        conceptual = int(r.get("conceptual_matches") or 0) > 0
+        status = ("exact" if exact else "similar" if similar
+                  else "conceptual" if conceptual else "none")
+        out.append({"title": title, "status": status, "source": "live",
+                    "exact": exact, "similar": similar,
+                    "conceptual": conceptual,
+                    "checked_at": r.get("checked_at") or _utc_now(),
+                    "error": None})
+    return out
+
+
+def _title_live_check(title):
+    from convergence_live import verify_niche
+    r = verify_niche(title, family="emotes", max_pages=1)
+    return {
+        "ok": bool(r.get("ok")),
+        "error": r.get("error"),
+        "exact_title_matches": r.get("exact_title_matches"),
+        "conceptual_matches": r.get("conceptual_matches"),
+        "top_competitors": r.get("top_competitors") or [],
+        "checked_at": r.get("verification_timestamp") or _utc_now(),
+    }
 
 
 # ── Generation ─────────────────────────────────────────────────────
@@ -360,8 +606,9 @@ def _too_similar(a, b):
     return len(ta & tb) / len(ta | tb) >= 0.8
 
 
-def gather_candidates(description, keywords, protected, generate_fn=None):
-    ai = ai_titles(description, keywords, protected, generate_fn)
+def gather_candidates(description, keywords, protected, concepts=None,
+                      generate_fn=None):
+    ai = ai_titles(description, concepts or keywords, protected, generate_fn)
     merged = list(ai) + _candidates(description, keywords)
     out, rejected = [], []
     for c in merged:
@@ -440,7 +687,8 @@ def _differentiation_score(title, names):
 def _retrieval_score(db, live):
     """Source availability only; a successful request is NOT strong evidence."""
     db_ok = bool(db.get("ok"))
-    live_ok = bool(live) and all(r.get("ok") for r in live)
+    live_ok = (bool(live) and all(r.get("ok") for r in live)
+               and not any(r.get("deferred") for r in live))
     if db_ok and live_ok:
         return 1.0
     if live_ok:
@@ -450,13 +698,8 @@ def _retrieval_score(db, live):
     return 0.0
 
 
-def _market_context_score(title, db, live):
-    """Title-specific textual proximity to observed emote listings.
-
-    This is a context/relevance proxy, NOT search demand, sales or CTR.
-    Similarity to existing titles is also penalized separately under
-    differentiation. An empty successful API response scores zero.
-    """
+def _keyword_context_score(title, db, live):
+    """Informational keyword-sample similarity; never title verification."""
     tokens = _title_tokens(title)
     if not tokens:
         return 0.0
@@ -475,36 +718,76 @@ def _market_context_score(title, db, live):
     return max(similarities, default=0.0)
 
 
-def rank_titles(titles, description, keywords, db, live):
-    """Transparent heuristic; brief-fit is NOT verified search demand."""
-    names = _competitor_names(db, live)
+def _title_check_map(title_checks):
+    return {c.get("title"): c for c in (title_checks or []) if c.get("title")}
+
+
+def _verified_components(check):
+    """(verified_similarity, verified_competition, verified?, status)."""
+    status = (check or {}).get("status")
+    if status == "exact":
+        return 0.0, 0.0, 1.0, "exact"
+    if status == "similar":
+        return 0.3, 0.4, 1.0, "similar"
+    if status == "conceptual":
+        return 0.6, 0.6, 1.0, "conceptual"
+    if status == "none":
+        return 1.0, 1.0, 1.0, "none"
+    return 0.5, 0.5, 0.0, "insufficient"
+
+
+def rank_titles(titles, description, concepts, db, live, title_checks=None):
+    """Transparent heuristic. Description overlap is NEVER market evidence.
+
+    Components are kept separate: product accuracy, natural readability,
+    semantic relevance, verified marketplace similarity, verified competition,
+    evidence completeness, and unknown demand. The final score is a listing
+    heuristic, not CTR or predicted sales, and is discounted when evidence is
+    incomplete.
+    """
+    checks = _title_check_map(title_checks)
     retrieval = _retrieval_score(db, live)
     for t in titles:
-        brief_fit = _search_score(t["title"], description, keywords)
-        market_context = _market_context_score(t["title"], db, live)
-        title_evidence = retrieval * market_context
+        semantic = _search_score(t["title"], description, concepts)
+        natural = _natural_score(t["title"])
+        check = checks.get(t["title"])
+        vsim, vcomp, verified, status = _verified_components(check)
+        completeness = 0.5 * retrieval + 0.5 * verified
+        kw_context = _keyword_context_score(t["title"], db, live)
+        base = (0.25 * 1.0 + 0.20 * natural + 0.25 * semantic
+                + 0.15 * vsim + 0.15 * vcomp)
+        score = 100 * base * (0.6 + 0.4 * completeness)
+        if status == "exact":
+            score *= 0.5   # an existing exact title is a serious negative
+        elif status == "similar":
+            score *= 0.8
         comps = {
-            "accuracy": 1.0,  # eligibility/ASTRA gate, not a measured probability
-            "natural": round(_natural_score(t["title"]), 3),
-            "brief_fit": round(brief_fit, 3),
-            "search": round(brief_fit, 3),  # backwards-compatible internal alias
-            "differentiation": round(_differentiation_score(t["title"], names), 3),
-            "market_context": round(market_context, 3),
+            "accuracy": 1.0,
+            "product_accuracy": 1.0,
+            "natural": round(natural, 3),
+            "natural_readability": round(natural, 3),
+            "search": round(semantic, 3),
+            "brief_fit": round(semantic, 3),
+            "semantic_relevance": round(semantic, 3),
+            "differentiation": round(vsim, 3),
+            "verified_similarity": round(vsim, 3),
+            "verified_competition": round(vcomp, 3),
+            "evidence": round(completeness, 3),
+            "evidence_completeness": round(completeness, 3),
             "retrieval": round(retrieval, 3),
-            "evidence": round(title_evidence, 3),
+            "market_context": round(kw_context, 3),
+            "keyword_sample_context": round(kw_context, 3),
+            "unknown_demand": "unknown",
         }
-        score = 100 * (0.25 * comps["accuracy"] + 0.20 * comps["natural"]
-                       + 0.25 * comps["brief_fit"]
-                       + 0.15 * comps["differentiation"]
-                       + 0.15 * comps["evidence"])
         t["score"] = round(score, 1)
         t["components"] = comps
-        t["evidence_quality"] = (
-            "incomplete" if retrieval < 1.0 else
-            "sampled, relevant" if market_context > 0 else "sampled, no relevant matches"
-        )
-    titles.sort(key=lambda t: (t["score"], t["components"]["brief_fit"],
-                               t["components"]["differentiation"]),
+        t["title_check"] = check
+        t["title_check_status"] = status
+        t["evidence_status"] = (
+            "verified" if completeness >= 0.99 else
+            "partial" if completeness > 0 else "insufficient")
+    titles.sort(key=lambda t: (t["score"], t["components"]["natural"],
+                               t["components"]["semantic_relevance"]),
                 reverse=True)
     for i, t in enumerate(titles):
         t["recommended"] = (i == 0)
@@ -513,29 +796,37 @@ def rank_titles(titles, description, keywords, db, live):
 # ── Entry point ────────────────────────────────────────────────────
 
 def generate(description, url=None, *, db_fn=None, live_fn=None,
-             meta_fn=None, generate_fn=None):
+             meta_fn=None, generate_fn=None, title_db_fn=None,
+             title_live_fn=None):
     raw_description = strip_banned(description).strip()
     protected = extract_protected_names(description)
     keywords = extract_keywords(raw_description, exclude=protected)
+    concepts = extract_concepts(raw_description, exclude=protected)
 
     meta = (meta_fn or fetch_tiktok_meta)(url) if url else {
         "ok": False, "error": "no url provided"}
-    meta_keywords = []
+    meta_concepts = []
     if meta.get("ok"):
-        meta_keywords = extract_keywords(
+        meta_concepts = extract_concepts(
             " ".join([meta.get("caption") or ""]
                      + list(meta.get("hashtags") or [])), exclude=protected)
-    research_keywords, seen = [], set()
-    for k in keywords + meta_keywords:
-        if k and k not in seen:
-            seen.add(k)
-            research_keywords.append(k)
 
-    db = (db_fn or research_db)(research_keywords[:5])
-    live = (live_fn or research_live)(research_keywords[:2])
+    # Concepts first; single words are only a fallback so we never spend a
+    # scarce live request on generic instructions such as "created".
+    research_concepts, seen = [], set()
+    for c in concepts + meta_concepts + keywords:
+        if c and c not in seen:
+            seen.add(c)
+            research_concepts.append(c)
+
+    db = (db_fn or research_db)(research_concepts[:5])
+    live_shortlist = (db.get("live_shortlist")
+                      or research_concepts[:2])[:2]
+    live = (live_fn or research_live)(live_shortlist)
 
     titles, rejected = gather_candidates(
-        raw_description, keywords, protected, generate_fn=generate_fn)
+        raw_description, keywords, protected, concepts=concepts,
+        generate_fn=generate_fn)
 
     # Fill to five from deterministic, grounded combinations if needed.
     if len(titles) < 5:
@@ -558,48 +849,92 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
         if ok and not _has_banned(t["title"]):
             final.append(t)
 
-    ranked = rank_titles(final[:5], raw_description, keywords, db, live)
-    live_ok = bool(live) and all(r.get("ok") for r in live)
+    initial = rank_titles(final[:5], raw_description, concepts, db, live)
+
+    # Title-level verification: local DB first; live only if keyword research
+    # was not already rate-limited. At most two titles are checked.
+    live_limited = any(not r.get("ok") for r in live)
+    if live_limited:
+        deferred_live = lambda title: {
+            "ok": False, "error": "deferred after rate limit",
+            "checked_at": _utc_now()}
+        checks = verify_titles(initial[:2], db_fn=title_db_fn,
+                               live_fn=deferred_live)
+    else:
+        checks = verify_titles(initial[:2], db_fn=title_db_fn,
+                               live_fn=title_live_fn)
+
+    ranked = rank_titles(final[:5], raw_description, concepts, db, live,
+                         title_checks=checks)
+    live_ok = (bool(live) and all(r.get("ok") for r in live)
+               and not any(r.get("deferred") for r in live))
     live_error = next((r.get("error") for r in live if not r.get("ok")), None)
+    deferred = (any(r.get("deferred") for r in live)
+                or any(c.get("status") == "insufficient" for c in checks))
 
     return {
-        "description": _build_description(raw_description, keywords,
-                                          protected=protected,
-                                          title=ranked[0]["title"] if ranked else None),
+        "description": _build_description(
+            raw_description, concepts, protected=protected,
+            title=ranked[0]["title"] if ranked else None),
         "titles": ranked,
         "recommended": ranked[0]["title"] if ranked else None,
         "experiment": _build_experiment(ranked, live_ok, live_error),
         "keywords": keywords,
-        "research_keywords": research_keywords,
+        "concepts": concepts,
+        "research_keywords": research_concepts,
+        "title_checks": checks,
         "protected_names": sorted(protected),
         "rejected": rejected[:10],
         "research": {
             "db": db, "live": live, "live_ok": live_ok,
-            "live_error": live_error, "tiktok": meta,
+            "live_error": live_error, "live_deferred": deferred,
+            "title_checks": checks, "tiktok": meta,
         },
         "banned_removed": sorted(
             {w for w in BANNED if w in str(description or "").lower()}),
     }
 
 
-def _build_description(description, keywords, protected=None, title=None):
-    """Public copy from validated title and safe themes, never the raw brief."""
-    blocked = _protected_tokens(protected)
-    safe_terms = [
-        k.lower() for k in (keywords or [])
-        if k.lower() not in blocked
-        and k.lower() not in STOPWORDS
-        and k.lower() not in MECHANICAL_WORDS
-        and not _has_banned(k)
-    ][:4]
-    validated_title, _why = _validate_candidate(
-        description, title or "Original Emote", protected)
-    display_title = validated_title or "This Emote"
-    theme = " ".join(safe_terms) if safe_terms else "your chosen style"
-    body = (f"Meet {display_title}, an emote centered on {theme}. "
-            "Add it to your collection and favorite it if it fits your style.")
-    if _has_banned(body) or (_tokens(body) & blocked):
-        return ("Discover a new emote for your avatar. "
+def _clean_descriptive_clause(description, protected=None):
+    """Remove creator instructions/references; keep natural product copy."""
+    text = str(description or "")
+    text = re.sub(
+        r"^\s*(?:i|we|he|she|they)\s+"
+        r"(?:created|made|built|designed|want|wanted)\b[^.]*?\bemote\b[^.]*\.?\s*",
+        " ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(?:inspired by|based on|in the style of|styled after)\s+"
+        r"[A-Z][\w'&-]*(?:\s+[A-Z][\w'&-]*){0,3}",
+        " ", text)
+    for name in sorted(protected or (), key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(name)}\b", " ", text, flags=re.IGNORECASE)
+    for word in sorted(INSTRUCTION_WORDS | set(BANNED), key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(word)}\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^[^\w]+", "", text)
+    return text
+
+
+def _build_description(description, concepts, protected=None, title=None):
+    """Natural marketplace copy; never instructions or a keyword dump."""
+    display_title = title or "This Emote"
+    clause = _clean_descriptive_clause(description, protected)
+    if clause and len(clause.split()) >= 3:
+        body = (f"Meet {display_title}. {clause.rstrip('.')}. "
+                "Add it to your collection and favorite it if it fits your style.")
+    else:
+        primary = (concepts or ["your chosen style"])[0]
+        secondary = next((c for c in (concepts or [])[1:]
+                          if c not in primary), None)
+        theme = f"{primary} with {secondary}" if secondary else primary
+        body = (f"Meet {display_title} — {theme}. "
+                "Add it to your collection and favorite it if it fits your style.")
+    if (_has_banned(body)
+            or (_tokens(body) & _protected_tokens(protected))
+            or re.search(r"\b(created|centered on|built around|inspired by|"
+                         r"based on|extracted|keywords?)\b", body,
+                         re.IGNORECASE)):
+        body = ("Discover a new emote for your avatar. "
                 "Add it to your collection and favorite it if it fits your style.")
     return body
 
@@ -636,7 +971,7 @@ def format_report(result):
     lines.append(f"**{rec}**" if rec else "_No title passed validation._")
     lines.append("")
 
-    lines.append("## Ranked titles (heuristics, not measured search demand/CTR/sales)")
+    lines.append("## Ranked titles (heuristic, not CTR/sales/measured demand)")
     if titles:
         for i, t in enumerate(titles, 1):
             tag = "recommended" if t.get("recommended") else "alternative"
@@ -644,11 +979,14 @@ def format_report(result):
             lines.append(
                 f"{i}. **{t['title']}** — {t['strategy']} ({tag}) · "
                 f"score {t.get('score')} "
-                f"[brief-fit {c.get('brief_fit')} · natural {c.get('natural')} · "
-                f"diff {c.get('differentiation')} · "
-                f"market-context {c.get('market_context')} · "
-                f"retrieval {c.get('retrieval')} · "
-                f"title-evidence {c.get('evidence')}]")
+                f"[accuracy {c.get('product_accuracy')} · "
+                f"natural {c.get('natural_readability')} · "
+                f"semantic {c.get('semantic_relevance')} · "
+                f"verified-sim {c.get('verified_similarity')} · "
+                f"verified-comp {c.get('verified_competition')} · "
+                f"evidence {c.get('evidence_completeness')}] · "
+                f"market evidence: {t.get('evidence_status', 'insufficient')} · "
+                f"demand: unknown")
     else:
         lines.append("_No validated titles._")
     lines.append("")
@@ -661,9 +999,27 @@ def format_report(result):
     lines.append(result.get("experiment") or "(unavailable)")
     lines.append("")
 
+    lines.append("## Title-level verification")
+    checks = result.get("title_checks") or research.get("title_checks") or []
+    if checks:
+        labels = {"exact": "exact title match",
+                  "similar": "similar title",
+                  "conceptual": "conceptual competitor",
+                  "none": "no matching title in sample",
+                  "insufficient": "insufficient live evidence"}
+        for c in checks:
+            lines.append(
+                f"- `{c.get('title')}` — **{labels.get(c.get('status'), 'unknown')}**"
+                f" · checked {str(c.get('checked_at'))[:19]}"
+                + (f" ({c['error']})" if c.get("error") else ""))
+    else:
+        lines.append("- Not run (no validated titles or deferred by rate limit).")
+    lines.append("")
+
     lines.append("## Evidence")
+    lines.append(f"- Research concepts: {', '.join(result.get('concepts') or []) or 'none'}")
     if db.get("ok"):
-        lines.append(f"- Database: {db.get('matches', 0)} emote name matches "
+        lines.append(f"- Database: {db.get('matches', 0)} phrase/token matches "
                      f"(sampled, not total supply).")
         for ex in (db.get("top_examples") or [])[:3]:
             lines.append(f"  - `{ex['name']}` — {ex['favorites']:,}♥ · "
@@ -674,18 +1030,23 @@ def format_report(result):
         for r in live:
             if r.get("ok"):
                 lines.append(
-                    f"- Live `{r['keyword']}`: {r.get('category_correct', 0)} "
-                    f"correct-category (asset 61) · "
-                    f"{r.get('exact_title_matches', 0)} exact · "
-                    f"{r.get('conceptual_matches', 0)} conceptual · "
-                    f"verified {str(r.get('verification_timestamp'))[:19]}")
+                    f"- Keyword sample `{r['keyword']}`: "
+                    f"{r.get('category_correct', 0)} correct-category "
+                    f"(asset 61) · {r.get('conceptual_matches', 0)} conceptual "
+                    f"keyword matches (keyword-level, not candidate-title "
+                    f"match) · checked {str(r.get('checked_at') or r.get('verification_timestamp'))[:19]}")
             else:
                 lines.append(
-                    f"- Live `{r['keyword']}`: **incomplete** "
-                    f"({r.get('error') or 'no response'}) — no marketplace "
-                    f"data was invented; confidence is reduced.")
+                    f"- Keyword sample `{r['keyword']}`: **incomplete** "
+                    f"({r.get('error') or 'no response'}) — no marketplace data "
+                    f"was invented."
+                    + (" Remaining optional verification was deferred."
+                       if r.get("deferred") else ""))
     else:
-        lines.append("- Live: not run (no research keywords).")
+        lines.append("- Live keyword research: not run.")
+    if research.get("live_deferred"):
+        lines.append("- Live verification was limited; evidence is incomplete "
+                     "and no demand claim is made.")
     if tiktok.get("ok"):
         lines.append("- TikTok reference: optional public metadata supplied; the "
                      "description remains the source of truth.")
@@ -694,10 +1055,10 @@ def format_report(result):
                      f"description-only.")
     if result.get("protected_names"):
         lines.append("- Protected performer/brand references were excluded "
-                     "from titles.")
+                     "from titles and public copy.")
     if result.get("rejected"):
         lines.append(f"- {len(result['rejected'])} candidate(s) rejected for "
                      "unsafe/inaccurate wording before output.")
     lines.append("- Titles are validated with ASTRA immediately before output; "
-                 "favorites are not sales.")
+                 "favorites are not sales; demand is unknown.")
     return "\n".join(lines)

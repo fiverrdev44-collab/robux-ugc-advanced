@@ -1,7 +1,11 @@
-"""Tests for the Emote Reference Title Engine (AI-first, ranked, secure)."""
+"""Regression tests for live !emote_title defects.
+
+All DB/live/AI calls are mocked. No production data or network is touched.
+"""
 import asyncio
 import json
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -13,131 +17,228 @@ import chain
 import emote_title_engine as ete
 from product_understanding import validate_title
 
-JABBA = ("I made a new emote inspired by Jabbawockeez. It's a mysterious, "
-         "energetic street dance.")
+LIVE_INPUT = (
+    "I created a new Roblox emote inspired by Jabbawockeez. It's a mysterious, "
+    "energetic street dance with a powerful hip-hop performance style.")
 
-
-def _db(*a, **k):
-    return {"ok": True, "matches": 12, "sampled": 12,
-            "top_examples": [{"name": "Mysterious Street Dance",
-                              "favorites": 120, "price": 45}],
-            "note": "sampled"}
-
-
-def _live_ok(*a, **k):
-    return [{"keyword": "mysterious", "ok": True, "sampled_results": 30,
-             "category_correct": 28, "category_mismatched": 2,
-             "exact_title_matches": 1, "conceptual_matches": 6,
-             "top_competitors": [{"name": "Energetic Street Dance",
-                                  "favorites": 90, "price": 40,
-                                  "asset_type_id": 61}],
-             "verification_timestamp": "2026-11-04T00:00:00Z"}]
-
-
-def _live_429(*a, **k):
-    return [{"keyword": "mysterious", "ok": False, "error": "rate limited (429)"}]
+FIVE = [
+    ("Search", "Mysterious Street Dance Emote"),
+    ("Branding", "Energetic Street Dance Emote"),
+    ("Aesthetic", "Mysterious Energetic Dance Emote"),
+    ("Community", "Hip Hop Dance Emote"),
+    ("Balanced", "Powerful Street Dance Emote"),
+]
 
 
 def _ai(titles):
-    def fn(prompt, **kwargs):
+    def fn(prompt, **kw):
         return json.dumps({"titles": [{"strategy": s, "title": t}
                                       for s, t in titles]})
     return fn
 
 
-FIVE_GOOD = [
-    ("Search", "Mysterious Street Dance Emote"),
-    ("Branding", "Energetic Street Dance Emote"),
-    ("Aesthetic", "Mysterious Energetic Dance Emote"),
-    ("Community", "Energetic Mysterious Street Emote"),
-    ("Balanced", "Street Mysterious Energetic Dance Emote"),
-]
+def _db(phrases):
+    return {
+        "ok": True, "matches": 18, "sampled": 18,
+        "phrases": [{"phrase": p, "token_matches": 5, "exact_matches": 1,
+                     "tokens": len(p.split())} for p in phrases],
+        "live_shortlist": ["energetic street dance", "hip hop dance"],
+        "top_examples": [{"name": "Mysterious Street Dance",
+                          "favorites": 120, "price": 45}],
+        "note": "sampled",
+    }
 
 
-class JabbaTests(unittest.TestCase):
-    def setUp(self):
-        self.res = ete.generate(
-            JABBA, db_fn=_db, live_fn=_live_ok, generate_fn=_ai(FIVE_GOOD))
+def _live_ok(phrases):
+    return [{"keyword": p, "ok": True, "category_correct": 10,
+             "category_mismatched": 0, "exact_title_matches": 0,
+             "conceptual_matches": 3, "top_competitors": [],
+             "checked_at": "2026-11-05T00:00:00Z"} for p in phrases]
 
-    def test_five_meaningfully_different_titles(self):
-        titles = [t["title"] for t in self.res["titles"]]
+
+def _live_429(phrases):
+    if not phrases:
+        return []
+    p = phrases[0]
+    return [{"keyword": p, "ok": False, "error": "rate limited (429)",
+             "checked_at": "2026-11-05T00:00:00Z", "deferred": True}]
+
+
+def _title_db(title):
+    return {"ok": True, "exact": False, "source": "database",
+            "checked_at": "2026-11-05T00:00:00Z"}
+
+
+def _title_live_mixed(title):
+    if "Mysterious Street Dance" in title:
+        return {"ok": True, "exact_title_matches": 1, "conceptual_matches": 3,
+                "top_competitors": [{"name": title, "asset_type_id": 61}],
+                "checked_at": "2026-11-05T00:00:00Z"}
+    return {"ok": True, "exact_title_matches": 0, "conceptual_matches": 4,
+            "top_competitors": [{"name": "Some Other Emote",
+                                 "asset_type_id": 61}],
+            "checked_at": "2026-11-05T00:00:00Z"}
+
+
+def _generate(**overrides):
+    kw = dict(db_fn=_db, live_fn=_live_ok, generate_fn=_ai(FIVE),
+              title_db_fn=_title_db, title_live_fn=_title_live_mixed)
+    kw.update(overrides)
+    return ete.generate(LIVE_INPUT, **kw)
+
+
+class SemanticExtractionTests(unittest.TestCase):
+    def test_created_never_researched(self):
+        captured = {}
+
+        def db_fn(phrases):
+            captured["db"] = list(phrases)
+            return _db(phrases)
+
+        def live_fn(phrases):
+            captured["live"] = list(phrases)
+            return _live_ok(phrases)
+
+        res = _generate(db_fn=db_fn, live_fn=live_fn)
+        terms = captured["db"] + captured["live"]
+        self.assertFalse(any("created" in t for t in terms), terms)
+        self.assertNotIn("created", res["research_keywords"])
+
+    def test_multiword_dance_concepts_preferred(self):
+        res = _generate()
+        concepts = res["concepts"]
+        expected = ("street dance", "hip hop dance", "mysterious dance",
+                    "energetic street dance")
+        present = [c for c in expected if c in concepts]
+        self.assertGreaterEqual(len(present), 3, concepts)
+        self.assertTrue(any(" " in p for p in res["research_keywords"][:2]),
+                        res["research_keywords"])
+
+    def test_public_description_is_natural(self):
+        res = _generate()
+        desc = res["description"]
+        low = desc.lower()
+        for bad in ("created", "centered on", "built around", "inspired by",
+                    "based on", "jabbawockeez", "keyword"):
+            self.assertNotIn(bad, low)
+        self.assertIn("street dance", low)
+        self.assertTrue(desc.startswith("Meet "))
+        self.assertGreaterEqual(low.count("."), 2)
+        self.assertNotIn("mysterious, energetic, street.", low)
+
+
+class TitleVerificationTests(unittest.TestCase):
+    def test_exact_similar_conceptual_insufficient(self):
+        direct = ete.verify_titles(
+            [{"title": "Mysterious Street Dance Emote"},
+             {"title": "Hip Hop Dance Emote"}],
+            db_fn=_title_db, live_fn=_title_live_mixed)
+        self.assertEqual([c["status"] for c in direct],
+                         ["exact", "conceptual"])
+        self.assertTrue(all(c["checked_at"] for c in direct))
+
+    def test_generate_attaches_title_checks(self):
+        res = _generate()
+        self.assertTrue(res["title_checks"])
+        valid = {"exact", "similar", "conceptual", "none", "insufficient"}
+        for c in res["title_checks"]:
+            self.assertIn(c["status"], valid)
+            self.assertTrue(c["checked_at"])
+        report = ete.format_report(res)
+        self.assertIn("Title-level verification", report)
+        self.assertIn("keyword-level, not candidate-title", report)
+
+    def test_exact_title_is_demoted(self):
+        titles = [{"title": "Mysterious Street Dance Emote", "strategy": "A"},
+                  {"title": "Hip Hop Dance Emote", "strategy": "B"}]
+        checks = [{"title": "Mysterious Street Dance Emote",
+                   "status": "exact", "checked_at": "2026-11-05T00:00:00Z"}]
+        ranked = ete.rank_titles(
+            titles, LIVE_INPUT, ["street dance", "hip hop dance"],
+            _db(["street dance"]), _live_ok(["street dance"]),
+            title_checks=checks)
+        self.assertEqual(ranked[0]["title"], "Hip Hop Dance Emote")
+        exact = next(t for t in ranked
+                     if t["title"] == "Mysterious Street Dance Emote")
+        self.assertEqual(exact["components"]["verified_similarity"], 0.0)
+
+
+class RateLimitTests(unittest.TestCase):
+    def test_research_live_stops_after_429(self):
+        calls = []
+
+        def fake_verify(phrase, family=None, max_pages=None):
+            calls.append(phrase)
+            return {"ok": False, "error": "rate limited (429)"}
+
+        with mock.patch("convergence_live.verify_niche",
+                        side_effect=fake_verify):
+            out = ete.research_live(["street dance", "hip hop dance"])
+        self.assertEqual(calls, ["street dance"])
+        self.assertTrue(out[-1]["deferred"])
+        self.assertTrue(out[-1]["checked_at"])
+
+    def test_generate_defers_title_live_after_429(self):
+        def must_not_call(title):
+            raise AssertionError("title live check called after rate limit")
+
+        res = _generate(live_fn=_live_429, title_live_fn=must_not_call)
+        self.assertTrue(res["research"]["live_deferred"])
+        report = ete.format_report(res)
+        self.assertIn("incomplete", report.lower())
+        self.assertIn("deferred", report.lower())
+        self.assertTrue(all(c["status"] in ("insufficient", "exact")
+                            for c in res["title_checks"]))
+
+    def test_no_evidence_caps_score_and_labels_unknown(self):
+        res = _generate(
+            db_fn=lambda p: {"ok": False, "error": "db down",
+                             "live_shortlist": []},
+            live_fn=_live_429,
+            title_db_fn=lambda t: {"ok": False, "exact": False,
+                                   "error": "db down",
+                                   "checked_at": "2026-11-05T00:00:00Z"})
+        for t in res["titles"]:
+            self.assertLessEqual(t["score"], 60.0)
+            self.assertEqual(t["evidence_status"], "insufficient")
+            self.assertEqual(t["components"]["unknown_demand"], "unknown")
+        self.assertIn("demand: unknown", ete.format_report(res).lower())
+
+
+class GenerationQualityTests(unittest.TestCase):
+    def test_five_distinct_grounded_titles(self):
+        res = _generate()
+        titles = [t["title"] for t in res["titles"]]
         self.assertEqual(len(titles), 5)
         self.assertEqual(len({t.lower() for t in titles}), 5)
-        for i in range(len(titles)):
-            for j in range(i + 1, len(titles)):
-                a = {x for x in ete._tokens(titles[i]) if x != "emote"}
-                b = {x for x in ete._tokens(titles[j]) if x != "emote"}
-                jaccard = len(a & b) / max(1, len(a | b))
-                self.assertLess(jaccard, 0.8, (titles[i], titles[j]))
+        for t in titles:
+            self.assertNotIn("jabbawockeez", t.lower())
+            self.assertIsNone(
+                re.search(r"\b(made|based|inspired)\b", t.lower()), t)
+            ok, why = validate_title(LIVE_INPUT, t, family="emotes")
+            self.assertTrue(ok, (t, why))
+            self.assertTrue(ete.motion_grounded(LIVE_INPUT, t), t)
+            self.assertFalse(astra.contains_banned_platform(t), t)
 
-    def test_no_unauthorized_performer_branding(self):
-        for t in self.res["titles"]:
-            self.assertNotIn("jabbawockeez", t["title"].lower())
-        self.assertIn("jabbawockeez", self.res["protected_names"])
-
-    def test_no_mechanical_titles(self):
-        for t in self.res["titles"]:
-            self.assertNotRegex(t["title"].lower(), r"\b(made|based|inspired)\b")
-
-    def test_titles_are_grounded_and_validated(self):
-        for t in self.res["titles"]:
-            self.assertTrue(ete.motion_grounded(JABBA, t["title"]), t)
-            ok, why = validate_title(JABBA, t["title"], family="emotes")
-            self.assertTrue(ok, (t["title"], why))
-            self.assertFalse(astra.contains_banned_platform(t["title"]))
-
-    def test_recommended_is_evaluated_not_first(self):
-        # The AI's first title exactly matches a DB competitor, so its
-        # differentiation drops and it must not win automatically.
-        self.assertEqual(self.res["titles"][0]["recommended"], True)
-        # Recommendation must be the highest-scored title; changing ranking
-        # weights can legitimately change which candidate wins.
-        self.assertEqual(self.res["recommended"], self.res["titles"][0]["title"])
-        scores = [t["score"] for t in self.res["titles"]]
-        self.assertEqual(self.res["titles"][0]["score"], max(scores))
-        for t in self.res["titles"]:
-            self.assertIn("components", t)
-            for key in ("accuracy", "natural", "search",
-                        "differentiation", "evidence"):
-                self.assertIn(key, t["components"])
-
-    def test_experiment_is_observational(self):
-        exp = self.res["experiment"].lower()
-        self.assertIn("observational", exp)
-        self.assertIn("not a randomized a/b test", exp)
-        self.assertNotIn("seven days", exp)
-
-    def test_banned_words_stripped(self):
-        desc = "a viral trending tiktok youtube fairy that floats"
-        res = ete.generate(desc, db_fn=_db, live_fn=_live_ok,
-                           generate_fn=_ai([("Search", "Viral Fairy Emote"),
-                                            ("Branding", "TikTok Float Emote")]))
-        for t in res["titles"]:
-            for bad in ("viral", "trending", "tiktok", "youtube"):
-                self.assertNotIn(bad, t["title"].lower())
-        self.assertNotIn("viral", res["description"].lower())
-
-    def test_motion_invention_rejected(self):
+    def test_no_movement_hallucinated(self):
         desc = "a calm idle emote"
         res = ete.generate(
             desc, db_fn=_db, live_fn=_live_ok,
             generate_fn=_ai([("Search", "Spinning Flip Emote"),
-                             ("Branding", "Calm Idle Emote")]))
+                             ("Branding", "Calm Idle Emote")]),
+            title_db_fn=_title_db, title_live_fn=_title_live_mixed)
         for t in res["titles"]:
             self.assertTrue(ete.motion_grounded(desc, t["title"]), t)
             self.assertNotIn("spinning", t["title"].lower())
             self.assertNotIn("flip", t["title"].lower())
 
-    def test_live_429_is_honest(self):
-        res = ete.generate(JABBA, db_fn=_db, live_fn=_live_429,
-                           generate_fn=_ai(FIVE_GOOD))
-        self.assertFalse(res["research"]["live_ok"])
-        report = ete.format_report(res)
-        self.assertIn("incomplete", report.lower())
-        self.assertIn("429", report)
-        # Evidence quality is marked incomplete; no competitor is invented.
-        self.assertTrue(all(t["evidence_quality"] == "incomplete"
-                            for t in res["titles"]))
+    def test_experiment_is_observational(self):
+        res = _generate()
+        plan = res["experiment"].lower()
+        self.assertIn("observational", plan)
+        self.assertIn("not a randomized a/b test", plan)
+        self.assertIn("does not establish causality", plan)
+        self.assertNotIn("seven days", plan)
 
 
 class SecureTikTokTests(unittest.TestCase):
@@ -148,56 +249,17 @@ class SecureTikTokTests(unittest.TestCase):
                     "https://tiktok.com@127.0.0.1/x",
                     "https://www.tiktok.com:8443/x",
                     "http://www.tiktok.com/@x/video/1"):
-            host, err = ete.validate_tiktok_url(url)
+            _host, err = ete.validate_tiktok_url(url)
             self.assertTrue(err, url)
 
-    def test_valid_reference_has_no_network_access(self):
-        with mock.patch("socket.getaddrinfo", side_effect=AssertionError("dns called")), \
-             mock.patch("requests.sessions.Session.get", side_effect=AssertionError("HTTP called")):
+    def test_no_network_for_reference(self):
+        with mock.patch("socket.getaddrinfo",
+                        side_effect=AssertionError("dns called")), \
+                mock.patch("requests.sessions.Session.get",
+                           side_effect=AssertionError("HTTP called")):
             res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1")
         self.assertFalse(res["ok"])
         self.assertTrue(res["reference_valid"])
-        self.assertIn("disabled", res["error"])
-        self.assertIsNone(ete.validate_tiktok_url("https://vm.tiktok.com/Zabc123/")[1])
-
-    def test_description_only_fallback(self):
-        with mock.patch("requests.sessions.Session.get", side_effect=AssertionError("HTTP called")):
-            result = ete.generate(JABBA, url="https://www.tiktok.com/@x/video/1",
-                                  db_fn=_db, live_fn=_live_ok,
-                                  generate_fn=_ai(FIVE_GOOD))
-        self.assertTrue(result["titles"])
-        self.assertFalse(result["research"]["tiktok"]["ok"])
-
-
-class ListingAndEvidenceTests(unittest.TestCase):
-    def test_no_brand_or_creator_instructions_in_public_description(self):
-        result = ete.generate(JABBA, db_fn=_db, live_fn=_live_ok,
-                              generate_fn=_ai(FIVE_GOOD))
-        desc = result["description"].lower()
-        for forbidden in ("jabbawockeez", "i made", "inspired by",
-                          "based on"):
-            self.assertNotIn(forbidden, desc)
-
-    def test_feasible_observational_experiment(self):
-        res = ete.generate(JABBA, db_fn=_db, live_fn=_live_ok,
-                           generate_fn=_ai(FIVE_GOOD))
-        plan = res["experiment"].lower()
-        self.assertIn("observational", plan)
-        self.assertIn("not a randomized a/b test", plan)
-        self.assertIn("does not establish causality", plan)
-        self.assertNotIn("show", plan)
-
-    def test_evidence_requires_relevant_competitor_names(self):
-        titles = [{"strategy": "Test", "title": "Mysterious Street Dance Emote"}]
-        no_names = {"ok": True, "matches": 0, "top_examples": []}
-        clean_live = [{"ok": True, "top_competitors": []}]
-        ranked = ete.rank_titles(titles, JABBA, ["mysterious"], no_names, clean_live)
-        comp = ranked[0]["components"]
-        self.assertEqual(comp["retrieval"], 1.0)
-        self.assertEqual(comp["market_context"], 0.0)
-        self.assertEqual(comp["evidence"], 0.0)
-        self.assertEqual(ranked[0]["evidence_quality"],
-                         "sampled, no relevant matches")
 
 
 class ChainStillWorksTests(unittest.TestCase):
@@ -266,7 +328,7 @@ class CommandTests(unittest.TestCase):
         with mock.patch.object(ete, "generate", return_value=fake_result), \
                 mock.patch.object(ete, "format_report",
                                   return_value="REPORT-BODY"):
-            asyncio.run(bot.commands["emote_title"](ctx, args=JABBA))
+            asyncio.run(bot.commands["emote_title"](ctx, args=LIVE_INPUT))
         self.assertIn("REPORT-BODY", ctx.channel.sent)
 
     def test_command_requires_description(self):

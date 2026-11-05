@@ -21,7 +21,8 @@ def _fast_scheduler():
     s = cl._get_scheduler()
     s.configure("catalog_search", rate_per_min=100000, max_concurrency=5,
                 cache_ttl=0, max_retries=1, circuit_threshold=1,
-                circuit_cooldown=30.0, backoff_base=0.001, backoff_cap=0.001)
+                circuit_cooldown=30.0, backoff_base=0.001, backoff_cap=0.001,
+                honor_retry_after=False, retry_after_budget=3600)
     return s
 
 
