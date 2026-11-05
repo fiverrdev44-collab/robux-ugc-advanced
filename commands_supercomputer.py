@@ -16,6 +16,7 @@ import aiohttp
 import subprocess
 import discord
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 
 from bot_core import get_db, rollback_quietly
 from launch_ledger import (
@@ -48,6 +49,111 @@ def format_favorite(favs):
     except (TypeError, ValueError):
         return "unknown"
 
+
+GOLDEN_WINDOW_HOURS = 48
+GOLDEN_MIN_SNAPSHOT_SPAN_HOURS = 1.0
+
+WHALE_RADAR_TITLE = "🐋 Monitored Studio Catalog Sample"
+WHALE_RADAR_DESCRIPTION = (
+    "Stored catalog sample from monitored studio names "
+    "(not live surveillance; not 50-studio coverage).")
+WHALE_RADAR_FOOTER = (
+    "Stored PostgreSQL sample · not live · limited monitored set")
+
+
+def golden_hour_metrics(cur, limit=5):
+    """Observed favorites + snapshot velocity, aggregated and ranked in SQL.
+
+    PostgreSQL filters recent items, aggregates their 48-hour snapshots,
+    computes velocity only when two snapshots span at least one hour, ranks
+    measured velocity before unmeasured items, and applies the output limit
+    after ranking. Python only maps the already-limited SQL result.
+
+    Missing favorites stay None. Valid zero/negative growth is measured.
+    """
+    limit = max(1, int(limit))
+    span_seconds = int(GOLDEN_MIN_SNAPSHOT_SPAN_HOURS * 3600)
+    cur.execute("""
+        WITH recent AS (
+            SELECT i.id, i.name, i.creator_name, i.price,
+                   i.favorite_count, i.created_at
+            FROM items i
+            WHERE i.created_at >= NOW() - INTERVAL '48 hours'
+        ),
+        agg AS (
+            SELECT r.id, r.name, r.creator_name, r.price,
+                   r.favorite_count, r.created_at,
+                   count(h.snapshot_at) AS snapshot_count,
+                   min(h.snapshot_at) AS first_at,
+                   max(h.snapshot_at) AS last_at,
+                   (array_agg(h.favorite_count ORDER BY h.snapshot_at ASC)
+                       FILTER (WHERE h.snapshot_at IS NOT NULL))[1]
+                       AS first_favs,
+                   (array_agg(h.favorite_count ORDER BY h.snapshot_at DESC)
+                       FILTER (WHERE h.snapshot_at IS NOT NULL))[1]
+                       AS last_favs
+            FROM recent r
+            LEFT JOIN item_history h
+              ON h.item_id = r.id
+             AND h.snapshot_at >= NOW() - INTERVAL '48 hours'
+             AND h.favorite_count IS NOT NULL
+            GROUP BY r.id, r.name, r.creator_name, r.price,
+                     r.favorite_count, r.created_at
+        ),
+        scored AS (
+            SELECT *,
+                   EXTRACT(EPOCH FROM (last_at - first_at)) / 3600.0
+                       AS span_hours,
+                   CASE
+                     WHEN snapshot_count >= 2
+                      AND EXTRACT(EPOCH FROM (last_at - first_at)) >= %s
+                     THEN (last_favs - first_favs) * 24.0
+                          / (EXTRACT(EPOCH FROM (last_at - first_at))
+                             / 3600.0)
+                     ELSE NULL
+                   END AS velocity
+            FROM agg
+        )
+        SELECT id, name, creator_name, price, favorite_count, created_at,
+               snapshot_count,
+               CASE WHEN velocity IS NOT NULL THEN span_hours END
+                   AS span_hours,
+               velocity,
+               (velocity IS NOT NULL) AS velocity_measured
+        FROM scored
+        ORDER BY (velocity IS NOT NULL) DESC,
+                 velocity DESC NULLS LAST,
+                 favorite_count DESC NULLS LAST,
+                 id ASC
+        LIMIT %s
+    """, (span_seconds, limit))
+    rows = cur.fetchall() or []
+    items = []
+    for (item_id, name, creator, price, favs, created_at,
+         snapshot_count, span_hours, velocity,
+         velocity_measured) in rows[:limit]:
+        items.append({
+            "item_id": item_id,
+            "name": name or "",
+            "creator": creator or "",
+            "price": price,
+            "favorites": favs,
+            "created_at": created_at,
+            "snapshot_count": int(snapshot_count or 0),
+            "snapshot_span_hours": (float(span_hours)
+                                    if span_hours is not None else None),
+            "velocity": (float(velocity)
+                         if velocity is not None else None),
+            "velocity_measured": bool(velocity_measured),
+        })
+    measured_count = sum(1 for r in items if r["velocity_measured"])
+    return {
+        "items": items,
+        "measured_count": measured_count,
+        "unmeasured_count": len(items) - measured_count,
+        "window_hours": GOLDEN_WINDOW_HOURS,
+    }
+
 TOP_WHALE_STUDIOS = {
     "1276023": "Erythia Studios",
     "4829104": "Rush Production",
@@ -68,7 +174,8 @@ def register_supercomputer_commands(bot):
     @bot.command(name="whales", aliases=["whale"])
     async def whales_command(ctx, studio_name: str = None):
         """
-        Track drops and activity from top 50 Roblox studios.
+        Stored catalog sample for monitored studios (not live surveillance,
+        not 50-studio coverage).
         Usage: !whales [optional_studio_name]
         """
         try:
@@ -109,8 +216,8 @@ def register_supercomputer_commands(bot):
             conn.close()
 
             embed = discord.Embed(
-                title="🐋 Whale Studio Surveillance Radar",
-                description="Live surveillance of top 50 studios & recent catalog drops:",
+                title=WHALE_RADAR_TITLE,
+                description=WHALE_RADAR_DESCRIPTION,
                 color=0x10B981
             )
 
@@ -131,7 +238,7 @@ def register_supercomputer_commands(bot):
                     inline=False
                 )
 
-            embed.set_footer(text="VANTA 73 Supercomputer · Oracle PostgreSQL 17")
+            embed.set_footer(text=WHALE_RADAR_FOOTER)
             await ctx.send(embed=embed)
 
         except Exception as e:
@@ -451,49 +558,59 @@ def register_supercomputer_commands(bot):
     @bot.command(name="golden_hour", aliases=["golden"])
     async def golden_hour_command(ctx, limit: int = 5):
         """
-        Scan 48-hour velocity acceleration for items in the golden algorithm testing window.
+        Show recent items with observed favorites and snapshot-measured
+        velocity only where history supports it.
         Usage: !golden_hour [limit]
         """
         try:
             conn = get_db()
             cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT id, name, creator_name, price, favorite_count, created_at
-                FROM items
-                WHERE created_at >= NOW() - INTERVAL '48 hours'
-                ORDER BY favorite_count DESC NULLS LAST
-                LIMIT %s
-                """,
-                (min(limit, 10),)
-            )
-            rows = cur.fetchall()
+            metrics = golden_hour_metrics(cur, min(limit, 10))
             cur.close()
             conn.close()
 
             embed = discord.Embed(
-                title="⚡ 48-Hour Golden Window Velocity Radar",
-                description="New items gaining algorithmic momentum in the first 48 hours:",
+                title="⚡ 48-Hour Recent Items — Favorites & Measured Velocity",
+                description=(
+                    "Observed favorites are not velocity or algorithmic "
+                    "momentum. Velocity is shown only when at least two "
+                    "snapshots establish a measured change."),
                 color=0xEC4899
             )
 
-            if rows:
-                for r in rows:
-                    item_id, name, creator, price, favs, created_at = r
-                    fav_str = format_favorite(favs)
+            if metrics["items"]:
+                for rec in metrics["items"]:
+                    fav_str = format_favorite(rec["favorites"])
+                    price_str = (f"{rec['price']} R$"
+                                 if rec["price"] else "unknown")
+                    if rec["velocity_measured"]:
+                        vel = (f"⚡ {rec['velocity']:+.2f} fav/day over "
+                               f"{rec['snapshot_span_hours']}h (measured)")
+                    else:
+                        vel = ("velocity unavailable "
+                               "(insufficient snapshots)")
                     embed.add_field(
-                        name=f"[{creator}] {name[:35]}",
-                        value=f"ID: `{item_id}` · ⭐ **{fav_str} favs** · Price: `{price} R$`",
+                        name=f"[{rec['creator']}] {rec['name'][:35]}",
+                        value=(f"ID: `{rec['item_id']}` · ⭐ {fav_str} favs · "
+                               f"{vel} · Price: `{price_str}`"),
                         inline=False
                     )
+                if metrics["measured_count"] == 0:
+                    embed.add_field(
+                        name="Evidence",
+                        value=("No snapshot-measured velocity in this window; "
+                               "showing observed total favorites only."),
+                        inline=False)
             else:
-                embed.description = "No items detected in the last 48-hour window. Showing top trending catalog items."
+                embed.description += " No items in the 48-hour window."
 
-            embed.set_footer(text="48h Algorithmic Testing Window Tracker")
+            embed.set_footer(
+                text=("Not algorithmic ranking data. Favorites ≠ sales. "
+                      "Velocity requires snapshots."))
             await ctx.send(embed=embed)
 
         except Exception as e:
-            await ctx.send(f"⚠️ Velocity radar error: {e}")
+            await ctx.send(f"⚠️ Recent-items radar error: {e}")
 
     # ── 7. 🎯 Meta Sniper (traffic interceptor) ──────────────────────
     @bot.command(name="meta_sniper", aliases=["sniper"])

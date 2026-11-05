@@ -282,28 +282,43 @@ def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15,
             perf_counts[t] += 1
 
     up_total = len(underperformers)
-    perf_total = max(len(performers), 1)
+    perf_total = len(performers)
+    perf_denom = max(perf_total, 1)
 
     results = []
     for word, up_n in up_counts.items():
         if up_n < min_sample:
             continue
         up_rate = up_n / up_total
-        perf_rate = perf_counts.get(word, 0) / perf_total
-        ratio = 999 if perf_rate == 0 else up_rate / perf_rate
-        if ratio < 1.5:
-            continue
+        perf_n = perf_counts.get(word, 0)
+        perf_rate = perf_n / perf_denom
+        if perf_total == 0:
+            ratio = None
+            evidence = "no high-favorite comparison group"
+        elif perf_n == 0:
+            ratio = None
+            evidence = "no high-favorite comparison occurrences"
+        else:
+            ratio = up_rate / perf_rate
+            evidence = "observational comparison"
+            if ratio < 1.5:
+                continue
         results.append({
             "word": word,
             "under_count": up_n,
+            "under_total": up_total,
+            "perf_count": perf_n,
+            "perf_total": perf_total,
             "under_rate": round(up_rate * 100, 1),
             "perf_rate": round(perf_rate * 100, 1),
-            "ratio": round(ratio, 2),
+            "ratio": round(ratio, 2) if ratio is not None else None,
+            "evidence": evidence,
             "comparison": "low-favorite vs high-favorite items (selection-biased)",
             "causal": False,
         })
 
-    results.sort(key=lambda r: -r["ratio"])
+    results.sort(key=lambda r: (r["ratio"] is None, -(r["ratio"] or 0),
+                                -r["under_count"]))
     return results[:top_n]
 
 
@@ -333,11 +348,18 @@ def format_failure_patterns(results):
         return "(no failure patterns found)"
     lines = ["# ⚠️ FAILURE PATTERNS\n"]
     lines.append("_Associations in a selection-biased comparison "
-                 "(low-favorite vs high-favorite items); not causal._\n")
+                 "(low-favorite vs high-favorite items); not causal. "
+                 "Zero comparison frequency is reported as n/a, not a ratio._\n")
     for i, r in enumerate(results, 1):
+        ratio = r.get("ratio")
+        ratio_text = (f"**{ratio}x**" if ratio is not None
+                      else "**n/a** (insufficient comparison)")
         lines.append(
-            f"**{i}. `{r['word']}`** — underperformers: **{r['under_rate']}%** "
-            f"· winners: **{r['perf_rate']}%** · ratio **{r['ratio']}x** "
-            f"· {r['under_count']} items"
+            f"**{i}. `{r['word']}`** — underperformers: "
+            f"**{r['under_count']}/{r.get('under_total', '?')}** "
+            f"({r['under_rate']}%) · high-favorite: "
+            f"**{r.get('perf_count', 0)}/{r.get('perf_total', 0)}** "
+            f"({r['perf_rate']}%) · ratio {ratio_text} · "
+            f"{r.get('evidence', 'observational comparison')}"
         )
     return "\n".join(lines)
