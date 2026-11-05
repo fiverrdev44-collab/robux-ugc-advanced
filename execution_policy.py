@@ -388,6 +388,10 @@ class EndpointPolicy:
     circuit_threshold: int = 3
     circuit_cooldown: float = 30.0
     max_cache_entries: int = 512
+    # Honour the server's full Retry-After delay. If it exceeds this budget,
+    # defer (do not retry) instead of retrying early.
+    retry_after_budget: float = 60.0
+    honor_retry_after: bool = True
 
 
 @dataclass
@@ -401,6 +405,8 @@ class SchedulerResult:
     cached: bool = False
     deduplicated: bool = False
     attempts: int = 0
+    deferred: bool = False
+    retry_after: float = None
 
 
 class _Bucket:
@@ -486,7 +492,8 @@ class RobloxScheduler:
         wait = _parse_retry_after(retry_after)
         if wait is None:
             wait = pol.circuit_cooldown
-        wait = max(1.0, min(wait, 300.0))
+        # Honour the full Retry-After deadline (generous sanity cap only).
+        wait = max(1.0, min(wait, 3600.0))
         with self._lock:
             self._circuit_until[endpoint] = max(
                 self._circuit_until.get(endpoint, 0.0), self._clock() + wait)
@@ -534,7 +541,9 @@ class RobloxScheduler:
     def _backoff(self, attempt, pol, retry_after=None):
         ra = _parse_retry_after(retry_after)
         if ra is not None:
-            return max(0.0, min(ra, pol.backoff_cap))
+            # Never retry before the server's requested delay. Test/benchmark
+            # configs may opt out explicitly via honor_retry_after=False.
+            return ra if pol.honor_retry_after else min(ra, pol.backoff_cap)
         return min(pol.backoff_cap, pol.backoff_base * (2 ** attempt))
 
     def request(self, endpoint, url, params=None, headers=None, timeout=12,
@@ -626,14 +635,21 @@ class RobloxScheduler:
                     self._success(endpoint)
                     break
                 if status == 429:
-                    ra = headers_dict.get("Retry-After")
+                    ra_raw = headers_dict.get("Retry-After")
+                    ra = _parse_retry_after(ra_raw)
+                    result.retry_after = ra
+                    if ra is not None and ra > pol.retry_after_budget:
+                        # Respect the full deadline: do not retry early.
+                        result.error = (f"rate limited (429); Retry-After "
+                                        f"{ra:.0f}s — deferred")
+                        result.deferred = True
+                        self._trip(endpoint, pol, ra_raw)
+                        break
                     if attempt < retries:
-                        self._sleep(self._backoff(attempt, pol, ra))
+                        self._sleep(self._backoff(attempt, pol, ra_raw))
                         continue
                     result.error = "rate limited (429)"
-                    # Threshold-based so backoff and the circuit breaker are
-                    # coordinated rather than tripping on a single blip.
-                    self._failure(endpoint, pol, ra)
+                    self._failure(endpoint, pol, ra_raw)
                     break
                 if 500 <= status < 600:
                     if attempt < retries:

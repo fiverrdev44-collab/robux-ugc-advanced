@@ -8,6 +8,7 @@ on:
       - project-oracle-phase2-1
       - feat/accuracy-first-execution-policy
       - feature/emote-title-engine
+      - fix/emote-title-live-defects
   pull_request:
     branches:
       - main
