@@ -148,10 +148,12 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
 
     if _circuit_open():
         return {"ok": False, "error": "circuit open (rate limited)",
-                "keyword": keyword, "cached": False}
+                "keyword": keyword, "cached": False, "deferred": True,
+                "retry_after": None}
 
     expected = _expected_asset_types(family)
     rows, pages, cursor = [], 0, None
+    rate_limit_meta = None
     try:
         while pages < max_pages:
             params = {"Keyword": keyword, "Limit": limit,
@@ -164,11 +166,17 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             status = r.status or 0
             if not r.ok:
                 if status == 429:
-                    retry_after = (r.headers or {}).get("Retry-After")
+                    # Preserve the scheduler's original retry/defer evidence.
+                    retry_after = (r.retry_after if r.retry_after is not None
+                                   else (r.headers or {}).get("Retry-After"))
+                    rate_limit_meta = {"deferred": bool(r.deferred),
+                                       "retry_after": retry_after}
                     if rows:
                         break
-                    return {"ok": False, "error": "rate limited (429)",
+                    return {"ok": False,
+                            "error": r.error or "rate limited (429)",
                             "retry_after": retry_after,
+                            "deferred": bool(r.deferred),
                             "keyword": keyword, "cached": False}
                 if status >= 500:
                     if rows:
@@ -247,6 +255,9 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             + (" (capped before catalog exhausted)" if capped else "")
         ),
     }
+    if rate_limit_meta:
+        # Partial results were returned, but the rate-limit evidence is kept.
+        result.update(rate_limit_meta)
     if use_cache:
         _cache_put(cache_key, result)
     return result

@@ -369,9 +369,11 @@ def research_live(phrases, max_queries=2):
             "conceptual_matches": r.get("conceptual_matches"),
             "top_competitors": (r.get("top_competitors") or [])[:5],
             "checked_at": r.get("verification_timestamp") or _utc_now(),
+            "retry_after": r.get("retry_after"),
+            "deferred": bool(r.get("deferred")),
         }
         out.append(rec)
-        if not rec["ok"]:
+        if rec["deferred"] or not rec["ok"]:
             remaining = wanted[idx + 1:]
             rec["deferred"] = True
             if remaining:
@@ -733,7 +735,9 @@ def _verified_components(check):
         return 0.6, 0.6, 1.0, "conceptual"
     if status == "none":
         return 1.0, 1.0, 1.0, "none"
-    return 0.5, 0.5, 0.0, "insufficient"
+    if status == "insufficient":
+        return 0.5, 0.5, 0.0, "insufficient"
+    return 0.5, 0.5, 0.0, "unverified"
 
 
 def rank_titles(titles, description, concepts, db, live, title_checks=None):
@@ -872,12 +876,27 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     deferred = (any(r.get("deferred") for r in live)
                 or any(c.get("status") == "insufficient" for c in checks))
 
+    # The winner may have changed after demotions. If that exact candidate was
+    # not checked, label it unverified — never spend another API request here.
+    recommended_verification = None
+    if ranked:
+        rec_title = ranked[0]["title"]
+        recommended_verification = next(
+            (c for c in checks if c.get("title") == rec_title), None)
+        if recommended_verification is None:
+            recommended_verification = {
+                "title": rec_title, "status": "unverified",
+                "checked_at": None,
+                "reason": "not checked to preserve rate-limit budget",
+            }
+
     return {
         "description": _build_description(
             raw_description, concepts, protected=protected,
             title=ranked[0]["title"] if ranked else None),
         "titles": ranked,
         "recommended": ranked[0]["title"] if ranked else None,
+        "recommended_verification": recommended_verification,
         "experiment": _build_experiment(ranked, live_ok, live_error),
         "keywords": keywords,
         "concepts": concepts,
@@ -888,7 +907,9 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
         "research": {
             "db": db, "live": live, "live_ok": live_ok,
             "live_error": live_error, "live_deferred": deferred,
-            "title_checks": checks, "tiktok": meta,
+            "title_checks": checks,
+            "recommended_verification": recommended_verification,
+            "tiktok": meta,
         },
         "banned_removed": sorted(
             {w for w in BANNED if w in str(description or "").lower()}),
@@ -1001,18 +1022,25 @@ def format_report(result):
 
     lines.append("## Title-level verification")
     checks = result.get("title_checks") or research.get("title_checks") or []
-    if checks:
-        labels = {"exact": "exact title match",
-                  "similar": "similar title",
-                  "conceptual": "conceptual competitor",
-                  "none": "no matching title in sample",
-                  "insufficient": "insufficient live evidence"}
-        for c in checks:
-            lines.append(
-                f"- `{c.get('title')}` — **{labels.get(c.get('status'), 'unknown')}**"
-                f" · checked {str(c.get('checked_at'))[:19]}"
-                + (f" ({c['error']})" if c.get("error") else ""))
-    else:
+    labels = {"exact": "exact title match",
+              "similar": "similar title",
+              "conceptual": "conceptual competitor",
+              "none": "no matching title in sample",
+              "insufficient": "insufficient live evidence",
+              "unverified": "unverified (not checked)"}
+    for c in checks:
+        lines.append(
+            f"- `{c.get('title')}` — **{labels.get(c.get('status'), 'unknown')}**"
+            f" · checked {str(c.get('checked_at'))[:19]}"
+            + (f" ({c['error']})" if c.get("error") else ""))
+    rec_ver = (result.get("recommended_verification")
+               or research.get("recommended_verification"))
+    if rec_ver and rec_ver.get("status") == "unverified":
+        lines.append(
+            f"- `{rec_ver.get('title')}` — **unverified (not checked; API "
+            f"budget preserved)**")
+    if not checks and not (
+            rec_ver and rec_ver.get("status") == "unverified"):
         lines.append("- Not run (no validated titles or deferred by rate limit).")
     lines.append("")
 
@@ -1028,17 +1056,30 @@ def format_report(result):
         lines.append(f"- Database: unavailable ({db.get('error', 'error')}).")
     if live:
         for r in live:
-            if r.get("ok"):
+            checked = str(r.get("checked_at")
+                          or r.get("verification_timestamp"))[:19]
+            if r.get("ok") and not r.get("deferred"):
                 lines.append(
                     f"- Keyword sample `{r['keyword']}`: "
                     f"{r.get('category_correct', 0)} correct-category "
                     f"(asset 61) · {r.get('conceptual_matches', 0)} conceptual "
                     f"keyword matches (keyword-level, not candidate-title "
-                    f"match) · checked {str(r.get('checked_at') or r.get('verification_timestamp'))[:19]}")
+                    f"match) · checked {checked}")
             else:
+                detail = r.get("error") or (
+                    "partial sample; rate limit deferred" if r.get("ok")
+                    else "no response")
+                if (r.get("retry_after") is not None
+                        and "retry-after" not in detail.lower()):
+                    try:
+                        detail += (f"; Retry-After "
+                                   f"{float(r['retry_after']):.0f}s")
+                    except (TypeError, ValueError):
+                        pass
+                prefix = "partial sample" if r.get("ok") else "incomplete"
                 lines.append(
-                    f"- Keyword sample `{r['keyword']}`: **incomplete** "
-                    f"({r.get('error') or 'no response'}) — no marketplace data "
+                    f"- Keyword sample `{r['keyword']}`: **{prefix}** "
+                    f"({detail}) · checked {checked} — no marketplace data "
                     f"was invented."
                     + (" Remaining optional verification was deferred."
                        if r.get("deferred") else ""))

@@ -14,6 +14,8 @@ sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(_
 
 import convergence_engine as ce
 import convergence_live as cl
+import execution_policy as ep
+import emote_title_engine as ete
 
 
 def _fast_scheduler():
@@ -311,6 +313,47 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertTrue(r2.get("cached"))
         self.assertEqual(calls["n"], 1)
         cl.clear_cache()
+
+
+class RetryEvidencePropagationTests(unittest.TestCase):
+    def test_retry_after_and_deferred_reach_research_and_report(self):
+        class _FakeSched:
+            def request(self, *a, **k):
+                return ep.SchedulerResult(
+                    ok=False, endpoint="catalog_search", status=429,
+                    headers={"Retry-After": "90"},
+                    error="rate limited (429); Retry-After 90s — deferred",
+                    deferred=True, retry_after=90.0)
+
+        with mock.patch.object(cl, "_get_scheduler", return_value=_FakeSched()):
+            vr = cl.verify_niche("street dance", family="emotes",
+                                 use_cache=False)
+        self.assertFalse(vr["ok"])
+        self.assertTrue(vr["deferred"])
+        self.assertEqual(vr["retry_after"], 90.0)
+        self.assertIn("Retry-After", vr["error"])
+
+        calls = []
+
+        def fake_verify(phrase, **kw):
+            calls.append(phrase)
+            return dict(vr)
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify):
+            live = ete.research_live(["street dance", "hip hop dance"])
+        self.assertEqual(calls, ["street dance"])  # no further requests
+        self.assertEqual(len(live), 1)
+        self.assertTrue(live[0]["deferred"])
+        self.assertEqual(live[0]["retry_after"], 90.0)
+
+        report = ete.format_report({
+            "titles": [], "recommended": None, "description": "d",
+            "experiment": "e",
+            "research": {"db": {"ok": False}, "live": live,
+                         "live_deferred": True, "tiktok": {}},
+        })
+        self.assertIn("Retry-After 90s", report)
+        self.assertIn("deferred", report.lower())
 
 
 class ReportTests(unittest.TestCase):

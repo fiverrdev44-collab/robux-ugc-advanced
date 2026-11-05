@@ -80,6 +80,20 @@ def _title_live_mixed(title):
             "checked_at": "2026-11-05T00:00:00Z"}
 
 
+def _title_live_exact_similar(title):
+    if title == "Mysterious Street Dance Emote":
+        return {"ok": True, "exact_title_matches": 1, "conceptual_matches": 3,
+                "top_competitors": [{"name": title, "asset_type_id": 61}],
+                "checked_at": "2026-11-05T00:00:00Z"}
+    if title == "Energetic Street Dance Emote":
+        return {"ok": True, "exact_title_matches": 0, "conceptual_matches": 4,
+                "top_competitors": [{"name": "Energetic Street Dance",
+                                     "asset_type_id": 61}],
+                "checked_at": "2026-11-05T00:00:00Z"}
+    return {"ok": True, "exact_title_matches": 0, "conceptual_matches": 0,
+            "top_competitors": [], "checked_at": "2026-11-05T00:00:00Z"}
+
+
 def _generate(**overrides):
     kw = dict(db_fn=_db, live_fn=_live_ok, generate_fn=_ai(FIVE),
               title_db_fn=_title_db, title_live_fn=_title_live_mixed)
@@ -161,6 +175,20 @@ class TitleVerificationTests(unittest.TestCase):
         exact = next(t for t in ranked
                      if t["title"] == "Mysterious Street Dance Emote")
         self.assertEqual(exact["components"]["verified_similarity"], 0.0)
+
+    def test_unchecked_winner_is_labeled_unverified(self):
+        # The first two candidates are checked and demoted (exact/similar);
+        # an unchecked third candidate wins and must be labeled unverified.
+        res = _generate(title_live_fn=_title_live_exact_similar)
+        winner = res["titles"][0]
+        self.assertEqual(winner["title"], "Mysterious Energetic Dance Emote")
+        self.assertEqual(winner["title_check_status"], "unverified")
+        self.assertEqual(res["recommended_verification"]["status"],
+                         "unverified")
+        report = ete.format_report(res)
+        self.assertIn("unverified (not checked", report)
+        # No extra live requests were made for the unchecked winner.
+        self.assertEqual(len(res["title_checks"]), 2)
 
 
 class RateLimitTests(unittest.TestCase):
