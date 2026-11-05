@@ -7,6 +7,7 @@ import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
+from creator_identity import has_creator_type
 
 
 def log(msg):
@@ -151,6 +152,42 @@ def snapshot_top_items():
         _RUN_LOCK.release()
 
 
+_SELECTION_SQL = """
+    WITH ranked_items AS (
+        SELECT id, total_sales, price, favorite_count, created_at,
+               COALESCE(fetched_at, updated_at) AS last_updated_at,
+            CASE
+                WHEN id IN (SELECT item_id FROM launch_ledger)
+                  OR created_at > NOW() - INTERVAL '3 days'
+                  OR (COALESCE(favorite_count, 0) > 1000
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '2 hours')
+                    THEN 0
+                WHEN (COALESCE(favorite_count, 0) BETWEEN 100 AND 1000
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '8 hours')
+                  OR (created_at > NOW() - INTERVAL '14 days'
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '6 hours')
+                    THEN 1
+                WHEN COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '7 days'
+                    THEN 2
+                ELSE 99
+            END AS tier,
+            CASE
+                WHEN id IN (SELECT item_id FROM launch_ledger) THEN 0
+                WHEN created_at > NOW() - INTERVAL '3 days' THEN 1
+                ELSE 2
+            END AS tier0_priority
+        FROM items
+    )
+    SELECT id, total_sales, price
+    FROM ranked_items
+    WHERE tier < 99
+    ORDER BY tier ASC,
+             CASE WHEN tier = 0 THEN tier0_priority ELSE 2 END ASC,
+             last_updated_at ASC NULLS FIRST
+    LIMIT %s
+"""
+
+
 def _snapshot_top_items_inner():
     log("📸 Snapshot job started.")
     for key in _stats:
@@ -162,35 +199,12 @@ def _snapshot_top_items_inner():
 
     # Tiered half-life selection. `last_updated_at` is the freshest observed
     # timestamp we store (fetched_at, else updated_at). Active ledger items and
-    # very new items are always tier 0; the rest decay by age/velocity.
+    # very new items are always tier 0; within tier 0 launch-ledger items come
+    # first, then recently created items, then stale/high-favorite items. This
+    # keeps the same limit/API budget while preventing fresh items from being
+    # displaced by thousands of older tier-0 rows.
     tier_limit = int(os.getenv("SNAPSHOT_TIER_LIMIT", "1500"))
-    cur.execute("""
-        WITH ranked_items AS (
-            SELECT id, total_sales, price, favorite_count, created_at,
-                   COALESCE(fetched_at, updated_at) AS last_updated_at,
-                CASE
-                    WHEN id IN (SELECT item_id FROM launch_ledger)
-                      OR created_at > NOW() - INTERVAL '3 days'
-                      OR (COALESCE(favorite_count, 0) > 1000
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '2 hours')
-                        THEN 0
-                    WHEN (COALESCE(favorite_count, 0) BETWEEN 100 AND 1000
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '8 hours')
-                      OR (created_at > NOW() - INTERVAL '14 days'
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '6 hours')
-                        THEN 1
-                    WHEN COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '7 days'
-                        THEN 2
-                    ELSE 99
-                END AS tier
-            FROM items
-        )
-        SELECT id, total_sales, price
-        FROM ranked_items
-        WHERE tier < 99
-        ORDER BY tier ASC, last_updated_at ASC NULLS FIRST
-        LIMIT %s
-    """, (tier_limit,))
+    cur.execute(_SELECTION_SQL, (tier_limit,))
     rows = cur.fetchall()
     log(f"📊 Found {len(rows)} items to snapshot.")
 
@@ -212,36 +226,99 @@ def _snapshot_top_items_inner():
         max_concurrency=int(os.getenv("SNAPSHOT_BATCH_CONCURRENCY", "3")),
     )
     fresh_favs, fresh_prices = {}, {}
+    fresh_identity = {}
     for iid, d in (items or {}).items():
         if d.get("favorite_count") is not None:
             fresh_favs[iid] = d["favorite_count"]
         if d.get("price") is not None:
             fresh_prices[iid] = d["price"]
+        identity = {
+            "creator_id": d.get("creator_id"),
+            "creator_type": d.get("creator_type"),
+            "creator_verified": d.get("creator_verified"),
+        }
+        if any(value is not None for value in identity.values()):
+            fresh_identity[iid] = identity
     log(f"✅ Success: {len(fresh_favs)}/{len(ids)} items "
         f"({len(failed)} failed / not returned)")
 
     if fresh_favs:
+        id_list = list(fresh_favs.keys())
+        fav_list = [int(fresh_favs[i]) for i in id_list]
+        price_list = [fresh_prices.get(i) for i in id_list]
+        creator_ids = [(fresh_identity.get(i) or {}).get("creator_id")
+                       for i in id_list]
+        creator_types = [(fresh_identity.get(i) or {}).get("creator_type")
+                         for i in id_list]
+        creator_verified = [
+            (fresh_identity.get(i) or {}).get("creator_verified")
+            for i in id_list]
+        has_type = has_creator_type(cur)
         try:
-            id_list = list(fresh_favs.keys())
-            fav_list = [int(fresh_favs[i]) for i in id_list]
-            price_list = [fresh_prices.get(i) for i in id_list]
-            cur.execute("""
-                UPDATE items AS i
-                SET favorite_count = v.favs,
-                    price = COALESCE(v.price, i.price),
-                    favorite_status = 'known'
-                FROM (SELECT unnest(%s::bigint[]) AS id,
-                             unnest(%s::int[]) AS favs,
-                             unnest(%s::int[]) AS price) AS v
-                WHERE i.id = v.id
-            """, (id_list, fav_list, price_list))
+            if has_type:
+                cur.execute("""
+                    UPDATE items AS i
+                    SET favorite_count = v.favs,
+                        price = COALESCE(v.price, i.price),
+                        favorite_status = 'known',
+                        creator_id = COALESCE(v.creator_id, i.creator_id),
+                        creator_type = COALESCE(v.creator_type,
+                                                i.creator_type),
+                        creator_verified = COALESCE(v.creator_verified,
+                                                    i.creator_verified)
+                    FROM (SELECT unnest(%s::bigint[]) AS id,
+                                 unnest(%s::int[]) AS favs,
+                                 unnest(%s::int[]) AS price,
+                                 unnest(%s::bigint[]) AS creator_id,
+                                 unnest(%s::text[]) AS creator_type,
+                                 unnest(%s::boolean[]) AS creator_verified) AS v
+                    WHERE i.id = v.id
+                """, (id_list, fav_list, price_list, creator_ids,
+                      creator_types, creator_verified))
+            else:
+                cur.execute("""
+                    UPDATE items AS i
+                    SET favorite_count = v.favs,
+                        price = COALESCE(v.price, i.price),
+                        favorite_status = 'known',
+                        creator_id = COALESCE(v.creator_id, i.creator_id),
+                        creator_verified = COALESCE(v.creator_verified,
+                                                    i.creator_verified)
+                    FROM (SELECT unnest(%s::bigint[]) AS id,
+                                 unnest(%s::int[]) AS favs,
+                                 unnest(%s::int[]) AS price,
+                                 unnest(%s::bigint[]) AS creator_id,
+                                 unnest(%s::boolean[]) AS creator_verified) AS v
+                    WHERE i.id = v.id
+                """, (id_list, fav_list, price_list, creator_ids,
+                      creator_verified))
         except Exception as e:
             log(f"⚠️ bulk item update failed: {e}")
             for iid, favs in fresh_favs.items():
                 try:
-                    cur.execute(
-                        "UPDATE items SET favorite_count = %s WHERE id = %s",
-                        (favs, iid))
+                    identity = fresh_identity.get(iid) or {}
+                    if has_type:
+                        cur.execute("""
+                            UPDATE items
+                            SET favorite_count = %s,
+                                creator_id = COALESCE(%s, creator_id),
+                                creator_type = COALESCE(%s, creator_type),
+                                creator_verified = COALESCE(%s,
+                                                           creator_verified)
+                            WHERE id = %s
+                        """, (favs, identity.get("creator_id"),
+                              identity.get("creator_type"),
+                              identity.get("creator_verified"), iid))
+                    else:
+                        cur.execute("""
+                            UPDATE items
+                            SET favorite_count = %s,
+                                creator_id = COALESCE(%s, creator_id),
+                                creator_verified = COALESCE(%s,
+                                                           creator_verified)
+                            WHERE id = %s
+                        """, (favs, identity.get("creator_id"),
+                              identity.get("creator_verified"), iid))
                 except Exception:
                     pass
     conn.commit()

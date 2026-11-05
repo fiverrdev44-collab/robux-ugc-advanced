@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
+from creator_identity import catalog_identity, has_creator_type
 
 
 def log(msg):
@@ -351,6 +352,73 @@ def build_all_queries():
     return queries
 
 
+def _item_row(iid, d):
+    favs = d.get("favorite_count")
+    identity = catalog_identity(d)
+    return (iid, (d.get("name") or "")[:500], favs, d.get("price") or 0,
+            (d.get("description") or "")[:5000],
+            (d.get("creator_name") or "")[:200],
+            identity["creator_id"], identity["creator_type"],
+            identity["creator_verified"],
+            d.get("asset_type_id") or 0,
+            ("known" if favs is not None else "missing"))
+
+
+def _upsert_items(cur, rows, has_type):
+    """Persist batch-client rows without erasing known creator identity."""
+    if has_type:
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        sql = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_type,
+                               creator_verified, asset_type_id,
+                               favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_type = COALESCE(EXCLUDED.creator_type,
+                                        items.creator_type),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        values = rows
+    else:
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        sql = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_verified,
+                               asset_type_id, favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        values = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[8], r[9],
+                   r[10]) for r in rows]
+    execute_values(cur, sql, values, template=template, page_size=100)
+
+
 def scan_id_window(cur, count=600):
     """Monotonic ID stepping: probe the next asset-ID window in 30-item batches.
 
@@ -373,33 +441,10 @@ def scan_id_window(cur, count=600):
 
     found, failed = fetch_id_window_sync(start, count, max_batch=30,
                                          rate_per_min=90, max_concurrency=3)
-    rows = []
-    for iid, d in found.items():
-        if not is_valid_asset_id(iid):
-            continue
-        favs = d.get("favorite_count")
-        rows.append((
-            iid, (d.get("name") or "")[:500], favs, d.get("price") or 0,
-            (d.get("description") or "")[:5000],
-            (d.get("creator_name") or "")[:200],
-            d.get("asset_type_id") or 0,
-            ("known" if favs is not None else "missing"),
-        ))
+    rows = [_item_row(iid, d) for iid, d in found.items()
+            if is_valid_asset_id(iid)]
     if rows:
-        execute_values(cur, """
-            INSERT INTO items (id, name, favorite_count, price, description,
-                               creator_name, asset_type_id, favorite_status,
-                               fetched_at)
-            VALUES %s
-            ON CONFLICT (id) DO UPDATE SET
-                favorite_count = EXCLUDED.favorite_count,
-                favorite_status = EXCLUDED.favorite_status,
-                price = EXCLUDED.price,
-                description = EXCLUDED.description,
-                name = EXCLUDED.name,
-                asset_type_id = EXCLUDED.asset_type_id,
-                fetched_at = CURRENT_TIMESTAMP
-        """, rows, template="(%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)")
+        _upsert_items(cur, rows, has_creator_type(cur))
 
     cur.execute("""
         INSERT INTO creator_patterns (pattern_key, pattern_value, updated_at)

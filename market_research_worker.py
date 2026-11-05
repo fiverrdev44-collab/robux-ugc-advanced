@@ -12,6 +12,8 @@ rotation. Never blocks Discord command handling.
 import os
 import time
 
+from creator_identity import catalog_identity, has_creator_type
+
 MAX_PER_CYCLE = int(os.getenv("RESEARCH_MAX_IDS", "300"))
 HIGH_LIMIT = int(os.getenv("RESEARCH_HIGH_LIMIT", "60"))
 MEDIUM_LIMIT = int(os.getenv("RESEARCH_MEDIUM_LIMIT", "120"))
@@ -77,25 +79,76 @@ def select_priority_ids(cur, high=HIGH_LIMIT, medium=MEDIUM_LIMIT,
     return ids, tiers
 
 
-def _upsert(cur, rows):
+def _item_row(iid, d):
+    favs = d.get("favorite_count")
+    identity = catalog_identity(d)
+    return (iid, (d.get("name") or "")[:500], favs,
+            d.get("price") or 0,
+            (d.get("description") or "")[:5000],
+            (d.get("creator_name") or "")[:200],
+            identity["creator_id"], identity["creator_type"],
+            identity["creator_verified"],
+            d.get("asset_type_id") or 0,
+            "known" if favs is not None else "missing")
+
+
+def _upsert(cur, rows, has_type=None):
     if not rows:
         return 0
+    if has_type is None:
+        has_type = has_creator_type(cur)
     from psycopg2.extras import execute_values
-    template = "(%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
-    execute_values(cur, """
-        INSERT INTO items (id, name, favorite_count, price, description,
-                           creator_name, asset_type_id, favorite_status,
-                           fetched_at)
-        VALUES %s
-        ON CONFLICT (id) DO UPDATE SET
-            favorite_count = EXCLUDED.favorite_count,
-            favorite_status = EXCLUDED.favorite_status,
-            price = EXCLUDED.price,
-            description = EXCLUDED.description,
-            name = EXCLUDED.name,
-            asset_type_id = EXCLUDED.asset_type_id,
-            fetched_at = CURRENT_TIMESTAMP
-    """, rows, template=template, page_size=100)
+    if has_type:
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        sql = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_type,
+                               creator_verified, asset_type_id,
+                               favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_type = COALESCE(EXCLUDED.creator_type,
+                                        items.creator_type),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        values = rows
+    else:
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        sql = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_verified,
+                               asset_type_id, favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        values = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[8], r[9],
+                   r[10]) for r in rows]
+    execute_values(cur, sql, values, template=template, page_size=100)
     return len(rows)
 
 
@@ -118,15 +171,7 @@ def run_cycle(db_factory=None):
         from roblox_batch_client import fetch_many_items_sync
         items, failed = fetch_many_items_sync(
             ids, max_batch=30, rate_per_min=60, max_concurrency=3)
-        rows = []
-        for iid, d in items.items():
-            favs = d.get("favorite_count")
-            rows.append((iid, (d.get("name") or "")[:500], favs,
-                         d.get("price") or 0,
-                         (d.get("description") or "")[:5000],
-                         (d.get("creator_name") or "")[:200],
-                         d.get("asset_type_id") or 0,
-                         "known" if favs is not None else "missing"))
+        rows = [_item_row(iid, d) for iid, d in items.items()]
         cur = conn.cursor()
         written = _upsert(cur, rows)
         conn.commit()
