@@ -17,13 +17,9 @@ TikTok references are optional: only a bounded, host-validated public HTML GET
 is used for caption/hashtags. No video is downloaded or analysed.
 """
 import html as _html
-import ipaddress
 import json
 import re
-import socket
-from urllib.parse import urljoin, urlsplit
-
-import requests
+from urllib.parse import urlsplit
 
 from astra import MOTION_TOKENS, contains_banned_platform
 
@@ -125,117 +121,46 @@ def extract_keywords(text, limit=8, exclude=None):
 
 # ── Secure optional TikTok metadata ────────────────────────────────
 
-def _public_ip(ip):
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return not (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
-
-
 def validate_tiktok_url(url):
-    """Strict hostname/scheme/port/DNS validation. Returns (host, error)."""
-    if not url or len(url) > 2048:
+    """Validate a TikTok reference without making network requests."""
+    if not isinstance(url, str) or not url or len(url) > 2048:
+        return None, "invalid url"
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in url):
         return None, "invalid url"
     try:
         parts = urlsplit(url)
-    except ValueError:
-        return None, "malformed url"
-    if parts.scheme not in ("https", "http"):
-        return None, "unsupported scheme"
-    if parts.username or parts.password:
-        return None, "credentials not allowed"
-    host = (parts.hostname or "").lower().rstrip(".")
-    if not (host == "tiktok.com" or host.endswith(TIKTOK_HOST_SUFFIX)):
-        return None, "not a tiktok host"
-    try:
+        host = (parts.hostname or "").lower().rstrip(".")
         port = parts.port
     except ValueError:
-        return None, "invalid port"
-    if port not in (None, 80, 443):
+        return None, "malformed url"
+    if parts.scheme.lower() != "https":
+        return None, "https required"
+    if parts.username or parts.password:
+        return None, "credentials not allowed"
+    if not (host == "tiktok.com" or host.endswith(TIKTOK_HOST_SUFFIX)):
+        return None, "not a tiktok host"
+    if port not in (None, 443):
         return None, "non-standard port"
-    try:
-        infos = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
-    except Exception:
-        return None, "unresolvable host"
-    ips = {info[4][0] for info in infos}
-    if not ips or any(not _public_ip(ip) for ip in ips):
-        return None, "unsafe destination"
     return host, None
 
 
-def _read_capped(resp, max_bytes=MAX_TIKTOK_BYTES):
-    buf = bytearray()
-    for chunk in resp.iter_content(8192):
-        if not chunk:
-            continue
-        remaining = max_bytes - len(buf)
-        if remaining <= 0:
-            break
-        buf.extend(chunk[:remaining])
-        if len(buf) >= max_bytes:
-            break
-    return bytes(buf).decode(resp.encoding or "utf-8", errors="replace")
-
-
-def _meta_from_html(html):
-    caption = ""
-    for prop in ("og:description", "og:title", "description"):
-        m = re.search(
-            rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)',
-            html, re.IGNORECASE)
-        if m:
-            caption = m.group(1)
-            break
-    caption = strip_banned(_html.unescape(caption))[:300]
-    tags = [strip_banned(t) for t in re.findall(r"#([A-Za-z0-9_]{2,30})", html)[:12]]
-    tags = [t for t in tags if t and not _has_banned(t)][:8]
-    return {"ok": True, "caption": caption, "hashtags": tags}
-
-
 def fetch_tiktok_meta(url, timeout=8, session=None):
-    """Bounded public caption/hashtags fetch. Never downloads video."""
+    """Metadata fetching disabled to avoid SSRF/DNS rebinding.
+
+    Preserve the validated URL as optional reference context, never
+    claim to have read its caption or watched its video. Description-only
+    generation continues without network I/O or paid APIs.
+    """
     if not url:
         return {"ok": False, "error": "no url"}
-    host, err = validate_tiktok_url(url)
+    _host, err = validate_tiktok_url(url)
     if err:
         return {"ok": False, "error": err}
-    own_session = session is None
-    sess = session or requests.Session()
-    current = url
-    try:
-        for _ in range(3):
-            resp = sess.get(
-                current, timeout=(5, timeout), allow_redirects=False,
-                stream=True, headers={"User-Agent": "Mozilla/5.0 (compatible; VANTA/1.0)"})
-            if resp.status_code in (301, 302, 303, 307, 308):
-                location = resp.headers.get("Location")
-                if not location:
-                    return {"ok": False, "error": "unsafe redirect"}
-                nxt = urljoin(current, location)
-                _next_host, next_err = validate_tiktok_url(nxt)
-                if next_err:
-                    return {"ok": False, "error": "unsafe redirect"}
-                current = nxt
-                continue
-            if resp.status_code != 200:
-                return {"ok": False, "error": f"HTTP {resp.status_code}"}
-            return _meta_from_html(_read_capped(resp))
-        return {"ok": False, "error": "too many redirects"}
-    except requests.Timeout:
-        return {"ok": False, "error": "timeout"}
-    except requests.RequestException as e:
-        return {"ok": False, "error": type(e).__name__}
-    except Exception as e:
-        return {"ok": False, "error": type(e).__name__}
-    finally:
-        if own_session:
-            try:
-                sess.close()
-            except Exception:
-                pass
-
+    return {
+        "ok": False,
+        "reference_valid": True,
+        "error": "TikTok metadata fetching disabled for outbound safety",
+    }
 
 # ── Research ───────────────────────────────────────────────────────
 
@@ -512,7 +437,8 @@ def _differentiation_score(title, names):
     return max(0.05, 1.0 - 0.9 * best)
 
 
-def _evidence_score(db, live):
+def _retrieval_score(db, live):
+    """Source availability only; a successful request is NOT strong evidence."""
     db_ok = bool(db.get("ok"))
     live_ok = bool(live) and all(r.get("ok") for r in live)
     if db_ok and live_ok:
@@ -521,37 +447,68 @@ def _evidence_score(db, live):
         return 0.75
     if db_ok:
         return 0.6
-    return 0.3
+    return 0.0
+
+
+def _market_context_score(title, db, live):
+    """Title-specific textual proximity to observed emote listings.
+
+    This is a context/relevance proxy, NOT search demand, sales or CTR.
+    Similarity to existing titles is also penalized separately under
+    differentiation. An empty successful API response scores zero.
+    """
+    tokens = _title_tokens(title)
+    if not tokens:
+        return 0.0
+    names = []
+    if db.get("ok"):
+        names.extend(ex.get("name") or "" for ex in db.get("top_examples") or [])
+    for r in live or []:
+        if r.get("ok"):
+            names.extend(c.get("name") or "" for c in r.get("top_competitors") or []
+                         if c.get("asset_type_id") in (61, "61"))
+    similarities = []
+    for name in names:
+        other = _title_tokens(name)
+        if other:
+            similarities.append(len(tokens & other) / len(tokens | other))
+    return max(similarities, default=0.0)
 
 
 def rank_titles(titles, description, keywords, db, live):
-    """Rank by accuracy, natural wording, search, differentiation, evidence."""
+    """Transparent heuristic; brief-fit is NOT verified search demand."""
     names = _competitor_names(db, live)
+    retrieval = _retrieval_score(db, live)
     for t in titles:
+        brief_fit = _search_score(t["title"], description, keywords)
+        market_context = _market_context_score(t["title"], db, live)
+        title_evidence = retrieval * market_context
         comps = {
-            "accuracy": 1.0,
+            "accuracy": 1.0,  # eligibility/ASTRA gate, not a measured probability
             "natural": round(_natural_score(t["title"]), 3),
-            "search": round(_search_score(t["title"], description, keywords), 3),
+            "brief_fit": round(brief_fit, 3),
+            "search": round(brief_fit, 3),  # backwards-compatible internal alias
             "differentiation": round(_differentiation_score(t["title"], names), 3),
-            "evidence": round(_evidence_score(db, live), 3),
+            "market_context": round(market_context, 3),
+            "retrieval": round(retrieval, 3),
+            "evidence": round(title_evidence, 3),
         }
-        score = 100 * (0.20 * comps["accuracy"] + 0.20 * comps["natural"]
-                       + 0.25 * comps["search"]
+        score = 100 * (0.25 * comps["accuracy"] + 0.20 * comps["natural"]
+                       + 0.25 * comps["brief_fit"]
                        + 0.15 * comps["differentiation"]
-                       + 0.20 * comps["evidence"])
+                       + 0.15 * comps["evidence"])
         t["score"] = round(score, 1)
         t["components"] = comps
-        t["evidence_quality"] = ("complete"
-                                 if (db.get("ok") and live
-                                     and all(r.get("ok") for r in live))
-                                 else "incomplete")
-    titles.sort(key=lambda t: (t["score"], t["components"]["search"],
+        t["evidence_quality"] = (
+            "incomplete" if retrieval < 1.0 else
+            "sampled, relevant" if market_context > 0 else "sampled, no relevant matches"
+        )
+    titles.sort(key=lambda t: (t["score"], t["components"]["brief_fit"],
                                t["components"]["differentiation"]),
                 reverse=True)
     for i, t in enumerate(titles):
         t["recommended"] = (i == 0)
     return titles
-
 
 # ── Entry point ────────────────────────────────────────────────────
 
@@ -606,7 +563,9 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     live_error = next((r.get("error") for r in live if not r.get("ok")), None)
 
     return {
-        "description": _build_description(raw_description, keywords),
+        "description": _build_description(raw_description, keywords,
+                                          protected=protected,
+                                          title=ranked[0]["title"] if ranked else None),
         "titles": ranked,
         "recommended": ranked[0]["title"] if ranked else None,
         "experiment": _build_experiment(ranked, live_ok, live_error),
@@ -623,41 +582,46 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     }
 
 
-def _build_description(description, keywords):
-    core = strip_banned(description).strip().rstrip(".")
-    if core:
-        core = core[0].upper() + core[1:]
-    else:
-        core = "A new emote concept"
-    parts = [f"{core}."]
-    if keywords:
-        parts.append("Built around " + ", ".join(keywords[:3]) + ".")
-    parts.append("Try it in-game and tell us how it feels.")
-    return " ".join(parts)
+def _build_description(description, keywords, protected=None, title=None):
+    """Public copy from validated title and safe themes, never the raw brief."""
+    blocked = _protected_tokens(protected)
+    safe_terms = [
+        k.lower() for k in (keywords or [])
+        if k.lower() not in blocked
+        and k.lower() not in STOPWORDS
+        and k.lower() not in MECHANICAL_WORDS
+        and not _has_banned(k)
+    ][:4]
+    validated_title, _why = _validate_candidate(
+        description, title or "Original Emote", protected)
+    display_title = validated_title or "This Emote"
+    theme = " ".join(safe_terms) if safe_terms else "your chosen style"
+    body = (f"Meet {display_title}, an emote centered on {theme}. "
+            "Add it to your collection and favorite it if it fits your style.")
+    if _has_banned(body) or (_tokens(body) & blocked):
+        return ("Discover a new emote for your avatar. "
+                "Add it to your collection and favorite it if it fits your style.")
+    return body
 
 
 def _build_experiment(titles, live_ok, live_error):
     rec = titles[0]["title"] if titles else None
-    alt = titles[1]["title"] if len(titles) > 1 else None
-    if rec and alt:
-        plan = (
-            f"Pre-register a randomized A/B test at launch: show \"{rec}\" to "
-            f"half of new viewers and \"{alt}\" to the other half for a fixed "
-            f"window (e.g., 14 days), then compare favorites and units.")
-    elif rec:
-        plan = (
-            f"Run a controlled test of \"{rec}\" against your current control "
-            f"title for a fixed window (e.g., 14 days).")
-    else:
-        plan = "No validated titles were produced; do not launch yet."
-    plan += (" Sequential title changes are observational, not causal; keep a "
-             "stable control and record the change date.")
+    if not rec:
+        return "No validated titles were produced; do not launch yet."
+    plan = (
+        f"For \"{rec}\", pre-register an observational launch window "
+        "(e.g., 14 days). Record the publication/title-change time, "
+        "daily sale units (if verified), favorites, price, and available "
+        "exposure metrics. Compare against a comparable pre-change period "
+        "or similar unchanged listings if available; document confounders. "
+        "Roblox Marketplace viewer assignment is not controlled here, so "
+        "this is NOT a randomized A/B test and does not establish causality."
+    )
     if not live_ok:
-        plan += (" Live verification is incomplete"
+        plan += (" Live competitor verification is incomplete"
                  + (f" ({live_error})" if live_error else "")
-                 + "; do not read the outcome as proof of market demand.")
+                 + "; avoid claims about verified demand.")
     return plan
-
 
 def format_report(result):
     titles = result.get("titles") or []
@@ -672,7 +636,7 @@ def format_report(result):
     lines.append(f"**{rec}**" if rec else "_No title passed validation._")
     lines.append("")
 
-    lines.append("## Ranked titles (listing-quality heuristic, not CTR/sales)")
+    lines.append("## Ranked titles (heuristics, not measured search demand/CTR/sales)")
     if titles:
         for i, t in enumerate(titles, 1):
             tag = "recommended" if t.get("recommended") else "alternative"
@@ -680,9 +644,11 @@ def format_report(result):
             lines.append(
                 f"{i}. **{t['title']}** — {t['strategy']} ({tag}) · "
                 f"score {t.get('score')} "
-                f"[search {c.get('search')} · natural {c.get('natural')} · "
+                f"[brief-fit {c.get('brief_fit')} · natural {c.get('natural')} · "
                 f"diff {c.get('differentiation')} · "
-                f"evidence {c.get('evidence')}]")
+                f"market-context {c.get('market_context')} · "
+                f"retrieval {c.get('retrieval')} · "
+                f"title-evidence {c.get('evidence')}]")
     else:
         lines.append("_No validated titles._")
     lines.append("")
@@ -721,7 +687,7 @@ def format_report(result):
     else:
         lines.append("- Live: not run (no research keywords).")
     if tiktok.get("ok"):
-        lines.append("- TikTok reference: public caption/hashtags read; the "
+        lines.append("- TikTok reference: optional public metadata supplied; the "
                      "description remains the source of truth.")
     elif tiktok.get("error") and tiktok.get("error") != "no url provided":
         lines.append(f"- TikTok reference: not used ({tiktok['error']}); "
