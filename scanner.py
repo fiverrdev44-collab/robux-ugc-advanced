@@ -352,6 +352,18 @@ def build_all_queries():
     return queries
 
 
+def _item_row(iid, d):
+    favs = d.get("favorite_count")
+    identity = catalog_identity(d)
+    return (iid, (d.get("name") or "")[:500], favs, d.get("price") or 0,
+            (d.get("description") or "")[:5000],
+            (d.get("creator_name") or "")[:200],
+            identity["creator_id"], identity["creator_type"],
+            identity["creator_verified"],
+            d.get("asset_type_id") or 0,
+            ("known" if favs is not None else "missing"))
+
+
 def _upsert_items(cur, rows, has_type):
     """Persist batch-client rows without erasing known creator identity."""
     if has_type:
@@ -429,21 +441,8 @@ def scan_id_window(cur, count=600):
 
     found, failed = fetch_id_window_sync(start, count, max_batch=30,
                                          rate_per_min=90, max_concurrency=3)
-    rows = []
-    for iid, d in found.items():
-        if not is_valid_asset_id(iid):
-            continue
-        favs = d.get("favorite_count")
-        identity = catalog_identity(d)
-        rows.append((
-            iid, (d.get("name") or "")[:500], favs, d.get("price") or 0,
-            (d.get("description") or "")[:5000],
-            (d.get("creator_name") or "")[:200],
-            identity["creator_id"], identity["creator_type"],
-            identity["creator_verified"],
-            d.get("asset_type_id") or 0,
-            ("known" if favs is not None else "missing"),
-        ))
+    rows = [_item_row(iid, d) for iid, d in found.items()
+            if is_valid_asset_id(iid)]
     if rows:
         _upsert_items(cur, rows, has_creator_type(cur))
 

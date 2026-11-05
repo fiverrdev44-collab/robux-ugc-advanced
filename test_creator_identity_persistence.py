@@ -16,6 +16,8 @@ from creator_identity import catalog_identity, economy_identity  # noqa: E402
 from roblox_batch_client import _normalize  # noqa: E402
 import enricher  # noqa: E402
 import live_enrich  # noqa: E402
+import market_research_worker  # noqa: E402
+import scanner  # noqa: E402
 import snapshot  # noqa: E402
 
 
@@ -91,6 +93,66 @@ def test_enricher_row_keeps_creator_identity():
     print("PASS enricher rows keep creator identity and missing values")
 
 
+def test_market_and_scanner_rows_keep_creator_identity():
+    payload = {
+        "name": "Item",
+        "price": 5,
+        "favoriteCount": 10,
+        "creatorName": "Creator",
+        "creatorTargetId": 999,
+        "creatorType": "Group",
+        "creatorHasVerifiedBadge": True,
+        "assetType": 61,
+    }
+    for row in (market_research_worker._item_row(1, payload),
+                scanner._item_row(1, payload)):
+        assert row[6:9] == (999, "Group", True)
+
+    missing = market_research_worker._item_row(2, {"name": "Missing"})
+    assert missing[6:9] == (None, None, None)
+    print("PASS market/scanner rows keep creator identity")
+
+
+def test_live_enrich_details_extract_creator_identity():
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class FakeSession:
+        def get(self, url, timeout=10):
+            if "catalog" in url:
+                return FakeResponse({"favoriteCount": 42})
+            return FakeResponse({
+                "Name": "Item",
+                "Description": "",
+                "PriceInRobux": 5,
+                "Sales": 0,
+                "Creator": {"Id": 321, "Name": "Studio",
+                            "CreatorType": "Group"},
+                "AssetTypeId": 61,
+                "Created": "2026-01-01T00:00:00Z",
+            })
+
+    original_sessions = live_enrich.SESSIONS
+    original_wait = live_enrich._wait_for_slot
+    live_enrich.SESSIONS = [FakeSession()]
+    live_enrich._wait_for_slot = lambda: None
+    try:
+        data = live_enrich._fetch_item_details(99)
+    finally:
+        live_enrich.SESSIONS = original_sessions
+        live_enrich._wait_for_slot = original_wait
+    assert data["creator_id"] == 321
+    assert data["creator_type"] == "Group"
+    assert data["creator_verified"] is None
+    assert data["favorite_count"] == 42
+    print("PASS live enrich details extract creator identity")
+
+
 def test_live_enrich_sql_preserves_identity_on_conflict():
     for sql in (live_enrich._UPSERT_WITH_TYPE,
                 live_enrich._UPSERT_NO_TYPE):
@@ -139,6 +201,8 @@ if __name__ == "__main__":
     test_economy_identity_preserves_explicit_values()
     test_batch_normalize_keeps_creator_identity()
     test_enricher_row_keeps_creator_identity()
+    test_market_and_scanner_rows_keep_creator_identity()
+    test_live_enrich_details_extract_creator_identity()
     test_live_enrich_sql_preserves_identity_on_conflict()
     test_snapshot_selection_prioritizes_launch_then_recent()
     test_diagnostics_are_read_only()

@@ -79,6 +79,19 @@ def select_priority_ids(cur, high=HIGH_LIMIT, medium=MEDIUM_LIMIT,
     return ids, tiers
 
 
+def _item_row(iid, d):
+    favs = d.get("favorite_count")
+    identity = catalog_identity(d)
+    return (iid, (d.get("name") or "")[:500], favs,
+            d.get("price") or 0,
+            (d.get("description") or "")[:5000],
+            (d.get("creator_name") or "")[:200],
+            identity["creator_id"], identity["creator_type"],
+            identity["creator_verified"],
+            d.get("asset_type_id") or 0,
+            "known" if favs is not None else "missing")
+
+
 def _upsert(cur, rows, has_type=None):
     if not rows:
         return 0
@@ -158,18 +171,7 @@ def run_cycle(db_factory=None):
         from roblox_batch_client import fetch_many_items_sync
         items, failed = fetch_many_items_sync(
             ids, max_batch=30, rate_per_min=60, max_concurrency=3)
-        rows = []
-        for iid, d in items.items():
-            favs = d.get("favorite_count")
-            identity = catalog_identity(d)
-            rows.append((iid, (d.get("name") or "")[:500], favs,
-                         d.get("price") or 0,
-                         (d.get("description") or "")[:5000],
-                         (d.get("creator_name") or "")[:200],
-                         identity["creator_id"], identity["creator_type"],
-                         identity["creator_verified"],
-                         d.get("asset_type_id") or 0,
-                         "known" if favs is not None else "missing"))
+        rows = [_item_row(iid, d) for iid, d in items.items()]
         cur = conn.cursor()
         written = _upsert(cur, rows)
         conn.commit()
