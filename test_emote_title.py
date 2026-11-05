@@ -2,7 +2,6 @@
 import asyncio
 import json
 import os
-import socket
 import sys
 import unittest
 from unittest import mock
@@ -101,10 +100,10 @@ class JabbaTests(unittest.TestCase):
                         "differentiation", "evidence"):
                 self.assertIn(key, t["components"])
 
-    def test_experiment_is_randomized_and_non_causal(self):
+    def test_experiment_is_observational(self):
         exp = self.res["experiment"].lower()
-        self.assertIn("randomized", exp)
-        self.assertIn("not causal", exp)
+        self.assertIn("observational", exp)
+        self.assertIn("not a randomized a/b test", exp)
         self.assertNotIn("seven days", exp)
 
     def test_banned_words_stripped(self):
@@ -141,83 +140,63 @@ class JabbaTests(unittest.TestCase):
 
 
 class SecureTikTokTests(unittest.TestCase):
-    class _Resp:
-        def __init__(self, status=200, headers=None, body=b""):
-            self.status_code = status
-            self.headers = headers or {}
-            self.encoding = "utf-8"
-            self._body = body
-
-        def iter_content(self, n):
-            for i in range(0, len(self._body), n):
-                yield self._body[i:i + n]
-
-    class _Session:
-        def __init__(self, responses):
-            self.responses = list(responses)
-            self.calls = []
-
-        def get(self, url, **kw):
-            self.calls.append(url)
-            return self.responses.pop(0)
-
-        def close(self):
-            pass
-
     def test_rejects_non_tiktok_hosts(self):
         for url in ("https://tiktok.com.evil.com/x",
                     "https://evil.com/?tiktok.com",
                     "javascript:alert(1)",
                     "https://tiktok.com@127.0.0.1/x",
-                    "https://www.tiktok.com:8443/x"):
+                    "https://www.tiktok.com:8443/x",
+                    "http://www.tiktok.com/@x/video/1"):
             host, err = ete.validate_tiktok_url(url)
             self.assertTrue(err, url)
 
-    def test_ssrf_private_destination_rejected(self):
-        def priv(host, port, type=None):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
-                     ("127.0.0.1", 443))]
-        sess = self._Session([])
-        with mock.patch.object(ete.socket, "getaddrinfo", side_effect=priv):
-            res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1",
-                                        session=sess)
+    def test_valid_reference_has_no_network_access(self):
+        with mock.patch("socket.getaddrinfo", side_effect=AssertionError("dns called")), \
+             mock.patch("requests.sessions.Session.get", side_effect=AssertionError("HTTP called")):
+            res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1")
         self.assertFalse(res["ok"])
-        self.assertEqual(res["error"], "unsafe destination")
-        self.assertEqual(sess.calls, [])
+        self.assertTrue(res["reference_valid"])
+        self.assertIn("disabled", res["error"])
+        self.assertIsNone(ete.validate_tiktok_url("https://vm.tiktok.com/Zabc123/")[1])
 
-    def test_unsafe_redirect_rejected(self):
-        sess = self._Session([self._Resp(302, {"Location": "https://evil.com/x"})])
-        with mock.patch.object(ete.socket, "getaddrinfo",
-                               return_value=[(socket.AF_INET, socket.SOCK_STREAM,
-                                              6, "", ("93.184.216.34", 443))]):
-            res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1",
-                                        session=sess)
-        self.assertFalse(res["ok"])
-        self.assertEqual(res["error"], "unsafe redirect")
-        self.assertEqual(len(sess.calls), 1)
+    def test_description_only_fallback(self):
+        with mock.patch("requests.sessions.Session.get", side_effect=AssertionError("HTTP called")):
+            result = ete.generate(JABBA, url="https://www.tiktok.com/@x/video/1",
+                                  db_fn=_db, live_fn=_live_ok,
+                                  generate_fn=_ai(FIVE_GOOD))
+        self.assertTrue(result["titles"])
+        self.assertFalse(result["research"]["tiktok"]["ok"])
 
-    def test_safe_public_url_parses_caption(self):
-        body = (b'<meta property="og:description" '
-                b'content="mysterious street dance #fyp #dance">')
-        sess = self._Session([self._Resp(200, {}, body)])
-        with mock.patch.object(ete.socket, "getaddrinfo",
-                               return_value=[(socket.AF_INET, socket.SOCK_STREAM,
-                                              6, "", ("93.184.216.34", 443))]):
-            res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1",
-                                        session=sess)
-        self.assertTrue(res["ok"])
-        self.assertIn("street dance", res["caption"])
-        self.assertIn("fyp", res["hashtags"])
 
-    def test_oversized_response_is_capped(self):
-        body = b"x" * (ete.MAX_TIKTOK_BYTES + 50_000)
-        sess = self._Session([self._Resp(200, {}, body)])
-        with mock.patch.object(ete.socket, "getaddrinfo",
-                               return_value=[(socket.AF_INET, socket.SOCK_STREAM,
-                                              6, "", ("93.184.216.34", 443))]):
-            res = ete.fetch_tiktok_meta("https://www.tiktok.com/@x/video/1",
-                                        session=sess)
-        self.assertTrue(res["ok"])
+class ListingAndEvidenceTests(unittest.TestCase):
+    def test_no_brand_or_creator_instructions_in_public_description(self):
+        result = ete.generate(JABBA, db_fn=_db, live_fn=_live_ok,
+                              generate_fn=_ai(FIVE_GOOD))
+        desc = result["description"].lower()
+        for forbidden in ("jabbawockeez", "i made", "inspired by",
+                          "based on"):
+            self.assertNotIn(forbidden, desc)
+
+    def test_feasible_observational_experiment(self):
+        res = ete.generate(JABBA, db_fn=_db, live_fn=_live_ok,
+                           generate_fn=_ai(FIVE_GOOD))
+        plan = res["experiment"].lower()
+        self.assertIn("observational", plan)
+        self.assertIn("not a randomized a/b test", plan)
+        self.assertIn("does not establish causality", plan)
+        self.assertNotIn("show", plan)
+
+    def test_evidence_requires_relevant_competitor_names(self):
+        titles = [{"strategy": "Test", "title": "Mysterious Street Dance Emote"}]
+        no_names = {"ok": True, "matches": 0, "top_examples": []}
+        clean_live = [{"ok": True, "top_competitors": []}]
+        ranked = ete.rank_titles(titles, JABBA, ["mysterious"], no_names, clean_live)
+        comp = ranked[0]["components"]
+        self.assertEqual(comp["retrieval"], 1.0)
+        self.assertEqual(comp["market_context"], 0.0)
+        self.assertEqual(comp["evidence"], 0.0)
+        self.assertEqual(ranked[0]["evidence_quality"],
+                         "sampled, no relevant matches")
 
 
 class ChainStillWorksTests(unittest.TestCase):
