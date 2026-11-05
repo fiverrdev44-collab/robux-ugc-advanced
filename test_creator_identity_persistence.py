@@ -56,6 +56,34 @@ def test_economy_identity_preserves_explicit_values():
     print("PASS economy identity preserves explicit values only")
 
 
+def test_catalog_identity_accepts_normalized_batch_payload():
+    normalized = catalog_identity({
+        "creator_id": 321,
+        "creator_type": "Group",
+        "creator_verified": False,
+    })
+    assert normalized == {"creator_id": 321, "creator_type": "Group",
+                          "creator_verified": False}
+
+    missing = catalog_identity({"creator_id": None,
+                                "creator_type": None,
+                                "creator_verified": None})
+    assert missing == {"creator_id": None, "creator_type": None,
+                       "creator_verified": None}
+
+    conflict = catalog_identity({
+        "creatorTargetId": 111,
+        "creatorType": "User",
+        "creatorHasVerifiedBadge": True,
+        "creator_id": 222,
+        "creator_type": "Group",
+        "creator_verified": False,
+    })
+    assert conflict == {"creator_id": 111, "creator_type": "User",
+                        "creator_verified": True}
+    print("PASS catalog identity accepts normalized payloads; raw wins")
+
+
 def test_batch_normalize_keeps_creator_identity():
     item = _normalize({
         "id": 55,
@@ -91,6 +119,25 @@ def test_enricher_row_keeps_creator_identity():
     missing = enricher._item_row(2, {"name": "Missing"})
     assert missing[6:9] == (None, None, None)
     print("PASS enricher rows keep creator identity and missing values")
+
+
+def test_ingestion_rows_accept_normalized_batch_payload():
+    normalized = _normalize({
+        "id": 55,
+        "name": "Item",
+        "creatorName": "Creator",
+        "creatorTargetId": 777,
+        "creatorType": "Group",
+        "creatorHasVerifiedBadge": False,
+        "favoriteCount": 10,
+        "price": 5,
+        "assetType": 61,
+    })
+    for row in (enricher._item_row(55, normalized),
+                market_research_worker._item_row(55, normalized),
+                scanner._item_row(55, normalized)):
+        assert row[6:9] == (777, "Group", False), row
+    print("PASS normalized batch payload survives worker row construction")
 
 
 def test_market_and_scanner_rows_keep_creator_identity():
@@ -198,9 +245,11 @@ def test_diagnostics_are_read_only():
 
 if __name__ == "__main__":
     test_catalog_identity_preserves_only_explicit_values()
+    test_catalog_identity_accepts_normalized_batch_payload()
     test_economy_identity_preserves_explicit_values()
     test_batch_normalize_keeps_creator_identity()
     test_enricher_row_keeps_creator_identity()
+    test_ingestion_rows_accept_normalized_batch_payload()
     test_market_and_scanner_rows_keep_creator_identity()
     test_live_enrich_details_extract_creator_identity()
     test_live_enrich_sql_preserves_identity_on_conflict()

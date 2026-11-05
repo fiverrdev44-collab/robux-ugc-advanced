@@ -419,22 +419,37 @@ class Phase2PostgresTests(unittest.TestCase):
 
     def test_ingestion_pipelines_preserve_creator_identity(self):
         os.environ.setdefault("ROBLOSECURITY_COOKIE", "test-cookie")
+        from roblox_batch_client import _normalize
+        from creator_identity import economy_identity
         from enricher import _upsert_rows as enrich_upsert
+        from enricher import _item_row as enrich_row
         from market_research_worker import _upsert as research_upsert
+        from market_research_worker import _item_row as research_row
         from scanner import _upsert_items as scanner_upsert
+        from scanner import _item_row as scanner_row
         from live_enrich import _upsert_item
-        from creator_tracker import upsert_items
+        from creator_tracker import upsert_items, _to_item
 
         self._item(200, 700, "User", "Known", True)
-        weak = (200, "Weak", 10, 20, "", "", None, None, None, 61, "known")
-        enrich_upsert(self.cur, [weak], True, self.conn)
-        self.assertEqual(self._item_identity(200), (700, "User", True, "Known"))
 
-        research_upsert(self.cur, [weak], has_type=True)
-        self.assertEqual(self._item_identity(200), (700, "User", True, "Known"))
-
-        scanner_upsert(self.cur, [weak], True)
-        self.assertEqual(self._item_identity(200), (700, "User", True, "Known"))
+        # Raw Roblox response -> normalize -> worker row -> PostgreSQL upsert.
+        weak_raw = {
+            "id": 200, "name": "Weak", "favoriteCount": 10,
+            "price": 20, "assetType": 61,
+        }
+        weak = _normalize(weak_raw)
+        for upsert, row in (
+                (lambda items: enrich_upsert(self.cur, items, True,
+                                             self.conn),
+                 enrich_row(200, weak)),
+                (lambda items: research_upsert(self.cur, items,
+                                               has_type=True),
+                 research_row(200, weak)),
+                (lambda items: scanner_upsert(self.cur, items, True),
+                 scanner_row(200, weak))):
+            upsert([row])
+            self.assertEqual(self._item_identity(200),
+                             (700, "User", True, "Known"))
 
         _upsert_item(self.cur, {
             "id": 200, "name": "Live", "favorite_count": 7, "price": 10,
@@ -445,53 +460,76 @@ class Phase2PostgresTests(unittest.TestCase):
         }, True)
         self.assertEqual(self._item_identity(200), (700, "User", True, "Known"))
 
-        upsert_items(self.cur, [{
-            "id": 200, "name": "Tracker", "description": "",
-            "favorite_count": 5, "price": 10, "creator_name": "",
-            "creator_id": None, "creator_type": None,
-            "creator_verified": None, "asset_type_id": 61,
-            "created_at": datetime.now(timezone.utc),
-        }])
+        upsert_items(self.cur, [_to_item({
+            "id": 200, "name": "Tracker", "favoriteCount": 5,
+            "price": 10, "assetType": 61,
+        })])
         self.assertEqual(self._item_identity(200), (700, "User", True, "Known"))
 
-        enrich_upsert(self.cur, [
-            (201, "Rich", 1, 2, "", "Rich", 701, "Group", False, 61,
-             "known")], True, self.conn)
+        # Complete identity, including explicit nonverified status.
+        group_raw = {
+            "id": 201, "name": "Rich", "favoriteCount": 1, "price": 2,
+            "assetType": 61, "creatorName": "Rich",
+            "creatorTargetId": 701, "creatorType": "Group",
+            "creatorHasVerifiedBadge": False,
+        }
+        normal = _normalize(group_raw)
+        enrich_upsert(self.cur, [enrich_row(201, normal)], True, self.conn)
         self.assertEqual(self._item_identity(201),
                          (701, "Group", False, "Rich"))
-        research_upsert(self.cur, [
-            (202, "Rich", 1, 2, "", "Rich", 702, "User", True, 61,
-             "known")], has_type=True)
-        self.assertEqual(self._item_identity(202), (702, "User", True, "Rich"))
-        scanner_upsert(self.cur, [
-            (203, "Rich", 1, 2, "", "Rich", 703, "Group", True, 61,
-             "known")], True)
+
+        user_raw = dict(group_raw, id=202, creatorTargetId=702,
+                        creatorType="User", creatorHasVerifiedBadge=True)
+        user_normal = _normalize(user_raw)
+        research_upsert(self.cur, [research_row(202, user_normal)],
+                        has_type=True)
+        self.assertEqual(self._item_identity(202),
+                         (702, "User", True, "Rich"))
+
+        scanner_raw = dict(group_raw, id=203, creatorTargetId=703,
+                           creatorHasVerifiedBadge=True)
+        scanner_normal = _normalize(scanner_raw)
+        scanner_upsert(self.cur, [scanner_row(203, scanner_normal)], True)
         self.assertEqual(self._item_identity(203),
                          (703, "Group", True, "Rich"))
+
+        live_identity = economy_identity({
+            "Creator": {"Id": 704, "CreatorType": "User"}})
         _upsert_item(self.cur, {
             "id": 204, "name": "Rich", "favorite_count": 1, "price": 2,
             "total_sales": 0, "description": "", "creator_name": "Rich",
-            "creator_id": 704, "creator_type": "User",
-            "creator_verified": False, "asset_type_id": 61,
-            "created_at": datetime.now(timezone.utc),
+            "asset_type_id": 61, "created_at": datetime.now(timezone.utc),
+            **live_identity,
         }, True)
         self.assertEqual(self._item_identity(204),
-                         (704, "User", False, "Rich"))
-        upsert_items(self.cur, [{
-            "id": 205, "name": "Rich", "description": "",
-            "favorite_count": 1, "price": 2, "creator_name": "Rich",
-            "creator_id": 705, "creator_type": "Group",
-            "creator_verified": True, "asset_type_id": 61,
-            "created_at": datetime.now(timezone.utc),
-        }])
+                         (704, "User", None, "Rich"))
+
+        upsert_items(self.cur, [_to_item(dict(
+            group_raw, id=205, creatorTargetId=705,
+            creatorHasVerifiedBadge=True))])
         self.assertEqual(self._item_identity(205),
                          (705, "Group", True, "Rich"))
 
+        # Same numeric ID must remain separate by creator type.
+        enrich_upsert(self.cur, [enrich_row(206, _normalize(dict(
+            group_raw, id=206, creatorTargetId=900, creatorType="User")))],
+            True, self.conn)
+        enrich_upsert(self.cur, [enrich_row(207, _normalize(dict(
+            group_raw, id=207, creatorTargetId=900, creatorType="Group")))],
+            True, self.conn)
+        self.assertEqual(self._item_identity(206), (900, "User", False, "Rich"))
+        self.assertEqual(self._item_identity(207),
+                         (900, "Group", False, "Rich"))
+
     def test_ingestion_pre_migration_without_creator_type(self):
         os.environ.setdefault("ROBLOSECURITY_COOKIE", "test-cookie")
+        from roblox_batch_client import _normalize
         from enricher import _upsert_rows as enrich_upsert
+        from enricher import _item_row as enrich_row
         from market_research_worker import _upsert as research_upsert
+        from market_research_worker import _item_row as research_row
         from scanner import _upsert_items as scanner_upsert
+        from scanner import _item_row as scanner_row
         from live_enrich import _upsert_item
         from creator_tracker import upsert_items
 
@@ -515,11 +553,15 @@ class Phase2PostgresTests(unittest.TestCase):
                                    creator_verified, favorite_status)
                 VALUES (300, 'Known', 'Known', 900, TRUE, 'known')
             """)
-            weak = (300, "Weak", 10, 20, "", "", None, None, None, 61,
-                    "known")
-            enrich_upsert(self.cur, [weak], False, NoopConn())
-            research_upsert(self.cur, [weak], has_type=False)
-            scanner_upsert(self.cur, [weak], False)
+            weak = _normalize({
+                "id": 300, "name": "Weak", "favoriteCount": 10,
+                "price": 20, "assetType": 61,
+            })
+            enrich_upsert(self.cur, [enrich_row(300, weak)], False,
+                          NoopConn())
+            research_upsert(self.cur, [research_row(300, weak)],
+                            has_type=False)
+            scanner_upsert(self.cur, [scanner_row(300, weak)], False)
             _upsert_item(self.cur, {
                 "id": 300, "name": "Live", "favorite_count": 7, "price": 10,
                 "total_sales": 0, "description": "", "creator_name": "",
@@ -540,9 +582,14 @@ class Phase2PostgresTests(unittest.TestCase):
             """)
             self.assertEqual(self.cur.fetchone(), (900, True, "Known"))
 
-            enrich_upsert(self.cur, [
-                (301, "Rich", 1, 2, "", "Rich", 902, None, False, 61,
-                 "known")], False, NoopConn())
+            rich = _normalize({
+                "id": 301, "name": "Rich", "favoriteCount": 1,
+                "price": 2, "assetType": 61, "creatorName": "Rich",
+                "creatorTargetId": 902, "creatorType": "Group",
+                "creatorHasVerifiedBadge": False,
+            })
+            enrich_upsert(self.cur, [enrich_row(301, rich)], False,
+                          NoopConn())
             self.cur.execute("""
                 SELECT creator_id, creator_verified, creator_name
                 FROM items WHERE id = 301

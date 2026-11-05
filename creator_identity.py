@@ -24,13 +24,47 @@ def _optional_text(value):
     return text or None
 
 
+def _creator_type(value):
+    """Return only the explicit Roblox creator types, canonicalised."""
+    text = _optional_text(value)
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered == "user":
+        return "User"
+    if lowered == "group":
+        return "Group"
+    return None
+
+
 def catalog_identity(payload):
-    """Identity from catalog details/search rows (creatorTargetId fields)."""
-    badge = payload.get("creatorHasVerifiedBadge")
+    """Identity from raw catalog rows or normalized batch-client dictionaries.
+
+    Precedence policy: direct Roblox fields (creatorTargetId / creatorType /
+    creatorHasVerifiedBadge) are authoritative because they are the original
+    source evidence. Normalized fields (creator_id / creator_type /
+    creator_verified) are used only when the raw field is absent or invalid.
+    If both forms disagree, the raw value wins; contradictory normalized data
+    is ignored rather than merged or invented.
+    """
+    raw_badge = payload.get("creatorHasVerifiedBadge")
+    normalized_badge = payload.get("creator_verified")
+    if isinstance(raw_badge, bool):
+        verified = raw_badge
+    elif isinstance(normalized_badge, bool):
+        verified = normalized_badge
+    else:
+        verified = None
+
+    raw_type = _creator_type(payload.get("creatorType"))
+    normalized_type = _creator_type(payload.get("creator_type"))
+    raw_id = _positive_int(payload.get("creatorTargetId"))
+    normalized_id = _positive_int(payload.get("creator_id"))
+
     return {
-        "creator_id": _positive_int(payload.get("creatorTargetId")),
-        "creator_type": _optional_text(payload.get("creatorType")),
-        "creator_verified": badge if isinstance(badge, bool) else None,
+        "creator_id": raw_id if raw_id is not None else normalized_id,
+        "creator_type": raw_type if raw_type is not None else normalized_type,
+        "creator_verified": verified,
     }
 
 
