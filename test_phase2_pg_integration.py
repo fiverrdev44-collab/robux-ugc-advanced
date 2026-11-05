@@ -613,7 +613,7 @@ class Phase2PostgresTests(unittest.TestCase):
               (1001, 'Recent', 10, 5, 0, NOW() - INTERVAL '1 hour',
                NOW() - INTERVAL '30 minutes'),
               (1002, 'OldTier0', 2000, 5, 0, NOW() - INTERVAL '30 days',
-               NOW() - INTERVAL '90 minutes'),
+               NOW() - INTERVAL '3 hours'),
               (1003, 'Launch', 2000, 5, 0, NOW() - INTERVAL '30 days',
                NOW() - INTERVAL '4 hours'),
               (1004, 'Tier1', 500, 5, 0, NOW() - INTERVAL '30 days',

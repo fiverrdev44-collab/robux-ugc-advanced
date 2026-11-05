@@ -41,4 +41,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install psycopg2-binary requests
       - name: Run Phase 2 PostgreSQL integration
-        run: python test_phase2_pg_integration.py
+        shell: bash
+        run: |
+          set +e
+          python test_phase2_pg_integration.py 2>&1 | tee pg-integration.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 120 pg-integration.log | while IFS= read -r line; do
+              echo "::error title=PG integration failure::$line"
+            done
+          fi
+          exit "$status"
