@@ -282,6 +282,48 @@ class GenerationQualityTests(unittest.TestCase):
         self.assertNotIn("seven days", plan)
 
 
+class RealDiscordExampleTests(unittest.TestCase):
+    def test_five_candidate_calibration(self):
+        concepts = ete.extract_concepts(LIVE_INPUT)
+        identity = ete.extract_product_identity(LIVE_INPUT, concepts)
+        names = [
+            "Mysterious Energetic Emote",
+            "Mysterious Hip Hop Dance",
+            "Energetic Hip Hop Dance",
+            "Mysterious Street Dance",
+            "Mysterious Emote",
+        ]
+        ranked = ete.rank_titles(
+            [{"title": n, "strategy": "example"} for n in names],
+            LIVE_INPUT, concepts, _db_clean(["dance"]), _live_ok(["dance"]),
+            title_checks=[], identity=identity)
+        by = {t["title"]: t for t in ranked}
+        for n in names:
+            c = by[n]["components"]
+            print(
+                f"[five] {n!r}: score={by[n]['score']} "
+                f"natural={c['natural_readability']} "
+                f"memory={c['memorability']} clarity={c['product_clarity']} "
+                f"originality={c['originality']} relevance={c['relevance']} "
+                f"identity={c['identity_recognized']}")
+
+        self.assertLess(by["Mysterious Energetic Emote"]["components"][
+            "product_clarity"], 0.5)
+        self.assertLess(by["Mysterious Emote"]["components"][
+            "product_clarity"], 0.5)
+        for good in ("Mysterious Hip Hop Dance", "Energetic Hip Hop Dance",
+                     "Mysterious Street Dance"):
+            self.assertGreaterEqual(by[good]["components"][
+                "product_clarity"], 0.9)
+
+        order = [t["title"] for t in ranked]
+        self.assertIn(order[0], ("Mysterious Hip Hop Dance",
+                                 "Energetic Hip Hop Dance",
+                                 "Mysterious Street Dance"))
+        self.assertIn(order[-1], ("Mysterious Energetic Emote",
+                                  "Mysterious Emote"))
+
+
 class SecureTikTokTests(unittest.TestCase):
     def test_rejects_non_tiktok_hosts(self):
         for url in ("https://tiktok.com.evil.com/x",

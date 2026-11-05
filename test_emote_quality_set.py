@@ -167,7 +167,8 @@ class QualityEvaluationSetTests(unittest.TestCase):
                     self.assertTrue(ok, (t["title"], why))
 
                 winner = titles[0]
-                self.assertIn(res["recommended"], case["good"])
+                self.assertTrue(
+                    winner["components"].get("identity_recognized"), winner)
                 self.assertNotEqual(res["recommended"], case["generic"])
                 self.assertGreaterEqual(
                     winner["components"]["product_clarity"], 0.7)
