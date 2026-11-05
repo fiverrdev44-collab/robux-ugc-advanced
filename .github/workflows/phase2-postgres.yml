@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feat/phase2-market-intelligence
+      - fix/phase2-m2-data-coverage
   pull_request:
     branches:
       - main

@@ -5,6 +5,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
+from creator_identity import catalog_identity, has_creator_type
 
 COOKIES = []
 for i in range(1, 6):
@@ -169,6 +170,99 @@ def _parse_created(raw):
         return None
 
 
+def _item_row(item_id, d):
+    favs = d.get("favorite_count")
+    favs = (_safe_int(favs, MAX_SANE_FAVS) if favs is not None else None)
+    price = _safe_int(d.get("price"), MAX_SANE_PRICE)
+    name = (d.get("name") or "")[:500]
+    desc = (d.get("description") or "")[:5000]
+    creator = (d.get("creator_name") or "")[:200]
+    asset_type = _safe_int(d.get("asset_type_id"), 1000)
+    status = "known" if favs is not None else "missing"
+    identity = catalog_identity(d)
+    return (item_id, name, favs, price, desc, creator,
+            identity["creator_id"], identity["creator_type"],
+            identity["creator_verified"], asset_type, status)
+
+
+def _upsert_rows(cur, rows, has_type, conn):
+    """Upsert enriched rows; weaker evidence never erases known identity."""
+    enriched = 0
+    db_errors = 0
+    if has_type:
+        upsert = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_type,
+                               creator_verified, asset_type_id,
+                               favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_type = COALESCE(EXCLUDED.creator_type,
+                                        items.creator_type),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        params = list(rows)
+    else:
+        upsert = """
+            INSERT INTO items (id, name, favorite_count, price, description,
+                               creator_name, creator_id, creator_verified,
+                               asset_type_id, favorite_status, fetched_at)
+            VALUES %s
+            ON CONFLICT (id) DO UPDATE SET
+                favorite_count = EXCLUDED.favorite_count,
+                favorite_status = EXCLUDED.favorite_status,
+                price = EXCLUDED.price,
+                description = EXCLUDED.description,
+                name = EXCLUDED.name,
+                creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                        items.creator_name),
+                creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+                creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                            items.creator_verified),
+                asset_type_id = EXCLUDED.asset_type_id,
+                fetched_at = CURRENT_TIMESTAMP
+        """
+        template = ("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "CURRENT_TIMESTAMP)")
+        params = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[8], r[9],
+                   r[10]) for r in rows]
+
+    for i in range(0, len(params), 100):
+        chunk = params[i:i + 100]
+        try:
+            execute_values(cur, upsert, chunk, template=template,
+                           page_size=100)
+            conn.commit()
+            enriched += len(chunk)
+        except Exception as e:
+            conn.rollback()
+            db_errors += len(chunk)
+            log(f"  bulk upsert failed ({len(chunk)} rows): {e}")
+            for values in chunk:
+                try:
+                    execute_values(cur, upsert, [values], template=template)
+                    conn.commit()
+                    enriched += 1
+                    db_errors -= 1
+                except Exception as e2:
+                    conn.rollback()
+                    log(f"  DB error {values[0]}: {e2}")
+    return enriched, db_errors
+
+
 def enrich_items():
     setup_database()
     conn = get_db_connection()
@@ -222,62 +316,20 @@ def enrich_items():
     db_errors = 0
     dates_filled = 0
 
-    def _row(item_id, d):
-        favs = d.get("favorite_count")
-        favs = (_safe_int(favs, MAX_SANE_FAVS) if favs is not None else None)
-        price = _safe_int(d.get("price"), MAX_SANE_PRICE)
-        name = (d.get("name") or "")[:500]
-        desc = (d.get("description") or "")[:5000]
-        creator = (d.get("creator_name") or "")[:200]
-        asset_type = _safe_int(d.get("asset_type_id"), 1000)
-        status = "known" if favs is not None else "missing"
-        return (item_id, name, favs, price, desc, creator, asset_type, status)
-
     rows = []
     for item_id, d in results.items():
         try:
-            rows.append(_row(item_id, d))
+            rows.append(_item_row(item_id, d))
             if _safe_int(d.get("asset_type_id"), 1000) == 61:
                 emote_count += 1
         except Exception as e:
             db_errors += 1
             log(f"  row build error {item_id}: {e}")
 
-    upsert = """
-        INSERT INTO items (id, name, favorite_count, price, description,
-                           creator_name, asset_type_id, favorite_status,
-                           fetched_at)
-        VALUES %s
-        ON CONFLICT (id) DO UPDATE SET
-            favorite_count = EXCLUDED.favorite_count,
-            favorite_status = EXCLUDED.favorite_status,
-            price = EXCLUDED.price,
-            description = EXCLUDED.description,
-            name = EXCLUDED.name,
-            asset_type_id = EXCLUDED.asset_type_id,
-            fetched_at = CURRENT_TIMESTAMP
-    """
-    template = "(%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
-
-    for i in range(0, len(rows), 100):
-        chunk = rows[i:i + 100]
-        try:
-            execute_values(cur, upsert, chunk, template=template, page_size=100)
-            conn.commit()
-            enriched += len(chunk)
-        except Exception as e:
-            conn.rollback()
-            db_errors += len(chunk)
-            log(f"  bulk upsert failed ({len(chunk)} rows): {e}")
-            for row in chunk:
-                try:
-                    execute_values(cur, upsert, [row], template=template)
-                    conn.commit()
-                    enriched += 1
-                    db_errors -= 1
-                except Exception as e2:
-                    conn.rollback()
-                    log(f"  DB error {row[0]}: {e2}")
+    has_type = has_creator_type(cur)
+    upserted, upsert_errors = _upsert_rows(cur, rows, has_type, conn)
+    enriched += upserted
+    db_errors += upsert_errors
 
     # Record permanent failures (404/invalid) so they are skipped after 3 tries.
     for fid, reason in failed_ids.items():

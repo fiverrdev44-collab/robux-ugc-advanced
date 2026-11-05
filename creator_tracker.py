@@ -274,8 +274,9 @@ def upsert_items(cur, items):
                         WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
                         ELSE 'known' END,
                     price = EXCLUDED.price,
-                    creator_name = EXCLUDED.creator_name,
-                    creator_id = EXCLUDED.creator_id,
+                    creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                            items.creator_name),
+                    creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
                     creator_type = COALESCE(EXCLUDED.creator_type,
                                             items.creator_type),
                     creator_verified = COALESCE(EXCLUDED.creator_verified,
@@ -304,8 +305,9 @@ def upsert_items(cur, items):
                         WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
                         ELSE 'known' END,
                     price = EXCLUDED.price,
-                    creator_name = EXCLUDED.creator_name,
-                    creator_id = EXCLUDED.creator_id,
+                    creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                            items.creator_name),
+                    creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
                     creator_verified = COALESCE(EXCLUDED.creator_verified,
                                                 items.creator_verified),
                     asset_type_id = EXCLUDED.asset_type_id,

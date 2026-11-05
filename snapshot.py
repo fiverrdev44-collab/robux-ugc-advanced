@@ -151,6 +151,42 @@ def snapshot_top_items():
         _RUN_LOCK.release()
 
 
+_SELECTION_SQL = """
+    WITH ranked_items AS (
+        SELECT id, total_sales, price, favorite_count, created_at,
+               COALESCE(fetched_at, updated_at) AS last_updated_at,
+            CASE
+                WHEN id IN (SELECT item_id FROM launch_ledger)
+                  OR created_at > NOW() - INTERVAL '3 days'
+                  OR (COALESCE(favorite_count, 0) > 1000
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '2 hours')
+                    THEN 0
+                WHEN (COALESCE(favorite_count, 0) BETWEEN 100 AND 1000
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '8 hours')
+                  OR (created_at > NOW() - INTERVAL '14 days'
+                      AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '6 hours')
+                    THEN 1
+                WHEN COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '7 days'
+                    THEN 2
+                ELSE 99
+            END AS tier,
+            CASE
+                WHEN id IN (SELECT item_id FROM launch_ledger) THEN 0
+                WHEN created_at > NOW() - INTERVAL '3 days' THEN 1
+                ELSE 2
+            END AS tier0_priority
+        FROM items
+    )
+    SELECT id, total_sales, price
+    FROM ranked_items
+    WHERE tier < 99
+    ORDER BY tier ASC,
+             CASE WHEN tier = 0 THEN tier0_priority ELSE 2 END ASC,
+             last_updated_at ASC NULLS FIRST
+    LIMIT %s
+"""
+
+
 def _snapshot_top_items_inner():
     log("📸 Snapshot job started.")
     for key in _stats:
@@ -162,35 +198,12 @@ def _snapshot_top_items_inner():
 
     # Tiered half-life selection. `last_updated_at` is the freshest observed
     # timestamp we store (fetched_at, else updated_at). Active ledger items and
-    # very new items are always tier 0; the rest decay by age/velocity.
+    # very new items are always tier 0; within tier 0 launch-ledger items come
+    # first, then recently created items, then stale/high-favorite items. This
+    # keeps the same limit/API budget while preventing fresh items from being
+    # displaced by thousands of older tier-0 rows.
     tier_limit = int(os.getenv("SNAPSHOT_TIER_LIMIT", "1500"))
-    cur.execute("""
-        WITH ranked_items AS (
-            SELECT id, total_sales, price, favorite_count, created_at,
-                   COALESCE(fetched_at, updated_at) AS last_updated_at,
-                CASE
-                    WHEN id IN (SELECT item_id FROM launch_ledger)
-                      OR created_at > NOW() - INTERVAL '3 days'
-                      OR (COALESCE(favorite_count, 0) > 1000
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '2 hours')
-                        THEN 0
-                    WHEN (COALESCE(favorite_count, 0) BETWEEN 100 AND 1000
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '8 hours')
-                      OR (created_at > NOW() - INTERVAL '14 days'
-                          AND COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '6 hours')
-                        THEN 1
-                    WHEN COALESCE(fetched_at, updated_at) < NOW() - INTERVAL '7 days'
-                        THEN 2
-                    ELSE 99
-                END AS tier
-            FROM items
-        )
-        SELECT id, total_sales, price
-        FROM ranked_items
-        WHERE tier < 99
-        ORDER BY tier ASC, last_updated_at ASC NULLS FIRST
-        LIMIT %s
-    """, (tier_limit,))
+    cur.execute(_SELECTION_SQL, (tier_limit,))
     rows = cur.fetchall()
     log(f"📊 Found {len(rows)} items to snapshot.")
 

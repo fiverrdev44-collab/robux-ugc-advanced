@@ -14,6 +14,7 @@ on:
       - fix/emote-title-production-acceptance
       - feat/creator-intelligence-phase1
       - feat/phase2-market-intelligence
+      - fix/phase2-m2-data-coverage
   pull_request:
     branches:
       - main
@@ -63,6 +64,10 @@ jobs:
         run: python test_phase2_milestone1.py
       - name: Run Phase 2 creator discovery Milestone 2 regressions
         run: python test_phase2_milestone2.py
+      - name: Run creator identity persistence regressions
+        run: python test_creator_identity_persistence.py
+      - name: Run snapshot selection regressions
+        run: python test_snapshot_batch.py
       - name: Run Astra and product understanding regressions
         run: |
           python test_astra.py

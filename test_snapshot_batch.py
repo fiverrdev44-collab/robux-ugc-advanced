@@ -95,8 +95,11 @@ def test_half_life_selection_preserved():
                             "snapshot.py"), encoding="utf-8").read()
     assert "WITH ranked_items" in src
     assert "WHERE tier < 99" in src
+    assert "tier0_priority" in src
+    assert "CASE WHEN tier = 0 THEN tier0_priority ELSE 2 END ASC" in src
+    assert "LIMIT %s" in src
     assert "fetch_many_items_sync" in src
-    print("PASS half-life CTE selection preserved")
+    print("PASS half-life CTE selection preserved with recent-first tier 0")
 
 
 if __name__ == "__main__":

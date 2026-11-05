@@ -10,6 +10,8 @@ import time
 
 import aiohttp
 
+from creator_identity import catalog_identity
+
 CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -183,7 +185,7 @@ class RobloxBatchClient:
 
 def _normalize(d):
     item_id = d.get("id")
-    return {
+    item = {
         "id": int(item_id) if item_id else None,
         "name": (d.get("name") or "")[:500],
         "description": (d.get("description") or "")[:5000],
@@ -192,8 +194,9 @@ def _normalize(d):
         "favorite_count": d.get("favoriteCount"),
         "asset_type_id": d.get("assetType") or 0,
         "creator_name": (d.get("creatorName") or "")[:200],
-        "creator_id": d.get("creatorTargetId"),
     }
+    item.update(catalog_identity(d))
+    return item
 
 
 async def _run(ids, **kwargs):

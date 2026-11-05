@@ -400,6 +400,23 @@ def test_t19_manual_module_entrypoint():
     print("T19 PASS python oracle_worker.py executes safely with feature disabled")
 
 
+def test_t20_discovery_rate_limited_reports_zero_observations():
+    enable()
+    from creator_tracker import RateLimited
+    rows, types = base_setup()
+    store = FakeStore(rows, types)
+    w = make_worker(store, search_map={1: RateLimited()})
+    out = ow.run_oracle_scan(**w)
+    assert out["creators_eligible"] == 3
+    assert out["creators_scanned"] == 0
+    assert out["items_discovered"] == 0
+    assert out["observations_inserted"] == 0
+    assert out["status"] == "partial"
+    assert out["truncated_creators"]["1"] == "discovery_rate_limited"
+    assert not store.inserted
+    print("T20 PASS discovery rate limit reported accurately, zero observations")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_t")]

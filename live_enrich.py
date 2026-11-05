@@ -14,6 +14,7 @@ import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
+from creator_identity import economy_identity, has_creator_type
 
 
 def log(msg):
@@ -232,6 +233,7 @@ def _fetch_item_details(item_id):
 
                 creator_obj = d.get("Creator") or {}
                 creator = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
+                identity = economy_identity(d)
 
                 created_raw = d.get("Created")
                 created_dt = None
@@ -251,12 +253,91 @@ def _fetch_item_details(item_id):
                     "favorite_count": favs,
                     "total_sales": d.get("Sales") or 0,
                     "creator_name": (creator or "")[:200],
+                    "creator_id": identity["creator_id"],
+                    "creator_type": identity["creator_type"],
+                    "creator_verified": identity["creator_verified"],
                     "asset_type_id": d.get("AssetTypeId") or 0,
                     "created_at": created_dt,
                 }
             except Exception:
                 continue
     return None
+
+
+_UPSERT_WITH_TYPE = """
+    INSERT INTO items (id, name, favorite_count, price, total_sales,
+                       description, creator_name, creator_id,
+                       creator_type, creator_verified, asset_type_id,
+                       created_at, favorite_status)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO UPDATE SET
+        favorite_count = EXCLUDED.favorite_count,
+        favorite_status = CASE
+            WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+            ELSE 'known'
+        END,
+        total_sales = EXCLUDED.total_sales,
+        price = EXCLUDED.price,
+        description = EXCLUDED.description,
+        name = EXCLUDED.name,
+        creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                items.creator_name),
+        creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+        creator_type = COALESCE(EXCLUDED.creator_type, items.creator_type),
+        creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                    items.creator_verified),
+        asset_type_id = EXCLUDED.asset_type_id,
+        created_at = COALESCE(items.created_at, EXCLUDED.created_at),
+        fetched_at = CURRENT_TIMESTAMP
+"""
+
+_UPSERT_NO_TYPE = """
+    INSERT INTO items (id, name, favorite_count, price, total_sales,
+                       description, creator_name, creator_id,
+                       creator_verified, asset_type_id, created_at,
+                       favorite_status)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO UPDATE SET
+        favorite_count = EXCLUDED.favorite_count,
+        favorite_status = CASE
+            WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+            ELSE 'known'
+        END,
+        total_sales = EXCLUDED.total_sales,
+        price = EXCLUDED.price,
+        description = EXCLUDED.description,
+        name = EXCLUDED.name,
+        creator_name = COALESCE(NULLIF(EXCLUDED.creator_name, ''),
+                                items.creator_name),
+        creator_id = COALESCE(EXCLUDED.creator_id, items.creator_id),
+        creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                    items.creator_verified),
+        asset_type_id = EXCLUDED.asset_type_id,
+        created_at = COALESCE(items.created_at, EXCLUDED.created_at),
+        fetched_at = CURRENT_TIMESTAMP
+"""
+
+
+def _upsert_item(cur, data, has_type):
+    values = (
+        data["id"], data["name"], data["favorite_count"],
+        data["price"], data["total_sales"], data["description"],
+        data["creator_name"], data.get("creator_id"),
+    )
+    if has_type:
+        values += (
+            data.get("creator_type"), data.get("creator_verified"),
+            data["asset_type_id"], data["created_at"],
+            ("known" if data.get("favorite_count") is not None else "missing"),
+        )
+        cur.execute(_UPSERT_WITH_TYPE, values)
+    else:
+        values += (
+            data.get("creator_verified"), data["asset_type_id"],
+            data["created_at"],
+            ("known" if data.get("favorite_count") is not None else "missing"),
+        )
+        cur.execute(_UPSERT_NO_TYPE, values)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -288,6 +369,7 @@ def live_enrich_keyword(keyword, category_ids=None, max_items=100):
 
     conn = get_db_connection()
     cur = conn.cursor()
+    has_type = has_creator_type(cur)
 
     try:
         cur.execute("SELECT id FROM items WHERE id = ANY(%s)", (ids,))
@@ -307,30 +389,7 @@ def live_enrich_keyword(keyword, category_ids=None, max_items=100):
                     data = fut.result(timeout=30)
                     if not data:
                         continue
-                    cur.execute("""
-                        INSERT INTO items (id, name, favorite_count, price, total_sales,
-                                           description, creator_name, asset_type_id, created_at,
-                                           favorite_status)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (id) DO UPDATE SET
-                            favorite_count = EXCLUDED.favorite_count,
-                            favorite_status = CASE
-                                WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
-                                ELSE 'known'
-                            END,
-                            total_sales = EXCLUDED.total_sales,
-                            price = EXCLUDED.price,
-                            description = EXCLUDED.description,
-                            name = EXCLUDED.name,
-                            asset_type_id = EXCLUDED.asset_type_id,
-                            created_at = COALESCE(items.created_at, EXCLUDED.created_at),
-                            fetched_at = CURRENT_TIMESTAMP
-                    """, (
-                        data["id"], data["name"], data["favorite_count"],
-                        data["price"], data["total_sales"], data["description"],
-                        data["creator_name"], data["asset_type_id"], data["created_at"],
-                        ("known" if data.get("favorite_count") is not None else "missing"),
-                    ))
+                    _upsert_item(cur, data, has_type)
                     saved += 1
                 except Exception as e:
                     log(f"save failed: {e}")
