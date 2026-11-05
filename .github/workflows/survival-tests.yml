@@ -7,6 +7,7 @@ on:
       - portfolio-change-intelligence
       - project-oracle-phase2-1
       - feat/accuracy-first-execution-policy
+      - feature/emote-title-engine
   pull_request:
     branches:
       - main
@@ -44,6 +45,8 @@ jobs:
         run: python test_execution_policy.py
       - name: Run command cancellation integration tests
         run: python test_command_cancellation.py
+      - name: Run emote title engine regressions
+        run: python test_emote_title.py
       - name: Run Astra and product understanding regressions
         run: |
           python test_astra.py

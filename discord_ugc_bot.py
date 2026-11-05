@@ -133,6 +133,15 @@ try:
 except Exception as e:
     print(f"⚠️ Advanced commands failed to load: {e}", flush=True)
 
+# Register emote commands independently: a failure must not skip experiments
+# or visibility registration.
+try:
+    from commands_emote import register_emote_commands
+    register_emote_commands(bot, get_db)
+    print("✅ Emote title engine loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ Emote title engine failed to load: {e}", flush=True)
+
 # ── 🎯 Interactive workflow menu (!start) ────────────────────
 try:
     from menu import register_menu_commands
