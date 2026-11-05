@@ -9,6 +9,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import psycopg2
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pattern_forge
@@ -35,50 +37,87 @@ class StubCursor:
         return result if isinstance(result, list) else [result]
 
 
-def joined_row(item_id, name, favs, snap_favs, snap_at, price=50,
-               creator="c1"):
-    return (item_id, name, creator, price, favs,
-            NOW - timedelta(hours=30), snap_favs, snap_at)
+def sql_row(item_id, name, favs, velocity, span_hours, snapshot_count=2,
+            price=50, creator="c1"):
+    """Shape returned by the SQL aggregation/ranking query."""
+    return (item_id, name, creator, price, favs, NOW - timedelta(hours=30),
+            snapshot_count, span_hours, velocity, velocity is not None)
 
 
 class GoldenHourTests(unittest.TestCase):
-    def test_velocity_only_when_snapshots_support_it(self):
+    def test_maps_measured_zero_negative_and_unmeasured(self):
         rows = [
-            # Measured: +20 favorites over 24h.
-            joined_row(1, "Aura Emote", 150, 100, NOW - timedelta(hours=24)),
-            joined_row(1, "Aura Emote", 150, 120, NOW),
-            # One snapshot only.
-            joined_row(2, "Plain Hat", 500, 480, NOW - timedelta(hours=5)),
-            # Two snapshots 0.5h apart: insufficient span.
-            joined_row(3, "Boots", 100, 95, NOW - timedelta(minutes=30)),
-            joined_row(3, "Boots", 100, 100, NOW),
-            # Measured flat: 0 growth over 24h.
-            joined_row(4, "Cape", 80, 80, NOW - timedelta(hours=24)),
-            joined_row(4, "Cape", 80, 80, NOW),
-            # Missing favorites, no snapshots.
-            joined_row(5, "Null", None, None, None),
+            sql_row(1, "Aura Emote", 150, 20.0, 24.0, 2),
+            sql_row(4, "Cape", 80, 0.0, 24.0, 2),
+            sql_row(6, "Decline", 40, -5.0, 12.0, 2),
+            sql_row(2, "Plain Hat", 500, None, None, 1),
+            sql_row(3, "Boots", 100, None, None, 2),
+            sql_row(5, "Null", None, None, None, 0),
         ]
         cur = StubCursor([rows])
         metrics = golden_hour_metrics(cur, limit=10)
-        by_id = {r["item_id"]: r for r in metrics["items"]}
 
-        self.assertEqual(metrics["measured_count"], 2)
+        self.assertEqual(metrics["measured_count"], 3)
         self.assertEqual(metrics["unmeasured_count"], 3)
         self.assertEqual([r["item_id"] for r in metrics["items"]],
-                         [1, 4, 2, 3, 5])
+                         [1, 4, 6, 2, 3, 5])
 
+        by_id = {r["item_id"]: r for r in metrics["items"]}
         self.assertTrue(by_id[1]["velocity_measured"])
         self.assertEqual(by_id[1]["velocity"], 20.0)
         self.assertEqual(by_id[1]["snapshot_span_hours"], 24.0)
         self.assertTrue(by_id[4]["velocity_measured"])
         self.assertEqual(by_id[4]["velocity"], 0.0)
+        self.assertTrue(by_id[6]["velocity_measured"])
+        self.assertEqual(by_id[6]["velocity"], -5.0)
 
         self.assertFalse(by_id[2]["velocity_measured"])
         self.assertIsNone(by_id[2]["velocity"])
+        self.assertIsNone(by_id[2]["snapshot_span_hours"])
+        self.assertEqual(by_id[2]["snapshot_count"], 1)
         self.assertFalse(by_id[3]["velocity_measured"])
         self.assertFalse(by_id[5]["velocity_measured"])
         self.assertIsNone(by_id[5]["favorites"])
-        self.assertIn("item_history", cur.executed[0][0])
+
+    def test_sql_aggregates_ranks_and_limits(self):
+        cur = StubCursor([[]])
+        golden_hour_metrics(cur, limit=7)
+        sql, params = cur.executed[0]
+        self.assertIn("WITH recent", sql)
+        self.assertIn("GROUP BY r.id", sql)
+        self.assertIn("array_agg", sql)
+        self.assertIn("snapshot_count >= 2", sql)
+        self.assertIn(">= %s", sql)
+        self.assertIn("ORDER BY (velocity IS NOT NULL) DESC", sql)
+        self.assertIn("favorite_count DESC NULLS LAST", sql)
+        self.assertIn("LIMIT %s", sql)
+        self.assertIn("h.snapshot_at >= NOW() - INTERVAL '48 hours'", sql)
+        self.assertEqual(params, (3600, 7))
+
+    def test_large_result_is_bounded_to_limit(self):
+        rows = [sql_row(i, f"Item {i}", 10000 - i, float(i), 24.0)
+                for i in range(10000)]
+        cur = StubCursor([rows])
+        metrics = golden_hour_metrics(cur, limit=5)
+        self.assertEqual(len(metrics["items"]), 5)
+        self.assertEqual([r["item_id"] for r in metrics["items"]],
+                         [0, 1, 2, 3, 4])
+
+    def test_database_error_and_timeout_propagate(self):
+        class ErrorCursor:
+            def __init__(self, error):
+                self.error = error
+
+            def execute(self, *args, **kwargs):
+                raise self.error
+
+        with self.assertRaises(TimeoutError):
+            golden_hour_metrics(ErrorCursor(TimeoutError("timeout")),
+                                limit=5)
+        with self.assertRaises(psycopg2.errors.QueryCanceled):
+            golden_hour_metrics(
+                ErrorCursor(psycopg2.errors.QueryCanceled("canceled")),
+                limit=5)
 
     def test_old_velocity_claims_removed_from_source(self):
         source = Path(__file__).with_name(

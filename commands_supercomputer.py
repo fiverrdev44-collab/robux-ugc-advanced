@@ -61,75 +61,96 @@ WHALE_RADAR_FOOTER = (
     "Stored PostgreSQL sample · not live · limited monitored set")
 
 
-def _as_utc(value):
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
 def golden_hour_metrics(cur, limit=5):
-    """Observed favorites + snapshot velocity only where snapshots support it.
+    """Observed favorites + snapshot velocity, aggregated and ranked in SQL.
 
-    Returns items ranked by measured velocity (desc), then observed favorites.
-    Items with fewer than two snapshots, or a snapshot span under one hour,
-    have velocity_measured=False and velocity=None.
+    PostgreSQL filters recent items, aggregates their 48-hour snapshots,
+    computes velocity only when two snapshots span at least one hour, ranks
+    measured velocity before unmeasured items, and applies the output limit
+    after ranking. Python only maps the already-limited SQL result.
+
+    Missing favorites stay None. Valid zero/negative growth is measured.
     """
+    limit = max(1, int(limit))
+    span_seconds = int(GOLDEN_MIN_SNAPSHOT_SPAN_HOURS * 3600)
     cur.execute("""
-        SELECT i.id, i.name, i.creator_name, i.price, i.favorite_count,
-               i.created_at, h.favorite_count, h.snapshot_at
-        FROM items i
-        LEFT JOIN item_history h
-          ON h.item_id = i.id
-         AND h.snapshot_at >= NOW() - INTERVAL '48 hours'
-        WHERE i.created_at >= NOW() - INTERVAL '48 hours'
-        ORDER BY i.id, h.snapshot_at
-    """)
+        WITH recent AS (
+            SELECT i.id, i.name, i.creator_name, i.price,
+                   i.favorite_count, i.created_at
+            FROM items i
+            WHERE i.created_at >= NOW() - INTERVAL '48 hours'
+        ),
+        agg AS (
+            SELECT r.id, r.name, r.creator_name, r.price,
+                   r.favorite_count, r.created_at,
+                   count(h.snapshot_at) AS snapshot_count,
+                   min(h.snapshot_at) AS first_at,
+                   max(h.snapshot_at) AS last_at,
+                   (array_agg(h.favorite_count ORDER BY h.snapshot_at ASC)
+                       FILTER (WHERE h.snapshot_at IS NOT NULL))[1]
+                       AS first_favs,
+                   (array_agg(h.favorite_count ORDER BY h.snapshot_at DESC)
+                       FILTER (WHERE h.snapshot_at IS NOT NULL))[1]
+                       AS last_favs
+            FROM recent r
+            LEFT JOIN item_history h
+              ON h.item_id = r.id
+             AND h.snapshot_at >= NOW() - INTERVAL '48 hours'
+             AND h.favorite_count IS NOT NULL
+            GROUP BY r.id, r.name, r.creator_name, r.price,
+                     r.favorite_count, r.created_at
+        ),
+        scored AS (
+            SELECT *,
+                   EXTRACT(EPOCH FROM (last_at - first_at)) / 3600.0
+                       AS span_hours,
+                   CASE
+                     WHEN snapshot_count >= 2
+                      AND EXTRACT(EPOCH FROM (last_at - first_at)) >= %s
+                     THEN (last_favs - first_favs) * 24.0
+                          / (EXTRACT(EPOCH FROM (last_at - first_at))
+                             / 3600.0)
+                     ELSE NULL
+                   END AS velocity
+            FROM agg
+        )
+        SELECT id, name, creator_name, price, favorite_count, created_at,
+               snapshot_count,
+               CASE WHEN velocity IS NOT NULL THEN span_hours END
+                   AS span_hours,
+               velocity,
+               (velocity IS NOT NULL) AS velocity_measured
+        FROM scored
+        ORDER BY (velocity IS NOT NULL) DESC,
+                 velocity DESC NULLS LAST,
+                 favorite_count DESC NULLS LAST,
+                 id ASC
+        LIMIT %s
+    """, (span_seconds, limit))
     rows = cur.fetchall() or []
-    by_item = {}
+    items = []
     for (item_id, name, creator, price, favs, created_at,
-         snap_favs, snap_at) in rows:
-        rec = by_item.setdefault(item_id, {
+         snapshot_count, span_hours, velocity,
+         velocity_measured) in rows[:limit]:
+        items.append({
             "item_id": item_id,
             "name": name or "",
             "creator": creator or "",
             "price": price,
             "favorites": favs,
             "created_at": created_at,
-            "snapshots": [],
+            "snapshot_count": int(snapshot_count or 0),
+            "snapshot_span_hours": (float(span_hours)
+                                    if span_hours is not None else None),
+            "velocity": (float(velocity)
+                         if velocity is not None else None),
+            "velocity_measured": bool(velocity_measured),
         })
-        if snap_at is not None and snap_favs is not None:
-            rec["snapshots"].append((_as_utc(snap_at), int(snap_favs)))
-
-    items = []
-    for rec in by_item.values():
-        snaps = sorted(rec.pop("snapshots"), key=lambda x: x[0])
-        rec["snapshot_count"] = len(snaps)
-        rec["velocity"] = None
-        rec["velocity_measured"] = False
-        rec["snapshot_span_hours"] = None
-        if len(snaps) >= 2:
-            first_at, first_favs = snaps[0]
-            last_at, last_favs = snaps[-1]
-            span_hours = (last_at - first_at).total_seconds() / 3600.0
-            rec["snapshot_span_hours"] = round(span_hours, 1)
-            if span_hours >= GOLDEN_MIN_SNAPSHOT_SPAN_HOURS:
-                rec["velocity"] = round(
-                    (last_favs - first_favs) / (span_hours / 24.0), 2)
-                rec["velocity_measured"] = True
-        items.append(rec)
-
-    measured = sorted(
-        [r for r in items if r["velocity_measured"]],
-        key=lambda r: (-(r["velocity"] or 0), -(r["favorites"] or 0)))
-    unmeasured = sorted(
-        [r for r in items if not r["velocity_measured"]],
-        key=lambda r: -(r["favorites"] or 0))
+    measured_count = sum(1 for r in items if r["velocity_measured"])
     return {
-        "items": (measured + unmeasured)[:max(1, int(limit))],
-        "measured_count": len(measured),
-        "unmeasured_count": len(unmeasured),
+        "items": items,
+        "measured_count": measured_count,
+        "unmeasured_count": len(items) - measured_count,
         "window_hours": GOLDEN_WINDOW_HOURS,
     }
 

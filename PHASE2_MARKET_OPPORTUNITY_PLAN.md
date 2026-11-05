@@ -34,6 +34,14 @@ Verified badge ≠ strong sales. No causal claims.
    favorites plus **snapshot-measured velocity only when ≥2 snapshots span at
    least 1 hour**. Otherwise `velocity unavailable`. Rank measured velocity
    first, then observed favorites. Label “not algorithmic ranking data”.
+   Aggregation, velocity, ranking, and the output limit execute in
+   PostgreSQL (`WITH recent` + `array_agg` + `LIMIT`); Python maps only the
+   already-limited result.
+   - Index review: the snapshot join uses the existing
+     `idx_item_history_item_snapshot (item_id, snapshot_at)`. An optional
+     additive `items(created_at)` index is provided in
+     `migrations/2026-11-05_golden_hour_indexes.sql`. `EXPLAIN`/staging
+     verification is pending (no staging DB available here).
 2. `!failures`: remove the 999 placeholder. Report under/high-favorite
    frequencies and sample sizes; `ratio=None` + `evidence` when the comparison
    frequency is zero or the comparison group is empty.
