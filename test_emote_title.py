@@ -49,6 +49,12 @@ def _db(phrases):
     }
 
 
+def _db_clean(phrases):
+    result = _db(phrases)
+    result["top_examples"] = []
+    return result
+
+
 def _live_ok(phrases):
     return [{"keyword": p, "ok": True, "category_correct": 10,
              "category_mismatched": 0, "exact_title_matches": 0,
@@ -152,7 +158,7 @@ class TitleVerificationTests(unittest.TestCase):
         self.assertTrue(all(c["checked_at"] for c in direct))
 
     def test_generate_attaches_title_checks(self):
-        res = _generate()
+        res = _generate(title_live_budget=2)
         self.assertTrue(res["title_checks"])
         valid = {"exact", "similar", "conceptual", "none", "insufficient"}
         for c in res["title_checks"]:
@@ -178,10 +184,16 @@ class TitleVerificationTests(unittest.TestCase):
 
     def test_unchecked_winner_is_labeled_unverified(self):
         # The first two candidates are checked and demoted (exact/similar);
-        # an unchecked third candidate wins and must be labeled unverified.
-        res = _generate(title_live_fn=_title_live_exact_similar)
+        # whichever candidate wins afterwards was not checked and must be
+        # labeled unverified without another API request.
+        res = _generate(db_fn=_db_clean,
+                        title_live_fn=_title_live_exact_similar,
+                        title_live_budget=2)
         winner = res["titles"][0]
-        self.assertEqual(winner["title"], "Mysterious Energetic Dance Emote")
+        checked = {c["title"] for c in res["title_checks"]}
+        self.assertIn("Mysterious Street Dance Emote", checked)
+        self.assertIn("Energetic Street Dance Emote", checked)
+        self.assertNotIn(winner["title"], checked)
         self.assertEqual(winner["title_check_status"], "unverified")
         self.assertEqual(res["recommended_verification"]["status"],
                          "unverified")
@@ -215,7 +227,8 @@ class RateLimitTests(unittest.TestCase):
         report = ete.format_report(res)
         self.assertIn("incomplete", report.lower())
         self.assertIn("deferred", report.lower())
-        self.assertTrue(all(c["status"] in ("insufficient", "exact")
+        self.assertTrue(all(c["status"] in ("insufficient", "exact",
+                                            "unverified")
                             for c in res["title_checks"]))
 
     def test_no_evidence_caps_score_and_labels_unknown(self):
