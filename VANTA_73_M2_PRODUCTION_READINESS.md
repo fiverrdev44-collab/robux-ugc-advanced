@@ -15,8 +15,11 @@ All production-dependent items remain **UNVERIFIED** until the read-only script
 is run by an operator with authorized access:
 
 ```bash
+# The script is NOT on main (main deploys the bot). Retrieve it first from the
+# reviewed documentation commit without merging or checking out that branch;
+# see section 0.1 for the pinned retrieval and verification commands.
 psql "$READONLY_DATABASE_URL" -X -v ON_ERROR_STOP=1 -P pager=off \
-     -A -F ' | ' -f diagnostics/production_readiness_m2.sql
+     -A -F ' | ' -f /tmp/m2_readiness_audit.sql
 ```
 
 Run it against a replica where possible. The script opens `BEGIN READ ONLY`,
@@ -29,18 +32,35 @@ Do not paste a DSN into chat, a commit, a report, or shell history. Use the
 read-only DSN that is already available to the authorized server/replica
 operator. The commands below reference the variable only; they never print it.
 
+The Oracle server tracks and deploys `main`; the audit script is intentionally
+on `docs/phase2-m2-production-readiness`, **not** `main`. Retrieve the reviewed
+script from commit `b1d0d30` without checking out, merging, or redeploying:
+
 ```bash
 cd ~/robux-ugc-advanced
+REVIEWED_COMMIT=b1d0d30c85a2119ffbf7b0a0ff54b54b2fbfd63c
 
-# Use the existing read-only DSN variable provisioned on the host.
+# Option A: fetch the docs branch, then read the pinned commit's file.
+# This does not change the checked-out branch or restart the service.
+git fetch --no-tags origin docs/phase2-m2-production-readiness
+git cat-file -p "${REVIEWED_COMMIT}:diagnostics/production_readiness_m2.sql" \
+    > /tmp/m2_readiness_audit.sql
+
+# Option B (if git network access is unavailable): pinned raw URL.
+# curl -fsSL \
+#   "https://raw.githubusercontent.com/fiverrdev44-collab/robux-ugc-advanced/${REVIEWED_COMMIT}/diagnostics/production_readiness_m2.sql" \
+#   -o /tmp/m2_readiness_audit.sql
+
+# Verify the reviewed script contents (SHA-256) before execution.
+echo "9523a812cd3f189c5be172cd67d6d047f7d5bb8debbc3a9855c433c4738939c7  /tmp/m2_readiness_audit.sql" \
+    | sha256sum -c -
+
+# Confirm the psql client and the existing read-only DSN variable.
+command -v psql && psql --version
 if [ -z "${READONLY_DATABASE_URL:-}" ]; then
   echo "READONLY_DATABASE_URL is not set in this shell; use the host's existing read-only DSN variable."
   exit 1
 fi
-
-psql "$READONLY_DATABASE_URL" -X -v ON_ERROR_STOP=1 -P pager=off \
-     -A -F ' | ' -f diagnostics/production_readiness_m2.sql \
-     | tee "/tmp/m2_readiness_$(date -u +%Y%m%dT%H%M%SZ).txt"
 ```
 
 If the host exposes the read-only DSN under a different variable name, use that
@@ -48,8 +68,35 @@ name instead. Prefer a replica endpoint or a role with `CONNECT`/`USAGE`/
 `SELECT` only. If only the primary is available, obtain approval first (item 2
 in section 8); the script is still strictly read-only.
 
-The operator should share only the captured output file. No credentials were
-requested, printed, or stored by this task.
+Execute with an additional session-level read-only default and timeouts:
+
+```bash
+OUT="/tmp/m2_readiness_$(date -u +%Y%m%dT%H%M%SZ).txt"
+PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000 -c lock_timeout=5000' \
+psql "$READONLY_DATABASE_URL" -X -v ON_ERROR_STOP=1 -P pager=off \
+     -A -F ' | ' -f /tmp/m2_readiness_audit.sql | tee "$OUT"
+```
+
+Sanitize before sharing (removes the environment block with database/user/host
+values; the script never prints the DSN):
+
+```bash
+awk '
+  /^=== 0\. Environment ===/ {skip=1; next}
+  /^=== 1\./ {skip=0}
+  !skip
+' "$OUT" > "${OUT%.txt}_sanitized.txt"
+
+if grep -Eqi 'postgres(ql)?://|password=|PGPASSWORD|READONLY_DATABASE_URL' \
+    "${OUT%.txt}_sanitized.txt"; then
+  echo "Potential credential text found; do NOT share this file."
+  exit 1
+fi
+echo "Sanitized output: ${OUT%.txt}_sanitized.txt"
+```
+
+Share only the sanitized output file. No credentials were requested, printed,
+or stored by this task.
 
 ## 1. Code-level findings (verified locally)
 
