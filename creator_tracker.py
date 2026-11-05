@@ -66,6 +66,7 @@ def _parse_time(value):
 
 
 def _to_item(d):
+    badge = d.get("creatorHasVerifiedBadge")
     return {
         "id": d.get("id"),
         "name": (d.get("name") or "")[:500],
@@ -74,8 +75,9 @@ def _to_item(d):
         "price": d.get("price") or 0,
         "creator_name": (d.get("creatorName") or "")[:200],
         "creator_id": d.get("creatorTargetId"),
-        "creator_type": d.get("creatorType") or "User",
-        "creator_verified": bool(d.get("creatorHasVerifiedBadge")),
+        # Missing type/verification stays missing; never default to User/False.
+        "creator_type": d.get("creatorType") or None,
+        "creator_verified": badge if isinstance(badge, bool) else None,
         "asset_type_id": d.get("assetType") or 0,
         "created_at": _parse_time(d.get("itemCreatedUtc")),
     }
@@ -234,38 +236,86 @@ def pick_batch(cur, limit=10, stale_hours=6):
     return cur.fetchall()
 
 
+def _items_has_creator_type(cur):
+    try:
+        cur.execute(
+            "select 1 from information_schema.columns "
+            "where table_schema = current_schema() "
+            "and table_name = 'items' and column_name = 'creator_type'")
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
 def upsert_items(cur, items):
+    has_type = _items_has_creator_type(cur)
     inserted = 0
     for it in items:
         if not it.get("id"):
             continue
-        cur.execute("""
-            INSERT INTO items (id, name, description, favorite_count, price,
-                               creator_name, creator_id, creator_verified,
-                               asset_type_id, created_at, fetched_at,
-                               favorite_status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                name = EXCLUDED.name,
-                description = EXCLUDED.description,
-                favorite_count = EXCLUDED.favorite_count,
-                favorite_status = CASE
-                    WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
-                    ELSE 'known'
-                END,
-                price = EXCLUDED.price,
-                creator_name = EXCLUDED.creator_name,
-                creator_id = EXCLUDED.creator_id,
-                creator_verified = EXCLUDED.creator_verified,
-                asset_type_id = EXCLUDED.asset_type_id,
-                fetched_at = CURRENT_TIMESTAMP
-        """, (
-            it["id"], it["name"], it["description"], it["favorite_count"],
-            it["price"], it["creator_name"], it.get("creator_id"),
-            it.get("creator_verified", False), it["asset_type_id"],
-            it.get("created_at"),
-            ("known" if it.get("favorite_count") is not None else "missing"),
-        ))
+        verified = it.get("creator_verified")  # None means unknown
+        creator_type = it.get("creator_type")  # None means unknown
+        favorite_status = ("known" if it.get("favorite_count") is not None
+                           else "missing")
+        if has_type:
+            cur.execute("""
+                INSERT INTO items (id, name, description, favorite_count,
+                                   price, creator_name, creator_id,
+                                   creator_type, creator_verified,
+                                   asset_type_id, created_at, fetched_at,
+                                   favorite_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        CURRENT_TIMESTAMP, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    favorite_count = EXCLUDED.favorite_count,
+                    favorite_status = CASE
+                        WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+                        ELSE 'known' END,
+                    price = EXCLUDED.price,
+                    creator_name = EXCLUDED.creator_name,
+                    creator_id = EXCLUDED.creator_id,
+                    creator_type = COALESCE(EXCLUDED.creator_type,
+                                            items.creator_type),
+                    creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                                items.creator_verified),
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    fetched_at = CURRENT_TIMESTAMP
+            """, (
+                it["id"], it["name"], it["description"], it["favorite_count"],
+                it["price"], it["creator_name"], it.get("creator_id"),
+                creator_type, verified, it["asset_type_id"],
+                it.get("created_at"), favorite_status,
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO items (id, name, description, favorite_count,
+                                   price, creator_name, creator_id,
+                                   creator_verified, asset_type_id,
+                                   created_at, fetched_at, favorite_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        CURRENT_TIMESTAMP, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    favorite_count = EXCLUDED.favorite_count,
+                    favorite_status = CASE
+                        WHEN EXCLUDED.favorite_count IS NULL THEN 'missing'
+                        ELSE 'known' END,
+                    price = EXCLUDED.price,
+                    creator_name = EXCLUDED.creator_name,
+                    creator_id = EXCLUDED.creator_id,
+                    creator_verified = COALESCE(EXCLUDED.creator_verified,
+                                                items.creator_verified),
+                    asset_type_id = EXCLUDED.asset_type_id,
+                    fetched_at = CURRENT_TIMESTAMP
+            """, (
+                it["id"], it["name"], it["description"], it["favorite_count"],
+                it["price"], it["creator_name"], it.get("creator_id"),
+                verified, it["asset_type_id"], it.get("created_at"),
+                favorite_status,
+            ))
         inserted += 1
     return inserted
 
