@@ -28,6 +28,7 @@ spending more of the shared quota.
 """
 import html as _html
 import json
+import os
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -67,6 +68,22 @@ CONCEPT_HEADS = {
     "dance", "emote", "pose", "movement", "choreography", "performance",
     "style", "groove",
 }
+# Brand names that must never appear unless the creator asked for them.
+FORBIDDEN_BRANDS = {"vanta", "roblox", "tiktok", "youtube"}
+GENERIC_ADJECTIVES = {
+    "powerful", "amazing", "awesome", "epic", "cool", "best", "ultimate",
+    "super", "mega", "insane", "crazy", "new", "original", "premium",
+    "perfect", "great", "good", "nice", "fun", "funny",
+}
+# Broad concept words that are already common in emote titles; a title made
+# only of these is likely generic even if it matches the description.
+GENERIC_CONCEPT_WORDS = {
+    "hip", "hop", "street", "dance", "style", "performance", "power",
+    "powerful", "emote", "pose", "move", "moves", "groove", "music",
+}
+PRODUCT_HEADS = {"emote", "dance", "pose", "performance", "style"}
+MAX_CANDIDATES = 12
+MIN_CANDIDATES = 10
 
 MAX_TIKTOK_BYTES = 512 * 1024
 TIKTOK_HOST_SUFFIX = ".tiktok.com"
@@ -412,12 +429,14 @@ def title_db_exact(title):
             pass
 
 
-def verify_titles(titles, max_titles=2, db_fn=None, live_fn=None):
+def verify_titles(titles, max_titles=2, db_fn=None, live_fn=None,
+                  db_only=False):
     """Verify the strongest final titles against actual Marketplace titles.
 
-    Local database exact-title evidence is checked first. At most two titles
-    are checked live; a rate limit/outage defers the rest and is reported as
-    insufficient evidence.
+    Local database exact-title evidence is checked first. When ``db_only`` is
+    set (the interactive default), no live request is made and an unchecked
+    title is labeled unverified. Otherwise at most ``max_titles`` are checked
+    live; a rate limit defers the rest as insufficient evidence.
     """
     out = []
     for t in list(titles or [])[:max_titles]:
@@ -428,6 +447,14 @@ def verify_titles(titles, max_titles=2, db_fn=None, live_fn=None):
                         "source": "database", "exact": True,
                         "similar": False, "conceptual": False,
                         "checked_at": local.get("checked_at"),
+                        "error": None})
+            continue
+        if db_only:
+            out.append({"title": title, "status": "unverified",
+                        "source": "database", "exact": False,
+                        "similar": False, "conceptual": False,
+                        "checked_at": local.get("checked_at"),
+                        "reason": "live verification skipped (request budget)",
                         "error": None})
             continue
         r = (live_fn or _title_live_check)(title)
@@ -481,14 +508,18 @@ CREATOR DESCRIPTION (the ONLY source of truth for what the emote does):
 Verified keywords: {keywords}
 Protected references (must NOT appear): {protected}
 
-Write exactly 5 distinct Roblox emote titles, one per strategy:
-Search, Branding, Aesthetic, Community, Balanced.
+Write at least 10 internally distinct Roblox emote title candidates using
+varied strategies (Search, Branding, Aesthetic, Community, Balanced, etc.).
 
 RULES:
 - Only use what the description states. Never invent movement, effects, colours, or facts.
 - Never name performers or brands (if the description says "inspired by X", never write X).
+- Never use VANTA, Roblox, TikTok, YouTube, or any other brand name.
 - Never use: viral, trending, tiktok, youtube.
 - Never use "Made", "Based", or "Inspired" in a title.
+- Avoid generic filler such as "Powerful ... Style" or "Amazing ... Performance".
+- Prefer titles ending in "Emote" or "Dance" so the product is clear.
+- Avoid awkward stacked noun phrases; each title should read like a product name.
 - Natural product-style names, 2-6 words, Title Case.
 - Each title must be meaningfully different from the others.
 
@@ -535,7 +566,7 @@ def ai_titles(description, keywords, protected, generate_fn=None):
             strategy = "AI"
         if title:
             out.append({"strategy": strategy, "title": title})
-    return out[:8]
+    return out[:MAX_CANDIDATES]
 
 
 def _title(words):
@@ -563,6 +594,11 @@ def _candidates(description, keywords):
         ("Grounded", _title([k3, k1, "Emote"])),
         ("Grounded", _title([k0, k2, "Emote"])),
         ("Grounded", _title([k0, k1, k2, k3, "Emote"])),
+        ("Grounded", _title([k1, k0, "Emote"])),
+        ("Grounded", _title([k2, k3, "Emote"])),
+        ("Grounded", _title([k0, k3, k2, "Emote"])),
+        ("Grounded", _title([k1, k2, k3, "Emote"])),
+        ("Grounded", _title([k3, k0, "Emote"])),
     ]
     out, seen = [], set()
     for strategy, title in raw:
@@ -579,6 +615,8 @@ def _validate_candidate(description, title, protected):
         return None, "empty"
     if _has_banned(clean):
         return None, "platform word"
+    if _tokens(clean) & FORBIDDEN_BRANDS:
+        return None, "unrequested brand (VANTA/platform)"
     if re.search(r"\b(made|based|inspired)\b", clean, re.IGNORECASE):
         return None, "mechanical wording"
     if protected and any(p and p in clean.lower() for p in protected):
@@ -612,8 +650,11 @@ def gather_candidates(description, keywords, protected, concepts=None,
                       generate_fn=None):
     ai = ai_titles(description, concepts or keywords, protected, generate_fn)
     merged = list(ai) + _candidates(description, keywords)
+    considered = len(merged)
     out, rejected = [], []
     for c in merged:
+        if len(out) >= MAX_CANDIDATES:
+            break
         clean, why = _validate_candidate(description, c["title"], protected)
         if not clean:
             rejected.append({"title": c["title"], "reason": why})
@@ -623,9 +664,7 @@ def gather_candidates(description, keywords, protected, concepts=None,
             continue
         out.append({"strategy": c.get("strategy") or "AI", "title": clean,
                     "validation": "passed"})
-        if len(out) >= 5:
-            break
-    return out[:5], rejected
+    return out, rejected, considered
 
 
 # ── Marketplace-aware ranking ──────────────────────────────────────
@@ -740,39 +779,145 @@ def _verified_components(check):
     return 0.5, 0.5, 0.0, "unverified"
 
 
-def rank_titles(titles, description, concepts, db, live, title_checks=None):
-    """Transparent heuristic. Description overlap is NEVER market evidence.
+def _word_list(title):
+    return re.findall(r"[A-Za-z0-9']+", title or "")
 
-    Components are kept separate: product accuracy, natural readability,
-    semantic relevance, verified marketplace similarity, verified competition,
-    evidence completeness, and unknown demand. The final score is a listing
-    heuristic, not CTR or predicted sales, and is discounted when evidence is
-    incomplete.
+
+def _product_clarity(title):
+    """Does the name read as a clear emote product?"""
+    words = [w.lower() for w in _word_list(title)]
+    if not words:
+        return 0.0
+    if words[-1] in ("emote", "emotes"):
+        return 1.0
+    if words[-1] in ("dance", "dances"):
+        return 0.9
+    if words[-1] in ("pose", "poses"):
+        return 0.8
+    if any(w in ("emote", "dance") for w in words):
+        return 0.7
+    if words[-1] in ("performance", "style"):
+        return 0.3
+    return 0.2
+
+
+def _memorability(title):
+    words = [w.lower() for w in _word_list(title)]
+    content = [w for w in words if w not in ("emote", "emotes")]
+    n = len(words)
+    if n < 2:
+        return 0.2
+    if n <= 4:
+        base = 1.0
+    elif n == 5:
+        base = 0.8
+    elif n == 6:
+        base = 0.6
+    else:
+        base = 0.35
+    initials = [w[0] for w in content if w]
+    if len(initials) >= 2 and len(set(initials)) == 1:
+        base = min(1.0, base + 0.1)
+    if len(content) != len(set(content)):
+        base -= 0.2
+    base -= 0.08 * sum(1 for w in content if w in GENERIC_ADJECTIVES)
+    return max(0.0, min(1.0, base))
+
+
+def _naturalness(title):
+    words = [w.lower() for w in _word_list(title)]
+    n = len(words)
+    if n < 2:
+        return 0.2
+    base = 1.0 if 2 <= n <= 5 else 0.7 if n == 6 else 0.4
+    content = [w for w in words if w not in ("emote", "emotes")]
+    if len(content) <= 1:
+        # "<one adjective> Emote" is too terse/generic to be a strong name.
+        base = min(base, 0.6)
+    if len(content) != len(set(content)):
+        base -= 0.2
+    generic = sum(1 for w in content if w in GENERIC_ADJECTIVES)
+    base -= 0.12 * generic
+    if generic >= 3:
+        base -= 0.2
+    if words[-1] in PRODUCT_HEADS:
+        base += 0.05
+    return max(0.0, min(1.0, base))
+
+
+def _originality(title, db, live):
+    tokens = _title_tokens(title)
+    if not tokens:
+        return 0.0
+    names = _competitor_names(db, live)
+    best = 0.0
+    for name in names:
+        other = _title_tokens(name)
+        if other:
+            best = max(best, len(tokens & other) / max(1, len(tokens | other)))
+    base = 1.0 - 0.7 * best
+    # Titles made only of broad concept words are generic even when grounded.
+    if not (tokens - GENERIC_CONCEPT_WORDS):
+        base -= 0.55
+    if any((n or "").strip().lower() == title.strip().lower() for n in names):
+        base = 0.0
+    return max(0.0, min(1.0, base))
+
+
+def _relevance(title, description, concepts):
+    tokens = _title_tokens(title)
+    if not tokens:
+        return 0.0
+    source = set(_tokens(description))
+    for c in concepts or []:
+        source.update(re.findall(r"[a-z0-9']+", c.lower()))
+    overlap = len(tokens & source) / len(tokens)
+    # Bounded groundedness, not a market/demand signal.
+    return min(1.0, 0.4 + 0.6 * overlap)
+
+
+def rank_titles(titles, description, concepts, db, live, title_checks=None):
+    """Creative-quality ranking. Eligibility is a gate, not a perfect score.
+
+    Quality components (naturalness, memorability, product clarity,
+    originality, relevance) are compared across candidates before ranking.
+    Description overlap is only a small relevance signal, so a generic title
+    cannot win merely by sharing the most words with the input. Evidence is
+    tracked separately and discounts the score when incomplete. No CTR or
+    sales probabilities are produced.
     """
     checks = _title_check_map(title_checks)
     retrieval = _retrieval_score(db, live)
     for t in titles:
-        semantic = _search_score(t["title"], description, concepts)
-        natural = _natural_score(t["title"])
+        natural = _naturalness(t["title"])
+        memory = _memorability(t["title"])
+        clarity = _product_clarity(t["title"])
+        original = _originality(t["title"], db, live)
+        relevance = _relevance(t["title"], description, concepts)
         check = checks.get(t["title"])
         vsim, vcomp, verified, status = _verified_components(check)
         completeness = 0.5 * retrieval + 0.5 * verified
         kw_context = _keyword_context_score(t["title"], db, live)
-        base = (0.25 * 1.0 + 0.20 * natural + 0.25 * semantic
-                + 0.15 * vsim + 0.15 * vcomp)
+        base = (0.25 * natural + 0.20 * memory + 0.20 * clarity
+                + 0.20 * original + 0.15 * relevance)
         score = 100 * base * (0.6 + 0.4 * completeness)
         if status == "exact":
             score *= 0.5   # an existing exact title is a serious negative
         elif status == "similar":
-            score *= 0.8
+            score *= 0.7
         comps = {
-            "accuracy": 1.0,
-            "product_accuracy": 1.0,
-            "natural": round(natural, 3),
+            "eligible": True,
             "natural_readability": round(natural, 3),
-            "search": round(semantic, 3),
-            "brief_fit": round(semantic, 3),
-            "semantic_relevance": round(semantic, 3),
+            "natural": round(natural, 3),
+            "memorability": round(memory, 3),
+            "product_clarity": round(clarity, 3),
+            "originality": round(original, 3),
+            "relevance": round(relevance, 3),
+            "product_accuracy": round(relevance, 3),
+            "accuracy": round(relevance, 3),
+            "semantic_relevance": round(relevance, 3),
+            "search": round(relevance, 3),
+            "brief_fit": round(relevance, 3),
             "differentiation": round(vsim, 3),
             "verified_similarity": round(vsim, 3),
             "verified_competition": round(vcomp, 3),
@@ -790,8 +935,9 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None):
         t["evidence_status"] = (
             "verified" if completeness >= 0.99 else
             "partial" if completeness > 0 else "insufficient")
-    titles.sort(key=lambda t: (t["score"], t["components"]["natural"],
-                               t["components"]["semantic_relevance"]),
+    titles.sort(key=lambda t: (t["score"], t["components"]["product_clarity"],
+                               t["components"]["originality"],
+                               t["components"]["natural_readability"]),
                 reverse=True)
     for i, t in enumerate(titles):
         t["recommended"] = (i == 0)
@@ -801,7 +947,7 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None):
 
 def generate(description, url=None, *, db_fn=None, live_fn=None,
              meta_fn=None, generate_fn=None, title_db_fn=None,
-             title_live_fn=None):
+             title_live_fn=None, title_live_budget=None):
     raw_description = strip_banned(description).strip()
     protected = extract_protected_names(description)
     keywords = extract_keywords(raw_description, exclude=protected)
@@ -828,48 +974,61 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
                       or research_concepts[:2])[:2]
     live = (live_fn or research_live)(live_shortlist)
 
-    titles, rejected = gather_candidates(
+    titles, rejected, considered = gather_candidates(
         raw_description, keywords, protected, concepts=concepts,
         generate_fn=generate_fn)
 
-    # Fill to five from deterministic, grounded combinations if needed.
-    if len(titles) < 5:
+    # Ensure at least MIN_CANDIDATES distinct eligible candidates if possible.
+    if len(titles) < MIN_CANDIDATES:
         for c in _candidates(raw_description, keywords):
-            if len(titles) >= 5:
+            if len(titles) >= MIN_CANDIDATES:
                 break
-            clean, why = _validate_candidate(raw_description, c["title"], protected)
+            clean, why = _validate_candidate(raw_description, c["title"],
+                                             protected)
             if not clean:
                 rejected.append({"title": c["title"], "reason": why})
                 continue
             if any(_too_similar(clean, t["title"]) for t in titles):
+                rejected.append({"title": clean, "reason": "too similar"})
                 continue
             titles.append({"strategy": c["strategy"], "title": clean,
                            "validation": "passed"})
 
-    # Final ASTRA gate immediately before output.
+    # Final ASTRA safety gate immediately before output.
     final = []
     for t in titles:
         ok, _why = validate_title(raw_description, t["title"])
-        if ok and not _has_banned(t["title"]):
+        if (ok and not _has_banned(t["title"])
+                and not (_tokens(t["title"]) & FORBIDDEN_BRANDS)):
             final.append(t)
 
-    initial = rank_titles(final[:5], raw_description, concepts, db, live)
+    initial = rank_titles(final, raw_description, concepts, db, live)
 
-    # Title-level verification: local DB first; live only if keyword research
-    # was not already rate-limited. At most two titles are checked.
-    live_limited = any(not r.get("ok") for r in live)
-    if live_limited:
-        deferred_live = lambda title: {
-            "ok": False, "error": "deferred after rate limit",
-            "checked_at": _utc_now()}
-        checks = verify_titles(initial[:2], db_fn=title_db_fn,
-                               live_fn=deferred_live)
+    # Title verification budget. Interactive default is 0: local DB exact
+    # checks only, no extra live requests after keyword research.
+    if title_live_budget is None:
+        try:
+            budget = int(os.getenv("EMOTE_TITLE_LIVE_TITLE_CHECKS", "0"))
+        except (TypeError, ValueError):
+            budget = 0
     else:
-        checks = verify_titles(initial[:2], db_fn=title_db_fn,
+        budget = max(0, int(title_live_budget))
+    live_limited = (any(not r.get("ok") for r in live)
+                    or any(r.get("deferred") for r in live))
+    if live_limited or budget <= 0:
+        checks = verify_titles(initial[:2], db_fn=title_db_fn, db_only=True)
+    else:
+        checks = verify_titles(initial[:min(budget, 2)], db_fn=title_db_fn,
                                live_fn=title_live_fn)
 
-    ranked = rank_titles(final[:5], raw_description, concepts, db, live,
+    ranked = rank_titles(final, raw_description, concepts, db, live,
                          title_checks=checks)
+    top5 = ranked[:5]
+    not_selected = [
+        {"title": t["title"], "score": t["score"],
+         "reason": "ranked below top five by creative quality"}
+        for t in ranked[5:]
+    ]
     live_ok = (bool(live) and all(r.get("ok") for r in live)
                and not any(r.get("deferred") for r in live))
     live_error = next((r.get("error") for r in live if not r.get("ok")), None)
@@ -879,8 +1038,8 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     # The winner may have changed after demotions. If that exact candidate was
     # not checked, label it unverified — never spend another API request here.
     recommended_verification = None
-    if ranked:
-        rec_title = ranked[0]["title"]
+    if top5:
+        rec_title = top5[0]["title"]
         recommended_verification = next(
             (c for c in checks if c.get("title") == rec_title), None)
         if recommended_verification is None:
@@ -893,22 +1052,29 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
     return {
         "description": _build_description(
             raw_description, concepts, protected=protected,
-            title=ranked[0]["title"] if ranked else None),
-        "titles": ranked,
-        "recommended": ranked[0]["title"] if ranked else None,
+            title=top5[0]["title"] if top5 else None),
+        "titles": top5,
+        "recommended": top5[0]["title"] if top5 else None,
         "recommended_verification": recommended_verification,
-        "experiment": _build_experiment(ranked, live_ok, live_error),
+        "candidates_generated": considered,
+        "candidates_eligible": len(final),
+        "title_live_budget": budget,
+        "not_selected": not_selected,
+        "experiment": _build_experiment(top5, live_ok, live_error),
         "keywords": keywords,
         "concepts": concepts,
         "research_keywords": research_concepts,
         "title_checks": checks,
         "protected_names": sorted(protected),
-        "rejected": rejected[:10],
+        "rejected": rejected[:12],
         "research": {
             "db": db, "live": live, "live_ok": live_ok,
             "live_error": live_error, "live_deferred": deferred,
             "title_checks": checks,
             "recommended_verification": recommended_verification,
+            "candidates_generated": considered,
+            "candidates_eligible": len(final),
+            "title_live_budget": budget,
             "tiktok": meta,
         },
         "banned_removed": sorted(
@@ -990,9 +1156,12 @@ def format_report(result):
     lines = ["# 🎭 EMOTE TITLE ENGINE", ""]
     lines.append("## Recommended title")
     lines.append(f"**{rec}**" if rec else "_No title passed validation._")
+    lines.append(f"_Candidates evaluated: {result.get('candidates_generated', '?')} "
+                 f"generated · {result.get('candidates_eligible', '?')} eligible · "
+                 f"{len(result.get('rejected') or [])} rejected._")
     lines.append("")
 
-    lines.append("## Ranked titles (heuristic, not CTR/sales/measured demand)")
+    lines.append("## Ranked titles (creative quality; not CTR/sales/demand)")
     if titles:
         for i, t in enumerate(titles, 1):
             tag = "recommended" if t.get("recommended") else "alternative"
@@ -1000,9 +1169,11 @@ def format_report(result):
             lines.append(
                 f"{i}. **{t['title']}** — {t['strategy']} ({tag}) · "
                 f"score {t.get('score')} "
-                f"[accuracy {c.get('product_accuracy')} · "
-                f"natural {c.get('natural_readability')} · "
-                f"semantic {c.get('semantic_relevance')} · "
+                f"[natural {c.get('natural_readability')} · "
+                f"memorable {c.get('memorability')} · "
+                f"clarity {c.get('product_clarity')} · "
+                f"originality {c.get('originality')} · "
+                f"relevance {c.get('relevance')} · "
                 f"verified-sim {c.get('verified_similarity')} · "
                 f"verified-comp {c.get('verified_competition')} · "
                 f"evidence {c.get('evidence_completeness')}] · "
@@ -1011,6 +1182,13 @@ def format_report(result):
     else:
         lines.append("_No validated titles._")
     lines.append("")
+
+    if result.get("not_selected"):
+        lines.append("## Not selected (lower creative quality)")
+        for t in result["not_selected"][:8]:
+            lines.append(f"- `{t['title']}` — score {t['score']} "
+                         f"({t['reason']})")
+        lines.append("")
 
     lines.append("## Final description")
     lines.append(result.get("description") or "(unavailable)")
@@ -1029,13 +1207,19 @@ def format_report(result):
               "insufficient": "insufficient live evidence",
               "unverified": "unverified (not checked)"}
     for c in checks:
+        label = labels.get(c.get("status"), "unknown")
+        if (c.get("status") == "unverified"
+                and "budget" in (c.get("reason") or "").lower()):
+            label = "unverified (not checked; API budget preserved)"
         lines.append(
-            f"- `{c.get('title')}` — **{labels.get(c.get('status'), 'unknown')}**"
+            f"- `{c.get('title')}` — **{label}**"
             f" · checked {str(c.get('checked_at'))[:19]}"
             + (f" ({c['error']})" if c.get("error") else ""))
     rec_ver = (result.get("recommended_verification")
                or research.get("recommended_verification"))
-    if rec_ver and rec_ver.get("status") == "unverified":
+    checked_titles = {c.get("title") for c in checks}
+    if (rec_ver and rec_ver.get("status") == "unverified"
+            and rec_ver.get("title") not in checked_titles):
         lines.append(
             f"- `{rec_ver.get('title')}` — **unverified (not checked; API "
             f"budget preserved)**")
