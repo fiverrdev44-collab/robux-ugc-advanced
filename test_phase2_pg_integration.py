@@ -1,16 +1,28 @@
 """Phase 2 Milestone 2 — real PostgreSQL integration tests.
 
-Runs only against a disposable database supplied via DATABASE_URL. In CI,
-PHASE2_REQUIRE_PG=1 makes a missing DATABASE_URL a failure instead of a skip.
-Never point this at production credentials.
+Safety contract
+---------------
+* Only PHASE2_TEST_DATABASE_URL is used; there is no fallback to the
+  application's DATABASE_URL.
+* The URL must be local, its database name must contain "test", and
+  PHASE2_TEST_DB_CONFIRM must equal "disposable". Otherwise the suite fails
+  closed before connecting or executing any DDL.
+* All objects live in a generated isolated schema. No DROP TABLE / TRUNCATE is
+  ever issued against the public schema; cleanup drops only the generated
+  test schema.
+* Synthetic data only. Never point this at production credentials.
 """
 import os
 import sys
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
+from urllib.parse import urlsplit
 
 import psycopg2
+from psycopg2 import sql
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,59 +32,150 @@ MIGRATION = Path(__file__).with_name("migrations").joinpath(
     "2026-11-05_creator_registry.sql")
 
 
+def validate_test_database_url(url, confirm):
+    """Return an error string for unsafe config; never include credentials."""
+    if not url:
+        return "missing PHASE2_TEST_DATABASE_URL"
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return "malformed test database URL"
+    if parts.scheme not in ("postgres", "postgresql"):
+        return "unsupported database scheme"
+    host = (parts.hostname or "").lower()
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        return "test database host must be local"
+    dbname = (parts.path or "").lstrip("/")
+    if not dbname or "test" not in dbname.lower():
+        return "test database name must contain 'test'"
+    if confirm != "disposable":
+        return "PHASE2_TEST_DB_CONFIRM must equal 'disposable'"
+    return None
+
+
+def open_test_connection(connect_fn=None):
+    url = os.getenv("PHASE2_TEST_DATABASE_URL", "").strip()
+    require = os.getenv("PHASE2_REQUIRE_PG") == "1"
+    if not url:
+        if require:
+            raise RuntimeError("PHASE2_TEST_DATABASE_URL is required")
+        raise unittest.SkipTest("PHASE2_TEST_DATABASE_URL not set")
+    error = validate_test_database_url(
+        url, os.getenv("PHASE2_TEST_DB_CONFIRM", ""))
+    if error:
+        raise RuntimeError(f"unsafe test database configuration: {error}")
+    return (connect_fn or psycopg2.connect)(url)
+
+
+_BASE_SCHEMA_SQL = """
+    CREATE TABLE items (
+        id BIGINT PRIMARY KEY,
+        name TEXT,
+        description TEXT,
+        favorite_count INTEGER,
+        price INTEGER,
+        total_sales INTEGER,
+        creator_name TEXT,
+        creator_id BIGINT,
+        creator_verified BOOLEAN,
+        asset_type_id INTEGER,
+        created_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ,
+        fetched_at TIMESTAMPTZ,
+        favorite_status TEXT
+    );
+    CREATE TABLE tracked_creators (
+        creator_id BIGINT PRIMARY KEY,
+        creator_type TEXT,
+        creator_name TEXT,
+        verified BOOLEAN,
+        last_scanned TIMESTAMPTZ
+    );
+    CREATE TABLE item_history (
+        id SERIAL PRIMARY KEY,
+        item_id BIGINT,
+        favorite_count INTEGER,
+        total_sales INTEGER,
+        price INTEGER,
+        snapshot_at TIMESTAMPTZ
+    );
+"""
+
+
+class ConfigSafetyTests(unittest.TestCase):
+    def test_missing_url_fails_before_connect_in_ci(self):
+        fake_connect = mock.Mock()
+        with mock.patch.dict(os.environ, {"PHASE2_REQUIRE_PG": "1"},
+                             clear=True), \
+                mock.patch.object(psycopg2, "connect", fake_connect):
+            with self.assertRaises(RuntimeError):
+                open_test_connection()
+        fake_connect.assert_not_called()
+
+    def test_missing_url_skips_locally_before_connect(self):
+        fake_connect = mock.Mock()
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(psycopg2, "connect", fake_connect):
+            with self.assertRaises(unittest.SkipTest):
+                open_test_connection()
+        fake_connect.assert_not_called()
+
+    def test_production_host_is_rejected(self):
+        err = validate_test_database_url(
+            "postgresql://user:secret@db.example.com/production",
+            "disposable")
+        self.assertIsNotNone(err)
+        self.assertIn("local", err)
+        self.assertNotIn("secret", err)
+        self.assertNotIn("db.example.com", err)
+
+    def test_non_test_database_name_is_rejected(self):
+        err = validate_test_database_url(
+            "postgresql://user:secret@localhost/production", "disposable")
+        self.assertIsNotNone(err)
+        self.assertIn("contain 'test'", err)
+
+    def test_missing_confirmation_is_rejected(self):
+        err = validate_test_database_url(
+            "postgresql://user:secret@localhost/vanta_test", "yes")
+        self.assertIsNotNone(err)
+        self.assertIn("disposable", err)
+
+    def test_valid_local_test_config_is_accepted(self):
+        url = "postgresql://user:secret@localhost/vanta_test"
+        self.assertIsNone(validate_test_database_url(url, "disposable"))
+        sentinel = object()
+        fake_connect = mock.Mock(return_value=sentinel)
+        with mock.patch.dict(os.environ, {
+                "PHASE2_TEST_DATABASE_URL": url,
+                "PHASE2_TEST_DB_CONFIRM": "disposable"}, clear=True):
+            self.assertIs(open_test_connection(fake_connect), sentinel)
+        fake_connect.assert_called_once_with(url)
+
+
 class Phase2PostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        url = os.getenv("DATABASE_URL")
-        if not url:
-            if os.getenv("PHASE2_REQUIRE_PG") == "1":
-                raise RuntimeError("DATABASE_URL is required for PG tests")
-            raise unittest.SkipTest("DATABASE_URL not set")
-        cls.conn = psycopg2.connect(url)
+        cls.conn = open_test_connection()
         cls.conn.autocommit = True
         cls.cur = cls.conn.cursor()
-        cls.cur.execute("""
-            DROP TABLE IF EXISTS creator_registry CASCADE;
-            DROP TABLE IF EXISTS item_history CASCADE;
-            DROP TABLE IF EXISTS tracked_creators CASCADE;
-            DROP TABLE IF EXISTS items CASCADE;
-            CREATE TABLE items (
-                id BIGINT PRIMARY KEY,
-                name TEXT,
-                description TEXT,
-                favorite_count INTEGER,
-                price INTEGER,
-                total_sales INTEGER,
-                creator_name TEXT,
-                creator_id BIGINT,
-                creator_verified BOOLEAN,
-                asset_type_id INTEGER,
-                created_at TIMESTAMPTZ,
-                updated_at TIMESTAMPTZ,
-                fetched_at TIMESTAMPTZ,
-                favorite_status TEXT,
-                creator_type TEXT
-            );
-            CREATE TABLE tracked_creators (
-                creator_id BIGINT PRIMARY KEY,
-                creator_type TEXT,
-                creator_name TEXT,
-                verified BOOLEAN,
-                last_scanned TIMESTAMPTZ
-            );
-            CREATE TABLE item_history (
-                id SERIAL PRIMARY KEY,
-                item_id BIGINT,
-                favorite_count INTEGER,
-                total_sales INTEGER,
-                price INTEGER,
-                snapshot_at TIMESTAMPTZ
-            );
-        """)
+        cls.schema = "phase2_m2_" + uuid.uuid4().hex[:12]
+        cls.cur.execute(sql.SQL("CREATE SCHEMA {}").format(
+            sql.Identifier(cls.schema)))
+        cls.cur.execute("SELECT set_config('search_path', %s, false)",
+                        (cls.schema,))
+        cls.cur.execute(_BASE_SCHEMA_SQL)
         cls.cur.execute(MIGRATION.read_text(encoding="utf-8"))
 
     @classmethod
     def tearDownClass(cls):
+        try:
+            cls.cur.execute("SELECT set_config('search_path', %s, false)",
+                            ("public",))
+            cls.cur.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                sql.Identifier(cls.schema)))
+        except Exception:
+            pass
         try:
             cls.cur.close()
             cls.conn.close()
@@ -99,8 +202,7 @@ class Phase2PostgresTests(unittest.TestCase):
             INSERT INTO items (id, name, description, favorite_count, price,
                 creator_name, creator_id, creator_type, creator_verified,
                 asset_type_id, created_at, fetched_at, favorite_status)
-            VALUES (%s, %s, '', %s, %s, %s, %s, %s, %s, %s, %s, NOW(),
-                    %s)
+            VALUES (%s, %s, '', %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
         """, (item_id, f"Item {item_id}", favs, price, creator_name,
               creator_id, creator_type, verified, asset, created,
               "known" if favs is not None else "missing"))
@@ -129,19 +231,17 @@ class Phase2PostgresTests(unittest.TestCase):
     def test_migration_and_composite_identity(self):
         self.cur.execute("""
             SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'items' AND column_name = 'creator_type'
+            WHERE table_schema = current_schema()
+              AND table_name = 'items' AND column_name = 'creator_type'
         """)
         self.assertIsNotNone(self.cur.fetchone())
-        self.cur.execute("SELECT to_regclass('public.creator_registry')")
+        self.cur.execute("SELECT to_regclass('creator_registry')")
         self.assertIsNotNone(self.cur.fetchone())
 
-        # Same numeric ID, different verified composite types.
         self._item(1, 300, "User", "Same", True)
         self._item(2, 300, "Group", "Same", None)
-        # Missing item type, tracked name corroborates.
         self._item(3, 400, None, "Fallback")
         self._tracked(400, "Group", "Fallback", True)
-        # Missing item type, tracked name does NOT corroborate.
         self._item(4, 500, None, "Mismatch")
         self._tracked(500, "User", "Other", True)
 
@@ -169,14 +269,8 @@ class Phase2PostgresTests(unittest.TestCase):
         self._item(20, 700, "User", "Snap", True)
         self.cur.execute("""
             INSERT INTO item_history (item_id, favorite_count, snapshot_at)
-            VALUES (20, 10, %s), (20, 15, %s), (20, 1, %s)
-        """, (now - timedelta(hours=3), now - timedelta(hours=1),
-              now - timedelta(hours=2)))
-        self.cur.execute("""
-            INSERT INTO item_history (item_id, favorite_count, snapshot_at)
-            VALUES (20, 20, %s)
-        """, (now,))
-        # A recent item with one snapshot and one with none.
+            VALUES (20, 10, %s), (20, 15, %s), (20, 20, %s)
+        """, (now - timedelta(hours=3), now - timedelta(hours=1), now))
         self._item(21, 701, "User", "One", True)
         self.cur.execute("""
             INSERT INTO item_history (item_id, favorite_count, snapshot_at)
@@ -194,8 +288,7 @@ class Phase2PostgresTests(unittest.TestCase):
     def test_upsert_idempotency_and_name_history(self):
         self._item(30, 800, "User", "Old Name", True)
         self._refresh()
-        first = self._registry("User", 800)
-        self.assertEqual(first[0], "Old Name")
+        self.assertEqual(self._registry("User", 800)[0], "Old Name")
 
         self.cur.execute("""
             UPDATE items SET creator_name = 'New Name', fetched_at = NOW()
@@ -207,7 +300,6 @@ class Phase2PostgresTests(unittest.TestCase):
         self.assertIn("Old Name", changed[4])
         self.assertNotIn("New Name", changed[4])
 
-        # Repeated identical refresh: no duplicate history, stable counts.
         self._refresh()
         self._refresh()
         stable = self._registry("User", 800)
@@ -215,6 +307,46 @@ class Phase2PostgresTests(unittest.TestCase):
         self.assertEqual(stable[3], changed[3])
         self.assertEqual(stable[5], changed[5])
         self.assertEqual(stable[6], changed[6])
+
+    def test_null_display_name_does_not_enter_history(self):
+        self._item(100, 1100, "User", "Current Name", True)
+        self._refresh()
+        row = {
+            "creator_type": "User", "creator_id": 1100,
+            "display_name": None, "verification_status": "unknown",
+            "verification_provenance": "missing",
+            "type_provenance": "item_catalog",
+            "first_seen": datetime.now(timezone.utc),
+            "last_seen": datetime.now(timezone.utc), "item_count": 1,
+            "category_counts": {"61": 1}, "price_counts": {"30_to_60": 1},
+            "median_favorites": 100, "median_price": 50,
+            "median_age_days": 1.0, "snapshot_item_count": 0,
+            "max_snapshots": 0, "missing_favorite_items": 0,
+            "previous_names": [],
+        }
+        cr.upsert_registry(self.cur, [row])
+        cr.upsert_registry(self.cur, [row])
+        current = self._registry("User", 1100)
+        self.assertEqual(current[0], "Current Name")
+        self.assertEqual(current[4], [])
+        self.assertNotIn("Current Name", current[4])
+
+        self.cur.execute("""
+            UPDATE items SET creator_name = 'Renamed', fetched_at = NOW()
+            WHERE id = 100
+        """)
+        self._refresh()
+        renamed = self._registry("User", 1100)
+        self.assertEqual(renamed[0], "Renamed")
+        self.assertIn("Current Name", renamed[4])
+        self.assertNotIn("Renamed", renamed[4])
+
+        cr.upsert_registry(self.cur, [row])
+        cr.upsert_registry(self.cur, [row])
+        stable = self._registry("User", 1100)
+        self.assertEqual(stable[0], "Renamed")
+        self.assertEqual(stable[4].count("Current Name"), 1)
+        self.assertNotIn("Renamed", stable[4])
 
     def test_resumable_multiple_invocations(self):
         self._item(40, 10, "Group", "G10")
@@ -246,7 +378,8 @@ class Phase2PostgresTests(unittest.TestCase):
         self.assertEqual(summary["segments"]["emerging"]["creators"], 2)
         self.assertEqual(summary["segments"]["verified"]["creators"], 1)
         self.assertEqual(summary["segments"]["nonverified"]["creators"], 1)
-        self.assertEqual(summary["segments"]["unknown_verification"]["creators"], 1)
+        self.assertEqual(
+            summary["segments"]["unknown_verification"]["creators"], 1)
         self.assertEqual(summary["sample"]["order"], "item_id")
         self.assertFalse(summary["sample"]["representative"])
 
@@ -259,9 +392,8 @@ class Phase2PostgresTests(unittest.TestCase):
             "creator_verified": None, "asset_type_id": 61,
             "created_at": datetime.now(timezone.utc),
         }])
-        self.cur.execute("""
-            SELECT creator_type, creator_verified FROM items WHERE id = 80
-        """)
+        self.cur.execute(
+            "SELECT creator_type, creator_verified FROM items WHERE id = 80")
         self.assertEqual(self.cur.fetchone(), ("Group", None))
 
         upsert_items(self.cur, [{
@@ -271,35 +403,46 @@ class Phase2PostgresTests(unittest.TestCase):
             "creator_verified": False, "asset_type_id": 61,
             "created_at": datetime.now(timezone.utc),
         }])
-        self.cur.execute("""
-            SELECT creator_type, creator_verified FROM items WHERE id = 80
-        """)
+        self.cur.execute(
+            "SELECT creator_type, creator_verified FROM items WHERE id = 80")
         self.assertEqual(self.cur.fetchone(), ("Group", False))
 
-    def test_missing_table_before_migration(self):
-        self.cur.execute("CREATE SCHEMA IF NOT EXISTS phase2_premig")
-        self.cur.execute("SET search_path TO phase2_premig")
-        self.cur.execute("""
-            CREATE TABLE items (
-                id BIGINT PRIMARY KEY, name TEXT, favorite_count INTEGER,
-                price INTEGER, creator_name TEXT, creator_id BIGINT,
-                creator_verified BOOLEAN, asset_type_id INTEGER,
-                created_at TIMESTAMPTZ, fetched_at TIMESTAMPTZ
-            );
-            CREATE TABLE tracked_creators (
-                creator_id BIGINT PRIMARY KEY, creator_type TEXT,
-                creator_name TEXT, verified BOOLEAN
-            );
-            CREATE TABLE item_history (
-                item_id BIGINT, favorite_count INTEGER, snapshot_at TIMESTAMPTZ
-            );
-        """)
-        evidence = cr.creator_evidence(self.cur)
-        self.assertFalse(evidence["registry"]["available"])
-        with self.assertRaises(Exception):
-            cr.refresh_from_items(self.cur)
-        self.cur.execute("SET search_path TO public")
-        self.cur.execute("DROP SCHEMA phase2_premig CASCADE")
+    def test_missing_registry_does_not_abort_transaction(self):
+        """P1: autocommit=False, safe availability check, later queries work."""
+        premig = "phase2_premig_" + uuid.uuid4().hex[:10]
+        self.conn.autocommit = False
+        try:
+            self.cur.execute(sql.SQL("CREATE SCHEMA {}").format(
+                sql.Identifier(premig)))
+            self.cur.execute("SELECT set_config('search_path', %s, true)",
+                             (premig,))
+            self.cur.execute(_BASE_SCHEMA_SQL)
+            evidence = cr.creator_evidence(self.cur)
+            self.assertFalse(evidence["registry"]["available"])
+            self.assertEqual(evidence["registry"]["reason"], "missing_table")
+            self.assertIn("comparison", evidence)
+            self.assertIn("snapshot_coverage", evidence)
+            self.cur.execute("SELECT 1")
+            self.assertEqual(self.cur.fetchone()[0], 1)
+            self.conn.rollback()
+        finally:
+            self.conn.rollback()
+            self.cur.execute("SELECT set_config('search_path', %s, false)",
+                             (self.schema,))
+            self.conn.autocommit = True
+
+    def test_evidence_in_normal_transaction(self):
+        self._item(120, 1200, "User", "TX", True)
+        self._refresh()
+        self.conn.autocommit = False
+        try:
+            evidence = cr.creator_evidence(self.cur)
+            self.assertNotEqual(evidence["registry"].get("available"), False)
+            self.cur.execute("SELECT 1")
+            self.assertEqual(self.cur.fetchone()[0], 1)
+        finally:
+            self.conn.rollback()
+            self.conn.autocommit = True
 
     def test_transaction_rollback(self):
         self._item(90, 990, "User", "Rollback", True)
@@ -310,10 +453,7 @@ class Phase2PostgresTests(unittest.TestCase):
             self.conn.rollback()
             self.assertIsNone(self._registry("User", 990))
         finally:
-            try:
-                self.conn.rollback()
-            except Exception:
-                pass
+            self.conn.rollback()
             self.conn.autocommit = True
 
 

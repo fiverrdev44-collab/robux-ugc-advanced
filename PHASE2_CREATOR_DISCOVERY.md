@@ -42,6 +42,20 @@ No production writes, no deployment, no autonomous learning.
    verification, snapshot coverage, comparisons, missing-table behavior, and
    rollback using synthetic data only.
 7. **Reconciled with main** before final CI; M1 changes are preserved.
+8. **Test-database safety**: integration tests use only
+   `PHASE2_TEST_DATABASE_URL` (no fallback to `DATABASE_URL`), require
+   `PHASE2_TEST_DB_CONFIRM=disposable`, a local host, and a database name
+   containing `test`. They fail closed before connecting/DDL otherwise, and
+   run in an isolated generated schema. Cleanup drops only that test schema;
+   no public-schema `DROP TABLE`/`TRUNCATE` is issued.
+9. **Missing registry without transaction abort**: `creator_evidence()` checks
+   `to_regclass('creator_registry')` before querying and uses a savepoint for
+   unexpected failures when the connection is transactional. Registry-missing
+   evidence is preserved while comparison/coverage queries and the surrounding
+   transaction continue.
+10. **NULL display-name history**: incoming NULL display names preserve the
+    current name, never add the current name to `previous_names`, and
+    deduplicate genuine history across repeated NULL-name updates.
 
 ---
 
@@ -209,11 +223,15 @@ this milestone does not implement that engine.
 
 **Real PostgreSQL integration** (`test_phase2_pg_integration.py`, CI-only):
 migration success; composite identity and User/Group collision; registry
-refresh/upserts; repeated-upsert idempotency and name history; multiple
-independent refresh invocations; verification tri-state; tracker ingestion;
-snapshot coverage SQL; category comparison SQL; missing-table behavior before
-migration; transaction rollback. Synthetic data only; no production
-credentials. Local runs skip without `DATABASE_URL`.
+refresh/upserts; repeated-upsert idempotency and name history; NULL-name
+history; multiple independent refresh invocations; verification tri-state;
+tracker ingestion; snapshot coverage SQL; category comparison SQL;
+missing-registry behavior inside an autocommit=False transaction; normal
+transaction evidence; missing-table failure before migration; transaction
+rollback. Six additional no-DB configuration-safety tests prove missing/unsafe
+`PHASE2_TEST_DATABASE_URL` values are rejected before any connection or DDL,
+without logging credentials. Synthetic data only; no production credentials.
+Local runs skip the PG class without the dedicated test URL.
 
 **No staging PostgreSQL was available, so write-based persistence and SQL
 execution were tested with fake cursors only.** The actual migration, upserts,

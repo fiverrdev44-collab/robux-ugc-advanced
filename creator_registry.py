@@ -256,14 +256,16 @@ _UPSERT_SQL = """
                 creator_registry.previous_names
                 || EXCLUDED.previous_names
                 || CASE
-                    WHEN creator_registry.display_name IS DISTINCT FROM
+                    WHEN NULLIF(EXCLUDED.display_name, '') IS NOT NULL
+                     AND creator_registry.display_name IS DISTINCT FROM
                          EXCLUDED.display_name
                     THEN jsonb_build_array(creator_registry.display_name)
                     ELSE '[]'::jsonb
                 END
             ) AS t(n)
             WHERE n IS NOT NULL
-              AND n <> COALESCE(EXCLUDED.display_name, '')
+              AND n <> COALESCE(NULLIF(EXCLUDED.display_name, ''),
+                                creator_registry.display_name, '')
         ), '[]'::jsonb),
         updated_at = CURRENT_TIMESTAMP
 """
@@ -678,22 +680,49 @@ _EVIDENCE_REGISTRY_SQL = """
 """
 
 
+def _table_exists(cur, table):
+    """Safe availability check; does not abort a healthy transaction."""
+    try:
+        cur.execute("select to_regclass(%s)", (table,))
+        row = cur.fetchone()
+        return bool(row and row[0] is not None)
+    except Exception:
+        return False
+
+
 def creator_evidence(cur, family=None, days=180, limit=5000):
     """Milestone 3 evidence interface (read-only). No opportunity engine."""
-    try:
-        cur.execute(_EVIDENCE_REGISTRY_SQL)
-        row = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0)
-        registry = {
-            "creators": int(row[0] or 0),
-            "verified": int(row[1] or 0),
-            "nonverified": int(row[2] or 0),
-            "unknown_verification": int(row[3] or 0),
-            "missing_type": int(row[4] or 0),
-            "items": int(row[5] or 0),
-            "snapshot_items": int(row[6] or 0),
-        }
-    except Exception as e:
-        registry = {"available": False, "error": type(e).__name__}
+    if not _table_exists(cur, "creator_registry"):
+        registry = {"available": False, "reason": "missing_table"}
+    else:
+        autocommit = getattr(getattr(cur, "connection", None),
+                             "autocommit", True)
+        if not autocommit:
+            cur.execute("SAVEPOINT creator_evidence_registry")
+        try:
+            cur.execute(_EVIDENCE_REGISTRY_SQL)
+            row = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0)
+            registry = {
+                "creators": int(row[0] or 0),
+                "verified": int(row[1] or 0),
+                "nonverified": int(row[2] or 0),
+                "unknown_verification": int(row[3] or 0),
+                "missing_type": int(row[4] or 0),
+                "items": int(row[5] or 0),
+                "snapshot_items": int(row[6] or 0),
+            }
+            if not autocommit:
+                cur.execute("RELEASE SAVEPOINT creator_evidence_registry")
+        except Exception as e:
+            if not autocommit:
+                try:
+                    cur.execute(
+                        "ROLLBACK TO SAVEPOINT creator_evidence_registry")
+                    cur.execute(
+                        "RELEASE SAVEPOINT creator_evidence_registry")
+                except Exception:
+                    pass
+            registry = {"available": False, "error": type(e).__name__}
     comparison = creator_comparison(cur, family=family, days=days,
                                     limit=limit)
     coverage = snapshot_coverage(cur, 48)

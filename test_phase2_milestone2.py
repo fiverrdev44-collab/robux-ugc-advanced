@@ -226,7 +226,9 @@ class RegistryPersistenceTests(unittest.TestCase):
         sql = cr._UPSERT_SQL
         self.assertIn("jsonb_agg(DISTINCT", sql)
         self.assertIn("jsonb_array_elements_text", sql)
-        self.assertIn("n <> COALESCE(EXCLUDED.display_name", sql)
+        self.assertIn("n <> COALESCE(NULLIF(EXCLUDED.display_name", sql)
+        self.assertIn("creator_registry.display_name", sql)
+        self.assertIn("NULLIF(EXCLUDED.display_name", sql)
 
     def test_comparison_sql_is_deterministic_and_composite(self):
         sql = cr._COMPARISON_SQL
@@ -368,7 +370,8 @@ class ComparisonTests(unittest.TestCase):
         counts = (20, 5, 10, 5, 2, 100, 40)
         comparison_rows = self._rows()
         coverage = (10, 3, 2, 5, 4, 20)
-        cur = StubCursor([counts, (1,), comparison_rows, coverage])
+        cur = StubCursor([("creator_registry",), counts, (1,),
+                          comparison_rows, coverage])
         evidence = cr.creator_evidence(
             cur, family="emotes", days=180, limit=100)
         self.assertEqual(evidence["registry"]["creators"], 20)
