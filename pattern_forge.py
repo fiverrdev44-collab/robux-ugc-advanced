@@ -1,56 +1,91 @@
 """
-pattern_forge.py — Statistical pattern mining across the whole UGC catalog.
+pattern_forge.py — Statistical pattern mining across the UGC catalog.
 
-Finds what ACTUALLY correlates with high favorites. Not predictions.
-Not AI opinions. Real lift ratios computed from 45k items.
+Finds associations between an item-level feature (word, bigram, price bucket,
+title length, launch day) and favorite counts. It is explicitly observational:
+no causal claims, no probability estimates, and no AI.
 
-For every feature (word, bigram, price bucket, title length, launch day),
-computes:
-    with_count     = items that have the feature
-    with_median    = median favorites of those items
-    without_median = median favorites of items WITHOUT the feature
-    lift           = with_median / without_median
+For every feature:
+    with_ids       = item IDs that have the feature
+    without_ids    = item IDs that do not have the feature
+    with_median    = median favorites of with_ids
+    without_median = median favorites of the comparison group
 
-All pure SQL. No AI. No fake scores.
+Comparison group:
+  * prefer non-featured items in the same (category, age bucket, price bucket)
+    stratum;
+  * fall back to the same category;
+  * fall back to the global non-featured pool, with the scope reported.
+
+Favorite counts are observed marketplace values. They are not sales, demand,
+CTR, or revenue. Missing favorites stay missing and are excluded.
 """
 import re
-from collections import defaultdict
-from datetime import datetime
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 
 
 STOP = {
-    "a","an","the","of","and","or","for","to","in","on","with","my","your",
-    "at","by","is","it","as","this","that","from","into","over","under",
-    "new","old","best","good","cool","nice","hot","top","very","much","many",
-    "roblox","item","ugc",
+    "a", "an", "the", "of", "and", "or", "for", "to", "in", "on", "with",
+    "my", "your", "at", "by", "is", "it", "as", "this", "that", "from",
+    "into", "over", "under", "new", "old", "best", "good", "cool", "nice",
+    "hot", "top", "very", "much", "many", "roblox", "item", "ugc",
 }
 
 
 def _median(vals):
-    if not vals:
+    """True median (average of the two middle values for even samples)."""
+    s = sorted(v for v in vals if v is not None)
+    if not s:
         return 0
-    s = sorted(vals)
-    return s[len(s) // 2]
+    n = len(s)
+    if n % 2:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
 def _price_bucket(p):
-    if not p or p <= 0:
-        return None
-    if p < 30:    return "under_30"
-    if p < 60:    return "30_to_60"
-    if p < 100:   return "60_to_100"
-    if p < 200:   return "100_to_200"
-    if p < 500:   return "200_to_500"
+    if p is None or p <= 0:
+        return "price_unknown"
+    if p < 30:
+        return "under_30"
+    if p < 60:
+        return "30_to_60"
+    if p < 100:
+        return "60_to_100"
+    if p < 200:
+        return "100_to_200"
+    if p < 500:
+        return "200_to_500"
     return "500_plus"
 
 
 def _title_length_bucket(n):
-    if n <= 2: return "len_1_2"
-    if n == 3: return "len_3"
-    if n == 4: return "len_4"
-    if n == 5: return "len_5"
-    if n == 6: return "len_6"
+    if n <= 2:
+        return "len_1_2"
+    if n == 3:
+        return "len_3"
+    if n == 4:
+        return "len_4"
+    if n == 5:
+        return "len_5"
+    if n == 6:
+        return "len_6"
     return "len_7_plus"
+
+
+def _age_bucket(age_days):
+    if age_days is None:
+        return "age_unknown"
+    if age_days < 30:
+        return "age_0_30"
+    if age_days < 90:
+        return "age_30_90"
+    if age_days < 180:
+        return "age_90_180"
+    if age_days < 365:
+        return "age_180_365"
+    return "age_365_plus"
 
 
 def _dow(created_at):
@@ -62,11 +97,23 @@ def _dow(created_at):
         return None
 
 
-def _fetch_all(cur, asset_ids=None, min_favs=1, limit=20000):
+def _age_days(created_at, now):
+    if created_at is None or now is None:
+        return None
+    try:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        return (now - created_at).total_seconds() / 86400.0
+    except Exception:
+        return None
+
+
+def _fetch_all(cur, asset_ids=None, min_favs=0, limit=20000):
     sql = """
-        SELECT name, favorite_count, price, asset_type_id, created_at
+        SELECT id, name, favorite_count, price, asset_type_id, created_at,
+               creator_name
         FROM items
-        WHERE favorite_count > %s
+        WHERE favorite_count >= %s
     """
     params = [int(min_favs)]
     if asset_ids:
@@ -78,7 +125,8 @@ def _fetch_all(cur, asset_ids=None, min_favs=1, limit=20000):
     return cur.fetchall()
 
 
-def mine_patterns(cur, family=None, min_sample=25, top_n=30, min_favs=5):
+def mine_patterns(cur, family=None, min_sample=25, top_n=30, min_favs=5,
+                  now=None):
     from category_configs import get_category_config
     asset_ids = None
     if family:
@@ -91,75 +139,106 @@ def mine_patterns(cur, family=None, min_sample=25, top_n=30, min_favs=5):
     if not rows:
         return []
 
-    all_favs = [r[1] or 0 for r in rows]
-    global_median = _median(all_favs)
-    if global_median == 0:
+    now = now or datetime.now(timezone.utc)
+    items = []
+    for (item_id, name, favs, price, asset_type, created_at,
+         creator_name) in rows:
+        if favs is None:
+            continue  # missing values stay missing
+        age = _age_days(created_at, now)
+        items.append({
+            "id": item_id,
+            "name": name or "",
+            "favs": int(favs),
+            "price": price,
+            "category": asset_type,
+            "age": age,
+            "created_at": created_at,
+            "stratum": (asset_type, _age_bucket(age), _price_bucket(price)),
+            "creator": (creator_name or "").strip().lower(),
+        })
+    if not items:
         return []
 
-    features = defaultdict(list)
+    all_ids = {it["id"] for it in items}
+    fav_by_id = {it["id"]: it["favs"] for it in items}
+    stratum_by_id = {it["id"]: it["stratum"] for it in items}
+    category_by_id = {it["id"]: it["category"] for it in items}
+    creator_by_id = {it["id"]: it["creator"] for it in items}
+
+    features = defaultdict(set)
     token_re = re.compile(r"[a-z]{3,}")
-
-    for name, favs, price, _, created_at in rows:
-        fav = favs or 0
-        toks = [t for t in token_re.findall((name or "").lower()) if t not in STOP]
-
-        seen_uni = set()
-        for t in toks:
-            if t in seen_uni:
-                continue
-            seen_uni.add(t)
-            features[f"word:{t}"].append(fav)
-
-        seen_bi = set()
-        for a, b in zip(toks, toks[1:]):
-            bg = f"{a} {b}"
-            if bg in seen_bi:
-                continue
-            seen_bi.add(bg)
-            features[f"bigram:{bg}"].append(fav)
-
-        pb = _price_bucket(price)
-        if pb:
-            features[f"price:{pb}"].append(fav)
-
-        features[f"len:{_title_length_bucket(len(toks))}"].append(fav)
-
-        dow = _dow(created_at)
+    for it in items:
+        toks = [t for t in token_re.findall(it["name"].lower())
+                if t not in STOP]
+        for tok in set(toks):
+            features[f"word:{tok}"].add(it["id"])
+        for a, b in set(zip(toks, toks[1:])):
+            features[f"bigram:{a} {b}"].add(it["id"])
+        features[f"price:{_price_bucket(it['price'])}"].add(it["id"])
+        features[f"len:{_title_length_bucket(len(toks))}"].add(it["id"])
+        dow = _dow(it.get("created_at"))
         if dow:
-            features[f"dow:{dow}"].append(fav)
+            features[f"dow:{dow}"].add(it["id"])
 
     results = []
-    for feat, favs_list in features.items():
-        if len(favs_list) < min_sample:
+    for feat, with_ids in features.items():
+        if len(with_ids) < min_sample:
             continue
-        with_med = _median(favs_list)
-
-        without = [f for f in all_favs if f not in favs_list]
-        without_med = _median(without) if without else global_median
-        if without_med == 0:
+        without_ids = all_ids - with_ids
+        if len(without_ids) < min_sample:
             continue
 
-        lift = with_med / without_med
+        featured_strata = {stratum_by_id[i] for i in with_ids}
+        featured_categories = {category_by_id[i] for i in with_ids}
+        scope = "global"
+        compare_ids = [
+            i for i in without_ids if stratum_by_id[i] in featured_strata]
+        if len(compare_ids) >= min_sample:
+            scope = "same_category_price_age"
+        else:
+            compare_ids = [
+                i for i in without_ids
+                if category_by_id[i] in featured_categories]
+            if len(compare_ids) >= min_sample:
+                scope = "same_category"
+            else:
+                compare_ids = list(without_ids)
+
+        with_median = _median([fav_by_id[i] for i in with_ids])
+        without_median = _median([fav_by_id[i] for i in compare_ids])
+        if without_median <= 0:
+            continue
+        lift = with_median / without_median
         if lift < 1.5:
             continue
 
-        kind = feat.split(":", 1)[0]
-        value = feat.split(":", 1)[1]
-
+        creators = Counter(creator_by_id[i] for i in with_ids
+                           if creator_by_id[i])
+        concentration = (max(creators.values()) / len(with_ids)
+                         if creators else 0.0)
+        kind, value = feat.split(":", 1)
         results.append({
             "feature": value,
             "kind": kind,
-            "with_count": len(favs_list),
-            "with_median": int(with_med),
-            "without_median": int(without_med),
+            "with_count": len(with_ids),
+            "without_count": len(compare_ids),
+            "with_median": round(with_median, 1),
+            "without_median": round(without_median, 1),
             "lift": round(lift, 2),
+            "comparison_scope": scope,
+            "creator_concentration": round(concentration, 2),
+            "single_creator_dominated": concentration > 0.5,
+            "metric": "favorites",
+            "causal": False,
         })
 
     results.sort(key=lambda r: (-r["lift"], -r["with_count"]))
     return results[:top_n]
 
 
-def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15, max_favs=5):
+def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15,
+                          max_favs=5):
     from category_configs import get_category_config
     asset_ids = None
     if family:
@@ -174,7 +253,8 @@ def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15, max_favs=5)
 
     underperformers = []
     performers = []
-    for name, favs, price, _, _ in rows:
+    for (item_id, name, favs, price, asset_type, created_at,
+         creator_name) in rows:
         if favs is None:
             continue
         if favs <= max_favs:
@@ -210,10 +290,7 @@ def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15, max_favs=5)
             continue
         up_rate = up_n / up_total
         perf_rate = perf_counts.get(word, 0) / perf_total
-        if perf_rate == 0:
-            ratio = 999
-        else:
-            ratio = up_rate / perf_rate
+        ratio = 999 if perf_rate == 0 else up_rate / perf_rate
         if ratio < 1.5:
             continue
         results.append({
@@ -222,6 +299,8 @@ def mine_failure_patterns(cur, family=None, min_sample=25, top_n=15, max_favs=5)
             "under_rate": round(up_rate * 100, 1),
             "perf_rate": round(perf_rate * 100, 1),
             "ratio": round(ratio, 2),
+            "comparison": "low-favorite vs high-favorite items (selection-biased)",
+            "causal": False,
         })
 
     results.sort(key=lambda r: -r["ratio"])
@@ -232,14 +311,19 @@ def format_patterns(patterns, family="all"):
     if not patterns:
         return f"(no patterns found for `{family}`)"
     lines = [f"# 🧪 PATTERN FORGE — {family}\n"]
-    lines.append("_Real statistical lift. Feature vs baseline across the catalog._\n")
+    lines.append("_Observational association with favorites — not sales, "
+                 "demand, or causal effects._\n")
     for i, p in enumerate(patterns, 1):
-        kind = p["kind"]
-        feat = p["feature"]
+        scope = p.get("comparison_scope", "global")
+        conc = p.get("creator_concentration", 0)
+        flag = " · ⚠️ creator-concentrated" if p.get(
+            "single_creator_dominated") else ""
         lines.append(
-            f"**{i}. [{kind}] `{feat}`** — lift **{p['lift']}x** "
-            f"· {p['with_count']:,} items · median {p['with_median']:,} favs "
-            f"(baseline {p['without_median']:,})"
+            f"**{i}. [{p['kind']}] `{p['feature']}`** — lift **{p['lift']}x** "
+            f"· {p['with_count']:,} with / {p.get('without_count', 0):,} "
+            f"comparison items · median {p['with_median']:,} vs "
+            f"{p['without_median']:,} favs · scope `{scope}` · "
+            f"creator share {int(conc * 100)}%{flag}"
         )
     return "\n".join(lines)
 
@@ -248,7 +332,8 @@ def format_failure_patterns(results):
     if not results:
         return "(no failure patterns found)"
     lines = ["# ⚠️ FAILURE PATTERNS\n"]
-    lines.append("_Words that appear in low-fav items far more than in winners._\n")
+    lines.append("_Associations in a selection-biased comparison "
+                 "(low-favorite vs high-favorite items); not causal._\n")
     for i, r in enumerate(results, 1):
         lines.append(
             f"**{i}. `{r['word']}`** — underperformers: **{r['under_rate']}%** "

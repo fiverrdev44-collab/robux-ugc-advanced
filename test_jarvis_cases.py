@@ -40,7 +40,8 @@ def test_evidence_semantics():
 def test_learning_filters_insufficient():
     rows = [
         (10, 86973415376933, "revive", "applied", "partial",
-         {"post_favs": 4, "post_units": 2, "days": 9}, None, 0, None, "2026-11-01"),
+         {"post_favs": 4, "post_units": 2, "days": 9, "verified": True},
+         None, 0, None, "2026-11-01"),
         (11, 121930221694467, "rename", "applied", "mature",
          {"post_favs": 30, "days": 30},
          {"insufficient": True, "reason": "treatment lacks pre/post snapshots"},

@@ -12,6 +12,7 @@ on:
       - fix/emote-title-creative-quality
       - fix/emote-title-quality-calibration
       - fix/emote-title-production-acceptance
+      - feat/creator-intelligence-phase1
   pull_request:
     branches:
       - main
@@ -55,6 +56,8 @@ jobs:
         run: python test_emote_quality_set.py
       - name: Run emote held-out quality benchmark
         run: python test_emote_heldout_quality.py
+      - name: Run creator intelligence Phase 1 regressions
+        run: python test_creator_intelligence_phase1.py
       - name: Run Astra and product understanding regressions
         run: |
           python test_astra.py
