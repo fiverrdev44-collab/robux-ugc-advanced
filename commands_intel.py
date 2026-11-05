@@ -2107,9 +2107,9 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
             conn = get_db(); cur = conn.cursor()
             try:
                 from creator_brain import learn, save, load_findings
-                cur.execute("SELECT count(*) FROM items WHERE creator_verified IS TRUE")
-                has_verified = (cur.fetchone()[0] or 0) > 0
-                findings = learn(cur, verified_only=has_verified)
+                # Representative by default: do not restrict learning to
+                # verified creators just because verified badges exist.
+                findings = learn(cur)
                 if findings:
                     save(cur, findings)
                     conn.commit()

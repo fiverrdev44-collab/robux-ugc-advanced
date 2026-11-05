@@ -24,9 +24,12 @@ def _tokens(text):
 
 def _median(values):
     vals = sorted(v for v in values if v is not None)
-    if not vals:
+    n = len(vals)
+    if n == 0:
         return 0
-    return vals[len(vals) // 2]
+    if n % 2:
+        return vals[n // 2]
+    return (vals[n // 2 - 1] + vals[n // 2]) / 2.0
 
 
 def build_cohort(cur, min_items=5, top_n=50, verified_only=False):
@@ -47,6 +50,63 @@ def build_cohort(cur, min_items=5, top_n=50, verified_only=False):
         LIMIT %s
     """, (min_items, top_n))
     return cur.fetchall()
+
+
+def build_comparison_cohorts(cur, min_items=3):
+    """Representative creator segments, including nonverified/average creators.
+
+    Not a success-only cohort: established vs emerging, verified vs
+    nonverified, and top/average/underperformers by median favorites.
+    Segments can overlap (e.g. a verified established creator).
+    """
+    cur.execute("""
+        SELECT lower(creator_name),
+               count(*) AS n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY favorite_count) AS med,
+               bool_or(coalesce(creator_verified, false)) AS verified
+        FROM items
+        WHERE creator_name IS NOT NULL AND creator_name <> ''
+          AND favorite_count IS NOT NULL
+        GROUP BY 1
+        HAVING count(*) >= %s
+    """, (min_items,))
+    rows = [(r[0], int(r[1] or 0), float(r[2] or 0), bool(r[3]))
+            for r in (cur.fetchall() or [])]
+    if not rows:
+        return None
+
+    ordered = sorted(rows, key=lambda r: r[2])
+    n = len(ordered)
+    if n < 3:
+        bottom, middle, top = [], ordered, []
+    else:
+        third = max(1, n // 3)
+        bottom = ordered[:third]
+        top = ordered[-third:]
+        middle = ordered[third:n - third]
+
+    segments = {
+        "established": [r for r in rows if r[1] >= 5],
+        "emerging": [r for r in rows if r[1] < 5],
+        "verified": [r for r in rows if r[3]],
+        "nonverified": [r for r in rows if not r[3]],
+        "top_performers": top,
+        "average_performers": middle,
+        "underperformers": bottom,
+    }
+
+    def summarize(rs):
+        return {"creators": len(rs), "items": sum(r[1] for r in rs),
+                "median_of_medians": round(_median([r[2] for r in rs]), 1)
+                if rs else 0}
+
+    return {
+        "creators": n,
+        "segments": {k: summarize(v) for k, v in segments.items()},
+        "sampled_creators": {
+            k: [r[0] for r in sorted(v, key=lambda x: -x[2])[:5]]
+            for k, v in segments.items() if v},
+    }
 
 
 def learn(cur, min_items=5, top_n=50, verified_only=False):
@@ -100,6 +160,11 @@ def learn(cur, min_items=5, top_n=50, verified_only=False):
     span_weeks = max(max(ages, default=0) - min(ages, default=0), 1) / 7
     cadence = len(rows) / max(len(cohort) * span_weeks, 1)
 
+    try:
+        comparison = build_comparison_cohorts(cur)
+    except Exception:
+        comparison = None
+
     return {
         "cohort_size": len(cohort),
         "items": len(rows),
@@ -110,6 +175,10 @@ def learn(cur, min_items=5, top_n=50, verified_only=False):
         "cadence_per_week": round(cadence, 2),
         "top_words": top_words,
         "top_bigrams": top_bigrams,
+        "comparison": comparison,
+        "cohort_mode": ("verified_only" if verified_only
+                        else "representative_all"),
+        "causal": False,
     }
 
 
@@ -154,7 +223,7 @@ def load_findings(cur):
             bits = part.split(":")
             if len(bits) == 3:
                 try:
-                    out.append((bits[0], int(bits[1]), int(bits[2])))
+                    out.append((bits[0], int(bits[1]), float(bits[2])))
                 except ValueError:
                     pass
         return out
@@ -162,13 +231,16 @@ def load_findings(cur):
     return {
         "cohort_size": int(stored["cohort_size"][0]),
         "items": int(stored["items"][0]),
-        "median_title_words": int(stored["median_title_words"][0]),
+        "median_title_words": float(stored["median_title_words"][0]),
         "emoji_rate": float(stored["emoji_rate"][0]),
-        "median_price": int(stored["median_price"][0]),
-        "median_favs": int(stored["median_favs"][0]),
+        "median_price": float(stored["median_price"][0]),
+        "median_favs": float(stored["median_favs"][0]),
         "cadence_per_week": float(stored["cadence_per_week"][0]),
         "top_words": _pairs("top_words"),
         "top_bigrams": _pairs("top_bigrams"),
+        "comparison": None,
+        "cohort_mode": "cached",
+        "causal": False,
         "updated_at": stored["cohort_size"][1],
     }
 
@@ -186,6 +258,17 @@ def format_report(f):
         f"• Median price: **R${f['median_price']}**",
         f"• Launch cadence: **{f['cadence_per_week']} items/week** per creator",
     ]
+    comp = f.get("comparison")
+    if comp and comp.get("segments"):
+        s = comp["segments"]
+        lines.append(
+            f"• Comparison: established {s['established']['creators']} · "
+            f"emerging {s['emerging']['creators']} · "
+            f"verified {s['verified']['creators']} · "
+            f"nonverified {s['nonverified']['creators']} · "
+            f"top/mid/low {s['top_performers']['creators']}/"
+            f"{s['average_performers']['creators']}/"
+            f"{s['underperformers']['creators']} creators")
     if f["top_words"]:
         lines.append("\n**Words in their winners:**")
         for w, n, med in f["top_words"][:10]:
@@ -199,5 +282,9 @@ def format_report(f):
     lines.append(
         "\n_Reading: their titles are the control group. Copy the shape "
         "(length, one aesthetic word, type word last), not the exact words._"
+    )
+    lines.append(
+        "_Observational associations, not causal effects. The top cohort is "
+        "not a controlled comparison; use the comparison segments as context._"
     )
     return "\n".join(lines)

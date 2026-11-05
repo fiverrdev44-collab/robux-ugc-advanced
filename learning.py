@@ -24,7 +24,9 @@ def load_measured_outcomes(cur, item_id=None, limit=5):
     Same-item outcomes are preferred when an item_id is supplied.
     """
     where = ("measured_at is not null and outcome is not null "
-             "and coalesce(maturity,'pending') in ('mature','partial')")
+             "and coalesce(maturity,'pending') in ('mature','partial') "
+             "and (applied_at is not null or status = 'applied') "
+             "and (applied_at is null or measured_at >= applied_at)")
     cur.execute(f"""
         select id, item_id, rec_type, status, maturity, outcome,
                did_estimate, control_n, applied_at, measured_at
@@ -41,6 +43,9 @@ def load_measured_outcomes(cur, item_id=None, limit=5):
         payload = _as_dict(outcome)
         did_payload = _as_dict(did)
         if did_payload.get("insufficient") is True:
+            continue
+        if payload.get("verified") is False:
+            # Unverified sales/outcomes are not learning evidence.
             continue
         if not payload:
             continue
@@ -77,4 +82,81 @@ def format_learning_context(cur, item_id=None, limit=3):
         controls = f" · controls={r['control_n']}" if r["control_n"] else " · no controls"
         lines.append(f"- {scope}{controls} · " + ", ".join(bits))
     lines.append("Use these only as bounded evidence; one item is not a rule.")
+    return "\n".join(lines)
+
+
+def learning_readiness(cur):
+    """Read-only audit of whether measured feedback is safe to learn from.
+
+    Never enables ASTRA_LEARNING_IN_GENERATION; enabling it is a human decision
+    after independent review.
+    """
+    try:
+        cur.execute("""
+            select
+              count(*),
+              count(*) filter (where applied_at is not null
+                                 or status = 'applied'),
+              count(*) filter (where measured_at is not null
+                                 and outcome is not null),
+              count(*) filter (where measured_at is not null
+                                 and outcome is not null
+                                 and coalesce(maturity,'pending')
+                                     in ('mature','partial')),
+              count(*) filter (where outcome ? 'post_units'
+                                 or outcome ? 'sales_delta_pct'),
+              count(*) filter (where coalesce(control_n,0) >= 10),
+              count(*) filter (where measured_at is not null
+                                 and applied_at is not null
+                                 and measured_at < applied_at),
+              count(*) filter (where outcome->>'verified' = 'false')
+            from recommendation_ledger
+        """)
+        row = cur.fetchone()
+    except Exception as e:
+        return {"ok": False, "error": type(e).__name__, "ready": False,
+                "recommended_flag": False,
+                "reason": ("ledger not ready; ASTRA_LEARNING_IN_GENERATION "
+                           "stays off")}
+
+    (total, applied, measured, mature, with_sales, with_controls,
+     leakage, unverified) = [int(x or 0) for x in row]
+    checks = {
+        "measured_outcomes": measured >= 20,
+        "mature_outcomes": mature >= 10,
+        "sales_evidence": with_sales >= 10,
+        "controls": with_controls >= 5,
+        "no_temporal_leakage": leakage == 0,
+        "no_unverified_sales": unverified == 0,
+    }
+    ready = all(checks.values())
+    return {
+        "ok": True, "total": total, "applied": applied,
+        "measured": measured, "mature": mature,
+        "with_sales": with_sales, "with_controls": with_controls,
+        "leakage": leakage, "unverified": unverified,
+        "checks": checks, "ready": ready,
+        "recommended_flag": False,
+        "reason": ("thresholds met; keep ASTRA_LEARNING_IN_GENERATION off "
+                   "until independent review" if ready else
+                   "insufficient or unreliable evidence; keep "
+                   "ASTRA_LEARNING_IN_GENERATION off"),
+    }
+
+
+def format_learning_readiness(report):
+    if not report.get("ok"):
+        return f"⚠️ Learning readiness unavailable: {report.get('error')}"
+    lines = ["# 🎓 LEARNING READINESS (read-only audit)"]
+    lines.append(
+        f"• Ledger rows: {report['total']:,} · applied {report['applied']:,} · "
+        f"measured {report['measured']:,} · mature {report['mature']:,}")
+    lines.append(
+        f"• With sales evidence: {report['with_sales']:,} · "
+        f"with controls: {report['with_controls']:,} · "
+        f"temporal leakage: {report['leakage']:,} · "
+        f"unverified: {report['unverified']:,}")
+    for name, passed in report["checks"].items():
+        lines.append(f"• {name}: {'✅' if passed else '❌'}")
+    lines.append(f"• Generation flag: **OFF** ({report['reason']})")
     return "\n".join(lines)

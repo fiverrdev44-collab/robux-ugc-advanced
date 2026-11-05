@@ -38,6 +38,16 @@ BOT_OWNERS = {
 # reject nonsense suggestions. Computed once per process (90k-row scan).
 _REAL_WORDS_CACHE = None
 
+
+def format_favorite(favs):
+    """Display observed favorite counts. Missing values stay unknown."""
+    if favs is None:
+        return "unknown"
+    try:
+        return f"{int(favs):,}"
+    except (TypeError, ValueError):
+        return "unknown"
+
 TOP_WHALE_STUDIOS = {
     "1276023": "Erythia Studios",
     "4829104": "Rush Production",
@@ -107,8 +117,7 @@ def register_supercomputer_commands(bot):
             if rows:
                 for row in rows:
                     item_id, name, creator, price, favs, created_at = row
-                    actual_favs = favs if (favs and favs > 0) else ((item_id % 7500) + 250)
-                    fav_str = f"{actual_favs:,}"
+                    fav_str = format_favorite(favs)
                     price_str = f"{price} R$" if price else "Free/Offsale"
                     embed.add_field(
                         name=f"[{creator}] {name[:35]}",
@@ -471,10 +480,10 @@ def register_supercomputer_commands(bot):
             if rows:
                 for r in rows:
                     item_id, name, creator, price, favs, created_at = r
-                    actual_favs = favs if (favs and favs > 0) else ((item_id % 7500) + 250)
+                    fav_str = format_favorite(favs)
                     embed.add_field(
                         name=f"[{creator}] {name[:35]}",
-                        value=f"ID: `{item_id}` · ⭐ **{actual_favs:,} favs** · Price: `{price} R$`",
+                        value=f"ID: `{item_id}` · ⭐ **{fav_str} favs** · Price: `{price} R$`",
                         inline=False
                     )
             else:
