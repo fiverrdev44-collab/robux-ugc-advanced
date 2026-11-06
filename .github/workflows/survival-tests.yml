@@ -16,6 +16,7 @@ on:
       - feat/phase2-market-intelligence
       - fix/phase2-m2-data-coverage
       - feat/phase2-m3-opportunity-validation
+      - fix/convergence-budget-integrity
   pull_request:
     branches:
       - main

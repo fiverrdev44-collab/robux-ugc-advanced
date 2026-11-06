@@ -335,6 +335,19 @@ def test_live_429_preserves_error_category():
     print("PASS HTTP 429 is unavailable evidence")
 
 
+def test_cached_marketplace_evidence_is_labeled():
+    live = _live(cached=True, cache_age_seconds=12.5,
+                 observed_at=NOW.isoformat(),
+                 verification_timestamp=NOW.isoformat())
+    bundle = _bundle(live=live)
+    assert bundle["marketplace"]["cached"] is True
+    assert bundle["marketplace"]["cache_age_seconds"] == 12.5
+    text = ov.format_bundle(bundle)
+    assert "cached" in text.lower()
+    assert "12.50s" in text
+    print("PASS cached marketplace evidence is labeled with age")
+
+
 def test_partial_marketplace_results():
     bundle = _bundle(live=_live(deferred=True, retry_after=30))
     assert bundle["marketplace"]["partial"] is True

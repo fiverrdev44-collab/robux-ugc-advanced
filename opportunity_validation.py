@@ -464,7 +464,8 @@ def _marketplace_evidence(live):
             "category_mismatched": None, "exact_title_competitors": None,
             "conceptually_related_competitors": None, "capped": None,
             "pages": None, "sample_note": None, "top_competitors": [],
-            "verification_timestamp": None,
+            "verification_timestamp": None, "cached": False,
+            "cache_age_seconds": None, "observed_at": None,
         }
     ok = bool(live.get("ok"))
     error = live.get("error")
@@ -499,6 +500,10 @@ def _marketplace_evidence(live):
         "sample_note": live.get("sample_note"),
         "top_competitors": live.get("top_competitors") or [],
         "verification_timestamp": live.get("verification_timestamp"),
+        "cached": bool(live.get("cached")),
+        "cache_age_seconds": live.get("cache_age_seconds"),
+        "observed_at": (live.get("observed_at")
+                        or live.get("verification_timestamp")),
     }
 
 
@@ -703,8 +708,8 @@ def _verdict(bundle, evidence):
             "without increasing the API budget.")
     if correct == 0:
         reasons.append(
-            "No correct-category marketplace results; low or missing "
-            "competition does not establish demand.")
+            "No correct-category matches in the observed marketplace sample; "
+            "this does not establish category-wide absence or demand.")
         return VERDICT_INSUFFICIENT, reasons, (
             "Do not pursue yet; confirm category presence with a bounded "
             "marketplace check.")
@@ -1023,7 +1028,8 @@ def format_bundle(bundle):
     age = db["item_age_distribution"]
     identified_conc = creator.get("creator_concentration_identified")
     name_conc = creator.get("creator_concentration_name_approx")
-    verified_at = (market.get("verification_timestamp") or "?")[:19]
+    verified_at = (market.get("observed_at")
+                   or market.get("verification_timestamp") or "?")[:19]
     lines = [
         "🎯 VANTA OPPORTUNITY VALIDATION",
         f"Concept: `{candidate.get('concept')}` · "
@@ -1047,9 +1053,12 @@ def format_bundle(bundle):
          f"{_fmt_number(market.get('conceptually_related_competitors'))}"
          + (" · capped" if market.get("capped") else "")
          + (" · partial" if market.get("partial") else "")
-         + (f" · verified {verified_at}"
-            if market.get("available") else
-            f" · unavailable ({market.get('error_category')})")),
+         + (" · cached (age "
+            f"{_fmt_number(market.get('cache_age_seconds'), 's')})"
+            if market.get("cached") else
+            (f" · verified {verified_at}"
+             if market.get("available") else
+             f" · unavailable ({market.get('error_category')})"))),
         (f"Creator Intelligence: "
          f"{_fmt_number(creator.get('numeric_creator_count'))} numeric IDs / "
          f"{_fmt_number(creator.get('identified_creator_count'))} confirmed "

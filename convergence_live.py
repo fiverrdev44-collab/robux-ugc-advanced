@@ -115,7 +115,7 @@ def _cache_get(key):
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
         if entry and (time.time() - entry["ts"]) <= CACHE_TTL_SECONDS:
-            return entry["value"]
+            return entry["value"], max(0.0, time.time() - entry["ts"])
     return None
 
 
@@ -140,10 +140,13 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
 
     cache_key = (str(family).lower(), keyword.lower())
     if use_cache:
-        cached = _cache_get(cache_key)
-        if cached is not None:
+        cached_entry = _cache_get(cache_key)
+        if cached_entry is not None:
+            cached, age = cached_entry
             cached = dict(cached)
             cached["cached"] = True
+            cached["cache_age_seconds"] = round(age, 1)
+            cached["observed_at"] = cached.get("verification_timestamp")
             return cached
 
     if _circuit_open():
@@ -258,6 +261,8 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     if rate_limit_meta:
         # Partial results were returned, but the rate-limit evidence is kept.
         result.update(rate_limit_meta)
+    result["observed_at"] = result["verification_timestamp"]
+    result["cache_age_seconds"] = 0.0
     if use_cache:
         _cache_put(cache_key, result)
     return result
@@ -265,26 +270,51 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
 
 def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
                      max_pages=2, limit=30, use_cache=True):
-    """Bounded, concurrency-limited live verification of a shortlist."""
+    """Bounded, circuit-aware live verification of a shortlist.
+
+    At most ``max_workers`` new requests are in flight. Once the shared circuit
+    is known to be open, remaining candidates are resolved from cache or
+    returned as deferred without issuing another request. Already-running
+    futures are allowed to finish; no new ones are submitted.
+    """
     keywords = [k for k in (keywords or []) if k]
     out = {}
     if not keywords:
         return out
-    failures = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(int(max_workers), 5))) as ex:
-        futures = [(k, ex.submit(verify_niche, k, family, limit, max_pages,
-                                 timeout, use_cache))
-                   for k in keywords]
-        for k, fut in futures:
-            try:
-                res = fut.result()
-            except Exception as e:
-                res = {"ok": False, "error": type(e).__name__, "keyword": k,
-                       "cached": False}
-            if not res.get("ok"):
-                failures += 1
-                res["skipped"] = failures > 3
-            out[k] = res
+    workers = max(1, min(int(max_workers), 5))
+    index = 0
+
+    def _resolve_deferred(k):
+        try:
+            return verify_niche(k, family, limit, max_pages, timeout,
+                                use_cache)
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__, "keyword": k,
+                    "cached": False, "deferred": True, "skipped": True}
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        while index < len(keywords):
+            if _circuit_open():
+                for k in keywords[index:]:
+                    res = _resolve_deferred(k)
+                    if not res.get("cached") and not res.get("ok"):
+                        res["skipped"] = True
+                    out[k] = res
+                break
+            batch = keywords[index:index + workers]
+            index += len(batch)
+            futures = [(k, ex.submit(verify_niche, k, family, limit,
+                                     max_pages, timeout, use_cache))
+                       for k in batch]
+            for k, fut in futures:
+                try:
+                    res = fut.result()
+                except Exception as exc:
+                    res = {"ok": False, "error": type(exc).__name__,
+                           "keyword": k, "cached": False}
+                if not res.get("cached") and not res.get("ok"):
+                    res["skipped"] = True
+                out[k] = res
     return out
 
 
@@ -321,7 +351,8 @@ def _confidence(candidate, live):
     elif not live.get("ok"):
         level = "low"; reasons.append(f"live check failed ({live.get('error')})")
     elif live.get("category_correct", 0) == 0:
-        level = "low"; reasons.append("no correct-category live results")
+        level = "low"
+        reasons.append("no correct-category matches in the observed sample")
     elif live.get("exact_title_matches", 0) > 0:
         level = "medium"; reasons.append("exact title already exists")
     elif score >= 55:
@@ -351,13 +382,20 @@ def format_recommendation(candidate, live=None):
     elif not live.get("ok"):
         lines.append(f"• **Live evidence:** unavailable ({live.get('error')})")
     else:
+        observed = (live.get("observed_at")
+                    or live.get("verification_timestamp") or "?")[:19]
+        if live.get("cached"):
+            freshness = (f"cached evidence (age "
+                         f"{live.get('cache_age_seconds', '?')}s; observed "
+                         f"{observed})")
+        else:
+            freshness = f"verified {observed}"
         lines.append(
             f"• **Live evidence:** {live['sampled_results']} sampled results · "
             f"{live['category_correct']} correct-category · "
             f"{live['exact_title_matches']} exact-title · "
             f"{live['conceptual_matches']} conceptual · "
-            f"({live.get('sample_note')}) · verified "
-            f"{live.get('verification_timestamp', '?')[:19]}"
+            f"({live.get('sample_note')}) · {freshness}"
         )
     # 4. competitor examples (concept-related only)
     if live and live.get("ok"):
@@ -377,11 +415,18 @@ def format_recommendation(candidate, live=None):
         lines.append("• **Competitor examples:** none verified")
     # 5. competition assessment
     if live and live.get("ok"):
-        lines.append(
-            f"• **Competition:** {live['exact_title_matches']} exact-title · "
-            f"{live['conceptual_matches']} conceptual matches "
-            f"(sampled, not total)"
-        )
+        if live.get("category_correct", 0) == 0:
+            lines.append(
+                "• **Competition:** 0 observed correct-category matches in "
+                "the sampled results; this sample does not prove "
+                "category-wide absence"
+            )
+        else:
+            lines.append(
+                f"• **Competition:** {live['exact_title_matches']} exact-title · "
+                f"{live['conceptual_matches']} conceptual matches "
+                f"(sampled, not total)"
+            )
     else:
         lines.append("• **Competition:** unknown (live check incomplete)")
     # 6. momentum
@@ -406,13 +451,17 @@ def format_recommendation(candidate, live=None):
         risks.append("live sample capped")
     if live and live.get("ok") and live.get("category_mismatched"):
         risks.append(f"{live['category_mismatched']} live results in wrong category")
+    if live and live.get("ok") and live.get("category_correct", 0) == 0:
+        risks.append("zero correct-category matches in sample; not proof of absence")
     lines.append(f"• **Risks:** {'; '.join(risks) if risks else 'none identified'}")
     # Recommendation must be negative when live verification finds no
     # correct-category results, regardless of the confidence level.
     if live is None or not live.get("ok"):
         verdict = "do not pursue without more evidence (live verification unavailable)"
     elif live.get("category_correct", 0) == 0:
-        verdict = "do not pursue — no correct-category live results"
+        verdict = ("insufficient evidence — no correct-category matches in the "
+                   "observed sample; this sample does not prove the category "
+                   "has no competitors")
     elif live.get("exact_title_matches", 0) > 0:
         verdict = "investigate cautiously — exact title already exists live"
     elif level == "medium":
@@ -428,6 +477,10 @@ def format_report(detailed, verified, family="all"):
     label = _FAMILY_LABEL.get(str(family).lower(), str(family))
     candidates = (detailed or {}).get("shortlist") or (detailed or {}).get("candidates") or []
     gated = (detailed or {}).get("gated") or []
+    try:
+        display_limit = max(1, int((detailed or {}).get("limit") or 8))
+    except (TypeError, ValueError):
+        display_limit = 8
 
     lines = [f"# 🎯 CONVERGENCE — {label}\n"]
     lines.append("_Database discovery + live marketplace verification. "
@@ -440,7 +493,7 @@ def format_report(detailed, verified, family="all"):
                      "(measured velocity or fresh supply, non-generic).")
         if gated:
             lines.append("\n**Gated (rejected) candidates:**")
-            for g in gated[:8]:
+            for g in gated[:display_limit]:
                 lines.append(f"• `{g['keyword']}` — {g['reason']}")
         lines.append("")
         lines.append("_Honest insufficient-evidence result; no recommendations "
@@ -455,7 +508,7 @@ def format_report(detailed, verified, family="all"):
 
     if gated:
         lines.append("## Gated out (not recommended)")
-        for g in gated[:8]:
+        for g in gated[:display_limit]:
             lines.append(f"• `{g['keyword']}` — {g['reason']} (score {g.get('score')})")
         lines.append("")
 
