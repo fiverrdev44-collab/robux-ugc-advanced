@@ -95,6 +95,13 @@ COMMAND_ALIASES = {
 }
 
 
+async def authorize_before_invoke(ctx):
+    """Discord before_invoke hook shared by production and integration tests."""
+    decision = authorize_command(ctx.command.name, ctx.author.id)
+    if not decision.allowed:
+        raise CommandNotAuthorized(decision.reason)
+
+
 class CommandNotAuthorized(commands.CheckFailure):
     """Raised before a denied command callback is invoked."""
 
@@ -213,11 +220,30 @@ class AIUsageLimiter:
             return True, ""
 
 
+def _env_int(name, default):
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 AI_LIMITER = AIUsageLimiter()
+PLANNER_LIMITER = AIUsageLimiter()
+PLANNER_LIMITER.configure(
+    user_limit=_env_int("M6_PLANNER_USER_LIMIT", 20),
+    owner_limit=_env_int("M6_PLANNER_OWNER_LIMIT", 100),
+    global_limit=_env_int("M6_PLANNER_GLOBAL_LIMIT", 200),
+    window_seconds=_env_int("M6_PLANNER_WINDOW_SECONDS", 3600),
+)
+
+
+def allow_planner_ai(user_id, owner=False, now=None):
+    return PLANNER_LIMITER.allow(user_id, owner=owner, now=now)
 
 
 def reset_for_tests():
     AI_LIMITER.reset()
+    PLANNER_LIMITER.reset()
 
 
 def configure_for_tests(user_limit=None, owner_limit=None,
@@ -225,6 +251,14 @@ def configure_for_tests(user_limit=None, owner_limit=None,
     AI_LIMITER.configure(user_limit=user_limit, owner_limit=owner_limit,
                          global_limit=global_limit,
                          window_seconds=window_seconds)
+
+
+def configure_planner_for_tests(user_limit=None, owner_limit=None,
+                                global_limit=None, window_seconds=None):
+    PLANNER_LIMITER.configure(user_limit=user_limit,
+                              owner_limit=owner_limit,
+                              global_limit=global_limit,
+                              window_seconds=window_seconds)
 
 
 def authorize_command(name, user_id, now=None):

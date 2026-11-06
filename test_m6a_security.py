@@ -6,6 +6,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import discord  # noqa: E402
 import command_security as cs  # noqa: E402
 from discord.ext import commands as dcommands  # noqa: E402
 
@@ -208,6 +209,192 @@ def test_ai_cost_and_mutating_commands_are_owner_only():
         policy = cs.policy_for(name)
         assert policy["level"] == "owner", name
     print("PASS AI-cost and mutating commands require owner authorization")
+
+
+def test_real_before_invoke_hook_denies_before_callback():
+    async def scenario():
+        bot = dcommands.Bot(command_prefix="!", intents=discord.Intents.default())
+        bot.before_invoke(cs.authorize_before_invoke)
+        calls = []
+
+        class Cmd:
+            name = "snapshot_now"
+
+        class Author:
+            id = NON_OWNER
+
+        class Ctx:
+            command = Cmd()
+            author = Author()
+
+        denied = False
+        try:
+            await bot._before_invoke(Ctx())
+        except cs.CommandNotAuthorized:
+            denied = True
+        assert denied
+        assert calls == []
+
+        Ctx.command.name = "guide"
+        await bot._before_invoke(Ctx())
+
+        Ctx.command.name = "unknown_command"
+        try:
+            await bot._before_invoke(Ctx())
+        except cs.CommandNotAuthorized:
+            pass
+        else:
+            raise AssertionError("unknown command should fail closed")
+
+    with _owner_context():
+        asyncio.run(scenario())
+    print("PASS real Discord before_invoke hook denies before callback")
+
+
+def test_real_before_invoke_hook_enforces_ai_limit():
+    async def scenario():
+        bot = dcommands.Bot(command_prefix="!", intents=discord.Intents.default())
+        bot.before_invoke(cs.authorize_before_invoke)
+
+        class Cmd:
+            name = "concept"
+
+        class Author:
+            id = OWNER
+
+        class Ctx:
+            command = Cmd()
+            author = Author()
+
+        await bot._before_invoke(Ctx())
+        try:
+            await bot._before_invoke(Ctx())
+        except cs.CommandNotAuthorized:
+            return True
+        return False
+
+    cs.configure_for_tests(user_limit=1, owner_limit=1, global_limit=10,
+                           window_seconds=60)
+    with _owner_context():
+        denied = asyncio.run(scenario())
+    cs.configure_for_tests()
+    cs.reset_for_tests()
+    assert denied
+    print("PASS real before_invoke hook enforces AI rate limit")
+
+
+def test_conversation_router_denies_before_callback():
+    import vanta_conversation as vc
+
+    class Cmd:
+        name = "desc_forge"
+        def __init__(self):
+            self.called = []
+
+        async def callback(self, ctx, **kwargs):
+            self.called.append(kwargs)
+
+    class Bot:
+        def __init__(self):
+            self.cmd = Cmd()
+
+        def get_command(self, name):
+            return self.cmd if name == "desc_forge" else None
+
+    class Channel:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, content=None, **kwargs):
+            self.messages.append(content or "")
+
+    class Message:
+        def __init__(self, channel):
+            self.channel = channel
+            self.author = type("A", (), {"id": NON_OWNER, "bot": False})()
+            self.content = "tags"
+            self.attachments = []
+            self.id = 1
+
+    route = {"intent": "tags", "concept": "Cute Hat", "item_id": None,
+             "family": None}
+    channel = Channel()
+    message = Message(channel)
+    bot = Bot()
+    state = vc.ConversationState(user_id=NON_OWNER)
+    with mock.patch("bot_core.psycopg2.connect",
+                    side_effect=AssertionError("DB call attempted")), \
+            mock.patch("live_market._get_with_backoff",
+                       side_effect=AssertionError("Roblox call attempted")), \
+            mock.patch("gemini_brain._generate",
+                       side_effect=AssertionError("AI call attempted")):
+        asyncio.run(vc._run_registry(bot, message, route, state))
+    assert bot.cmd.called == []
+    assert any("denied" in str(x).lower() for x in channel.messages)
+
+    with _owner_context():
+        channel2 = Channel()
+        message2 = Message(channel2)
+        message2.author.id = OWNER
+        bot2 = Bot()
+        state2 = vc.ConversationState(user_id=OWNER)
+        asyncio.run(vc._run_registry(bot2, message2, route, state2))
+    assert bot2.cmd.called, bot2.cmd.called
+    print("PASS conversation router denies before callback and allows owner")
+
+
+def test_planner_budget_is_global_per_user_and_counts_failures():
+    import vanta_conversation as vc
+
+    text = "maybe a floating lantern hat for cozy avatars"
+    calls = []
+
+    def fake_planner(*args, **kwargs):
+        calls.append(1)
+        return None
+
+    cs.configure_planner_for_tests(user_limit=1, owner_limit=1,
+                                   global_limit=10, window_seconds=60)
+    with mock.patch.object(vc, "_planner_ai", side_effect=fake_planner), \
+            mock.patch.object(cs, "_owner_ids", return_value=set()):
+        first = vc.ConversationState(user_id=NON_OWNER)
+        asyncio.run(vc.plan_message(text, False, first, bot=None))
+        second = vc.ConversationState(user_id=NON_OWNER)
+        asyncio.run(vc.plan_message(text, False, second, bot=None))
+    assert len(calls) == 1
+    assert len(first.ai_calls) == 1
+    assert len(second.ai_calls) == 0
+
+    calls.clear()
+    def failing_planner(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("provider failed")
+
+    cs.configure_planner_for_tests(user_limit=1, owner_limit=1,
+                                   global_limit=10, window_seconds=60)
+    with mock.patch.object(vc, "_planner_ai", side_effect=failing_planner), \
+            mock.patch.object(cs, "_owner_ids", return_value=set()):
+        first = vc.ConversationState(user_id=NON_OWNER)
+        asyncio.run(vc.plan_message(text, False, first, bot=None))
+        second = vc.ConversationState(user_id=NON_OWNER)
+        asyncio.run(vc.plan_message(text, False, second, bot=None))
+    assert len(calls) == 1
+
+    calls.clear()
+    cs.configure_planner_for_tests(user_limit=10, owner_limit=10,
+                                   global_limit=1, window_seconds=60)
+    with mock.patch.object(vc, "_planner_ai", side_effect=fake_planner), \
+            mock.patch.object(cs, "_owner_ids", return_value=set()):
+        first = vc.ConversationState(user_id=1)
+        asyncio.run(vc.plan_message(text, False, first, bot=None))
+        second = vc.ConversationState(user_id=2)
+        asyncio.run(vc.plan_message(text, False, second, bot=None))
+    assert len(calls) == 1
+    assert len(first.ai_calls) == 1
+    assert len(second.ai_calls) == 0
+    cs.configure_planner_for_tests()
+    cs.reset_for_tests()
+    print("PASS planner budget is global per user and counts failed attempts")
 
 
 if __name__ == "__main__":

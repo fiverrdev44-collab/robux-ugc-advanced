@@ -26,7 +26,7 @@ from flask import Flask, request
 from bot_core import get_db, ASSET_TYPE_NAMES
 from command_security import (
     CommandNotAuthorized,
-    authorize_command,
+    authorize_before_invoke,
     denial_message,
 )
 from commands_guide import register_guide_commands
@@ -43,11 +43,7 @@ _boot_done = False
 _main_loop = None   # captured in on_ready — scheduler uses this
 
 
-@bot.before_invoke
-async def _authorize_command(ctx):
-    decision = authorize_command(ctx.command.name, ctx.author.id)
-    if not decision.allowed:
-        raise CommandNotAuthorized(decision.reason)
+bot.before_invoke(authorize_before_invoke)
 
 
 @bot.event

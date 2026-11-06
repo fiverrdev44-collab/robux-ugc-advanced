@@ -7,11 +7,32 @@
 - **Out of scope and unchanged:** ORACLE algorithms, autonomous learning, sales attribution, `!emote_title`, M4 activation, database schemas, environment variables, Roblox API budgets.
 - **Production state:** unchanged. No merge or deploy.
 
+## M6-A.1 follow-up (included in this branch)
+
+- Conversation-planner AI is now bounded by process-global per-user and
+  global limits before `_planner_ai()` is invoked:
+  - non-owner: 20 attempts/hour
+  - owner: 100 attempts/hour
+  - global: 200 attempts/hour
+  - window: 3600 seconds
+- Attempts are counted before the provider call, including provider failures,
+  timeouts, and invalid responses. The deterministic fast path still returns
+  without any AI call.
+- The limiter is keyed by Discord user, not conversation state, so new threads
+  or sessions cannot reset a user's allowance.
+- Actual `before_invoke` and conversation-router integration tests were added,
+  not just helper-level tests.
+- Sales embed source authentication is missing. The finding and a proposed
+  allowlist/dry-run design are documented in
+  `M6A1_SALES_SOURCE_REVIEW.md`; production ingestion was **not** changed.
+
 ## 1. Exact files modified
 
 **New**
 - `command_security.py`
 - `test_m6a_security.py`
+- `M6A_SECURITY_CORRECTION.md`
+- `M6A1_SALES_SOURCE_REVIEW.md`
 
 **Modified**
 - `commands_ai.py`
@@ -60,6 +81,18 @@ Denied commands never reach the callback, so they cannot open a database connect
 - Unauthorized users are denied before the limiter is consulted, so they consume no quota.
 - Denied or rate-limited AI commands make zero provider calls.
 
+Conversation-planner controls (M6-A.1):
+
+- Non-owner planner limit: **20 attempts/hour**.
+- Owner planner limit: **100 attempts/hour**.
+- Global planner limit: **200 attempts/hour**.
+- Planner limits are process-global per Discord user, so new threads/sessions
+  cannot reset them.
+- The attempt is recorded before `_planner_ai()` runs; provider failures,
+  timeouts, and invalid responses are charged once.
+- Deterministic fast paths return before the planner budget/provider call.
+- No additional AI operation is charged for a single planner call.
+
 Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!analyze_image`, `!chain`, `!creative`, `!creative_raw`, `!desc_analyze`, `!desc_forge`, `!autopsy`, `!revive`, `!path`, `!playbook`, `!meta_sniper`, `!stealth`, `!revsim`, `!sales_keywords`, `!tags`, and `!ai_debug`.
 
 ## 5. Before/after behavior
@@ -77,10 +110,14 @@ Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!a
 | Aliased restricted command | Alias reached callback | Alias canonicalized and denied |
 | Owner AI command above limit | No limit | Bounded per-user/global rejection |
 | Owner AI command under limit | Worked | Still works |
+| Planner AI for non-owner, new thread | Per-state 20/hour could reset | Process-global 20/hour per user |
+| Planner provider fails or returns invalid JSON | Not charged in old state list | Counted once before provider |
+| Planner over limit | Could still call provider in some paths | Deterministic route; zero provider calls |
+| Sales embed from unapproved sender | Accepted by channel check alone | Finding documented; ingestion unchanged |
 
 ## 6. Security test results
 
-`python test_m6a_security.py` — **11/11 passed**:
+`python test_m6a_security.py` — **15/15 passed**:
 
 - Every command has an explicit policy.
 - Owner-only commands deny non-owners and allow owners.
@@ -94,6 +131,10 @@ Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!a
 - `!ai_debug` source contains no key prefix/length output.
 - Mock API keys never appear in the Discord response.
 - AI-cost and mutating commands are owner-only.
+- The real `before_invoke` hook denies restricted commands and enforces AI limits.
+- The real conversation router denies before callback and allows owners.
+- Planner limits are global per user, survive new sessions, and count failed
+  provider attempts.
 
 ## 7. Existing regression results
 
@@ -110,7 +151,7 @@ Full offline suite run (25 suites, all exit 0):
 Disposable PostgreSQL 16.2:
 
 ```text
-Ran 23 tests in 2.090s
+Ran 23 tests in 1.482s
 OK
 PG_TEST_RETURN_CODE=0
 ```
@@ -127,8 +168,12 @@ These are outside M6-A scope and remain open:
 - Legacy probability/expected-sales language in F-03/F-04 is unchanged.
 - `tracked_creators`/Creator Brain identity issues and ORACLE rate-limit behavior are unchanged.
 - M4 remains disabled (`PHASE2_M4_ENABLED=0`) and is not activated.
-- The AI planner in the conversation router retains its existing hourly per-user limit; this correction adds command-level limits but does not replace that planner budget.
+- Sales embeds are not authenticated against a trusted webhook/sender. The
+  finding and a proposed dry-run/enforce allowlist design are documented in
+  `M6A1_SALES_SOURCE_REVIEW.md`; production ingestion behavior is unchanged.
 - A determined operator with owner credentials can still consume owner AI limits; limits are bounded but not a security boundary against the owner.
+- Planner limits are process-local; a multi-process deployment would need a
+  shared store to enforce a single global budget.
 
 ## 9. Recommendation
 
