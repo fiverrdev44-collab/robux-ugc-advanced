@@ -4,8 +4,11 @@ Stage A gate logic (generic rejection, evidence qualification, median/velocity
 labeling) is tested as pure functions. Stage B live verification is tested with
 mocked Roblox responses — no network, no database writes.
 """
+import asyncio
 import email.utils
+import os
 import sys
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -194,6 +197,118 @@ class StageAFixTests(unittest.TestCase):
         self.assertFalse(r["stale"])
 
 
+class LimitTests(unittest.TestCase):
+    class _Cur:
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return LimitTests._Cur()
+
+        def close(self):
+            pass
+
+    def _detailed(self, limit, shortlist, count=8):
+        def fake_score(cur, kw, family, **kwargs):
+            return _candidate(keyword=kw, score=100 - int(kw.rsplit(" ", 1)[-1]))
+
+        keywords = [f"levitation pose {i}" for i in range(count)]
+        with mock.patch.object(ce, "get_research_db",
+                               return_value=self._Conn()), \
+                mock.patch.object(ce, "_gather_keywords",
+                                  return_value=keywords), \
+                mock.patch.object(ce, "_score_keyword",
+                                  side_effect=fake_score):
+            return ce.scan_convergence_detailed(
+                "emotes", limit, shortlist=shortlist)
+
+    def test_limit_clamp_is_documented_and_bounded(self):
+        self.assertEqual(ce.clamp_convergence_limit(3), 3)
+        self.assertEqual(ce.clamp_convergence_limit(0), 1)
+        self.assertEqual(ce.clamp_convergence_limit(-5), 1)
+        self.assertEqual(ce.clamp_convergence_limit(999), 8)
+        self.assertEqual(ce.clamp_convergence_limit(None), 8)
+        self.assertEqual(ce.clamp_convergence_limit("3"), 3)
+        self.assertEqual(ce.clamp_convergence_limit("bad"), 8)
+
+    def test_detailed_shortlist_never_exceeds_requested_limit(self):
+        out = self._detailed(3, 8)
+        self.assertEqual(out["limit"], 3)
+        self.assertEqual(len(out["candidates"]), 3)
+        self.assertEqual(len(out["shortlist"]), 3)
+
+    def test_default_detailed_shortlist_remains_eight(self):
+        out = self._detailed(10, 8)
+        self.assertEqual(out["limit"], 10)
+        self.assertEqual(len(out["candidates"]), 8)
+        self.assertEqual(len(out["shortlist"]), 8)
+
+    def test_legacy_report_renders_only_limited_shortlist(self):
+        rows = [_candidate(keyword=f"levitation pose {i}") for i in range(3)]
+        text = cl.format_report(
+            {"shortlist": rows, "candidates": rows, "limit": 3,
+             "gated": []}, {}, family="emotes")
+        self.assertEqual(text.count("### 🎯"), 3)
+        self.assertIn("Shortlist (3 candidates)", text)
+
+    def test_converge_command_honors_limit_and_accessory(self):
+        import commands_advanced as ca
+
+        class FakeBot:
+            def __init__(self):
+                self.commands = {}
+
+            def command(self, name=None, **kw):
+                def deco(fn):
+                    self.commands[name or kw.get("name")] = fn
+                    return fn
+                return deco
+
+        class FakeCtx:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, content=None, **kw):
+                self.sent.append(content)
+
+        calls = {}
+
+        def fake_detailed(family, limit, shortlist=None):
+            calls["args"] = (family, limit, shortlist)
+            rows = [_candidate(keyword=f"levitation pose {i}")
+                    for i in range(shortlist)]
+            return {"family": family, "shortlist": rows,
+                    "candidates": rows, "limit": limit, "gated": []}
+
+        def fake_verify(keywords, family=None, **kwargs):
+            calls["keywords"] = list(keywords)
+            return {}
+
+        def fake_format(detailed, verified, family):
+            return "ok"
+
+        for family, requested, expected in (
+                ("emotes", 3, 3), ("accessory", 3, 3),
+                ("emotes", 999, 8), ("emotes", 0, 1)):
+            bot = FakeBot()
+            ca.register_advanced_commands(bot, lambda: None)
+            ctx = FakeCtx()
+            with mock.patch.object(ce, "scan_convergence_detailed",
+                                   side_effect=fake_detailed), \
+                    mock.patch.object(cl, "verify_shortlist",
+                                      side_effect=fake_verify), \
+                    mock.patch.object(cl, "format_report",
+                                      side_effect=fake_format), \
+                    mock.patch.dict(os.environ,
+                                    {"PHASE2_M3_ENABLED": "0"}):
+                asyncio.run(bot.commands["converge"](
+                    ctx, family=family, limit=requested))
+            self.assertEqual(calls["args"], (family, expected, expected))
+            self.assertEqual(len(calls["keywords"]), expected)
+            self.assertLessEqual(len(ctx.sent), 3)
+
+
 class LiveVerificationTests(unittest.TestCase):
     def setUp(self):
         cl.clear_cache()
@@ -270,6 +385,10 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertFalse(r1["ok"])
         self.assertFalse(r2["ok"])
         self.assertIn("circuit open", r2["error"])
+        self.assertTrue(r2["circuit_open"])
+        self.assertEqual(r2["status"], "deferred")
+        self.assertFalse(r2["attempted"])
+        self.assertTrue(r2["skipped"])
         self.assertEqual(calls["n"], 2)  # scheduler retries once before tripping
 
     def test_http_429(self):
@@ -312,7 +431,208 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertFalse(r1.get("cached"))
         self.assertTrue(r2.get("cached"))
         self.assertEqual(calls["n"], 1)
+        self.assertEqual(r2["observed_at"], r1["verification_timestamp"])
+        self.assertEqual(r2["verification_timestamp"],
+                         r1["verification_timestamp"])
+        self.assertGreaterEqual(r2["cache_age_seconds"], 0.0)
         cl.clear_cache()
+
+
+class ShortlistCircuitTests(unittest.TestCase):
+    def setUp(self):
+        cl.clear_cache()
+        cl._reset_circuit()
+        _fast_scheduler()
+
+    def test_circuit_prevents_new_requests(self):
+        state = {"open": False}
+        calls = []
+        cl._cache_put(
+            cl._cache_key("cached", "emotes", 30, 2),
+            {"ok": True, "keyword": "cached",
+             "verification_timestamp": "2026-11-06T00:00:00+00:00",
+             "observed_at": "2026-11-06T00:00:00+00:00",
+             "cached": False, "sampled_results": 1,
+             "category_correct": 1},
+        )
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            state["open"] = True
+            return {"ok": False, "error": "rate limited (429)", "keyword": k,
+                    "deferred": True, "retry_after": 90.0}
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  side_effect=lambda: state["open"]):
+            out = cl.verify_shortlist(
+                ["a", "cached", "c", "d"], family="emotes", max_workers=1)
+        self.assertEqual(calls, ["a"])
+        self.assertEqual(out["a"]["retry_after"], 90.0)
+        self.assertEqual(out["a"]["status"], "failed")
+        self.assertTrue(out["a"]["attempted"])
+        self.assertFalse(out["a"]["skipped"])
+        self.assertTrue(out["cached"]["cached"])
+        self.assertEqual(out["cached"]["status"], "cached")
+        self.assertEqual(out["c"]["status"], "deferred")
+        self.assertTrue(out["c"]["skipped"])
+        self.assertFalse(out["c"]["attempted"])
+
+    def test_already_open_circuit_uses_cache_or_defers(self):
+        calls = []
+        cl._cache_put(
+            cl._cache_key("cached", "emotes", 30, 2),
+            {"ok": True, "keyword": "cached",
+             "verification_timestamp": "2026-11-06T00:00:00+00:00",
+             "observed_at": "2026-11-06T00:00:00+00:00",
+             "cached": False, "sampled_results": 1,
+             "category_correct": 1},
+        )
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            raise AssertionError("network-capable verification was invoked")
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  return_value=True):
+            out = cl.verify_shortlist(
+                ["cached", "other"], family="emotes", max_workers=3)
+        self.assertTrue(out["cached"]["cached"])
+        self.assertEqual(out["cached"]["status"], "cached")
+        self.assertTrue(out["other"]["deferred"])
+        self.assertEqual(out["other"]["status"], "deferred")
+        self.assertEqual(calls, [])
+
+    def test_attempted_429_is_not_labeled_skipped(self):
+        with mock.patch.object(
+                cl, "_get_with_backoff",
+                return_value=_FakeResp(429, {}, {"Retry-After": "1"})):
+            out = cl.verify_shortlist(
+                ["levitation"], family="emotes", max_workers=1)
+        result = out["levitation"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["attempted"])
+        self.assertFalse(result["skipped"])
+        self.assertIsNotNone(result["retry_after"])
+
+    def test_queued_worker_detects_circuit_without_request(self):
+        started = threading.Event()
+        requests = []
+
+        def fake_verify(k, *a, **kw):
+            if k == "a":
+                requests.append(k)
+                started.set()
+                return {"ok": False, "error": "rate limited (429)",
+                        "keyword": k, "deferred": True, "retry_after": 45.0}
+            started.wait(2)
+            return {"ok": False, "error": "circuit open (rate limited)",
+                    "keyword": k, "deferred": True, "retry_after": None,
+                    "circuit_open": True, "attempted": False,
+                    "skipped": True, "status": "deferred"}
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify):
+            out = cl.verify_shortlist(
+                ["a", "b"], family="emotes", max_workers=2)
+        self.assertEqual(requests, ["a"])
+        self.assertEqual(out["a"]["status"], "failed")
+        self.assertTrue(out["a"]["attempted"])
+        self.assertFalse(out["a"]["skipped"])
+        self.assertEqual(out["a"]["retry_after"], 45.0)
+        self.assertEqual(out["b"]["status"], "deferred")
+        self.assertFalse(out["b"]["attempted"])
+        self.assertTrue(out["b"]["skipped"])
+
+    def test_circuit_expiry_race_never_requests(self):
+        calls = []
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            raise AssertionError("network-capable verification was invoked")
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  side_effect=[True, False]):
+            out = cl.verify_shortlist(
+                ["a", "b"], family="emotes", max_workers=1)
+        self.assertEqual(calls, [])
+        self.assertEqual(out["a"]["status"], "deferred")
+        self.assertEqual(out["b"]["status"], "deferred")
+
+    def test_three_worker_batch_stops_after_circuit(self):
+        state = {"open": False}
+        calls = []
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            state["open"] = True
+            return {"ok": False, "error": "rate limited (429)", "keyword": k,
+                    "deferred": True, "retry_after": 30.0}
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  side_effect=lambda: state["open"]):
+            out = cl.verify_shortlist(
+                ["a", "b", "c", "d", "e", "f"], family="emotes",
+                max_workers=3)
+        self.assertEqual(set(calls), {"a", "b", "c"})
+        self.assertEqual(len(calls), 3)
+        for key in ("d", "e", "f"):
+            self.assertEqual(out[key]["status"], "deferred")
+            self.assertTrue(out[key]["skipped"])
+            self.assertFalse(out[key]["attempted"])
+
+    def test_different_query_depths_are_not_cached_as_equivalent(self):
+        payload = {"data": _items_for_cache(), "nextPageCursor": None}
+        calls = {"n": 0}
+
+        def fake_fetch(*a, **k):
+            calls["n"] += 1
+            return _FakeResp(200, payload)
+
+        with mock.patch.object(cl, "_get_with_backoff", side_effect=fake_fetch):
+            small = cl.verify_niche("levitation", family="emotes",
+                                    limit=30, max_pages=1)
+            large = cl.verify_niche("levitation", family="emotes",
+                                    limit=60, max_pages=2)
+            small_again = cl.verify_niche("levitation", family="emotes",
+                                          limit=30, max_pages=1)
+        self.assertEqual(calls["n"], 2)
+        self.assertFalse(small["cached"])
+        self.assertFalse(large["cached"])
+        self.assertTrue(small_again["cached"])
+        self.assertIn("first 30", small["sample_note"])
+        self.assertIn("first 120", large["sample_note"])
+
+    def test_cached_evidence_survives_circuit_with_timestamps(self):
+        payload = {"data": _items_for_cache(), "nextPageCursor": None}
+        with mock.patch.object(cl, "_get_with_backoff",
+                               return_value=_FakeResp(200, payload)):
+            first = cl.verify_niche("levitation", family="emotes")
+        self.assertFalse(first["cached"])
+        self.assertTrue(first["verification_timestamp"])
+        self.assertTrue(first["observed_at"])
+
+        cl._trip_circuit(60)
+        try:
+            with mock.patch.object(
+                    cl, "_get_with_backoff",
+                    side_effect=AssertionError("network call attempted")):
+                cached = cl.verify_niche("levitation", family="emotes")
+        finally:
+            cl._reset_circuit()
+        self.assertTrue(cached["cached"])
+        self.assertEqual(cached["observed_at"], first["verification_timestamp"])
+        self.assertEqual(cached["verification_timestamp"],
+                         first["verification_timestamp"])
+        self.assertGreaterEqual(cached["cache_age_seconds"], 0.0)
+
+
+def _items_for_cache():
+    return [{"name": "levitation 1", "favoriteCount": 100, "price": 50,
+             "assetType": 61, "creatorName": "a"}]
 
 
 class RetryEvidencePropagationTests(unittest.TestCase):
@@ -376,7 +696,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(level, "low")
         self.assertIn("correct-category", why)
 
-    def test_zero_category_results_verdict_is_negative(self):
+    def test_zero_category_results_are_not_category_absence(self):
         c = _candidate()
         live = {"ok": True, "keyword": "levitation pose", "sampled_results": 30,
                 "category_correct": 0, "category_mismatched": 30,
@@ -384,8 +704,25 @@ class ReportTests(unittest.TestCase):
                 "top_competitors": [], "verification_timestamp": "2026-11-03T00:00:00",
                 "sample_note": "first 30", "capped": False}
         text = cl.format_recommendation(c, live)
-        self.assertIn("do not pursue", text)
-        self.assertNotIn("investigate further", text)
+        self.assertIn("insufficient evidence", text)
+        self.assertIn("does not prove", text)
+        self.assertIn("observed sample", text)
+        self.assertNotIn("0 competitors", text)
+        self.assertNotIn("no products", text)
+
+    def test_zero_category_capped_sample_is_explicit(self):
+        c = _candidate()
+        live = {"ok": True, "keyword": "levitation pose", "sampled_results": 30,
+                "category_correct": 0, "category_mismatched": 30,
+                "exact_title_matches": 0, "conceptual_matches": 0,
+                "top_competitors": [], "verification_timestamp": "2026-11-03T00:00:00",
+                "sample_note": "first 60 results sampled (capped before catalog exhausted)",
+                "capped": True}
+        text = cl.format_recommendation(c, live)
+        self.assertIn("live sample capped", text)
+        self.assertIn("zero correct-category matches in sample; not proof of absence",
+                      text)
+        self.assertIn("insufficient evidence", text)
 
     def test_competitor_examples_are_concept_related(self):
         live = {"ok": True, "keyword": "levitation", "sampled_results": 2,

@@ -535,6 +535,25 @@ def qualifies_all(results):
     return ok, rejected
 
 
+CONVERGENCE_MIN_LIMIT = 1
+CONVERGENCE_MAX_LIMIT = 8
+DEFAULT_CONVERGENCE_LIMIT = 8
+
+
+def clamp_convergence_limit(value):
+    """Clamp the user-facing !converge limit to a safe bounded range.
+
+    The upper bound matches the existing live-verification shortlist cap, so a
+    larger request cannot increase Roblox API usage. The default 10 used by the
+    command therefore resolves to the historical eight-candidate shortlist.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = DEFAULT_CONVERGENCE_LIMIT
+    return max(CONVERGENCE_MIN_LIMIT, min(CONVERGENCE_MAX_LIMIT, number))
+
+
 def scan_convergence(family=None, limit=15):
     conn = get_db(); cur = conn.cursor()
     keywords = _gather_keywords(cur, family=family)
@@ -569,7 +588,21 @@ def scan_convergence(family=None, limit=15):
 
 
 def scan_convergence_detailed(family=None, limit=15, shortlist=8):
-    """Two-stage Stage A: scored candidates + evidence-gate summary."""
+    """Two-stage Stage A: scored candidates + evidence-gate summary.
+
+    The shortlist can never exceed the requested candidate limit. Direct
+    callers keep the legacy default candidate ceiling; the Discord command
+    applies the narrower user-facing clamp before calling this function.
+    """
+    try:
+        limit = max(1, int(limit))
+    except (TypeError, ValueError):
+        limit = 15
+    try:
+        shortlist = max(1, int(shortlist))
+    except (TypeError, ValueError):
+        shortlist = min(8, limit)
+    shortlist = min(shortlist, limit)
     conn = get_research_db(); cur = conn.cursor()
     try:
         keywords = _gather_keywords(cur, family=family)
@@ -596,6 +629,8 @@ def scan_convergence_detailed(family=None, limit=15, shortlist=8):
             "family": family or "all",
             "candidates": qualified[:limit],
             "shortlist": qualified[:shortlist],
+            "limit": limit,
+            "shortlist_limit": shortlist,
             "gated": gated,
             "scanned": len(keywords),
         }

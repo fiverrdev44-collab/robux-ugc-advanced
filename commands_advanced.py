@@ -269,7 +269,8 @@ def register_advanced_commands(bot, get_db):
     @bot.command(name="converge")
     async def converge_cmd(ctx, family: str = "all", limit: int = 10):
         """!converge | !converge emotes | !converge all_families"""
-        from convergence_engine import scan_all_families, FAMILIES
+        from convergence_engine import (scan_all_families, FAMILIES,
+                                        clamp_convergence_limit)
 
         if family == "all_families":
             await ctx.send("🧠 Scanning all categories...")
@@ -303,12 +304,14 @@ def register_advanced_commands(bot, get_db):
             )
 
         label = f"`{family}`" if family != "all" else "all categories"
+        requested_limit = clamp_convergence_limit(limit)
         await ctx.send(f"🧠 Convergence scan + live verification — {label}...")
 
         def _run():
             from convergence_engine import scan_convergence_detailed
             from convergence_live import verify_shortlist, format_report
-            detailed = scan_convergence_detailed(family, limit, shortlist=8)
+            detailed = scan_convergence_detailed(
+                family, requested_limit, shortlist=requested_limit)
             shortlist = (detailed.get("shortlist") or
                          detailed.get("candidates") or [])
             verified = verify_shortlist(
