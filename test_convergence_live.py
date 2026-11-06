@@ -8,6 +8,7 @@ import asyncio
 import email.utils
 import os
 import sys
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -384,6 +385,10 @@ class LiveVerificationTests(unittest.TestCase):
         self.assertFalse(r1["ok"])
         self.assertFalse(r2["ok"])
         self.assertIn("circuit open", r2["error"])
+        self.assertTrue(r2["circuit_open"])
+        self.assertEqual(r2["status"], "deferred")
+        self.assertFalse(r2["attempted"])
+        self.assertTrue(r2["skipped"])
         self.assertEqual(calls["n"], 2)  # scheduler retries once before tripping
 
     def test_http_429(self):
@@ -511,6 +516,34 @@ class ShortlistCircuitTests(unittest.TestCase):
         self.assertTrue(result["attempted"])
         self.assertFalse(result["skipped"])
         self.assertIsNotNone(result["retry_after"])
+
+    def test_queued_worker_detects_circuit_without_request(self):
+        started = threading.Event()
+        requests = []
+
+        def fake_verify(k, *a, **kw):
+            if k == "a":
+                requests.append(k)
+                started.set()
+                return {"ok": False, "error": "rate limited (429)",
+                        "keyword": k, "deferred": True, "retry_after": 45.0}
+            started.wait(2)
+            return {"ok": False, "error": "circuit open (rate limited)",
+                    "keyword": k, "deferred": True, "retry_after": None,
+                    "circuit_open": True, "attempted": False,
+                    "skipped": True, "status": "deferred"}
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify):
+            out = cl.verify_shortlist(
+                ["a", "b"], family="emotes", max_workers=2)
+        self.assertEqual(requests, ["a"])
+        self.assertEqual(out["a"]["status"], "failed")
+        self.assertTrue(out["a"]["attempted"])
+        self.assertFalse(out["a"]["skipped"])
+        self.assertEqual(out["a"]["retry_after"], 45.0)
+        self.assertEqual(out["b"]["status"], "deferred")
+        self.assertFalse(out["b"]["attempted"])
+        self.assertTrue(out["b"]["skipped"])
 
     def test_circuit_expiry_race_never_requests(self):
         calls = []

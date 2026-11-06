@@ -167,7 +167,8 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     if _circuit_open():
         return {"ok": False, "error": "circuit open (rate limited)",
                 "keyword": keyword, "cached": False, "deferred": True,
-                "retry_after": None}
+                "retry_after": None, "circuit_open": True,
+                "attempted": False, "skipped": True, "status": "deferred"}
 
     expected = _expected_asset_types(family)
     rows, pages, cursor = [], 0, None
@@ -183,6 +184,20 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
             pages += 1
             status = r.status or 0
             if not r.ok:
+                if (getattr(r, "deferred", False)
+                        and "circuit" in str(getattr(r, "error", "")).lower()):
+                    return {
+                        "ok": False,
+                        "error": r.error or "circuit open (rate limited)",
+                        "keyword": keyword,
+                        "cached": False,
+                        "deferred": True,
+                        "retry_after": getattr(r, "retry_after", None),
+                        "circuit_open": True,
+                        "attempted": False,
+                        "skipped": True,
+                        "status": "deferred",
+                    }
                 if status == 429:
                     # Preserve the scheduler's original retry/defer evidence.
                     retry_after = (r.retry_after if r.retry_after is not None
@@ -317,6 +332,7 @@ def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
             "attempted": False,
             "status": "deferred",
             "retry_after": None,
+            "circuit_open": True,
         }
 
     def _with_status(res, attempted):
@@ -324,6 +340,10 @@ def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
             res["status"] = "cached"
             res["attempted"] = False
             res["skipped"] = False
+        elif res.get("circuit_open"):
+            res["status"] = "deferred"
+            res["attempted"] = False
+            res["skipped"] = True
         elif res.get("ok"):
             res["status"] = "verified"
             res["attempted"] = attempted
