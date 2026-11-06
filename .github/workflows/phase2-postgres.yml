@@ -7,6 +7,7 @@ on:
       - fix/phase2-m2-data-coverage
       - feat/phase2-m3-opportunity-validation
       - fix/convergence-budget-integrity
+      - feat/phase2-m4-original-ugc
   pull_request:
     branches:
       - main
