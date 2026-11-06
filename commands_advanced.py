@@ -14,6 +14,7 @@ from rising_gaps import (
     format_rising_gaps,
     detect_category_from_keyword,
 )
+from opportunity_validation import render_converge_report
 
 
 def _resolve_family_prefix(text):
@@ -312,7 +313,8 @@ def register_advanced_commands(bot, get_db):
                          detailed.get("candidates") or [])
             verified = verify_shortlist(
                 [c["keyword"] for c in shortlist], family=family)
-            return format_report(detailed, verified, family)
+            return render_converge_report(
+                detailed, verified, family, get_db, format_report)
 
         from execution_policy import to_thread_cancellable
         body, timed_out, err = await to_thread_cancellable("converge", _run)
