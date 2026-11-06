@@ -442,12 +442,16 @@ class ShortlistCircuitTests(unittest.TestCase):
     def test_circuit_prevents_new_requests(self):
         state = {"open": False}
         calls = []
+        cl._cache_put(
+            cl._cache_key("cached", "emotes", 30, 2),
+            {"ok": True, "keyword": "cached",
+             "verification_timestamp": "2026-11-06T00:00:00+00:00",
+             "observed_at": "2026-11-06T00:00:00+00:00",
+             "cached": False, "sampled_results": 1,
+             "category_correct": 1},
+        )
 
         def fake_verify(k, *a, **kw):
-            if state["open"]:
-                return {"ok": False, "error": "circuit open (rate limited)",
-                        "keyword": k, "cached": k == "cached",
-                        "deferred": True, "skipped": True}
             calls.append(k)
             state["open"] = True
             return {"ok": False, "error": "rate limited (429)", "keyword": k,
@@ -460,18 +464,29 @@ class ShortlistCircuitTests(unittest.TestCase):
                 ["a", "cached", "c", "d"], family="emotes", max_workers=1)
         self.assertEqual(calls, ["a"])
         self.assertEqual(out["a"]["retry_after"], 90.0)
+        self.assertEqual(out["a"]["status"], "failed")
+        self.assertTrue(out["a"]["attempted"])
+        self.assertFalse(out["a"]["skipped"])
         self.assertTrue(out["cached"]["cached"])
+        self.assertEqual(out["cached"]["status"], "cached")
+        self.assertEqual(out["c"]["status"], "deferred")
         self.assertTrue(out["c"]["skipped"])
-        self.assertTrue(out["d"]["skipped"])
+        self.assertFalse(out["c"]["attempted"])
 
     def test_already_open_circuit_uses_cache_or_defers(self):
         calls = []
+        cl._cache_put(
+            cl._cache_key("cached", "emotes", 30, 2),
+            {"ok": True, "keyword": "cached",
+             "verification_timestamp": "2026-11-06T00:00:00+00:00",
+             "observed_at": "2026-11-06T00:00:00+00:00",
+             "cached": False, "sampled_results": 1,
+             "category_correct": 1},
+        )
 
         def fake_verify(k, *a, **kw):
             calls.append(k)
-            return {"ok": False, "error": "circuit open (rate limited)",
-                    "keyword": k, "cached": k == "cached",
-                    "deferred": True, "skipped": True}
+            raise AssertionError("network-capable verification was invoked")
 
         with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
                 mock.patch.object(cl, "_circuit_open",
@@ -479,8 +494,84 @@ class ShortlistCircuitTests(unittest.TestCase):
             out = cl.verify_shortlist(
                 ["cached", "other"], family="emotes", max_workers=3)
         self.assertTrue(out["cached"]["cached"])
+        self.assertEqual(out["cached"]["status"], "cached")
         self.assertTrue(out["other"]["deferred"])
-        self.assertEqual(len(calls), 2)  # cache/circuit resolution, no network
+        self.assertEqual(out["other"]["status"], "deferred")
+        self.assertEqual(calls, [])
+
+    def test_attempted_429_is_not_labeled_skipped(self):
+        with mock.patch.object(
+                cl, "_get_with_backoff",
+                return_value=_FakeResp(429, {}, {"Retry-After": "1"})):
+            out = cl.verify_shortlist(
+                ["levitation"], family="emotes", max_workers=1)
+        result = out["levitation"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["attempted"])
+        self.assertFalse(result["skipped"])
+        self.assertIsNotNone(result["retry_after"])
+
+    def test_circuit_expiry_race_never_requests(self):
+        calls = []
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            raise AssertionError("network-capable verification was invoked")
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  side_effect=[True, False]):
+            out = cl.verify_shortlist(
+                ["a", "b"], family="emotes", max_workers=1)
+        self.assertEqual(calls, [])
+        self.assertEqual(out["a"]["status"], "deferred")
+        self.assertEqual(out["b"]["status"], "deferred")
+
+    def test_three_worker_batch_stops_after_circuit(self):
+        state = {"open": False}
+        calls = []
+
+        def fake_verify(k, *a, **kw):
+            calls.append(k)
+            state["open"] = True
+            return {"ok": False, "error": "rate limited (429)", "keyword": k,
+                    "deferred": True, "retry_after": 30.0}
+
+        with mock.patch.object(cl, "verify_niche", side_effect=fake_verify), \
+                mock.patch.object(cl, "_circuit_open",
+                                  side_effect=lambda: state["open"]):
+            out = cl.verify_shortlist(
+                ["a", "b", "c", "d", "e", "f"], family="emotes",
+                max_workers=3)
+        self.assertEqual(set(calls), {"a", "b", "c"})
+        self.assertEqual(len(calls), 3)
+        for key in ("d", "e", "f"):
+            self.assertEqual(out[key]["status"], "deferred")
+            self.assertTrue(out[key]["skipped"])
+            self.assertFalse(out[key]["attempted"])
+
+    def test_different_query_depths_are_not_cached_as_equivalent(self):
+        payload = {"data": _items_for_cache(), "nextPageCursor": None}
+        calls = {"n": 0}
+
+        def fake_fetch(*a, **k):
+            calls["n"] += 1
+            return _FakeResp(200, payload)
+
+        with mock.patch.object(cl, "_get_with_backoff", side_effect=fake_fetch):
+            small = cl.verify_niche("levitation", family="emotes",
+                                    limit=30, max_pages=1)
+            large = cl.verify_niche("levitation", family="emotes",
+                                    limit=60, max_pages=2)
+            small_again = cl.verify_niche("levitation", family="emotes",
+                                          limit=30, max_pages=1)
+        self.assertEqual(calls["n"], 2)
+        self.assertFalse(small["cached"])
+        self.assertFalse(large["cached"])
+        self.assertTrue(small_again["cached"])
+        self.assertIn("first 30", small["sample_note"])
+        self.assertIn("first 120", large["sample_note"])
 
     def test_cached_evidence_survives_circuit_with_timestamps(self):
         payload = {"data": _items_for_cache(), "nextPageCursor": None}

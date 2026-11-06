@@ -124,6 +124,27 @@ def _cache_put(key, value):
         _CACHE[key] = {"ts": time.time(), "value": value}
 
 
+def _cache_key(keyword, family, limit, max_pages):
+    """Cache identity includes category, keyword, page size, and page depth."""
+    return (str(family).lower(), str(keyword).lower(), int(limit),
+            int(max_pages))
+
+
+def _cached_result(keyword, family, limit, max_pages, use_cache=True):
+    """Return cached evidence only; never performs a network request."""
+    if not use_cache:
+        return None
+    cached_entry = _cache_get(_cache_key(keyword, family, limit, max_pages))
+    if cached_entry is None:
+        return None
+    cached, age = cached_entry
+    cached = dict(cached)
+    cached["cached"] = True
+    cached["cache_age_seconds"] = round(age, 1)
+    cached["observed_at"] = cached.get("verification_timestamp")
+    return cached
+
+
 def clear_cache():
     with _CACHE_LOCK:
         _CACHE.clear()
@@ -138,16 +159,10 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     if not keyword:
         return {"ok": False, "error": "empty keyword", "keyword": keyword}
 
-    cache_key = (str(family).lower(), keyword.lower())
-    if use_cache:
-        cached_entry = _cache_get(cache_key)
-        if cached_entry is not None:
-            cached, age = cached_entry
-            cached = dict(cached)
-            cached["cached"] = True
-            cached["cache_age_seconds"] = round(age, 1)
-            cached["observed_at"] = cached.get("verification_timestamp")
-            return cached
+    cache_key = _cache_key(keyword, family, limit, max_pages)
+    cached = _cached_result(keyword, family, limit, max_pages, use_cache)
+    if cached is not None:
+        return cached
 
     if _circuit_open():
         return {"ok": False, "error": "circuit open (rate limited)",
@@ -284,22 +299,48 @@ def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
     workers = max(1, min(int(max_workers), 5))
     index = 0
 
-    def _resolve_deferred(k):
-        try:
-            return verify_niche(k, family, limit, max_pages, timeout,
-                                use_cache)
-        except Exception as exc:
-            return {"ok": False, "error": type(exc).__name__, "keyword": k,
-                    "cached": False, "deferred": True, "skipped": True}
+    def _cache_only_or_deferred(k):
+        """Resolve without ever invoking a network-capable verification."""
+        cached = _cached_result(k, family, limit, max_pages, use_cache)
+        if cached is not None:
+            cached["status"] = "cached"
+            cached["attempted"] = False
+            cached["skipped"] = False
+            return cached
+        return {
+            "ok": False,
+            "error": "circuit open (rate limited)",
+            "keyword": k,
+            "cached": False,
+            "deferred": True,
+            "skipped": True,
+            "attempted": False,
+            "status": "deferred",
+            "retry_after": None,
+        }
+
+    def _with_status(res, attempted):
+        if res.get("cached"):
+            res["status"] = "cached"
+            res["attempted"] = False
+            res["skipped"] = False
+        elif res.get("ok"):
+            res["status"] = "verified"
+            res["attempted"] = attempted
+            res["skipped"] = False
+        else:
+            res["status"] = "failed"
+            res["attempted"] = attempted
+            res["skipped"] = False
+        return res
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         while index < len(keywords):
             if _circuit_open():
+                # Cache-only path. A circuit that expires immediately after
+                # this check still must not trigger a new request.
                 for k in keywords[index:]:
-                    res = _resolve_deferred(k)
-                    if not res.get("cached") and not res.get("ok"):
-                        res["skipped"] = True
-                    out[k] = res
+                    out[k] = _cache_only_or_deferred(k)
                 break
             batch = keywords[index:index + workers]
             index += len(batch)
@@ -311,10 +352,9 @@ def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
                     res = fut.result()
                 except Exception as exc:
                     res = {"ok": False, "error": type(exc).__name__,
-                           "keyword": k, "cached": False}
-                if not res.get("cached") and not res.get("ok"):
-                    res["skipped"] = True
-                out[k] = res
+                           "keyword": k, "cached": False,
+                           "deferred": False}
+                out[k] = _with_status(res, attempted=True)
     return out
 
 
@@ -380,7 +420,10 @@ def format_recommendation(candidate, live=None):
     if live is None:
         lines.append("• **Live evidence:** not verified")
     elif not live.get("ok"):
-        lines.append(f"• **Live evidence:** unavailable ({live.get('error')})")
+        deferred = " · deferred" if live.get("deferred") else ""
+        lines.append(
+            f"• **Live evidence:** unavailable ({live.get('error')})"
+            f"{deferred}")
     else:
         observed = (live.get("observed_at")
                     or live.get("verification_timestamp") or "?")[:19]
