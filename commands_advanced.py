@@ -14,6 +14,7 @@ from rising_gaps import (
     format_rising_gaps,
     detect_category_from_keyword,
 )
+from opportunity_validation import render_converge_report
 
 
 def _resolve_family_prefix(text):
@@ -307,7 +308,6 @@ def register_advanced_commands(bot, get_db):
         def _run():
             from convergence_engine import scan_convergence_detailed
             from convergence_live import verify_shortlist, format_report
-            from opportunity_validation import render_converge_report
             detailed = scan_convergence_detailed(family, limit, shortlist=8)
             shortlist = (detailed.get("shortlist") or
                          detailed.get("candidates") or [])
