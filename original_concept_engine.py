@@ -22,6 +22,11 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from astra import contains_banned_platform
+from category_configs import (
+    get_concept_vocab,
+    get_filler_block,
+    get_type_words_for,
+)
 from opportunity_validation import (
     build_category_context,
     count_undated_matches,
@@ -101,6 +106,16 @@ MULTIPLIER_RE = re.compile(r"\b\d+(?:\.\d+)?x\b", re.IGNORECASE)
 MARKET_NUMBER_RE = re.compile(
     r"(\d[\d,.]*)\s*(favorites?|sales?|sold|revenue|profit|competitors?|"
     r"items?|creators?|demand|searches?)", re.IGNORECASE)
+SALES_CLAIM_RE = re.compile(
+    r"(\d[\d,.]*)\s*(sales?|sold|revenue)\b", re.IGNORECASE)
+FAVORITE_CLAIM_RE = re.compile(
+    r"(\d[\d,.]*)\s*favorites?\b", re.IGNORECASE)
+CREATOR_CLAIM_RE = re.compile(
+    r"(\d[\d,.]*)\s*(creators?|creator identities?)\b", re.IGNORECASE)
+DEMAND_CLAIM_RE = re.compile(
+    r"(\d[\d,.]*)\s*(demand|searches?|search volume)\b", re.IGNORECASE)
+COMPETITOR_CLAIM_RE = re.compile(
+    r"(\d[\d,.]*)\s*competitors?\b", re.IGNORECASE)
 
 STOPWORDS = {
     "the", "and", "for", "with", "your", "you", "a", "an", "of", "in",
@@ -145,6 +160,12 @@ GENERIC_CONCEPT_WORDS = {
     "cute", "pretty", "beautiful", "epic", "best", "new", "trendy",
 }
 
+GENERIC_ANCHORS = GENERIC_CONCEPT_WORDS | {
+    "themed", "style", "styled", "looking", "inspired", "roblox", "ugc",
+    "item", "thing", "stuff", "concept", "idea",
+}
+MAX_SEARCH_TERMS = 4
+
 
 def m4_enabled():
     return os.getenv(M4_FLAG_ENV, "0").strip().lower() in {
@@ -158,6 +179,31 @@ def resolve_concept_category(raw):
 
 def category_label(category):
     return CATEGORY_SPECS.get(category, {}).get("label", "UGC")
+
+
+def extract_search_terms(category, request):
+    """Bounded deterministic anchors from the request and category vocabulary.
+
+    These are token-level anchors. They are never reported as exact-phrase
+    matches, and generic/type/filler words are removed.
+    """
+    if category not in CATEGORY_SPECS:
+        return []
+    vocab = get_concept_vocab(category)
+    filler = get_filler_block(category) | get_type_words_for(category)
+    aliases = set(CATEGORY_ALIASES) | set(CATEGORY_ALIASES.values())
+    scored = []
+    seen = set()
+    for index, token in enumerate(_tokens(request)):
+        if (len(token) < 3 or token in STOPWORDS or token in filler
+                or token in GENERIC_ANCHORS or token in aliases):
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        scored.append((0 if token in vocab else 1, index, token))
+    scored.sort()
+    return [token for _, _, token in scored[:MAX_SEARCH_TERMS]]
 
 
 def _now_iso(now=None):
@@ -234,6 +280,14 @@ def _evidence_numbers(evidence, m3_bundle=None):
     for competitor in evidence.get("top_competitors") or []:
         add(competitor.get("favorites"))
         add(competitor.get("price"))
+    sales = evidence.get("sales") or {}
+    add(sales.get("confirmed_units"))
+    add(sales.get("confirmed_robux"))
+    marketplace = evidence.get("marketplace") or {}
+    add(marketplace.get("category_correct"))
+    add(marketplace.get("sampled_results"))
+    for key in ("demand", "demand_live", "demand_volume"):
+        add(evidence.get(key))
     if m3_bundle:
         for key in ("sample_size", "distribution_sample_size"):
             add((m3_bundle.get("database") or {}).get(key))
@@ -254,8 +308,6 @@ def _claim_reasons(text, allowed_numbers):
     if CLAIM_RE.search(text) or UNIQUENESS_RE.search(text):
         reasons.append("unsupported commercial/ownership claim")
     market_context = bool(MARKET_CONTEXT_RE.search(text))
-    if market_context and PERCENT_RE.search(text):
-        reasons.append("unsupported percentage claim")
     if market_context and MULTIPLIER_RE.search(text):
         reasons.append("unsupported multiplier claim")
     for match in MARKET_NUMBER_RE.finditer(text):
@@ -301,7 +353,7 @@ def _reproduces_phrase(text, competitor_names):
     return None
 
 
-def _validate_claims(concept, allowed_numbers):
+def _ai_text_fields(concept):
     fields = [
         concept.get("concept_name"),
         concept.get("original_description"),
@@ -314,15 +366,139 @@ def _validate_claims(concept, allowed_numbers):
     for key in ("emote_specification", "accessory_specification"):
         spec = concept.get(key)
         if isinstance(spec, dict):
-            fields.extend(str(v) for v in spec.values())
-    for text in fields:
-        reasons = _claim_reasons(str(text or ""), allowed_numbers)
+            for value in spec.values():
+                if isinstance(value, (list, tuple)):
+                    fields.extend(str(item) for item in value)
+                else:
+                    fields.append(str(value))
+    return [str(text or "") for text in fields]
+
+
+def _validate_claims(concept, allowed_numbers):
+    for text in _ai_text_fields(concept):
+        reasons = _claim_reasons(text, allowed_numbers)
         if reasons:
             return reasons
     experiment = str(concept.get("validation_experiment") or "")
     if CLAIM_RE.search(experiment):
         return ["unsupported commercial/ownership claim in validation plan"]
     return []
+
+
+def _favorite_observations(evidence):
+    values = set()
+    dist = evidence.get("favorite_distribution") or {}
+    for key in ("min", "p25", "median", "p75", "p90", "max"):
+        number = _parse_number(dist.get(key))
+        if number is not None:
+            values.add(round(number, 4))
+    for competitor in evidence.get("top_competitors") or []:
+        number = _parse_number(competitor.get("favorites"))
+        if number is not None:
+            values.add(round(number, 4))
+    return values
+
+
+def _validate_metric_claims(concept, evidence):
+    """Each factual metric may use only its own evidence category."""
+    reasons = []
+    sales = evidence.get("sales") or {}
+    sales_confirmed = sales.get("status") == "confirmed"
+    sales_units = _parse_number(sales.get("confirmed_units"))
+    sales_robux = _parse_number(sales.get("confirmed_robux"))
+    favorite_values = _favorite_observations(evidence)
+    creator = evidence.get("creator") or {}
+    confirmed_creators = _parse_number(
+        creator.get("identified_creator_count")) or 0
+    marketplace = evidence.get("marketplace") or {}
+    category_correct = _parse_number(marketplace.get("category_correct"))
+    demand_evidence = _parse_number(evidence.get("demand"))
+
+    for text in _ai_text_fields(concept):
+        for match in SALES_CLAIM_RE.finditer(text):
+            number = _parse_number(match.group(1))
+            noun = match.group(2).lower()
+            if not sales_confirmed:
+                reasons.append(
+                    "sales claim without attributable sales evidence")
+                break
+            expected = sales_units if noun in ("sale", "sales", "sold") \
+                else sales_robux
+            if number is None or expected is None or round(number, 4) != round(
+                    expected, 4):
+                reasons.append(
+                    f"sales claim not supported by attributable evidence: "
+                    f"{match.group(0)}")
+                break
+        for match in FAVORITE_CLAIM_RE.finditer(text):
+            number = _parse_number(match.group(1))
+            if number is None or round(number, 4) not in favorite_values:
+                reasons.append(
+                    f"favorite claim without favorite observation: "
+                    f"{match.group(0)}")
+                break
+        for match in CREATOR_CLAIM_RE.finditer(text):
+            number = _parse_number(match.group(1))
+            if (number is None or confirmed_creators <= 0
+                    or round(number, 4) != round(confirmed_creators, 4)):
+                reasons.append(
+                    f"creator claim without confirmed composite evidence: "
+                    f"{match.group(0)}")
+                break
+        for match in DEMAND_CLAIM_RE.finditer(text):
+            number = _parse_number(match.group(1))
+            if (number is None or demand_evidence is None
+                    or round(number, 4) != round(demand_evidence, 4)):
+                reasons.append(
+                    f"demand claim without demand evidence: {match.group(0)}")
+                break
+        for match in COMPETITOR_CLAIM_RE.finditer(text):
+            number = _parse_number(match.group(1))
+            if (not marketplace.get("available")
+                    or number is None or category_correct is None
+                    or round(number, 4) != round(category_correct, 4)):
+                reasons.append(
+                    "competitor claim without sampled marketplace evidence: "
+                    f"{match.group(0)}")
+                break
+        percentages = [m for m in PERCENT_RE.finditer(text)]
+        if percentages:
+            lowered = text.lower()
+            if re.search(r"\b(original|unique|guaranteed|proven)\b", lowered):
+                reasons.append("unsupported originality percentage claim")
+                break
+            allowed = set()
+            if "concentration" in lowered:
+                for key in ("creator_concentration_identified",
+                            "creator_concentration_name_approx"):
+                    number = _parse_number(creator.get(key))
+                    if number is not None:
+                        allowed.add(round(number * 100.0, 4))
+            elif ("creator" in lowered or "identity" in lowered
+                    or "coverage" in lowered):
+                for key in ("resolved_composite_coverage_pct",
+                            "numeric_id_coverage_pct"):
+                    number = _parse_number(creator.get(key))
+                    if number is not None:
+                        allowed.add(round(number, 4))
+            if not allowed:
+                if MARKET_CONTEXT_RE.search(lowered):
+                    reasons.append(
+                        "percentage claim without a corresponding calculation")
+                    break
+                # Technical percentages (e.g. material transparency) are not
+                # market claims and remain allowed.
+                continue
+            for match in percentages:
+                number = _parse_number(match.group(0).replace("%", "").strip())
+                if number is None or round(number, 4) not in allowed:
+                    reasons.append(
+                        f"percentage claim not supported by corresponding "
+                        f"evidence: {match.group(0)}")
+                    break
+        if reasons:
+            break
+    return reasons
 
 
 def _validate_emote_spec(spec):
@@ -403,6 +579,7 @@ def _validate_concept(raw, category, request, evidence, seen, allowed_ids,
         reasons.extend(_validate_accessory_spec(
             raw.get("accessory_specification")))
     reasons.extend(_validate_claims(raw, allowed_numbers))
+    reasons.extend(_validate_metric_claims(raw, evidence))
 
     name = str(raw.get("concept_name") or "").strip()
     spec_payload = (raw.get("emote_specification")
@@ -514,6 +691,17 @@ def _validate_concept(raw, category, request, evidence, seen, allowed_ids,
 def _supporting_observations(evidence, m3_bundle=None):
     observations = []
     sample_n = evidence.get("sample_n") or 0
+    terms = evidence.get("query_terms") or []
+    if terms:
+        observations.append(
+            "SAMPLED: Search anchors "
+            + ", ".join(f"`{term}`" for term in terms)
+            + " were matched at token level; this is not an exact-phrase "
+            "match.")
+    else:
+        observations.append(
+            "UNKNOWN: No safe search anchors survived generic/filler "
+            "filtering; no item sample was queried.")
     if sample_n:
         observations.append(
             f"SAMPLED: {sample_n} matching {evidence.get('category')} items "
@@ -540,6 +728,15 @@ def _supporting_observations(evidence, m3_bundle=None):
         observations.append(
             f"LIMITED: {evidence['undated_excluded_n']} matching items lacked "
             "creation timestamps and were excluded from the bounded sample.")
+    sales = evidence.get("sales") or {}
+    if sales.get("status") == "confirmed":
+        observations.append(
+            "OBSERVED: confirmed attributable sales "
+            f"{sales.get('confirmed_units')} units / "
+            f"{sales.get('confirmed_robux')} R$ via exact asset IDs.")
+    else:
+        observations.append(
+            "UNKNOWN: Attributable sales evidence unavailable.")
     if m3_bundle:
         observations.append(
             f"HEURISTIC: M3 verdict {m3_bundle.get('investigation_verdict')}; "
@@ -553,11 +750,14 @@ def _competition_findings(evidence, m3_bundle=None):
     competitors = evidence.get("top_competitors") or []
     if competitors:
         names = ", ".join(
-            f"{c.get('name')} ({c.get('favorites')}♥)"
+            f"{c.get('name')} ({c.get('favorites')}♥"
+            + (f"; matched {', '.join(c.get('matched_terms') or [])}"
+               if c.get("matched_terms") else "")
+            + ")"
             for c in competitors[:3])
         findings.append(
-            "SAMPLED: Observed competitors in the bounded item sample: "
-            f"{names}.")
+            "SAMPLED: Observed competitors in the bounded token-matched item "
+            f"sample: {names}.")
     else:
         findings.append(
             "UNKNOWN: No correct-category competitors were observed in the "
@@ -616,13 +816,18 @@ def collect_market_evidence(cur, category, request, sample_limit=(
     spec = CATEGORY_SPECS.get(category)
     if spec is None:
         raise ValueError(f"unsupported category: {category}")
-    rows = fetch_item_sample(
-        cur, request, family=category, limit=sample_limit,
-        sample_window_days=window_days,
-        asset_type_ids=spec["asset_type_ids"])
-    undated = count_undated_matches(
-        cur, request, family=category, limit=sample_limit,
-        asset_type_ids=spec["asset_type_ids"])
+    terms = extract_search_terms(category, request)
+    if terms:
+        rows = fetch_item_sample(
+            cur, family=category, limit=sample_limit,
+            sample_window_days=window_days,
+            asset_type_ids=spec["asset_type_ids"], terms=terms)
+        undated = count_undated_matches(
+            cur, family=category, limit=sample_limit,
+            asset_type_ids=spec["asset_type_ids"], terms=terms)
+    else:
+        rows = []
+        undated = {"count": 0, "capped": False, "limit": sample_limit}
     summary = summarize_item_sample(
         rows, sample_limit=sample_limit,
         undated_matches=undated.get("count", 0),
@@ -634,17 +839,48 @@ def collect_market_evidence(cur, category, request, sample_limit=(
         context = {"registry": {"available": False,
                                 "error": type(exc).__name__}}
     top = sorted(rows, key=lambda r: -int(r.get("favorite_count") or 0))[:5]
+
+    def matched_terms(name):
+        normalized = _norm(name)
+        return [term for term in terms
+                if re.search(rf"\b{re.escape(term)}\b", normalized)]
+
     evidence_ids = [f"db:item:{r['id']}" for r in top
                     if r.get("id") is not None]
     creator = summary["creator"]
+    sales = dict((m3_bundle or {}).get("sales") or {})
+    if not sales:
+        sales = {
+            "available": False, "status": "unavailable",
+            "attribution": None, "confirmed_units": None,
+            "confirmed_robux": None,
+            "limitations": ["Attributable sales evidence unavailable."],
+        }
+    sales_limitations = list(sales.get("limitations") or [])
     limitations = [
         "Database observations are a bounded, popularity-ordered sample, not "
         "a complete category census.",
         "M4 did not make a live Roblox marketplace request; live verification "
         "is unavailable unless supplied through an M3 bundle.",
-        "Favorites are not sales; attributable sales evidence is unavailable.",
         "Text similarity cannot prove global originality or legal clearance.",
     ]
+    if sales.get("status") == "confirmed":
+        limitations.append(
+            "Favorites are not sales; confirmed sales evidence is limited to "
+            "exact attributable records.")
+    else:
+        limitations.append(
+            "Favorites are not sales; attributable sales evidence is "
+            "unavailable.")
+    if terms:
+        limitations.append(
+            "Item matching is token-level OR matching on "
+            + ", ".join(f"`{t}`" for t in terms)
+            + "; it is not an exact-phrase match.")
+    else:
+        limitations.append(
+            "No safe search anchors survived generic/filler filtering; no "
+            "item sample was queried.")
     if not summary["sample_items"]:
         limitations.append(
             "No matching database observations were found; the creative "
@@ -665,7 +901,13 @@ def collect_market_evidence(cur, category, request, sample_limit=(
         "category_label": spec["label"],
         "asset_type_ids": list(spec["asset_type_ids"]),
         "request": request,
-        "source": "items table; bounded popularity sample; no live request",
+        "query_terms": list(terms),
+        "match_mode": "token_or_terms" if terms else "no_safe_anchor",
+        "exact_phrase_match": False,
+        "source": (
+            "items table; bounded token-level OR sample; no live request"
+            if terms else
+            "items table; no safe search anchors; no live request"),
         "sample_window_days": window_days,
         "sample_n": summary["sample_items"],
         "undated_excluded_n": summary["undated_excluded_n"],
@@ -676,15 +918,20 @@ def collect_market_evidence(cur, category, request, sample_limit=(
         "item_age_distribution": summary["item_age_distribution"],
         "creator": creator,
         "registry": context.get("registry") or {"available": False},
+        "marketplace": (m3_bundle or {}).get("marketplace")
+        or {"available": False},
         "top_competitors": [{
             "id": r.get("id"),
             "name": r.get("name"),
             "favorites": int(r.get("favorite_count") or 0),
             "price": r.get("price"),
+            "matched_terms": matched_terms(r.get("name")),
         } for r in top],
         "competitor_names": [r.get("name") for r in rows if r.get("name")],
         "evidence_ids": evidence_ids,
-        "limitations": list(dict.fromkeys(limitations)),
+        "sales": sales,
+        "limitations": list(dict.fromkeys(
+            limitations + sales_limitations)),
         "evidence_status": "SAMPLED" if summary["sample_items"] else "UNKNOWN",
         "m3_verdict": (m3_bundle or {}).get("investigation_verdict"),
     }

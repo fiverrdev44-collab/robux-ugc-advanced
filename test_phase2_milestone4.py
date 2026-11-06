@@ -80,6 +80,13 @@ def _evidence(category="emotes", request=None, m3=None, **overrides):
         ],
         "evidence_status": "SAMPLED",
         "m3_verdict": (m3 or {}).get("investigation_verdict"),
+        "sales": {
+            "available": False, "status": "unavailable",
+            "confirmed_units": None, "confirmed_robux": None,
+            "limitations": ["Attributable sales evidence unavailable."],
+        },
+        "marketplace": (m3 or {}).get("marketplace")
+        or {"available": False},
     }
     base.update(overrides)
     base["supporting_observations"] = m4._supporting_observations(base, m3)
@@ -389,6 +396,85 @@ def test_duplicate_concepts_and_three_concept_limit():
     assert any("maximum" in r["reason"]
                for r in result["rejected_concepts"])
     print("PASS duplicate concepts rejected and max three enforced")
+
+
+def test_search_anchor_extraction_is_bounded_and_generic_safe():
+    assert m4.extract_search_terms(
+        "emotes", "smooth futuristic levitation dance") == [
+            "smooth", "futuristic", "levitation"]
+    assert m4.extract_search_terms("emotes", "cool hat") == []
+    assert m4.extract_search_terms("emotes", "dance emote") == []
+    assert m4.extract_search_terms(
+        "back", "fantasy crystal wings") == ["crystal", "fantasy"]
+    print("PASS search anchors are bounded, deterministic, and generic-safe")
+
+
+def test_token_matching_is_labelled_not_exact_phrase():
+    evidence = _evidence(
+        query_terms=["smooth", "levitation"],
+        match_mode="token_or_terms", exact_phrase_match=False,
+        top_competitors=[{"id": 1, "name": "Smooth Levitation",
+                          "favorites": 120, "price": 50,
+                          "matched_terms": ["smooth", "levitation"]}])
+    observations = m4._supporting_observations(evidence)
+    findings = m4._competition_findings(evidence)
+    assert evidence["exact_phrase_match"] is False
+    assert any("token level" in x and "not an exact-phrase" in x
+               for x in observations)
+    assert any("matched smooth, levitation" in x for x in findings)
+    print("PASS token-level matches are labelled, not exact phrase")
+
+
+def test_metric_specific_cross_metric_collisions():
+    sales_payload = _emote_payload(description="The niche has 8 sales.")
+    assert _generate(sales_payload)["concepts"] == []
+
+    creator_evidence = _evidence(creator={
+        "numeric_creator_count": 8,
+        "identified_creator_count": 3,
+        "unknown_identity_items": 0,
+        "unknown_creator_type_items": 0,
+        "resolved_composite_coverage_pct": 37.5,
+        "numeric_id_coverage_pct": 100.0,
+        "creator_concentration_identified": 0.4,
+        "verification_counts": {"verified": 2, "nonverified": 1,
+                                "unknown": 0},
+    })
+    creator_payload = _emote_payload(
+        description="8 creators already participate.")
+    assert _generate(creator_payload, creator_evidence)["concepts"] == []
+
+    favorites_payload = _emote_payload(description="Only 8 favorites.")
+    assert _generate(favorites_payload)["concepts"] == []
+
+    competitor_payload = _emote_payload(
+        description="8 competitors were observed.")
+    assert _generate(competitor_payload)["concepts"] == []
+
+    demand_payload = _emote_payload(description="8 searches per day.")
+    assert _generate(demand_payload)["concepts"] == []
+
+    confirmed = _evidence(sales={
+        "available": True, "status": "confirmed",
+        "confirmed_units": 5, "confirmed_robux": 500,
+        "limitations": [],
+    })
+    confirmed_payload = _emote_payload(
+        description="The niche has 5 confirmed sales.")
+    assert len(_generate(confirmed_payload, confirmed)["concepts"]) == 1
+
+    hypothetical = _emote_payload()
+    hypothetical["concepts"][0]["validation_experiment"] = (
+        "Measure confirmed sales after launch against a matched cohort.")
+    assert len(_generate(hypothetical)["concepts"]) == 1
+
+    coverage_payload = _emote_payload(
+        description="The niche has 100% creator coverage.")
+    assert len(_generate(coverage_payload)["concepts"]) == 1
+    concentration_payload = _emote_payload(
+        description="The niche has 100% creator concentration.")
+    assert _generate(concentration_payload)["concepts"] == []
+    print("PASS metric-specific claims reject cross-metric collisions")
 
 
 def test_unsupported_sales_and_invented_metrics():

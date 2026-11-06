@@ -105,20 +105,30 @@ def _table_columns(cur, table):
         return set()
 
 
-def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
+def fetch_item_sample(cur, keyword=None, family=None, limit=200, has_type=None,
                       sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS,
-                      asset_type_ids=None):
+                      asset_type_ids=None, terms=None):
     """Bounded, popularity-ordered sample from the enforced creation window.
 
-    Items with a missing creation timestamp are excluded from this sample and
-    counted separately by ``count_undated_matches``. The result is a
-    convenience sample, not a representative population.
+    ``terms`` performs bounded token-level OR matching, which must be labelled
+    as token matching rather than exact-phrase matching. Items with a missing
+    creation timestamp are excluded and counted separately by
+    ``count_undated_matches``. The result is a convenience sample, not a
+    representative population.
     """
+    term_list = [str(t).strip().lower() for t in (terms or [])
+                 if str(t).strip()][:5]
     keyword = (keyword or "").strip()
-    if not keyword:
+    if not keyword and not term_list:
         return []
-    pattern = _kw_pattern(keyword)
-    match_op = "ilike" if " " in keyword else "~*"
+    if term_list:
+        name_sql = ("and (" + " or ".join(["i.name ~* %s"] * len(term_list))
+                    + ")")
+        name_params = [_kw_pattern(t) for t in term_list]
+    else:
+        match_op = "ilike" if " " in keyword else "~*"
+        name_sql = f"and i.name {match_op} %s"
+        name_params = [_kw_pattern(keyword)]
     if asset_type_ids:
         ids = [int(x) for x in asset_type_ids]
         fam_sql = (" and asset_type_id in ("
@@ -135,14 +145,14 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
                i.creator_id, {type_expr} AS creator_type,
                i.creator_verified, i.creator_name, i.fetched_at
         FROM items i
-        WHERE i.name {match_op} %s
-          AND i.favorite_count > 5
+        WHERE i.favorite_count > 5
           AND i.created_at IS NOT NULL
           AND i.created_at >= NOW() - make_interval(days => %s)
+          {name_sql}
           {fam_sql}
         ORDER BY i.favorite_count DESC, i.id ASC
         LIMIT %s
-    """, [pattern, int(sample_window_days)] + fam_params + [int(limit)])
+    """, [int(sample_window_days)] + name_params + fam_params + [int(limit)])
     rows = cur.fetchall() or []
     return [{
         "id": r[0],
@@ -158,14 +168,22 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
     } for r in rows]
 
 
-def count_undated_matches(cur, keyword, family=None, limit=200,
-                          asset_type_ids=None):
+def count_undated_matches(cur, keyword=None, family=None, limit=200,
+                          asset_type_ids=None, terms=None):
     """Bounded count of matching items excluded for a missing created_at."""
+    term_list = [str(t).strip().lower() for t in (terms or [])
+                 if str(t).strip()][:5]
     keyword = (keyword or "").strip()
-    if not keyword:
+    if not keyword and not term_list:
         return {"count": 0, "capped": False, "limit": int(limit)}
-    pattern = _kw_pattern(keyword)
-    match_op = "ilike" if " " in keyword else "~*"
+    if term_list:
+        name_sql = ("and (" + " or ".join(["i.name ~* %s"] * len(term_list))
+                    + ")")
+        name_params = [_kw_pattern(t) for t in term_list]
+    else:
+        match_op = "ilike" if " " in keyword else "~*"
+        name_sql = f"and i.name {match_op} %s"
+        name_params = [_kw_pattern(keyword)]
     if asset_type_ids:
         ids = [int(x) for x in asset_type_ids]
         fam_sql = (" and asset_type_id in ("
@@ -178,13 +196,13 @@ def count_undated_matches(cur, keyword, family=None, limit=200,
         SELECT count(*) FROM (
             SELECT 1
             FROM items i
-            WHERE i.name {match_op} %s
-              AND i.favorite_count > 5
+            WHERE i.favorite_count > 5
               AND i.created_at IS NULL
+              {name_sql}
               {fam_sql}
             LIMIT %s
         ) undated
-    """, [pattern] + fam_params + [int(limit)])
+    """, name_params + fam_params + [int(limit)])
     count = int((cur.fetchone() or [0])[0] or 0)
     return {"count": count, "capped": count >= int(limit),
             "limit": int(limit)}

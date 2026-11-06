@@ -834,8 +834,10 @@ class Phase2PostgresTests(unittest.TestCase):
               (9302, 'floating crystal wings', 9999, 10, %s, NOW(), 702,
                'User', TRUE, 'EmoteMaker', 61, 'known'),
               (9303, 'floating crystal wings', 200, 20, %s, NOW(), 703,
-               'Group', TRUE, 'NeckMaker', 43, 'known')
-        """, (created, created, created))
+               'Group', TRUE, 'NeckMaker', 43, 'known'),
+              (9304, 'simple levitation', 50, 15, %s, NOW(), 704,
+               'User', TRUE, 'EmoteMaker2', 61, 'known')
+        """, (created, created, created, created))
         before_items = self._count("items")
         before_sales = self._count("my_sales")
         evidence = m4.collect_market_evidence(
@@ -850,6 +852,22 @@ class Phase2PostgresTests(unittest.TestCase):
         assert 9303 not in [x.get("id") for x in evidence["top_competitors"]]
         assert evidence["evidence_status"] == "SAMPLED"
         assert evidence["market_validation_status"] == "EXPLORATORY"
+        assert evidence["match_mode"] == "token_or_terms"
+        assert evidence["exact_phrase_match"] is False
+        assert "crystal" in evidence["query_terms"]
+        assert "floating" in evidence["query_terms"]
+        assert set(evidence["top_competitors"][0]["matched_terms"]) >= {
+            "crystal", "floating"}
+
+        natural = m4.collect_market_evidence(
+            self.cur, "emotes", "smooth futuristic levitation dance",
+            sample_limit=50, window_days=180)
+        assert natural["sample_n"] == 1
+        assert natural["top_competitors"][0]["id"] == 9304
+        assert "levitation" in natural["query_terms"]
+        assert natural["match_mode"] == "token_or_terms"
+        assert natural["exact_phrase_match"] is False
+        assert "levitation" in natural["top_competitors"][0]["matched_terms"]
         assert self._count("items") == before_items
         assert self._count("my_sales") == before_sales
 
