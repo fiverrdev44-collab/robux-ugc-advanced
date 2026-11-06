@@ -838,6 +838,18 @@ async def _run_registry(bot, message, route, state):
         await message.channel.send(f"That engine is unavailable right now (`{name}`).")
         return
 
+    from command_security import (
+        CommandNotAuthorized,
+        denial_message,
+        require_authorized,
+    )
+    try:
+        require_authorized(getattr(command, "name", name),
+                           message.author.id)
+    except CommandNotAuthorized as denied:
+        await message.channel.send(denial_message(str(denied)))
+        return
+
     label = {
         "inspect_item": "Checking the item",
         "diagnose_item": "Running a full diagnosis",

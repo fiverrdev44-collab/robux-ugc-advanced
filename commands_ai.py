@@ -1701,6 +1701,7 @@ RULES:
     @bot.command(name="ai_debug")
     async def ai_debug(ctx):
         """Show AI provider diagnostics."""
+        from command_security import redact_secrets
         lines = ["**🔬 AI Debug Report**\n"]
 
         gkey = os.getenv("GEMINI_API_KEY", "")
@@ -1709,9 +1710,12 @@ RULES:
         omodel = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
         lines.append("**Env vars:**")
-        lines.append(f"• GEMINI_API_KEY: `{gkey[:8] if gkey else 'MISSING'}...` (len {len(gkey)})")
+        lines.append(
+            f"• GEMINI_API_KEY: {'configured' if gkey else 'not configured'}")
         lines.append(f"• GEMINI_MODEL: `{gmodel}`")
-        lines.append(f"• OPENROUTER_API_KEY: `{okey[:10] if okey else 'MISSING'}...` (len {len(okey)})")
+        lines.append(
+            f"• OPENROUTER_API_KEY: "
+            f"{'configured' if okey else 'not configured'}")
         lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
         lines.append("")
 
@@ -1729,7 +1733,9 @@ RULES:
                 else:
                     lines.append("• ⚠️ Empty response")
             except Exception as e:
-                lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+                lines.append(
+                    f"• ❌ {type(e).__name__}: "
+                    f"`{redact_secrets(str(e))[:200]}`")
         lines.append("")
 
         lines.append("**OpenRouter test** (`say hello`):")
@@ -1750,8 +1756,10 @@ RULES:
                 else:
                     lines.append("• ⚠️ Empty response")
             except Exception as e:
-                lines.append(f"• ❌ {type(e).__name__}: `{str(e)[:200]}`")
+                lines.append(
+                    f"• ❌ {type(e).__name__}: "
+                    f"`{redact_secrets(str(e))[:200]}`")
 
-        body = "\n".join(lines)
+        body = redact_secrets("\n".join(lines))
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
