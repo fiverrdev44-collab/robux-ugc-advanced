@@ -891,7 +891,11 @@ def format_bundle(bundle):
             "No exact-asset-attributable sales in the window."
             if sales.get("status") == "no_exact_asset_sales" else
             SALES_UNAVAILABLE)),
-        f"Risks: {', '.join(bundle.get('contradictory_evidence') or []) or 'none identified'}",
+        ("Risks: " + (", ".join(
+            list(bundle.get("contradictory_evidence") or [])
+            + [m for m in (bundle.get("missing_evidence") or [])
+               if m not in (bundle.get("contradictory_evidence") or [])][:4]
+        ) or "none identified")),
         (f"Evidence Quality: {bundle['evidence']['quality']} "
          f"({bundle['evidence']['checks_available']}/"
          f"{bundle['evidence']['checks_total']} checks; missing: "
