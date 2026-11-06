@@ -17,6 +17,7 @@ on:
       - fix/phase2-m2-data-coverage
       - feat/phase2-m3-opportunity-validation
       - fix/convergence-budget-integrity
+      - feat/phase2-m4-original-ugc
   pull_request:
     branches:
       - main
@@ -70,6 +71,8 @@ jobs:
         run: python test_creator_identity_persistence.py
       - name: Run Phase 2 Milestone 3 opportunity validation regressions
         run: python test_phase2_milestone3.py
+      - name: Run Phase 2 Milestone 4 original concept regressions
+        run: python test_phase2_milestone4.py
       - name: Run snapshot selection regressions
         run: python test_snapshot_batch.py
       - name: Run Astra and product understanding regressions

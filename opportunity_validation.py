@@ -106,7 +106,8 @@ def _table_columns(cur, table):
 
 
 def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
-                      sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS):
+                      sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS,
+                      asset_type_ids=None):
     """Bounded, popularity-ordered sample from the enforced creation window.
 
     Items with a missing creation timestamp are excluded from this sample and
@@ -118,7 +119,13 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
         return []
     pattern = _kw_pattern(keyword)
     match_op = "ilike" if " " in keyword else "~*"
-    fam_sql, fam_params = _family_clause(family)
+    if asset_type_ids:
+        ids = [int(x) for x in asset_type_ids]
+        fam_sql = (" and asset_type_id in ("
+                   + ",".join(["%s"] * len(ids)) + ")")
+        fam_params = ids
+    else:
+        fam_sql, fam_params = _family_clause(family)
     fam_sql = fam_sql.replace("asset_type_id", "i.asset_type_id")
     if has_type is None:
         has_type = has_creator_type(cur)
@@ -151,14 +158,21 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
     } for r in rows]
 
 
-def count_undated_matches(cur, keyword, family=None, limit=200):
+def count_undated_matches(cur, keyword, family=None, limit=200,
+                          asset_type_ids=None):
     """Bounded count of matching items excluded for a missing created_at."""
     keyword = (keyword or "").strip()
     if not keyword:
         return {"count": 0, "capped": False, "limit": int(limit)}
     pattern = _kw_pattern(keyword)
     match_op = "ilike" if " " in keyword else "~*"
-    fam_sql, fam_params = _family_clause(family)
+    if asset_type_ids:
+        ids = [int(x) for x in asset_type_ids]
+        fam_sql = (" and asset_type_id in ("
+                   + ",".join(["%s"] * len(ids)) + ")")
+        fam_params = ids
+    else:
+        fam_sql, fam_params = _family_clause(family)
     fam_sql = fam_sql.replace("asset_type_id", "i.asset_type_id")
     cur.execute(f"""
         SELECT count(*) FROM (

@@ -68,7 +68,7 @@ LIVE_RESEARCH_COMMANDS = {
 }
 
 AI_REASONING_COMMANDS = {
-    "chain", "brainstorm", "creative_raw", "predict",
+    "chain", "brainstorm", "concept", "creative_raw", "predict",
 }
 
 MULTI_STAGE_COMMANDS = {

@@ -112,6 +112,13 @@ register_ai_commands(bot)
 print("✅ AI commands loaded.", flush=True)
 
 try:
+    from commands_concept import register_concept_commands
+    register_concept_commands(bot, get_db)
+    print("✅ M4 original concept command loaded.", flush=True)
+except Exception as e:
+    print(f"⚠️ M4 concept command failed to load: {e}", flush=True)
+
+try:
     from commands_intel import register_intel_commands
     register_intel_commands(bot, get_db, ASSET_TYPE_NAMES)
     print("✅ Intel commands loaded.", flush=True)
