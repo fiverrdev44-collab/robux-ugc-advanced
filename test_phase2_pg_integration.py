@@ -702,6 +702,69 @@ class Phase2PostgresTests(unittest.TestCase):
         assert self._count("items") == before_items
         assert self._count("my_sales") == before_sales
 
+    def test_m3_item_sample_enforces_reported_window(self):
+        import opportunity_validation as ov
+        now = datetime.now(timezone.utc)
+        recent_created = now - timedelta(days=10)
+        old_created = now - timedelta(days=400)
+        self.cur.execute("""
+            INSERT INTO items (id, name, favorite_count, price, created_at,
+                fetched_at, creator_id, creator_type, creator_verified,
+                creator_name, asset_type_id, favorite_status)
+            VALUES
+              (9201, 'floating emote recent', 100, 10, %s, NOW(), 601,
+               'User', TRUE, 'Recent', 61, 'known'),
+              (9202, 'floating emote old', 10000, 99, %s, NOW(), 602,
+               'User', TRUE, 'Old', 61, 'known'),
+              (9203, 'floating emote undated', 9000, 50, NULL, NOW(), 603,
+               'User', TRUE, 'Undated', 61, 'known')
+        """, (recent_created, old_created))
+        rows = ov.fetch_item_sample(
+            self.cur, "floating emote", "emotes", limit=50,
+            sample_window_days=180)
+        assert [r["id"] for r in rows] == [9201]
+        assert max(r["favorite_count"] for r in rows) == 100
+
+        undated = ov.count_undated_matches(
+            self.cur, "floating emote", "emotes", limit=50)
+        assert undated == {"count": 1, "capped": False, "limit": 50}
+
+        summary = ov.summarize_item_sample(
+            rows, now=now, sample_limit=50, undated_matches=1,
+            sample_window_days=180)
+        assert summary["sample_items"] == 1
+        assert summary["sample_window_days"] == 180
+        assert summary["undated_excluded_n"] == 1
+        assert summary["favorite_distribution"]["max"] == 100
+        assert summary["favorite_distribution"]["window_days"] == 180
+        assert summary["item_age_distribution"]["sample_n"] == 1
+        assert summary["item_age_distribution"]["missing_created_at_n"] == 1
+        returned_min = datetime.fromisoformat(
+            summary["sample_created_at_min"])
+        assert abs((returned_min - recent_created).total_seconds()) < 2
+
+        candidate = {
+            "keyword": "floating emote", "family": "emotes", "score": 50,
+            "demand": 12, "supply": 3, "median_favs": 100, "recent": 1,
+            "velocity": 1.0, "velocity_measured": True, "observations": 2,
+            "stale": False, "freshness": "recent",
+        }
+        live = {
+            "ok": True, "sampled_results": 30, "category_correct": 20,
+            "category_mismatched": 10, "exact_title_matches": 0,
+            "conceptual_matches": 8, "capped": False, "pages": 1,
+            "sample_note": "first 60 results sampled",
+            "verification_timestamp": now.isoformat(), "top_competitors": [],
+        }
+        bundle = ov.build_validation_bundles(
+            {"shortlist": [candidate]}, {"floating emote": live},
+            "emotes", self.cur, now=now)[0]
+        assert bundle["database"]["sample_window_days"] == 180
+        assert bundle["database"]["distribution_sample_size"] == 1
+        assert bundle["database"]["undated_matches_excluded"] == 1
+        assert bundle["database"]["favorite_distribution"]["max"] == 100
+        assert bundle["database"]["bounded_item_sample"]["representative"] is False
+
     def _count(self, table):
         self.cur.execute(f"SELECT count(*) FROM {table}")
         return self.cur.fetchone()[0]
@@ -725,16 +788,28 @@ class Phase2PostgresTests(unittest.TestCase):
             """)
             context = ov.build_category_context(self.cur, "emotes")
             assert context["registry"]["available"] is False
+            now = datetime.now(timezone.utc)
+            rows = ov.fetch_item_sample(
+                self.cur, "floating emote", "emotes", limit=10,
+                sample_window_days=180)
+            assert len(rows) == 1
+            assert rows[0]["creator_id"] == 501
+            assert rows[0]["creator_type"] is None
+            summary = ov.summarize_item_sample(rows, now=now)
+            assert summary["creator"]["numeric_creator_count"] == 1
+            assert summary["creator"]["identified_creator_count"] == 0
+            assert summary["creator"]["unknown_creator_type_items"] == 1
             bundle = ov.build_evidence_bundle(
                 {"keyword": "floating emote", "family": "emotes",
                  "supply": 1, "median_favs": 10, "recent": 1,
                  "velocity": None, "velocity_measured": False,
                  "observations": 0, "stale": False, "freshness": "none",
                  "score": 10, "demand": 1},
-                None, [], context, None, now=datetime.now(timezone.utc))
+                None, rows, context, None, now=now)
             assert bundle["creator"]["registry_available"] is False
-            assert bundle["investigation_verdict"] in {
-                ov.VERDICT_INSUFFICIENT, ov.VERDICT_INVESTIGATE}
+            assert bundle["creator"]["identified_creator_count"] == 0
+            assert bundle["creator"]["unknown_creator_type_items"] == 1
+            assert bundle["investigation_verdict"] != ov.VERDICT_VALIDATE
             self.conn.rollback()
         finally:
             try:

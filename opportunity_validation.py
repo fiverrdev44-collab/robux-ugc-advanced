@@ -15,6 +15,7 @@ from convergence_engine import _family_clause, _kw_pattern
 from creator_identity import has_creator_type
 
 M3_FLAG_ENV = "PHASE2_M3_ENABLED"
+DEFAULT_SAMPLE_WINDOW_DAYS = 180
 
 VERDICT_INSUFFICIENT = "INSUFFICIENT EVIDENCE"
 VERDICT_INVESTIGATE = "INVESTIGATE"
@@ -47,6 +48,16 @@ def _age_days(value, now):
     if value is None:
         return None
     return max(0.0, (now - value).total_seconds() / 86400.0)
+
+
+def _resolved_creator_type(value):
+    """Only explicit User/Group types are confirmed composite identities."""
+    text = (value or "").strip().lower()
+    if text == "user":
+        return "User"
+    if text == "group":
+        return "Group"
+    return None
 
 
 def _percentile(values, q):
@@ -94,8 +105,14 @@ def _table_columns(cur, table):
         return set()
 
 
-def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None):
-    """Bounded, parameterized item sample for one candidate concept."""
+def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None,
+                      sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS):
+    """Bounded, popularity-ordered sample from the enforced creation window.
+
+    Items with a missing creation timestamp are excluded from this sample and
+    counted separately by ``count_undated_matches``. The result is a
+    convenience sample, not a representative population.
+    """
     keyword = (keyword or "").strip()
     if not keyword:
         return []
@@ -113,10 +130,12 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None):
         FROM items i
         WHERE i.name {match_op} %s
           AND i.favorite_count > 5
+          AND i.created_at IS NOT NULL
+          AND i.created_at >= NOW() - make_interval(days => %s)
           {fam_sql}
         ORDER BY i.favorite_count DESC, i.id ASC
         LIMIT %s
-    """, [pattern] + fam_params + [int(limit)])
+    """, [pattern, int(sample_window_days)] + fam_params + [int(limit)])
     rows = cur.fetchall() or []
     return [{
         "id": r[0],
@@ -130,6 +149,31 @@ def fetch_item_sample(cur, keyword, family=None, limit=200, has_type=None):
         "creator_name": r[8],
         "fetched_at": r[9],
     } for r in rows]
+
+
+def count_undated_matches(cur, keyword, family=None, limit=200):
+    """Bounded count of matching items excluded for a missing created_at."""
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return {"count": 0, "capped": False, "limit": int(limit)}
+    pattern = _kw_pattern(keyword)
+    match_op = "ilike" if " " in keyword else "~*"
+    fam_sql, fam_params = _family_clause(family)
+    fam_sql = fam_sql.replace("asset_type_id", "i.asset_type_id")
+    cur.execute(f"""
+        SELECT count(*) FROM (
+            SELECT 1
+            FROM items i
+            WHERE i.name {match_op} %s
+              AND i.favorite_count > 5
+              AND i.created_at IS NULL
+              {fam_sql}
+            LIMIT %s
+        ) undated
+    """, [pattern] + fam_params + [int(limit)])
+    count = int((cur.fetchone() or [0])[0] or 0)
+    return {"count": count, "capped": count >= int(limit),
+            "limit": int(limit)}
 
 
 def fetch_sales_evidence(cur, asset_ids, days=90, now=None):
@@ -209,25 +253,42 @@ def fetch_sales_evidence(cur, asset_ids, days=90, now=None):
 
 def _creator_summary(item_rows):
     verified = nonverified = verification_unknown = 0
-    identity_unknown = 0
-    identified = 0
+    no_identity = 0
+    numeric_id_items = 0
+    resolved_items = 0
+    unknown_type_items = 0
+    numeric_ids = set()
+    unknown_type_ids = set()
+    unknown_type_names = {}
     groups = {}
     name_groups = {}
     name_keys = {}
     for row in item_rows:
         cid = row.get("creator_id")
-        ctype = (row.get("creator_type") or "unknown").strip() or "unknown"
         favs = int(row.get("favorite_count") or 0)
+        ctype = None
         if cid is None:
-            identity_unknown += 1
+            no_identity += 1
         else:
-            identified += 1
-            key = (ctype, int(cid))
-            entry = groups.setdefault(
-                key, {"creator_type": ctype, "creator_id": int(cid),
-                      "items": 0, "favorites": 0})
-            entry["items"] += 1
-            entry["favorites"] += favs
+            cid = int(cid)
+            numeric_id_items += 1
+            numeric_ids.add(cid)
+            ctype = _resolved_creator_type(row.get("creator_type"))
+            if ctype is None:
+                unknown_type_items += 1
+                unknown_type_ids.add(cid)
+                unresolved_name = (row.get("creator_name") or "").strip()
+                if unresolved_name:
+                    unknown_type_names.setdefault(cid, set()).add(
+                        unresolved_name)
+            else:
+                resolved_items += 1
+                key = (ctype, cid)
+                entry = groups.setdefault(
+                    key, {"creator_type": ctype, "creator_id": cid,
+                          "items": 0, "favorites": 0})
+                entry["items"] += 1
+                entry["favorites"] += favs
         badge = row.get("creator_verified")
         if badge is True:
             verified += 1
@@ -243,11 +304,14 @@ def _creator_summary(item_rows):
                        "favorites": 0})
             entry["items"] += 1
             entry["favorites"] += favs
-            if cid is not None:
-                name_keys.setdefault(name, set()).add((ctype, int(cid)))
+            if ctype is not None:
+                name_keys.setdefault(name, set()).add((ctype, cid))
 
     sample_n = len(item_rows)
-    coverage = round(100.0 * identified / sample_n, 1) if sample_n else None
+    resolved_coverage = (
+        round(100.0 * resolved_items / sample_n, 1) if sample_n else None)
+    numeric_coverage = (
+        round(100.0 * numeric_id_items / sample_n, 1) if sample_n else None)
     total_favs = sum(g["favorites"] for g in groups.values())
     top = max(groups.values(), key=lambda g: g["favorites"],
               default=None)
@@ -266,13 +330,24 @@ def _creator_summary(item_rows):
         entry["share_of_identified_favorites"] = (
             round(entry["favorites"] / total_favs, 3) if total_favs else None)
 
+    ids_by_type = {}
+    for ctype, cid in groups:
+        ids_by_type.setdefault(cid, set()).add(ctype)
+
     return {
         "identity_basis": "(creator_type, creator_id)",
         "sample_items": sample_n,
-        "identified_items": identified,
-        "unknown_identity_items": identity_unknown,
+        "numeric_id_items": numeric_id_items,
+        "numeric_creator_count": len(numeric_ids),
+        "numeric_id_coverage_pct": numeric_coverage,
+        "resolved_composite_items": resolved_items,
+        "identified_items": resolved_items,
+        "unknown_identity_items": no_identity,
+        "unknown_creator_type_items": unknown_type_items,
+        "unknown_creator_type_numeric_ids": len(unknown_type_ids),
+        "resolved_composite_coverage_pct": resolved_coverage,
+        "identity_coverage_pct": resolved_coverage,
         "identified_creator_count": len(groups),
-        "identity_coverage_pct": coverage,
         "creator_concentration_identified": concentration,
         "creator_concentration_name_approx": name_concentration,
         "name_approximation_label": (
@@ -292,54 +367,89 @@ def _creator_summary(item_rows):
             }
             for name, keys in sorted(name_keys.items()) if len(keys) > 1
         ],
+        "unresolved_numeric_id_display_names": [
+            {"creator_id": cid, "display_names": sorted(names),
+             "note": "unresolved creator type; names are not merged"}
+            for cid, names in sorted(unknown_type_names.items())
+            if len(names) > 1
+        ],
+        "numeric_ids_with_multiple_types": [
+            {"creator_id": cid, "types": sorted(types)}
+            for cid, types in sorted(ids_by_type.items()) if len(types) > 1
+        ],
     }
 
 
-def summarize_item_sample(item_rows, now=None, sample_limit=200):
-    """Pure summary of a bounded item sample. Missing values stay None."""
+def summarize_item_sample(item_rows, now=None, sample_limit=200,
+                          undated_matches=0, undated_capped=False,
+                          sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS):
+    """Summarize only dated rows from the enforced creation window.
+
+    Rows with no creation timestamp are excluded from the bounded distributions
+    and reported separately. The caller supplies ``undated_matches`` for items
+    excluded by SQL; any undated rows passed directly are also counted.
+    """
     now = now or _now()
-    favorites = [r.get("favorite_count") for r in item_rows
+    dated_rows = [r for r in item_rows if r.get("created_at") is not None]
+    in_rows_undated = len(item_rows) - len(dated_rows)
+    excluded_undated = int(undated_matches or 0) + in_rows_undated
+    favorites = [r.get("favorite_count") for r in dated_rows
                  if r.get("favorite_count") is not None]
-    prices = [r.get("price") for r in item_rows
+    prices = [r.get("price") for r in dated_rows
               if r.get("price") is not None and int(r.get("price") or 0) > 0]
-    missing_price = sum(1 for r in item_rows if r.get("price") is None)
-    free_price = sum(1 for r in item_rows if r.get("price") == 0)
-    ages = []
-    missing_age = 0
-    for row in item_rows:
-        age = _age_days(row.get("created_at"), now)
-        if age is None:
-            missing_age += 1
-        else:
-            ages.append(age)
+    missing_price = sum(1 for r in dated_rows if r.get("price") is None)
+    free_price = sum(1 for r in dated_rows if r.get("price") == 0)
+    ages = [_age_days(r.get("created_at"), now) for r in dated_rows]
+    ages = [a for a in ages if a is not None]
+    created_values = [_as_utc(r.get("created_at")) for r in dated_rows]
+    created_values = [v for v in created_values if v is not None]
     fav_dist = _distribution(favorites, "favorites")
     total_favs = sum(float(f) for f in favorites)
+    fav_dist.update({
+        "window_days": int(sample_window_days),
+        "ordering": "favorite_count_desc_convenience",
+        "representative": False,
+        "created_at_null_excluded_n": excluded_undated,
+        "source": "bounded items sample; popularity-ordered convenience sample",
+    })
     fav_dist["top_item_share"] = (
         round(max(float(f) for f in favorites) / total_favs, 3)
         if total_favs and favorites else None)
-    creator = _creator_summary(item_rows)
+    creator = _creator_summary(dated_rows)
     return {
-        "sample_items": len(item_rows),
+        "sample_items": len(dated_rows),
         "sample_limit": int(sample_limit),
-        "sample_capped": len(item_rows) >= int(sample_limit),
+        "sample_window_days": int(sample_window_days),
+        "sample_capped": len(dated_rows) >= int(sample_limit),
+        "sample_created_at_min": (
+            min(created_values).isoformat() if created_values else None),
+        "sample_created_at_max": (
+            max(created_values).isoformat() if created_values else None),
+        "undated_matches": int(undated_matches or 0),
+        "undated_capped": bool(undated_capped),
+        "undated_excluded_n": excluded_undated,
         "favorite_distribution": fav_dist,
         "price_distribution": {
             **_distribution(prices, "Robux"),
             "missing_n": missing_price,
             "free_n": free_price,
+            "created_at_null_excluded_n": excluded_undated,
             "zero_or_missing_note": (
                 "Free items and missing prices are excluded from paid-price "
                 "comparability."),
         },
         "item_age_distribution": {
             **_distribution(ages, "days"),
-            "missing_created_at_n": missing_age,
+            "missing_created_at_n": excluded_undated,
+            "missing_created_at_included": False,
+            "window_days": int(sample_window_days),
         },
         "recent_observations": {
             "last_14d": sum(1 for a in ages if a <= 14),
             "last_30d": sum(1 for a in ages if a <= 30),
             "window_days": 14,
             "sample_n": len(ages),
+            "sample_window_days": int(sample_window_days),
         },
         "creator": creator,
     }
@@ -398,8 +508,10 @@ def _creator_context(summary, category_context):
                                            "reason": "not_queried"}
     comparison = context.get("comparison") or {}
     coverage = summary.get("identity_coverage_pct")
+    unresolved_types = summary.get("unknown_creator_type_items") or 0
     limited = (not registry.get("available", False)
-               or coverage is None or coverage < 50.0)
+               or coverage is None or coverage < 50.0
+               or unresolved_types > 0)
     verification = summary.get("verification_counts") or {}
     if registry.get("available"):
         uncertainty = (
@@ -427,12 +539,17 @@ def _creator_context(summary, category_context):
             ("Creator Registry unavailable; stable-ID creator metrics are "
              "limited to the item sample.") if not registry.get("available")
             else "Creator Registry available; category comparison is bounded.",
-            ("Identity coverage below 50%; creator participation and "
-             "concentration are not representative.") if (
+            ("Confirmed composite identity coverage below 50%; creator "
+             "participation and concentration are not representative.") if (
                 coverage is not None and coverage < 50.0) else
-            ("Identity coverage unavailable." if coverage is None else
+            ("Confirmed composite identity coverage unavailable."
+             if coverage is None else
              "Creator identity coverage is item-sample based, not population "
              "coverage."),
+            (f"{unresolved_types} sampled items have numeric creator IDs but "
+             "no confirmed User/Group creator type; they are not counted as "
+             "independent creators.") if unresolved_types else
+            "All sampled numeric creator IDs have confirmed User/Group types.",
         ],
     }
 
@@ -475,11 +592,11 @@ def _evidence_checks(bundle):
          "snapshot velocity measured" if growth["measured"]
          else "no qualifying snapshot pair"),
         ("creator_identity_coverage",
-         (creator.get("identity_coverage_pct") or 0) >= 50.0,
-         ">=50% of sampled items have stable creator IDs"),
+         (creator.get("resolved_composite_coverage_pct") or 0) >= 50.0,
+         ">=50% of sampled items have confirmed User/Group composite IDs"),
         ("independent_creators",
          (creator.get("identified_creator_count") or 0) >= 3,
-         "at least three independently identified creators"),
+         "at least three confirmed composite creator identities"),
         ("recent_observations",
          (recent.get("last_14d") or 0) > 0 and not growth["stale"],
          "recent item observations are fresh"),
@@ -659,12 +776,16 @@ def _verdict(bundle, evidence):
 
 
 def build_evidence_bundle(candidate, live, item_rows, category_context,
-                          sales_evidence, sample_limit=200, now=None,
+                          sales_evidence, sample_limit=200,
+                          sample_window_days=DEFAULT_SAMPLE_WINDOW_DAYS,
+                          undated_matches=0, undated_capped=False, now=None,
                           db_error=None):
     """Pure evidence-bundle builder. All missing values remain explicit None."""
     now = now or _now()
-    summary = summarize_item_sample(item_rows, now=now,
-                                    sample_limit=sample_limit)
+    summary = summarize_item_sample(
+        item_rows, now=now, sample_limit=sample_limit,
+        undated_matches=undated_matches, undated_capped=undated_capped,
+        sample_window_days=sample_window_days)
     market = _marketplace_evidence(live)
     creator = _creator_context(summary["creator"], category_context)
     growth = _growth_evidence(candidate)
@@ -674,26 +795,58 @@ def build_evidence_bundle(candidate, live, item_rows, category_context,
         "confirmed_robux": None, "limitations": [SALES_UNAVAILABLE],
     }
     median_favs = candidate.get("median_favs")
-    median_source = "convergence_engine candidate"
+    median_source = "convergence_engine_all_time"
+    median_bounded = False
     if median_favs is None:
         median_favs = summary["favorite_distribution"].get("median")
-        median_source = "bounded item sample"
+        median_source = "bounded_item_sample"
+        median_bounded = True
     database = {
         "sample_size": int(candidate.get("supply") or 0),
+        "sample_size_source": "convergence_engine_all_time",
         "distribution_sample_size": summary["sample_items"],
-        "sample_window_days": 180,
+        "sample_window_days": int(sample_window_days),
+        "sample_window_enforced": True,
         "sample_limit": int(sample_limit),
         "sample_capped": summary["sample_capped"],
+        "distribution_ordering": "favorite_count_desc_convenience",
+        "distribution_representative": False,
+        "distribution_sample_created_at_min": summary[
+            "sample_created_at_min"],
+        "distribution_sample_created_at_max": summary[
+            "sample_created_at_max"],
+        "undated_matches_excluded": summary["undated_excluded_n"],
+        "undated_matches_capped": summary["undated_capped"],
         "median_favorites": median_favs,
         "median_favorites_source": median_source,
+        "median_favorites_is_bounded": median_bounded,
         "favorite_distribution": summary["favorite_distribution"],
         "recent_item_observations": {
             **summary["recent_observations"],
             "candidate_recent_14d": candidate.get("recent"),
-            "source": "candidate count plus bounded item-age sample",
+            "candidate_recent_source": "convergence_engine_all_time",
+            "bounded_sample_source": "item-age sample within enforced window",
         },
         "price_distribution": summary["price_distribution"],
         "item_age_distribution": summary["item_age_distribution"],
+        "convergence_all_time": {
+            "supply": int(candidate.get("supply") or 0),
+            "median_favorites": candidate.get("median_favs"),
+            "recent_14d": candidate.get("recent"),
+            "source": "convergence_engine._score_keyword",
+        },
+        "bounded_item_sample": {
+            "window_days": int(sample_window_days),
+            "ordering": "favorite_count_desc_convenience",
+            "representative": False,
+            "sample_n": summary["sample_items"],
+            "sample_limit": int(sample_limit),
+            "capped": summary["sample_capped"],
+            "created_at_min": summary["sample_created_at_min"],
+            "created_at_max": summary["sample_created_at_max"],
+            "undated_excluded_n": summary["undated_excluded_n"],
+            "undated_capped": summary["undated_capped"],
+        },
         "snapshot_growth": growth,
         "db_error": db_error,
     }
@@ -736,10 +889,18 @@ def build_evidence_bundle(candidate, live, item_rows, category_context,
         bundle["missing_evidence"].append("price_evidence")
     if not summary["item_age_distribution"].get("available"):
         bundle["missing_evidence"].append("creation_timestamp_evidence")
+    if summary["undated_excluded_n"]:
+        bundle["missing_evidence"].append("undated_items_excluded")
     if not creator.get("registry_available"):
         bundle["missing_evidence"].append("creator_registry")
     if (creator.get("identity_coverage_pct") or 0) < 50.0:
         bundle["missing_evidence"].append("creator_identity_coverage")
+    if creator.get("unknown_creator_type_items"):
+        bundle["missing_evidence"].append("creator_type_unknown")
+    if ((creator.get("numeric_id_coverage_pct") or 0)
+            > (creator.get("resolved_composite_coverage_pct") or 0)):
+        bundle["missing_evidence"].append(
+            "resolved_composite_identity_coverage")
     if summary["sample_capped"]:
         bundle["missing_evidence"].append("complete_database_sample")
     if market.get("capped"):
@@ -752,6 +913,14 @@ def build_evidence_bundle(candidate, live, item_rows, category_context,
         + list(sales.get("limitations") or [])
         + list(growth.get("limitations") or [])
     )
+    bundle["confidence_limitations"].append(
+        "Item distributions are popularity-ordered convenience samples inside "
+        f"the enforced {int(sample_window_days)}-day window; they are not "
+        "statistically representative.")
+    if summary["undated_excluded_n"]:
+        bundle["confidence_limitations"].append(
+            f"{summary['undated_excluded_n']} matching items lacked creation "
+            "timestamps and were excluded from the bounded distribution.")
     if market.get("sample_note"):
         bundle["confidence_limitations"].append(market["sample_note"])
     if not market["available"] and market.get("error"):
@@ -784,7 +953,9 @@ def build_category_context(cur, family, days=180, limit=5000, now=None):
 
 
 def build_validation_bundles(detailed, verified, family, cur, now=None,
-                             item_limit=200, sales_days=90):
+                             item_limit=200, sample_window_days=(
+                                 DEFAULT_SAMPLE_WINDOW_DAYS),
+                             sales_days=90):
     """Build one bundle per existing shortlist candidate. No discovery/live pass."""
     candidates = ((detailed or {}).get("shortlist")
                   or (detailed or {}).get("candidates") or [])
@@ -798,15 +969,23 @@ def build_validation_bundles(detailed, verified, family, cur, now=None,
         keyword = candidate.get("keyword")
         rows = []
         db_error = None
+        undated = {"count": 0, "capped": False}
         try:
-            rows = fetch_item_sample(cur, keyword, family, limit=item_limit,
-                                     has_type=has_type)
+            rows = fetch_item_sample(
+                cur, keyword, family, limit=item_limit, has_type=has_type,
+                sample_window_days=sample_window_days)
+            undated = count_undated_matches(
+                cur, keyword, family, limit=item_limit)
         except Exception as exc:
             db_error = type(exc).__name__
         asset_ids = [r.get("id") for r in rows if r.get("id") is not None]
         try:
             sales = fetch_sales_evidence(cur, asset_ids, days=sales_days,
                                          now=now)
+            if sales.get("available"):
+                sales["limitations"].append(
+                    "Sales attribution is limited to exact asset IDs in the "
+                    "bounded item sample.")
         except Exception as exc:
             sales = {
                 "available": False, "status": "unavailable",
@@ -816,7 +995,10 @@ def build_validation_bundles(detailed, verified, family, cur, now=None,
             }
         bundles.append(build_evidence_bundle(
             candidate, verified.get(keyword), rows, context, sales,
-            sample_limit=item_limit, now=now, db_error=db_error))
+            sample_limit=item_limit, sample_window_days=sample_window_days,
+            undated_matches=undated.get("count", 0),
+            undated_capped=undated.get("capped", False),
+            now=now, db_error=db_error))
     return bundles
 
 
@@ -847,12 +1029,16 @@ def format_bundle(bundle):
         f"Concept: `{candidate.get('concept')}` · "
         f"{candidate.get('asset_family') or 'all'}",
         (f"Database Evidence: supply {_fmt_number(db.get('sample_size'))} "
-         f"(favorites>5); median {_fmt_number(db.get('median_favorites'))}♥; "
+         f"(all-time, favorites>5); median "
+         f"{_fmt_number(db.get('median_favorites'))}♥ "
+         f"({db.get('median_favorites_source')}); bounded distribution "
+         f"n={db.get('distribution_sample_size')} "
+         f"(last {db.get('sample_window_days')}d, popularity-ordered "
+         f"convenience sample, not representative; undated excluded "
+         f"{_fmt_number(db.get('undated_matches_excluded'))}); "
          f"favorite p25–p75 {_fmt_number(fav.get('p25'))}–"
          f"{_fmt_number(fav.get('p75'))}; recent14 "
-         f"{_fmt_number(db['recent_item_observations'].get('last_14d'))}; "
-         f"distribution sample n={db.get('distribution_sample_size')} "
-         f"(last {db.get('sample_window_days')}d)"
+         f"{_fmt_number(db['recent_item_observations'].get('last_14d'))}"
          + (" (capped)" if db.get("sample_capped") else "")),
         (f"Marketplace Competition: sampled "
          f"{_fmt_number(market.get('sampled_results'))}, correct-category "
@@ -864,10 +1050,16 @@ def format_bundle(bundle):
          + (f" · verified {verified_at}"
             if market.get("available") else
             f" · unavailable ({market.get('error_category')})")),
-        (f"Creator Intelligence: {_fmt_number(creator.get('identified_creator_count'))} "
-         f"identified / {_fmt_number(creator.get('unknown_identity_items'))} "
-         f"unknown; identity coverage "
-         f"{_fmt_number(creator.get('identity_coverage_pct'), '%')}; "
+        (f"Creator Intelligence: "
+         f"{_fmt_number(creator.get('numeric_creator_count'))} numeric IDs / "
+         f"{_fmt_number(creator.get('identified_creator_count'))} confirmed "
+         f"composite / "
+         f"{_fmt_number(creator.get('unknown_creator_type_items'))} unknown-type "
+         f"items / {_fmt_number(creator.get('unknown_identity_items'))} no-ID; "
+         f"numeric-ID coverage "
+         f"{_fmt_number(creator.get('numeric_id_coverage_pct'), '%')}; "
+         f"composite coverage "
+         f"{_fmt_number(creator.get('resolved_composite_coverage_pct'), '%')}; "
          f"stable-ID concentration "
          f"{_fmt_number(identified_conc * 100 if identified_conc is not None else None, '%')}; "
          f"name-approx "

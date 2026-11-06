@@ -109,7 +109,8 @@ def _sales(**overrides):
     return base
 
 
-def _bundle(rows=None, live=None, context=None, sales=None, candidate=None):
+def _bundle(rows=None, live=None, context=None, sales=None, candidate=None,
+            sample_window_days=180, undated_matches=0):
     return ov.build_evidence_bundle(
         candidate or _candidate(),
         live if live is not None else _live(),
@@ -117,6 +118,8 @@ def _bundle(rows=None, live=None, context=None, sales=None, candidate=None):
         context if context is not None else _context(),
         sales if sales is not None else _sales(),
         sample_limit=200,
+        sample_window_days=sample_window_days,
+        undated_matches=undated_matches,
         now=NOW,
     )
 
@@ -160,6 +163,72 @@ def test_user_group_numeric_id_collision_stays_separate():
     bundle = _bundle(rows=rows)
     assert bundle["creator"]["identified_creator_count"] == 2
     print("PASS User/Group numeric-ID collision stays separate")
+
+
+def test_numeric_ids_without_types_are_unresolved():
+    rows = [_item(i, 10 + i, 10, 1, 500 + i, None, None,
+                  f"I{i}", f"C{i}") for i in range(1, 4)]
+    bundle = _bundle(rows=rows)
+    assert bundle["creator"]["numeric_creator_count"] == 3
+    assert bundle["creator"]["numeric_id_coverage_pct"] == 100.0
+    assert bundle["creator"]["identified_creator_count"] == 0
+    assert bundle["creator"]["resolved_composite_coverage_pct"] == 0.0
+    assert bundle["creator"]["unknown_creator_type_items"] == 3
+    assert bundle["investigation_verdict"] != ov.VERDICT_VALIDATE
+    assert "creator_type_unknown" in bundle["missing_evidence"]
+    print("PASS unknown creator types never become confirmed identities")
+
+
+def test_three_known_composites_can_validate():
+    bundle = _bundle()
+    assert bundle["creator"]["numeric_creator_count"] == 3
+    assert bundle["creator"]["identified_creator_count"] == 3
+    assert bundle["creator"]["resolved_composite_coverage_pct"] == 100.0
+    assert bundle["investigation_verdict"] == ov.VERDICT_VALIDATE
+    print("PASS three confirmed composite identities can validate")
+
+
+def test_same_numeric_id_user_group_remains_separate():
+    rows = [
+        _item(1, 10, 10, 1, 777, "User", True, "A", "One"),
+        _item(2, 20, 12, 2, 777, "Group", True, "B", "Two"),
+    ]
+    bundle = _bundle(rows=rows)
+    assert bundle["creator"]["numeric_creator_count"] == 1
+    assert bundle["creator"]["identified_creator_count"] == 2
+    assert bundle["creator"]["numeric_ids_with_multiple_types"] == [
+        {"creator_id": 777, "types": ["Group", "User"]}]
+    print("PASS User/Group collision keeps two confirmed composites")
+
+
+def test_multiple_names_share_unresolved_numeric_id():
+    rows = [
+        _item(1, 10, 10, 1, 888, None, None, "A", "Name A"),
+        _item(2, 20, 12, 2, 888, None, None, "B", "Name B"),
+    ]
+    bundle = _bundle(rows=rows)
+    assert bundle["creator"]["numeric_creator_count"] == 1
+    assert bundle["creator"]["identified_creator_count"] == 0
+    unresolved = bundle["creator"]["unresolved_numeric_id_display_names"]
+    assert unresolved and unresolved[0]["creator_id"] == 888
+    assert set(unresolved[0]["display_names"]) == {"Name A", "Name B"}
+    print("PASS duplicate display names do not resolve an unknown type")
+
+
+def test_sample_window_metadata_matches_enforced_window():
+    bundle = _bundle(sample_window_days=90, undated_matches=2)
+    db = bundle["database"]
+    assert db["sample_window_days"] == 90
+    assert db["sample_window_enforced"] is True
+    assert db["bounded_item_sample"]["window_days"] == 90
+    assert db["bounded_item_sample"]["representative"] is False
+    assert db["undated_matches_excluded"] == 2
+    assert db["favorite_distribution"]["window_days"] == 90
+    assert db["favorite_distribution"]["ordering"] == (
+        "favorite_count_desc_convenience")
+    assert db["item_age_distribution"]["missing_created_at_n"] == 2
+    assert db["item_age_distribution"]["missing_created_at_included"] is False
+    print("PASS reported sample window matches the enforced contract")
 
 
 def test_missing_creator_ids():
@@ -217,9 +286,21 @@ def test_high_favorites_without_sales_are_not_proven():
         r["favorite_count"] = (r["favorite_count"] or 0) * 100
     bundle = _bundle(rows=rows, sales=_sales())
     assert bundle["sales"]["status"] == "unavailable"
-    assert "Attributable sales evidence unavailable." in ov.format_bundle(bundle)
-    assert bundle["investigation_verdict"] != ov.VERDICT_VALIDATE or True
-    print("PASS high favorites do not fabricate sales")
+    assert bundle["sales"]["confirmed_units"] is None
+    text = ov.format_bundle(bundle)
+    assert "Attributable sales evidence unavailable." in text
+    assert "confirmed 0 units" not in text.lower()
+    assert "profit" not in text.lower()
+    assert "guaranteed" not in text.lower()
+
+    no_growth = _bundle(
+        rows=rows, sales=_sales(),
+        candidate=_candidate(velocity=None, velocity_measured=False,
+                             observations=0, freshness="none", recent=0))
+    assert no_growth["investigation_verdict"] != ov.VERDICT_VALIDATE
+    assert no_growth["sales"]["status"] == "unavailable"
+    assert no_growth["sales"]["confirmed_units"] is None
+    print("PASS high favorites do not fabricate sales or unsupported verdicts")
 
 
 def test_creator_concentration_distortion():
@@ -457,7 +538,9 @@ def test_safe_m3_behavior_flag_on_and_deterministic():
     assert first == second
     assert "VANTA OPPORTUNITY VALIDATION" in first
     assert "Verdict:" in first
-    print("PASS flag ON report is safe and deterministic")
+    assert "creator_registry" in first
+    assert "Attributable sales evidence unavailable." in first
+    print("PASS flag ON report preserves missing-evidence limitations")
 
 
 if __name__ == "__main__":
