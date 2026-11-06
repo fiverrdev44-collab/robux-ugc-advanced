@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 
 import discord
 
+from command_security import allow_planner_ai, is_owner
+
 THREAD_RE = re.compile(r"^vanta-(\d+)-([a-f0-9]{12})$", re.I)
 URL_ID_RE = re.compile(
     r"(?:catalog|marketplace|library|item)[^\d]{0,20}(\d{6,20})", re.I
@@ -716,6 +718,20 @@ async def _run_registry(bot, message, route, state):
         # Fallback for AI/planner routes: honour "today"/"last 7 days" etc.
         days = parse_sales_window(getattr(message, "content", ""))
 
+    from command_security import (
+        CommandNotAuthorized,
+        denial_message,
+        require_authorized,
+    )
+
+    async def _authorized_target(name):
+        try:
+            require_authorized(name, message.author.id)
+            return True
+        except CommandNotAuthorized as denied:
+            await message.channel.send(denial_message(str(denied)))
+            return False
+
     if intent == "greeting":
         await message.channel.send(
             "Hey — what are we working on? Send an item ID/URL, describe a "
@@ -769,6 +785,8 @@ async def _run_registry(bot, message, route, state):
 
     if intent == "analyze_image":
         name = "analyze_image"
+        if not await _authorized_target(name):
+            return
         kwargs = {}
     elif intent == "help":
         await message.channel.send(
@@ -791,6 +809,9 @@ async def _run_registry(bot, message, route, state):
                     "Send the item ID or describe the listing you want improved."
                 )
                 return
+        # Authorization must precede title/item-context DB reads.
+        if not await _authorized_target(name):
+            return
         if arg_kind == "item":
             if not item_id:
                 await message.channel.send("Send the item ID or Roblox URL first.")
@@ -1289,45 +1310,52 @@ async def plan_message(text, has_attachment, state, bot=None):
         return fast
 
     now = time.time()
+    owner = is_owner(state.user_id)
     state.ai_calls = [t for t in state.ai_calls if now - t < 3600]
-    planner_limit = 100 if state.user_id in _owner_ids() else 20
+    allowed, _reason = allow_planner_ai(state.user_id, owner=owner)
+    if not allowed:
+        # Deterministic routing remains available; no provider call is made.
+        return fast
+    # Count the attempt even if the provider fails, times out, or returns an
+    # invalid plan. The process-global limiter is keyed by user, so new
+    # threads/sessions cannot reset the allowance.
+    state.ai_calls.append(now)
     state._planner_bot = bot
-    if len(state.ai_calls) < planner_limit:
-        try:
-            plan = await asyncio.wait_for(
-                asyncio.to_thread(_planner_ai, text, has_attachment, state),
-                timeout=30,
-            )
-        except asyncio.TimeoutError:
-            print("[vanta-planner] timeout", flush=True)
-            plan = None
-        # ReAct plans may arrive as {"actions":[{command,args}], "chat_response"}.
-        if isinstance(plan, dict) and plan.get("actions") and not plan.get("action"):
-            first = plan["actions"][0] or {}
-            cmd = str(first.get("command") or "").lstrip("!").lower()
-            mapped = {
-                "autopsy": "diagnose_item", "verdict": "inspect_item",
-                "revive": "revive_item", "revive_item": "revive_item",
-                "chain": "create_ideas", "brainstorm": "create_ideas",
-                "tags": "tags", "desc_forge": "tags",
-                "analyze_image": "analyze_image", "sales_report": "check_sales",
-                "experiments": "check_experiments", "visibility": "check_visibility",
-                "data_audit": "data_audit", "converge": "find_opportunities",
-            }.get(cmd, "clarify")
-            plan = dict(plan)
-            plan["action"] = mapped
-        route = _validate_plan(plan, state, has_attachment)
-        if route and isinstance(plan, dict):
-            route["chat_response"] = str(plan.get("chat_response") or "")[:200]
-        if route:
-            if route.get("concept"):
-                state.last_concept = route["concept"]
-            if route.get("family"):
-                state.last_family = route["family"]
-            state.ai_calls.append(time.time())
-            state.ai_calls = [t for t in state.ai_calls
-                              if time.time() - t < 3600]
-            return route
+    try:
+        plan = await asyncio.wait_for(
+            asyncio.to_thread(_planner_ai, text, has_attachment, state),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        print("[vanta-planner] timeout", flush=True)
+        plan = None
+    except Exception as exc:
+        print(f"[vanta-planner] failed: {type(exc).__name__}", flush=True)
+        plan = None
+    # ReAct plans may arrive as {"actions":[{command,args}], "chat_response"}.
+    if isinstance(plan, dict) and plan.get("actions") and not plan.get("action"):
+        first = plan["actions"][0] or {}
+        cmd = str(first.get("command") or "").lstrip("!").lower()
+        mapped = {
+            "autopsy": "diagnose_item", "verdict": "inspect_item",
+            "revive": "revive_item", "revive_item": "revive_item",
+            "chain": "create_ideas", "brainstorm": "create_ideas",
+            "tags": "tags", "desc_forge": "tags",
+            "analyze_image": "analyze_image", "sales_report": "check_sales",
+            "experiments": "check_experiments", "visibility": "check_visibility",
+            "data_audit": "data_audit", "converge": "find_opportunities",
+        }.get(cmd, "clarify")
+        plan = dict(plan)
+        plan["action"] = mapped
+    route = _validate_plan(plan, state, has_attachment)
+    if route and isinstance(plan, dict):
+        route["chat_response"] = str(plan.get("chat_response") or "")[:200]
+    if route:
+        if route.get("concept"):
+            state.last_concept = route["concept"]
+        if route.get("family"):
+            state.last_family = route["family"]
+        return route
     return fast
 
 

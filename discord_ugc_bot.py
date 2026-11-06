@@ -24,6 +24,11 @@ from discord.ext import commands
 from flask import Flask, request
 
 from bot_core import get_db, ASSET_TYPE_NAMES
+from command_security import (
+    CommandNotAuthorized,
+    authorize_before_invoke,
+    denial_message,
+)
 from commands_guide import register_guide_commands
 from commands_market import register_market_commands
 from commands_ai import register_ai_commands
@@ -36,6 +41,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 _boot_done = False
 _main_loop = None   # captured in on_ready — scheduler uses this
+
+
+bot.before_invoke(authorize_before_invoke)
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, CommandNotAuthorized):
+        await ctx.send(denial_message(str(error)))
+        return
+    print(f"[command] {ctx.command}: {type(error).__name__}: {error}",
+          flush=True)
 
 
 @bot.event

@@ -8,6 +8,7 @@ on:
       - feat/phase2-m3-opportunity-validation
       - fix/convergence-budget-integrity
       - feat/phase2-m4-original-ugc
+      - fix/m6a-security-authorization
   pull_request:
     branches:
       - main
