@@ -307,12 +307,14 @@ def register_advanced_commands(bot, get_db):
         def _run():
             from convergence_engine import scan_convergence_detailed
             from convergence_live import verify_shortlist, format_report
+            from opportunity_validation import render_converge_report
             detailed = scan_convergence_detailed(family, limit, shortlist=8)
             shortlist = (detailed.get("shortlist") or
                          detailed.get("candidates") or [])
             verified = verify_shortlist(
                 [c["keyword"] for c in shortlist], family=family)
-            return format_report(detailed, verified, family)
+            return render_converge_report(
+                detailed, verified, family, get_db, format_report)
 
         from execution_policy import to_thread_cancellable
         body, timed_out, err = await to_thread_cancellable("converge", _run)

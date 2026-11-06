@@ -103,6 +103,16 @@ _BASE_SCHEMA_SQL = """
         item_id BIGINT PRIMARY KEY,
         launched_at TIMESTAMPTZ
     );
+    CREATE TABLE my_sales (
+        id SERIAL PRIMARY KEY,
+        sale_date DATE,
+        sale_time TIMESTAMPTZ,
+        item_name TEXT,
+        buyer TEXT,
+        amount_robux INTEGER,
+        status TEXT,
+        asset_id BIGINT
+    );
 """
 
 
@@ -190,7 +200,7 @@ class Phase2PostgresTests(unittest.TestCase):
         self.cur = self.conn.cursor()
         self.cur.execute(
             "TRUNCATE creator_registry, item_history, tracked_creators, "
-            "launch_ledger, items RESTART IDENTITY CASCADE")
+            "launch_ledger, my_sales, items RESTART IDENTITY CASCADE")
 
     def tearDown(self):
         try:
@@ -626,6 +636,114 @@ class Phase2PostgresTests(unittest.TestCase):
         self.cur.execute(snapshot._SELECTION_SQL, (2,))
         ids = [row[0] for row in self.cur.fetchall()]
         self.assertEqual(ids, [1003, 1001])
+
+    def test_m3_evidence_bridge_read_only(self):
+        import opportunity_validation as ov
+        now = datetime.now(timezone.utc)
+        rows = [
+            (9001, "floating emote A", 10, 10, 1, 101, "User", True, "Alpha"),
+            (9002, "floating emote B", 15, 12, 2, 102, "Group", None, "Beta"),
+            (9003, "floating emote C", 20, 15, 3, 103, "User", False,
+             "Gamma"),
+            (9004, "floating emote D", 25, 18, 4, 777, "User", True,
+             "SameName"),
+            (9005, "floating emote E", 30, 20, 5, 777, "Group", True,
+             "SameName"),
+            (9006, "floating emote F", 40, 25, 6, None, None, None, None),
+        ]
+        for (iid, name, favs, price, age, cid, ctype, verified,
+             cname) in rows:
+            self.cur.execute("""
+                INSERT INTO items (id, name, favorite_count, price,
+                    created_at, fetched_at, creator_id, creator_type,
+                    creator_verified, creator_name, asset_type_id,
+                    favorite_status)
+                VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, 61,
+                        'known')
+            """, (iid, name, favs, price, now - timedelta(days=age),
+                  cid, ctype, verified, cname))
+        sale_time = now - timedelta(minutes=1)
+        self.cur.execute("""
+            INSERT INTO my_sales (sale_time, item_name, amount_robux,
+                                  asset_id)
+            VALUES (%s, 'floating emote A', 100, 9001),
+                   (%s, 'floating emote B', 200, 9002),
+                   (%s, 'unresolved', 300, NULL)
+        """, (sale_time, sale_time, sale_time))
+        before_items = self._count("items")
+        before_sales = self._count("my_sales")
+        candidate = {
+            "keyword": "floating emote", "family": "emotes", "score": 60,
+            "demand": 12, "supply": 6, "median_favs": 22.5, "recent": 6,
+            "velocity": 2.0, "velocity_measured": True, "observations": 3,
+            "stale": False, "freshness": "recent", "concentration": 0.3,
+        }
+        live = {
+            "ok": True, "sampled_results": 30, "category_correct": 20,
+            "category_mismatched": 10, "exact_title_matches": 1,
+            "conceptual_matches": 8, "capped": False, "pages": 1,
+            "sample_note": "first 60 results sampled",
+            "verification_timestamp": now.isoformat(), "top_competitors": [],
+        }
+        bundles = ov.build_validation_bundles(
+            {"shortlist": [candidate]}, {"floating emote": live},
+            "emotes", self.cur, now=now)
+        assert len(bundles) == 1
+        bundle = bundles[0]
+        assert bundle["creator"]["identified_creator_count"] == 5
+        assert bundle["creator"]["identity_coverage_pct"] == 83.3
+        assert any("SameName" == d["display_name"]
+                   for d in bundle["creator"]["duplicate_names_distinct_ids"])
+        assert bundle["sales"]["status"] == "confirmed"
+        assert bundle["sales"]["confirmed_units"] == 2
+        assert bundle["sales"]["confirmed_robux"] == 300
+        assert bundle["sales"]["unresolved_transactions"] == 1
+        assert bundle["investigation_verdict"] == ov.VERDICT_VALIDATE
+        assert self._count("items") == before_items
+        assert self._count("my_sales") == before_sales
+
+    def _count(self, table):
+        self.cur.execute(f"SELECT count(*) FROM {table}")
+        return self.cur.fetchone()[0]
+
+    def test_m3_missing_registry_context(self):
+        import opportunity_validation as ov
+        premig = "m3_noreg_" + uuid.uuid4().hex[:10]
+        self.conn.autocommit = False
+        try:
+            self.cur.execute(sql.SQL("CREATE SCHEMA {}").format(
+                sql.Identifier(premig)))
+            self.cur.execute("SELECT set_config('search_path', %s, true)",
+                             (premig,))
+            self.cur.execute(_BASE_SCHEMA_SQL)
+            self.cur.execute("""
+                INSERT INTO items (id, name, favorite_count, price,
+                    created_at, fetched_at, creator_id, creator_verified,
+                    creator_name, asset_type_id, favorite_status)
+                VALUES (9101, 'floating emote no registry', 10, 10, NOW(),
+                        NOW(), 501, TRUE, 'Alpha', 61, 'known')
+            """)
+            context = ov.build_category_context(self.cur, "emotes")
+            assert context["registry"]["available"] is False
+            bundle = ov.build_evidence_bundle(
+                {"keyword": "floating emote", "family": "emotes",
+                 "supply": 1, "median_favs": 10, "recent": 1,
+                 "velocity": None, "velocity_measured": False,
+                 "observations": 0, "stale": False, "freshness": "none",
+                 "score": 10, "demand": 1},
+                None, [], context, None, now=datetime.now(timezone.utc))
+            assert bundle["creator"]["registry_available"] is False
+            assert bundle["investigation_verdict"] in {
+                ov.VERDICT_INSUFFICIENT, ov.VERDICT_INVESTIGATE}
+            self.conn.rollback()
+        finally:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            self.conn.autocommit = True
+            self.cur.execute("SELECT set_config('search_path', %s, false)",
+                             (self.schema,))
 
     def test_missing_registry_does_not_abort_transaction(self):
         """P1: autocommit=False, safe availability check, later queries work."""
