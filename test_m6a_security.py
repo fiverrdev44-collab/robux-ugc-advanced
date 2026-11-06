@@ -21,13 +21,17 @@ def _owner_context():
 def test_every_registered_command_is_classified():
     assert len(cs.ALL_COMMANDS) == 90
     assert not (cs.OWNER_ONLY & cs.PUBLIC_READ_ONLY)
-    assert cs.OWNER_ONLY | cs.PUBLIC_READ_ONLY == cs.ALL_COMMANDS
+    assert not (cs.OWNER_ONLY & cs.PUBLIC_RATE_LIMITED)
+    assert not (cs.PUBLIC_READ_ONLY & cs.PUBLIC_RATE_LIMITED)
+    assert (cs.OWNER_ONLY | cs.PUBLIC_READ_ONLY
+            | cs.PUBLIC_RATE_LIMITED) == cs.ALL_COMMANDS
     for name in cs.ALL_COMMANDS:
         policy = cs.policy_for(name)
         assert policy["known"] is True
         assert policy["level"] in {"owner", "public"}
         assert policy["command"] == name
-    assert cs.AI_COST <= cs.OWNER_ONLY
+    assert cs.AI_COST <= (cs.OWNER_ONLY | cs.PUBLIC_RATE_LIMITED)
+    assert cs.PUBLIC_RATE_LIMITED <= cs.AI_COST
     assert cs.MUTATING <= cs.OWNER_ONLY
     print("PASS every command has an explicit authorization policy")
 
@@ -54,7 +58,7 @@ def test_public_read_only_commands_still_work():
     public = [
         "guide", "help", "version", "start", "watchlist", "track",
         "sales_report", "sales_for", "converge", "verdict", "predict",
-        "emote_title", "creator_brain", "momentum", "experiments",
+        "creator_brain", "momentum", "experiments",
     ]
     with _owner_context():
         for name in public:
@@ -202,13 +206,84 @@ def test_ai_debug_mock_keys_never_appear_in_response():
 
 
 def test_ai_cost_and_mutating_commands_are_owner_only():
-    for name in cs.AI_COST:
+    for name in cs.AI_COST - cs.PUBLIC_RATE_LIMITED:
         policy = cs.policy_for(name)
         assert policy["level"] == "owner", name
     for name in cs.MUTATING:
         policy = cs.policy_for(name)
         assert policy["level"] == "owner", name
     print("PASS AI-cost and mutating commands require owner authorization")
+
+
+def test_emote_title_public_exception_is_documented_and_rate_limited():
+    policy = cs.policy_for("emote_title")
+    assert policy["level"] == "public"
+    assert policy["ai_cost"] is True
+    assert policy["external_api"] is True
+    assert policy["public_exception"] is True
+
+    cs.configure_emote_title_for_tests(user_limit=1, owner_limit=1,
+                                       global_limit=10, window_seconds=60)
+    with _owner_context():
+        first = cs.authorize_command("emote_title", NON_OWNER, now=400.0)
+        second = cs.authorize_command("emote_title", NON_OWNER, now=401.0)
+    assert first.allowed and first.level == "public"
+    assert not second.allowed and second.ai_rate_limited
+
+    cs.configure_emote_title_for_tests(user_limit=2, owner_limit=1,
+                                       global_limit=10, window_seconds=60)
+    with _owner_context():
+        first = cs.authorize_command("emote_title", OWNER, now=500.0)
+        second = cs.authorize_command("emote_title", OWNER, now=501.0)
+    assert first.allowed
+    assert not second.allowed and second.ai_rate_limited
+    cs.configure_emote_title_for_tests()
+    cs.reset_for_tests()
+    print("PASS emote_title public exception is documented and rate-limited")
+
+
+def test_emote_title_limiter_denies_before_callback():
+    async def scenario():
+        bot = dcommands.Bot(command_prefix="!",
+                            intents=discord.Intents.default())
+        bot.before_invoke(cs.authorize_before_invoke)
+        calls = []
+
+        class Cmd:
+            name = "emote_title"
+
+        class Author:
+            id = NON_OWNER
+
+        class Ctx:
+            command = Cmd()
+            author = Author()
+
+        async def callback():
+            calls.append(1)
+
+        await bot._before_invoke(Ctx())
+        await callback()
+        try:
+            await bot._before_invoke(Ctx())
+        except cs.CommandNotAuthorized:
+            return calls
+        raise AssertionError("second emote_title should be denied")
+
+    cs.configure_emote_title_for_tests(user_limit=1, owner_limit=1,
+                                       global_limit=10, window_seconds=60)
+    with mock.patch("bot_core.psycopg2.connect",
+                    side_effect=AssertionError("DB call attempted")), \
+            mock.patch("live_market._get_with_backoff",
+                       side_effect=AssertionError("Roblox call attempted")), \
+            mock.patch("gemini_brain._generate",
+                       side_effect=AssertionError("AI call attempted")):
+        with _owner_context():
+            calls = asyncio.run(scenario())
+    cs.configure_emote_title_for_tests()
+    cs.reset_for_tests()
+    assert calls == [1]
+    print("PASS emote_title limiter denies before AI/API callback")
 
 
 def test_real_before_invoke_hook_denies_before_callback():

@@ -48,11 +48,13 @@ OWNER_ONLY = {
     "verified_scan", "visibility_run", "visibility_seed",
 }
 
+PUBLIC_RATE_LIMITED = {"emote_title"}
+
 AI_COST = {
     "ai_debug", "analyze_image", "autopsy", "brainstorm", "chain", "concept",
-    "creative", "creative_raw", "desc_analyze", "desc_forge", "meta_sniper",
-    "path", "playbook", "rescue", "revive", "revsim", "sales_keywords",
-    "stealth", "tags",
+    "creative", "creative_raw", "desc_analyze", "desc_forge", "emote_title",
+    "meta_sniper", "path", "playbook", "rescue", "revive", "revsim",
+    "sales_keywords", "stealth", "tags",
 }
 
 MUTATING = {
@@ -63,10 +65,10 @@ MUTATING = {
 }
 
 EXTERNAL_API = {
-    "autopsy", "converge", "converge_debug", "enrich_run", "meta_sniper",
-    "revive", "sales_probe", "sales_scan", "scan_run", "snapshot_now",
-    "suggest_probe", "suggest_run", "vacuum", "verified_scan", "visibility_run",
-    "visibility_seed",
+    "autopsy", "converge", "converge_debug", "emote_title", "enrich_run",
+    "meta_sniper", "revive", "sales_probe", "sales_scan", "scan_run",
+    "snapshot_now", "suggest_probe", "suggest_run", "vacuum",
+    "verified_scan", "visibility_run", "visibility_seed",
 }
 
 SENSITIVE = {
@@ -75,7 +77,8 @@ SENSITIVE = {
     "sales_scan", "selftest_db",
 }
 
-PUBLIC_READ_ONLY = ALL_COMMANDS - OWNER_ONLY
+PUBLIC_COMMANDS = ALL_COMMANDS - OWNER_ONLY
+PUBLIC_READ_ONLY = PUBLIC_COMMANDS - PUBLIC_RATE_LIMITED
 
 COMMAND_ALIASES = {
     "about": "version", "apply_rec": "applied", "certify": "selftest",
@@ -130,6 +133,7 @@ def policy_for(name):
             "ai_cost": False,
             "external_api": False,
             "sensitive": True,
+            "public_exception": False,
             "known": False,
         }
     return {
@@ -139,6 +143,7 @@ def policy_for(name):
         "ai_cost": canonical in AI_COST,
         "external_api": canonical in EXTERNAL_API,
         "sensitive": canonical in SENSITIVE,
+        "public_exception": canonical in PUBLIC_RATE_LIMITED,
         "known": True,
     }
 
@@ -235,6 +240,13 @@ PLANNER_LIMITER.configure(
     global_limit=_env_int("M6_PLANNER_GLOBAL_LIMIT", 200),
     window_seconds=_env_int("M6_PLANNER_WINDOW_SECONDS", 3600),
 )
+PUBLIC_EMOTE_LIMITER = AIUsageLimiter()
+PUBLIC_EMOTE_LIMITER.configure(
+    user_limit=_env_int("M6_EMOTE_TITLE_USER_LIMIT", 10),
+    owner_limit=_env_int("M6_EMOTE_TITLE_OWNER_LIMIT", 20),
+    global_limit=_env_int("M6_EMOTE_TITLE_GLOBAL_LIMIT", 30),
+    window_seconds=_env_int("M6_EMOTE_TITLE_WINDOW_SECONDS", 600),
+)
 
 
 def allow_planner_ai(user_id, owner=False, now=None):
@@ -244,6 +256,7 @@ def allow_planner_ai(user_id, owner=False, now=None):
 def reset_for_tests():
     AI_LIMITER.reset()
     PLANNER_LIMITER.reset()
+    PUBLIC_EMOTE_LIMITER.reset()
 
 
 def configure_for_tests(user_limit=None, owner_limit=None,
@@ -261,6 +274,14 @@ def configure_planner_for_tests(user_limit=None, owner_limit=None,
                               window_seconds=window_seconds)
 
 
+def configure_emote_title_for_tests(user_limit=None, owner_limit=None,
+                                    global_limit=None, window_seconds=None):
+    PUBLIC_EMOTE_LIMITER.configure(user_limit=user_limit,
+                                   owner_limit=owner_limit,
+                                   global_limit=global_limit,
+                                   window_seconds=window_seconds)
+
+
 def authorize_command(name, user_id, now=None):
     policy = policy_for(name)
     canonical = policy["command"]
@@ -272,7 +293,9 @@ def authorize_command(name, user_id, now=None):
         return AuthorizationDecision(
             False, canonical, "owner", "This command is owner-only.")
     if policy["ai_cost"]:
-        allowed, reason = AI_LIMITER.allow(
+        limiter = (PUBLIC_EMOTE_LIMITER
+                   if policy["public_exception"] else AI_LIMITER)
+        allowed, reason = limiter.allow(
             user_id, owner=is_owner(user_id), now=now)
         if not allowed:
             return AuthorizationDecision(

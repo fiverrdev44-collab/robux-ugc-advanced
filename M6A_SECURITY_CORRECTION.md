@@ -4,7 +4,7 @@
 - **Branch:** `fix/m6a-security-authorization`
 - **Implementation commit:** `0e19be91da10b7fed859ef9a8ba32acb98419bcd`
 - **Scope:** F-01 command authorization, F-02 secret protection, and F-14 AI-cost authorization risks.
-- **Out of scope and unchanged:** ORACLE algorithms, autonomous learning, sales attribution, `!emote_title`, M4 activation, database schemas, environment variables, Roblox API budgets.
+- **Out of scope and unchanged:** ORACLE algorithms, autonomous learning, sales attribution, `!emote_title` command code/algorithm/output, M4 activation, database schemas, environment variables, Roblox API budgets.
 - **Production state:** unchanged. No merge or deploy.
 
 ## M6-A.1 follow-up (included in this branch)
@@ -25,6 +25,15 @@
 - Sales embed source authentication is missing. The finding and a proposed
   allowlist/dry-run design are documented in
   `M6A1_SALES_SOURCE_REVIEW.md`; production ingestion was **not** changed.
+- `!emote_title` is an explicitly documented **public, rate-limited exception**:
+  it invokes AI and live marketplace research, so it is now classified as
+  AI-cost and external-API while remaining public. Default allowance:
+  - non-owner: 10 invocations per 600 seconds
+  - owner: 20 invocations per 600 seconds
+  - global: 30 invocations per 600 seconds
+- The emote-title limiter is checked before the command callback; denied
+  invocations make zero AI-provider and Roblox API calls. `commands_emote.py`
+  and `emote_title_engine.py` were not modified.
 
 ## 1. Exact files modified
 
@@ -46,8 +55,9 @@
 `command_security.py` defines an explicit policy for all **90** registered commands:
 
 - **52 owner-only** commands: mutating, administrative, sensitive diagnostics, live-API diagnostics, and costly AI paths.
-- **38 public read-only** commands: safe lookups, status, history, title utilities, and read-only sales summaries.
-- **19 AI-cost** commands: all owner-authorized and additionally rate-limited.
+- **37 public read-only** commands: safe lookups, status, history, and read-only sales summaries.
+- **1 documented public rate-limited exception:** `!emote_title`.
+- **20 AI-cost** commands: 19 owner-authorized plus the public `!emote_title` exception; all are rate-limited.
 - Unknown commands fail closed as owner-only.
 - Aliases are canonicalized before policy lookup, so aliases cannot bypass restrictions.
 - The policy marks each command's side effects: mutating, AI cost, external API, and sensitive.
@@ -93,7 +103,7 @@ Conversation-planner controls (M6-A.1):
 - Deterministic fast paths return before the planner budget/provider call.
 - No additional AI operation is charged for a single planner call.
 
-Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!analyze_image`, `!chain`, `!creative`, `!creative_raw`, `!desc_analyze`, `!desc_forge`, `!autopsy`, `!revive`, `!path`, `!playbook`, `!meta_sniper`, `!stealth`, `!revsim`, `!sales_keywords`, `!tags`, and `!ai_debug`.
+Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!analyze_image`, `!chain`, `!creative`, `!creative_raw`, `!desc_analyze`, `!desc_forge`, `!autopsy`, `!revive`, `!path`, `!playbook`, `!meta_sniper`, `!stealth`, `!revsim`, `!sales_keywords`, `!tags`, `!ai_debug`, and the public exception `!emote_title`.
 
 ## 5. Before/after behavior
 
@@ -114,10 +124,12 @@ Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!a
 | Planner provider fails or returns invalid JSON | Not charged in old state list | Counted once before provider |
 | Planner over limit | Could still call provider in some paths | Deterministic route; zero provider calls |
 | Sales embed from unapproved sender | Accepted by channel check alone | Finding documented; ingestion unchanged |
+| `!emote_title` repeated invocation | No command-level quota | Public with 10/20 per 600s user/owner limit; denied before callback |
+| `!emote_title` denied by limiter | Would still run AI/API | Zero AI-provider and Roblox API calls |
 
 ## 6. Security test results
 
-`python test_m6a_security.py` — **15/15 passed**:
+`python test_m6a_security.py` — **17/17 passed**:
 
 - Every command has an explicit policy.
 - Owner-only commands deny non-owners and allow owners.
@@ -135,6 +147,10 @@ Commands classified as AI-cost include `!concept`, `!brainstorm`, `!rescue`, `!a
 - The real conversation router denies before callback and allows owners.
 - Planner limits are global per user, survive new sessions, and count failed
   provider attempts.
+- `!emote_title` is public, classified as AI-cost/external-API, and bounded by
+  a dedicated per-user/global exception limiter.
+- Denied `!emote_title` invocations make zero AI/API calls; under-limit
+  invocations preserve the existing command path.
 
 ## 7. Existing regression results
 
@@ -171,6 +187,10 @@ These are outside M6-A scope and remain open:
 - Sales embeds are not authenticated against a trusted webhook/sender. The
   finding and a proposed dry-run/enforce allowlist design are documented in
   `M6A1_SALES_SOURCE_REVIEW.md`; production ingestion behavior is unchanged.
+- `!emote_title` remains public by design. Its allowance is bounded per user
+  and globally, but a determined distributed client could still consume the
+  global allowance; this is a documented availability/cost exception, not an
+  owner-only control.
 - A determined operator with owner credentials can still consume owner AI limits; limits are bounded but not a security boundary against the owner.
 - Planner limits are process-local; a multi-process deployment would need a
   shared store to enforce a single global budget.
@@ -179,4 +199,4 @@ These are outside M6-A scope and remain open:
 
 **Controlled pull-request review is appropriate.**
 
-The correction closes the requested P1 authorization, secret-disclosure, and AI-cost gaps without touching ORACLE, autonomous learning, sales attribution, `!emote_title`, database schemas, or production environment settings. Merge and deployment remain blocked pending explicit approval and CI results from the new branch.
+The correction closes the requested P1 authorization, secret-disclosure, and AI-cost gaps without modifying ORACLE, autonomous learning, sales attribution, `!emote_title` command code/algorithms/output, database schemas, or production environment settings. Merge and deployment remain blocked pending explicit approval and CI results from the new branch.
