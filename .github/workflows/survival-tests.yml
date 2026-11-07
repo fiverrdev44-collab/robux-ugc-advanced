@@ -83,6 +83,8 @@ jobs:
         run: python test_final_certification.py
       - name: Run final command contract regressions
         run: python test_final_command_contracts.py
+      - name: Run public command callback regressions
+        run: python test_public_command_callbacks.py
       - name: Run safe Roblox API wrapper regressions
         run: python test_safe_roblox.py
       - name: Run sales source validation regressions

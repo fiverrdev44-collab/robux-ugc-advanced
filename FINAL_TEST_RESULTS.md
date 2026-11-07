@@ -27,6 +27,7 @@ python test_m6a_security.py
 python test_vanta_conversation.py
 python test_final_certification.py
 python test_final_command_contracts.py
+python test_public_command_callbacks.py
 python test_safe_roblox.py
 python test_sales_source_validation.py
 python test_emote_title.py
@@ -51,6 +52,7 @@ python test_recommendation_lifecycle.py
 | M6-A security | PASS | 17 |
 | Final certification | PASS | 6 |
 | Final command contracts | PASS | 2 |
+| Public command callbacks | PASS | 25 tests / 34 commands |
 | Safe Roblox API wrapper | PASS | 8 |
 | Sales source validation | PASS | 5 |
 | Convergence live | PASS | 49 |
@@ -108,10 +110,10 @@ PG_TEST_RETURN_CODE=0
 `FINAL_COMMAND_MATRIX.csv` contains all 90 registered commands.
 
 - **Registration/alias/authorization contract:** PASS for all 90.
-- **Callback behavior:** PASS for 2 (`!ai_debug`, `!converge`); BLOCKED for 54 owner-only/mutating/AI/API commands; NOT TESTED for 34 public commands.
+- **Callback behavior:** PASS for 36 commands (34 previously-untested public commands plus `!ai_debug` and `!converge`); BLOCKED for 54 owner-only/mutating/AI/API commands; NOT TESTED for 0 commands.
 - **Live smoke:** NOT TESTED for all commands. No live production command or API load test was performed.
 
-The matrix distinguishes contract evidence from callback and live evidence. A contract PASS does not prove full command behavior.
+The matrix distinguishes contract evidence from callback and live evidence. Public callback PASS results are backed by `test_public_command_callbacks.py`; owner-only/mutating/AI/API callbacks remain BLOCKED with explicit reasons. Live smoke is still NOT TESTED.
 
 ## CI results
 

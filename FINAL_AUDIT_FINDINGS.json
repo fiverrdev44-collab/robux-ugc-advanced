@@ -142,12 +142,12 @@
       "id": "F-13",
       "severity": "P2",
       "area": "testing/coverage",
-      "status": "partial",
+      "status": "partial_public_complete",
       "title": "Command behavior coverage remains incomplete",
       "location": "FINAL_COMMAND_MATRIX.csv",
-      "evidence": "All 90 commands have registration/alias/dispatch/auth contract PASS. Callback behavior: 2 PASS, 54 BLOCKED, 34 NOT TESTED. New safe-API and sales-source tests add failure-injection evidence but not per-command callbacks.",
-      "correction": "Added all-command contracts; full callback fixtures remain outstanding.",
-      "remaining_risk": "Public read-only command behavior and owner-only callback behavior are not fully certified."
+      "evidence": "test_public_command_callbacks.py executes actual callbacks for all 34 previously NOT TESTED public commands with isolated Discord contexts, mocked DB/API/AI, fixtures, and output assertions; 25 test functions / 34 commands pass. FINAL_COMMAND_MATRIX.csv now reports 36 callback PASS, 54 owner-only/mutating/AI/API BLOCKED, 0 NOT TESTED.",
+      "correction": "All 34 public NOT TESTED callbacks now have behavioral evidence. Owner-only/mutating/AI/API callbacks remain deliberately blocked from offline execution.",
+      "remaining_risk": "The 54 owner-only/mutating/AI/API callbacks still lack callback-level behavioral evidence; live smoke is not performed."
     },
     {
       "id": "F-14",
@@ -156,7 +156,7 @@
       "status": "fixed_verified_with_limitation",
       "title": "AI cost controls and planner budget",
       "location": "command_security.py AIUsageLimiter; vanta_conversation.py plan_message",
-      "evidence": "systemd shows one active MainPID (275487) with a single ExecStart. One process serves Discord commands. Command and planner quotas are process-local, which is sufficient for the verified single-process deployment; multi-process would need shared storage.",
+      "evidence": "Single active bot process verified (MainPID 275487). Command and planner quotas are process-local; sufficient for the verified single-process deployment.",
       "correction": "Verified single process; quotas are bounded in-process.",
       "remaining_risk": "A future multi-process deployment would require shared quota storage."
     },
