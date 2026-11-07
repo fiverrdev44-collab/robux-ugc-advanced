@@ -14,6 +14,11 @@ CATEGORY = "backgrounds"
 EXPECTED_WIDTH = 2560
 EXPECTED_HEIGHT = 1440
 MIN_SAMPLE = 20
+DEFAULT_EARLY_CANDIDATE_LIMIT = 500
+DEFAULT_EARLY_LIMIT = 10
+MIN_EARLY_OBSERVATIONS = 2
+ACCELERATION_OBSERVATIONS = 3
+THUMBNAIL_ENDPOINT = "https://thumbnails.roblox.com/v1/assets"
 SUPPORTED_FORMATS = {"JPEG", "PNG", "TGA", "BMP"}
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tga", ".bmp"}
 
@@ -278,6 +283,421 @@ def format_market_report(data, max_lines=18):
         "_Favorites are not sales. No CTR, revenue, demand volume, or "
         "conversion probability is inferred._")
     return "\n".join(lines[:max_lines])
+
+
+def _background_candidate_rows(cur, days, candidate_limit):
+    cur.execute(f"""
+        WITH candidates AS (
+            SELECT id, name, creator_name, favorite_count, price, created_at,
+                   EXTRACT(EPOCH FROM (NOW() - created_at))/86400 AS age_days,
+                   asset_type_id
+            FROM items
+            WHERE asset_type_id = 92
+              AND created_at IS NOT NULL
+              AND created_at >= NOW() - INTERVAL '{int(days)} days'
+            ORDER BY created_at DESC, id DESC
+            LIMIT {int(candidate_limit)}
+        )
+        SELECT c.id, c.name, c.creator_name, c.favorite_count, c.price,
+               c.age_days, c.created_at, c.asset_type_id,
+               COUNT(h.id) AS observations
+        FROM candidates c
+        LEFT JOIN item_history h
+               ON h.item_id = c.id
+              AND h.favorite_count IS NOT NULL
+              AND h.snapshot_at >= NOW() - INTERVAL '{int(days)} days'
+        GROUP BY c.id, c.name, c.creator_name, c.favorite_count, c.price,
+                 c.age_days, c.created_at, c.asset_type_id
+        ORDER BY c.created_at DESC, c.id DESC
+    """)
+    return cur.fetchall() or []
+
+
+def _background_history_rows(cur, item_ids, days):
+    if not item_ids:
+        return []
+    cur.execute(f"""
+        SELECT h.item_id, h.favorite_count, h.snapshot_at
+        FROM item_history h
+        JOIN items i ON i.id = h.item_id
+        WHERE h.item_id = ANY(%s)
+          AND i.asset_type_id = 92
+          AND h.favorite_count IS NOT NULL
+          AND h.snapshot_at >= NOW() - INTERVAL '{int(days)} days'
+        ORDER BY h.item_id, h.snapshot_at, h.id
+    """, (list(item_ids),))
+    return cur.fetchall() or []
+
+
+def _background_acceleration(points):
+    if len(points) < ACCELERATION_OBSERVATIONS:
+        return None
+    rates = []
+    for (t0, f0), (t1, f1) in zip(points, points[1:]):
+        dt = (t1 - t0).total_seconds() / 86400.0
+        if dt > 0:
+            rates.append((f1 - f0) / dt)
+    if len(rates) < 2:
+        return None
+    return rates[-1] - rates[0]
+
+
+def _background_confidence(observations, observation_days, freshness_hours):
+    if (observations >= ACCELERATION_OBSERVATIONS
+            and observation_days >= 2.0
+            and freshness_hours <= 24.0):
+        return "high"
+    if observations >= MIN_EARLY_OBSERVATIONS and freshness_hours <= 72.0:
+        return "medium"
+    return "low"
+
+
+def _background_text_themes(items):
+    counts = {}
+    for item in items:
+        for token in set(_tokens(item.get("name"))):
+            counts[token] = counts.get(token, 0) + 1
+    return [
+        {"theme": token, "items": count}
+        for token, count in sorted(
+            counts.items(), key=lambda pair: (-pair[1], pair[0]))[:10]
+    ]
+
+
+def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
+                                  candidate_limit=DEFAULT_EARLY_CANDIDATE_LIMIT,
+                                  now=None):
+    """Rank recently published backgrounds by measured favorite growth.
+
+    ``days`` is both the publication window and the history window. The
+    candidate set is deterministic (latest by created_at, then id) and bounded.
+    Lifetime favorites divided by listing age is reported separately and is
+    never used for ranking.
+    """
+    days = max(1, min(int(days), 30))
+    limit = max(1, min(int(limit), 50))
+    candidate_limit = max(1, min(int(candidate_limit), 2000))
+    now = now or datetime.now(timezone.utc)
+    result = {
+        "category": CATEGORY,
+        "asset_type_id": ASSET_TYPE_ID,
+        "window_days": days,
+        "candidate_limit": candidate_limit,
+        "generated_at": now.isoformat(),
+        "status": "ok",
+        "ranked": [],
+        "insufficient": [],
+        "candidate_window": 0,
+        "usable_history": 0,
+        "coverage_pct": 0.0,
+        "data_confidence": "low",
+        "insufficient_count": 0,
+        "non_growing_count": 0,
+        "text_themes": [],
+        "text_themes_label": "text-derived title keywords, not visual analysis",
+        "visual_analysis": {
+            "status": "not_analyzed",
+            "reason": (
+                "The approved thumbnail endpoint returns an image reference, "
+                "but automated visual analysis is not enabled to avoid "
+                "unbudgeted API/AI usage."),
+            "thumbnail_endpoint": THUMBNAIL_ENDPOINT,
+        },
+        "method": (
+            "Measured favorites change between the first and last valid "
+            "item_history snapshots inside the window. Current favorites "
+            "divided by listing age is reported separately as a lifetime "
+            "average and is not used for ranking."),
+    }
+
+    try:
+        rows = _background_candidate_rows(cur, days, candidate_limit)
+    except Exception:
+        _rollback(cur)
+        result.update(status="unavailable", error="candidate query unavailable")
+        return result
+
+    rows = [row for row in rows if int(row[7] or 0) == ASSET_TYPE_ID]
+    result["candidate_window"] = len(rows)
+    if not rows:
+        result["status"] = "no_recent_backgrounds"
+        return result
+
+    usable_ids = [
+        row[0] for row in rows
+        if int(row[8] or 0) >= MIN_EARLY_OBSERVATIONS
+    ]
+    histories = {}
+    try:
+        for item_id, favs, snapshot in _background_history_rows(
+                cur, usable_ids, days):
+            if item_id is None or favs is None or snapshot is None:
+                continue
+            histories.setdefault(item_id, []).append((snapshot, favs))
+    except Exception:
+        _rollback(cur)
+        result["history_error"] = "history query unavailable"
+
+    ranked = []
+    insufficient = []
+    non_growing = []
+    usable_history = 0
+    for row in rows:
+        (item_id, name, creator, current_favs, price, age_days,
+         created_at, _atype, _observations) = row
+        points = sorted(
+            histories.get(item_id, []), key=lambda point: point[0])
+        if len(points) >= MIN_EARLY_OBSERVATIONS:
+            usable_history += 1
+        if len(points) < MIN_EARLY_OBSERVATIONS:
+            insufficient.append({
+                "id": item_id,
+                "name": (name or "")[:120],
+                "url": f"https://www.roblox.com/catalog/{item_id}",
+                "creator": (creator or "")[:120],
+                "current_favorites": (
+                    int(current_favs) if current_favs is not None else None),
+                "price": (int(price) if price is not None
+                          and int(price) > 0 else None),
+                "listing_age_days": round(float(age_days or 0), 2),
+                "observations": len(points),
+                "reason": "fewer than 2 valid favorite observations",
+            })
+            continue
+
+        first_time, first_favs = points[0]
+        last_time, last_favs = points[-1]
+        observation_days = (last_time - first_time).total_seconds() / 86400.0
+        if observation_days <= 0:
+            insufficient.append({
+                "id": item_id,
+                "name": (name or "")[:120],
+                "url": f"https://www.roblox.com/catalog/{item_id}",
+                "creator": (creator or "")[:120],
+                "current_favorites": (
+                    int(current_favs) if current_favs is not None else None),
+                "price": (int(price) if price is not None
+                          and int(price) > 0 else None),
+                "listing_age_days": round(float(age_days or 0), 2),
+                "observations": len(points),
+                "reason": "observation window has no positive duration",
+            })
+            continue
+
+        measured_gain = int(last_favs) - int(first_favs)
+        if measured_gain <= 0:
+            non_growing.append({
+                "id": item_id,
+                "name": (name or "")[:120],
+                "url": f"https://www.roblox.com/catalog/{item_id}",
+                "measured_favorites_gained": measured_gain,
+                "observations": len(points),
+                "reason": "no positive measured favorite gain in the window",
+            })
+            continue
+
+        age = float(age_days or 0)
+        lifetime_per_day = None
+        if current_favs is not None and age > 0:
+            lifetime_per_day = float(current_favs) / age
+        freshness_hours = max(
+            0.0, (now - _utc(last_time)).total_seconds() / 3600.0)
+        acceleration = _background_acceleration(points)
+        confidence = _background_confidence(
+            len(points), observation_days, freshness_hours)
+        warnings = []
+        if len(points) < ACCELERATION_OBSERVATIONS:
+            warnings.append(
+                "fewer than 3 observations; acceleration unavailable")
+        if observation_days < 1.0:
+            warnings.append("observation window under 1 day")
+        if freshness_hours > 72.0:
+            warnings.append("last snapshot older than 72h")
+        if current_favs is None:
+            warnings.append("current favorites unavailable")
+        if price is None or int(price) <= 0:
+            warnings.append("price unavailable or zero")
+        if confidence != "high":
+            warnings.append(f"{confidence} confidence")
+
+        ranked.append({
+            "id": item_id,
+            "asset_type_id": ASSET_TYPE_ID,
+            "name": (name or "")[:120],
+            "url": f"https://www.roblox.com/catalog/{item_id}",
+            "creator": (creator or "")[:120],
+            "listing_age_days": round(age, 2),
+            "price": (int(price) if price is not None
+                      and int(price) > 0 else None),
+            "current_favorites": (
+                int(current_favs) if current_favs is not None else None),
+            "last_observed_favorites": int(last_favs),
+            "measured_favorites_gained": measured_gain,
+            "measured_favs_per_day": round(
+                measured_gain / observation_days, 2),
+            "lifetime_favs_per_day": (
+                round(lifetime_per_day, 2)
+                if lifetime_per_day is not None else None),
+            "observations": len(points),
+            "observation_days": round(observation_days, 2),
+            "observation_period": (
+                f"{_utc(first_time):%Y-%m-%d %H:%M} → "
+                f"{_utc(last_time):%Y-%m-%d %H:%M} UTC"),
+            "observation_start": _utc(first_time).isoformat(),
+            "observation_end": _utc(last_time).isoformat(),
+            "snapshot_freshness_hours": round(freshness_hours, 1),
+            "acceleration_favs_per_day": (
+                round(acceleration, 2) if acceleration is not None else None),
+            "confidence": confidence,
+            "missing_data": warnings,
+            "thumbnail_request_url": (
+                f"{THUMBNAIL_ENDPOINT}?assetIds={int(item_id)}"
+                "&size=768x432&format=Png&isCircular=false"),
+            "visual_analysis": "not_analyzed",
+        })
+
+    ranked.sort(key=lambda item: (
+        -item["measured_favs_per_day"],
+        -(item["acceleration_favs_per_day"] or 0.0),
+        item["snapshot_freshness_hours"],
+        item["listing_age_days"],
+        item["id"],
+    ))
+    ranked_total = len(ranked)
+    result["ranked"] = ranked[:limit]
+    result["ranked_total"] = ranked_total
+    result["usable_history"] = usable_history
+    result["coverage_pct"] = round(
+        100.0 * usable_history / max(len(rows), 1), 1)
+    result["insufficient_count"] = len(insufficient)
+    result["non_growing_count"] = len(non_growing)
+    result["insufficient"] = insufficient[:5]
+    if (len(rows) >= 20 and result["coverage_pct"] >= 50.0):
+        result["data_confidence"] = "high"
+    elif len(rows) >= 5 and result["coverage_pct"] >= 20.0:
+        result["data_confidence"] = "medium"
+    else:
+        result["data_confidence"] = "low"
+    result["text_themes"] = _background_text_themes(result["ranked"])
+    if not result["ranked"]:
+        result["status"] = (
+            "no_positive_growth" if non_growing else "insufficient_history")
+    return result
+
+
+def _early_price_label(price):
+    if price is None or int(price) <= 0:
+        return "price unavailable"
+    return f"R${int(price)}"
+
+
+def _early_creator_label(creator):
+    if not creator:
+        return "creator unavailable"
+    return f"by `{creator}`"
+
+
+def format_background_early_winners(data, days=None):
+    if not data:
+        return "No Avatar Background early-winner data available."
+    window = days or data.get("window_days") or "?"
+    status = data.get("status")
+    if status == "unavailable":
+        return (
+            f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
+            f"❌ Data unavailable: `{data.get('error')}`. No ranking is "
+            "claimed.")
+    if status == "no_recent_backgrounds":
+        return (
+            f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
+            "No Avatar Backgrounds were published in this window with stored "
+            "metadata. No ranking is claimed.")
+    if status == "insufficient_history":
+        return (
+            f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
+            f"Candidates: **{data.get('candidate_window', 0)}** · usable "
+            f"history: **0** · coverage **0%**.\n"
+            "No background had at least two valid favorite observations in "
+            "this window. No ranking is claimed. Try `!early 14 backgrounds` "
+            "or wait for more snapshots.")
+    if status == "no_positive_growth":
+        return (
+            f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
+            f"Candidates: **{data.get('candidate_window', 0)}** · usable "
+            f"history: **{data.get('usable_history', 0)}** · coverage "
+            f"**{data.get('coverage_pct', 0)}%**.\n"
+            "No sampled background had a positive measured favorite gain in "
+            "this window. No ranking is claimed.")
+
+    lines = [f"# ⚡ BACKGROUND EARLY WINNERS — measured, last {window}d", ""]
+    lines.append(
+        f"• Candidate window: **{data.get('candidate_window', 0)}** recent "
+        f"backgrounds · usable history: **{data.get('usable_history', 0)}** "
+        f"· coverage **{data.get('coverage_pct', 0)}%** · data confidence "
+        f"**{data.get('data_confidence', 'low').upper()}**")
+    lines.append(
+        "• Ranking uses measured favorite differences between the first and "
+        "last valid snapshots. Lifetime favorites ÷ listing age is shown "
+        "separately.")
+    lines.append("")
+    for index, item in enumerate(data.get("ranked", []), 1):
+        name = (item.get("name") or "unnamed").replace("[", "(").replace(
+            "]", ")")
+        lines.append(
+            f"**{index}. [{name}]({item['url']})** — "
+            f"**{item['measured_favs_per_day']}/day measured**")
+        lines.append(
+            f"   +{item['measured_favorites_gained']} favs over "
+            f"{item['observation_days']}d · {item['observations']} obs · "
+            f"{item['snapshot_freshness_hours']}h fresh · "
+            f"{item['observation_period']}")
+        if item.get("acceleration_favs_per_day") is not None:
+            lines.append(
+                f"   Acceleration: {item['acceleration_favs_per_day']:+.2f} "
+                "favs/day change")
+        favorites = item.get("current_favorites")
+        last_observed = item.get("last_observed_favorites")
+        favorites_label = (
+            f"{favorites:,} current favorites"
+            if favorites is not None else "current favorites unavailable")
+        if (favorites is not None and last_observed is not None
+                and last_observed != favorites):
+            favorites_label += f" (last obs {last_observed:,})"
+        lifetime = item.get("lifetime_favs_per_day")
+        lifetime_label = (
+            f"lifetime avg {lifetime}/day"
+            if lifetime is not None else "lifetime avg unavailable")
+        lines.append(
+            f"   {_early_price_label(item.get('price'))} · "
+            f"{item.get('listing_age_days')}d old · "
+            f"{_early_creator_label(item.get('creator'))} · "
+            f"{favorites_label} · {lifetime_label}")
+        warning = f"Confidence: **{item['confidence'].upper()}**"
+        if item.get("missing_data"):
+            warning += " · " + "; ".join(item["missing_data"])
+        lines.append(f"   {warning}")
+    if data.get("insufficient_count"):
+        lines.append("")
+        lines.append(
+            f"_{data['insufficient_count']} candidate(s) had fewer than two "
+            "valid observations and were not ranked._")
+    if data.get("non_growing_count"):
+        lines.append(
+            f"_{data['non_growing_count']} candidate(s) had no positive "
+            "measured gain and were not ranked._")
+    if data.get("text_themes"):
+        lines.append("")
+        lines.append(
+            "**Text-derived title themes (not visual analysis):** "
+            + ", ".join(
+                f"`{theme['theme']}` ({theme['items']})"
+                for theme in data["text_themes"]))
+    lines.append("")
+    lines.append(
+        "_Visual image analysis is not enabled; only source-file validation "
+        "and text-derived themes are reported. No CTR, impression, or "
+        "conversion data is inferred._")
+    return "\n".join(lines)
 
 
 def _image_bytes(source):

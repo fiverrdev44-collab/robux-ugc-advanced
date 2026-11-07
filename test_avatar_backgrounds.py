@@ -53,6 +53,32 @@ class FakeCursor:
         pass
 
 
+class EarlyCursor:
+    """Routes background early-winner queries without touching a database."""
+
+    def __init__(self, candidates=None, history=None):
+        self.candidates = candidates or []
+        self.history = history or []
+        self.queries = []
+        self.result = []
+        self.connection = self
+
+    def execute(self, sql, params=None):
+        self.queries.append((str(sql), params))
+        if "WITH candidates AS" in sql:
+            self.result = self.candidates
+        elif "FROM item_history" in sql and "item_id = ANY" in sql:
+            self.result = self.history
+        else:
+            self.result = []
+
+    def fetchall(self):
+        return list(self.result)
+
+    def rollback(self):
+        pass
+
+
 def _sample_rows(n=25):
     rows = []
     for i in range(n):
@@ -111,6 +137,129 @@ def test_category_isolation_and_existing_families():
     assert ce.resolve_family_ids("backgrounds") == [92]
     assert ce.resolve_family_ids("emote") == [61]
     assert ce.resolve_family_ids("hair") == [41]
+
+
+def _early_candidates():
+    return [
+        (101, "Moonlit Shrine Avatar Background", "alice", 1000, 150,
+         5.0, NOW - timedelta(days=5), 92, 4),
+        (102, "Neon Rain City Background", "", 500, 0,
+         3.0, NOW - timedelta(days=3), 92, 3),
+        (103, "Cozy Library Background", "carol", 50, 25,
+         1.0, NOW - timedelta(days=1), 92, 1),
+    ]
+
+
+def _early_history():
+    return [
+        (101, 400, NOW - timedelta(days=5)),
+        (101, 600, NOW - timedelta(days=3)),
+        (101, 800, NOW - timedelta(days=1)),
+        (101, 1000, NOW),
+        (102, 100, NOW - timedelta(days=3)),
+        (102, 150, NOW - timedelta(days=2)),
+        (102, 250, NOW),
+        (103, 50, NOW - timedelta(hours=12)),
+    ]
+
+
+def test_background_early_winners_use_measured_growth_only():
+    cur = EarlyCursor(candidates=_early_candidates(), history=_early_history())
+    data = ab.find_background_early_winners(cur, days=7, now=NOW)
+    assert data["status"] == "ok"
+    assert data["candidate_window"] == 3
+    assert data["usable_history"] == 2
+    assert data["coverage_pct"] == 66.7
+    assert [item["id"] for item in data["ranked"]] == [101, 102]
+    assert all(item["asset_type_id"] == 92 for item in data["ranked"])
+
+    first = data["ranked"][0]
+    assert first["measured_favorites_gained"] == 600
+    assert first["measured_favs_per_day"] == 120.0
+    assert first["lifetime_favs_per_day"] == 200.0
+    assert first["measured_favs_per_day"] != first["lifetime_favs_per_day"]
+    assert first["observations"] == 4
+    assert first["observation_days"] == 5.0
+    assert first["acceleration_favs_per_day"] == 100.0
+    assert first["price"] == 150
+    assert first["creator"] == "alice"
+    assert first["url"] == "https://www.roblox.com/catalog/101"
+    assert first["observation_period"].startswith("20")
+    assert first["thumbnail_request_url"].startswith(
+        "https://thumbnails.roblox.com/v1/assets")
+    assert "assetIds=101" in first["thumbnail_request_url"]
+    assert first["visual_analysis"] == "not_analyzed"
+
+    second = data["ranked"][1]
+    assert second["measured_favorites_gained"] == 150
+    assert second["measured_favs_per_day"] == 50.0
+    assert second["price"] is None
+    assert second["creator"] == ""
+    assert any("price unavailable" in warning
+               for warning in second["missing_data"])
+
+    assert data["text_themes"]
+    assert {theme["theme"] for theme in data["text_themes"]} >= {
+        "moonlit", "shrine"}
+    assert data["visual_analysis"]["status"] == "not_analyzed"
+    assert data["insufficient_count"] == 1
+
+    item_queries = [sql for sql, _ in cur.queries if "FROM items" in sql]
+    assert len(item_queries) == 1
+    assert "asset_type_id = 92" in item_queries[0]
+    assert len(cur.queries) == 2
+
+    report = ab.format_background_early_winners(data, days=7)
+    assert "BACKGROUND EARLY WINNERS" in report
+    assert "R$150" in report
+    assert "creator unavailable" in report
+    assert "price unavailable" in report
+    assert "lifetime avg" in report
+    assert "Text-derived title themes (not visual analysis)" in report
+    assert "Visual image analysis is not enabled" in report
+    assert "No CTR" in report
+
+
+def test_background_early_winners_insufficient_history_is_honest():
+    candidate = _early_candidates()[2]
+    cur = EarlyCursor(
+        candidates=[candidate],
+        history=[(103, 50, NOW - timedelta(hours=12))],
+    )
+    data = ab.find_background_early_winners(cur, days=7, now=NOW)
+    assert data["status"] == "insufficient_history"
+    assert data["ranked"] == []
+    assert data["candidate_window"] == 1
+    assert data["usable_history"] == 0
+    assert data["coverage_pct"] == 0.0
+    assert data["insufficient_count"] == 1
+    report = ab.format_background_early_winners(data, days=7)
+    assert "No background had at least two valid favorite observations" in report
+    assert "No ranking is claimed" in report
+    assert len(cur.queries) == 1
+
+
+def test_background_early_winners_empty_category_has_no_fallback():
+    cur = EarlyCursor(candidates=[], history=[])
+    data = ab.find_background_early_winners(cur, days=7, now=NOW)
+    assert data["status"] == "no_recent_backgrounds"
+    assert data["ranked"] == []
+    assert len(cur.queries) == 1
+    assert "asset_type_id = 92" in cur.queries[0][0]
+    report = ab.format_background_early_winners(data, days=7)
+    assert "No Avatar Backgrounds were published" in report
+    assert "No ranking is claimed" in report
+
+
+def test_background_early_winners_price_and_creator_labels():
+    cur = EarlyCursor(candidates=_early_candidates(), history=_early_history())
+    data = ab.find_background_early_winners(cur, days=7, now=NOW)
+    report = ab.format_background_early_winners(data, days=7)
+    assert "R$150" in report
+    assert "by `alice`" in report
+    assert "price unavailable" in report
+    assert "creator unavailable" in report
+    assert "500 current favorites" in report
 
 
 def test_convergence_clause_and_xray_section():
