@@ -2,7 +2,8 @@
 
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Branch:** `audit/final-vanta73-certification`
-- **Implementation SHA:** `0e1510d2e160c5792592d74e681135c806e90233`
+- **Implementation/remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
+- **Final certification HEAD:** reported in the final delivery after artifact commit
 - **Host:** Windows, Python 3.12.10
 - **Integration DB:** disposable PostgreSQL 16.2
 - **Production:** not used for tests; no production writes, migrations, deployments, or API load tests.
@@ -26,6 +27,8 @@ python test_m6a_security.py
 python test_vanta_conversation.py
 python test_final_certification.py
 python test_final_command_contracts.py
+python test_safe_roblox.py
+python test_sales_source_validation.py
 python test_emote_title.py
 python test_emote_quality_set.py
 python test_emote_heldout_quality.py
@@ -48,6 +51,8 @@ python test_recommendation_lifecycle.py
 | M6-A security | PASS | 17 |
 | Final certification | PASS | 6 |
 | Final command contracts | PASS | 2 |
+| Safe Roblox API wrapper | PASS | 4 |
+| Sales source validation | PASS | 5 |
 | Convergence live | PASS | 49 |
 | Execution policy | PASS | 25 |
 | Command cancellation | PASS | 3 |
@@ -93,7 +98,7 @@ python test_phase2_pg_integration.py
 Result:
 
 ```text
-Ran 23 tests in 1.603s
+Ran 24 tests in 1.638s
 OK
 PG_TEST_RETURN_CODE=0
 ```
@@ -111,9 +116,9 @@ The matrix distinguishes contract evidence from callback and live evidence. A co
 ## CI results
 
 - Phase 2 PostgreSQL Integration: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42354230647`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42396243369`
 - Survival Intelligence Tests: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42354230564`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42396243329`
 
 ## Skipped / blocked
 

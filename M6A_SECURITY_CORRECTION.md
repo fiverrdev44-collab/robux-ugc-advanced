@@ -54,10 +54,11 @@
 
 `command_security.py` defines an explicit policy for all **90** registered commands:
 
-- **52 owner-only** commands: mutating, administrative, sensitive diagnostics, live-API diagnostics, and costly AI paths.
-- **37 public read-only** commands: safe lookups, status, history, and read-only sales summaries.
+- **55 owner-only** commands: mutating, administrative, sensitive diagnostics, live-API diagnostics, and costly AI paths.
+- **34 public read-only** commands: safe lookups, status, history, and read-only sales summaries.
 - **1 documented public rate-limited exception:** `!emote_title`.
 - **20 AI-cost** commands: 19 owner-authorized plus the public `!emote_title` exception; all are rate-limited.
+- Final A–Z remediation additionally reclassified `!verdict`, `!hitrate`, and `!creator_brain` as owner-only/mutating because they perform live API or database writes.
 - Unknown commands fail closed as owner-only.
 - Aliases are canonicalized before policy lookup, so aliases cannot bypass restrictions.
 - The policy marks each command's side effects: mutating, AI cost, external API, and sensitive.

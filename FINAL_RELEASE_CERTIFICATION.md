@@ -27,49 +27,62 @@ API-budget increases, or automatic merges were performed.
 - DB Check workflow no longer prints host/name/user.
 - Duplicate GitHub Actions job name `offline-regression` was split into
   `survival-tests`/`sales-integrity`; deploy now fails on dependency-install error.
-- 27 offline suites and 23 disposable-PostgreSQL tests pass.
-- CI Survival and PostgreSQL workflows pass on the implementation SHA.
+- 29 offline suites and 24 disposable-PostgreSQL tests pass.
+- CI Survival and PostgreSQL workflows pass on the remediation SHA.
+
+## Governance state (corrected)
+
+- `main` is **protected**.
+- Active ruleset **26727577** requires a pull request and the
+  `offline-regression` + `phase2-postgres` checks.
+- Deletion and non-fast-forward updates are prohibited.
+- No configured bypass actors.
+- **Zero required approving reviews** and no independently verified manual
+  deployment approval remain genuine governance gaps.
+- `sales-integrity` is the unique former `offline-regression` job name.
 
 ## Unresolved blockers
 
 ### P1
-1. **F-05:** Multiple direct Roblox API calls bypass the shared scheduler,
-   Retry-After handling, and circuit breaker.
-2. **F-06:** `main` is unprotected and pushes can auto-deploy without required
-   Survival/PostgreSQL checks. This requires repository settings, not code.
-3. **F-14 limitation:** AI quotas are process-local; multi-process deployment
-   needs shared quota storage.
+1. **F-05 (partial):** Read-only GET paths now use `safe_roblox` with shared
+   pacing, Retry-After, and circuit state. Authenticated POST/probe paths and
+   `roblox_batch_client` still use separate request paths; the circuit is not
+   universal.
+2. **F-14 limitation (P3):** One active bot process was verified. Quotas are
+   process-local and sufficient for the verified single-process deployment;
+   multi-process would require shared storage.
 
 ### P2
-4. **F-07:** `tracked_creators` still has a numeric-only primary key, allowing
+3. **F-07:** `tracked_creators` still has a numeric-only primary key, allowing
    User/Group collisions.
-5. **F-08:** Creator Brain cohorts/patterns still group by display name.
-6. **F-09:** A single discovery rate limit can abort the ORACLE creator pass.
-7. **F-10:** Mixed `TIMESTAMP`/`TIMESTAMPTZ` semantics remain.
-8. **F-11 verification:** Event-ID-aware dedupe is code-correct but could not be
-   executed because the disposable setup path hardcodes PostgreSQL SSL.
-9. **F-12:** M4 is dormant and does not receive an M3 bundle in the command path.
-10. **F-18:** Sales embeds are not authenticated against a trusted webhook or
-    sender. Design is documented; ingestion behavior is unchanged.
-11. **F-13:** Full per-command callback/live coverage is incomplete. Matrix:
-    2 PASS, 54 BLOCKED, 34 NOT TESTED for callback behavior; all 90 have
-    contract/auth PASS.
+4. **F-08:** Creator Brain cohorts/patterns still group by display name.
+5. **F-09:** A single discovery rate limit can abort the ORACLE creator pass.
+6. **F-10:** Mixed `TIMESTAMP`/`TIMESTAMPTZ` semantics remain.
+7. **F-12:** M4 is dormant and does not receive an M3 bundle in the command path.
+8. **F-18:** Sales source validation is implemented and tested in off/dry-run/
+   enforce modes but not wired into ingestion; enforcement requires approved
+   webhook/sender IDs and rollout.
+9. **F-13:** Full per-command callback/live coverage remains incomplete. Matrix:
+   2 PASS, 54 BLOCKED, 34 NOT TESTED for callback behavior; all 90 have
+   contract/auth PASS.
+
+F-11 is now fixed and verified: the disposable PostgreSQL test proves distinct
+source event IDs survive and duplicate event IDs collapse.
 
 ## Deployment requirements before a future GO
 
-1. Fix F-05 by routing every Roblox request through the shared scheduler/client
-   with one circuit and Retry-After policy.
-2. Protect `main`, require PR review and Survival/PostgreSQL checks, and require
-   manual production approval.
+1. Finish F-05 by routing all remaining authenticated POST/probe and batch-client
+   paths through shared pacing/circuit controls.
+2. Add at least one required approving review and a manual production deployment
+   approval; do not modify rulesets without approval.
 3. Fix composite creator identity and Creator Brain/ORACLE grouping.
 4. Implement ORACLE per-creator rate-limit recovery within the existing budget.
 5. Standardize timestamp semantics or prove timezone-safe behavior.
-6. Complete an SSL-capable disposable PostgreSQL verification of sales dedupe.
-7. Complete per-command callback tests for public commands and controlled tests
+6. Complete per-command callback tests for public commands and controlled tests
    for owner-only commands.
-8. Roll out sales-source validation in dry-run, then enforce, with a separate
-   reviewed environment/configuration change.
-9. Keep `PHASE2_M4_ENABLED=0` until M4 M3-evidence integration is completed.
+7. Approve trusted webhook/sender identities and roll out sales-source validation
+   in dry-run, then enforce.
+8. Keep `PHASE2_M4_ENABLED=0` until M4 M3-evidence integration is completed.
 
 ## Rollback procedure for the certification branch
 
