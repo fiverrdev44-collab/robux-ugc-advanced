@@ -385,6 +385,39 @@ CATEGORY_FAMILIES = {
         },
     },
 
+    "backgrounds": {
+        "label": "Avatar Background",
+        "asset_type_ids": [92],
+        "aliases": ["background", "backgrounds", "avatarbackground",
+                    "avatar_background", "avatar backgrounds"],
+        "type_words": ["background", "scene", "landscape", "environment"],
+        "shape": "scene",
+        "shape_rule": (
+            "Describe a 2D environment or backdrop, not a wearable accessory "
+            "or a character animation. Specify scene, lighting, depth, mood "
+            "and an unobstructed avatar silhouette. Never claim proven CTR."
+        ),
+        "buckets": [
+            {"name": "ATMOSPHERIC", "vibe": "cozy, misty, dreamy, cinematic"},
+            {"name": "FANTASY", "vibe": "celestial, enchanted, palace, forest"},
+            {"name": "MODERN", "vibe": "neon, city, cyber, minimal"},
+        ],
+        "title_archetypes": [
+            'SCENE + BACKGROUND: "Moonlit Shrine Background"',
+            'THEME + SCENE: "Neon Rain City Background"',
+        ],
+        "filler_block": {"background", "avatar", "roblox", "ugc",
+                         "viral", "trending", "tiktok", "youtube"},
+        "concept_vocab": {
+            "sky", "moon", "stars", "galaxy", "celestial", "cloud",
+            "forest", "mountain", "lake", "sunset", "nature", "garden",
+            "cozy", "library", "room", "bedroom", "palace", "castle",
+            "magic", "enchanted", "fantasy", "neon", "city", "cyber",
+            "rain", "night", "gothic", "void", "abstract", "gradient",
+            "anime", "kawaii", "pastel", "minimal", "ocean", "beach",
+        },
+    },
+
     "generic": {
         "label": "UGC Item",
         "asset_type_ids": [],
@@ -421,6 +454,7 @@ DEFAULT_FAMILY = "emote"
 # both directions so lookups never silently fail.
 
 _CONVERGENCE_TO_CATEGORY = {
+    "backgrounds": "backgrounds",
     "emotes":   "emote",
     "hair":     "hair",
     "face":     "face",
@@ -436,6 +470,7 @@ _CONVERGENCE_TO_CATEGORY = {
 }
 
 _CATEGORY_TO_CONVERGENCE = {
+    "backgrounds": "backgrounds",
     "emote":     "emotes",
     "hair":      "hair",
     "headwear":  "headwear",
