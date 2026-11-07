@@ -1,9 +1,9 @@
-# VANTA 73 — Final Test Results
+# VANTA 73 â€” Final Test Results
 
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Branch:** `audit/final-vanta73-certification`
 - **Implementation/remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final tested code HEAD:** `bf1626dcd661e98fb745f833996f3da1c478352e`
+- **Final tested code HEAD:** `e8750da903906f29d55dbc2dc311197c91da9f85`
 - **Host:** Windows, Python 3.12.10
 - **Integration DB:** disposable PostgreSQL 16.2
 - **Production:** not used for tests; no production writes, migrations, deployments, or API load tests.
@@ -73,17 +73,17 @@ Other suites are script-based and print their own PASS summaries. No failures we
 
 ## New correction-specific tests
 
-- `test_final_certification.py` — 6/6:
+- `test_final_certification.py` â€” 6/6:
   - Runtime 90-command inventory equals the authorization policy.
   - `verdict`, `hitrate`, `creator_brain` are owner-only/mutating.
   - Predictor output is heuristic, not a success probability.
   - ROI output no longer fabricates sales or revenue.
   - Sales dedupe is event-ID aware.
   - GitHub Actions job names are unique; scheduler is not started on import.
-- `test_final_command_contracts.py` — 2/2:
+- `test_final_command_contracts.py` â€” 2/2:
   - All 90 commands have registration, dispatch, alias, and authorization contracts.
   - Unknown commands fail closed.
-- `test_m6a_security.py` — 17/17:
+- `test_m6a_security.py` â€” 17/17:
   - Central authorization, secret redaction, AI quotas, planner budget,
     `emote_title` public rate-limited exception, real `before_invoke`, and
     conversation-router denial.
@@ -120,9 +120,9 @@ The matrix distinguishes contract evidence from callback and live evidence. Publ
 ## CI results
 
 - Phase 2 PostgreSQL Integration: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923774`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066436`
 - Survival Intelligence Tests: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923742`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066454`
 
 ## Skipped / blocked
 
@@ -137,3 +137,4 @@ The matrix distinguishes contract evidence from callback and live evidence. Publ
 - Synthetic fixtures and disposable PostgreSQL do not prove production behavior.
 - The temporary PostgreSQL instance was PostgreSQL 16.2, not necessarily the production server version.
 - The final CI runs cover the branch code; they are not a production deployment test.
+

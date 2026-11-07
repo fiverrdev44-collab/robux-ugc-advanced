@@ -1,9 +1,9 @@
-# VANTA 73 — Final Release Certification
+# VANTA 73 â€” Final Release Certification
 
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Certification branch:** `audit/final-vanta73-certification`
 - **Remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final tested code HEAD:** `bf1626dcd661e98fb745f833996f3da1c478352e`
+- **Final tested code HEAD:** `e8750da903906f29d55dbc2dc311197c91da9f85`
 - **Verdict:** **NO-GO for production release certification**
 
 Feature freeze was respected. No new commands, AI engines, marketplace-learning
@@ -35,8 +35,8 @@ API-budget increases, or automatic merges were performed.
   `survival-tests`/`sales-integrity`; deploy now fails on dependency-install error.
 - 29 offline suites and 24 disposable-PostgreSQL tests pass.
 - CI Survival and PostgreSQL workflows pass on the remediation SHA.
-  - Survival: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923742`
-  - PostgreSQL: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923774`
+  - Survival: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066454`
+  - PostgreSQL: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066436`
 
 ## Governance state (corrected)
 
@@ -142,3 +142,4 @@ and restricted callback behaviors. Unresolved P1 API/release controls, the
 `!selftest` composite-callback blocker, and unperformed production smoke tests
 prevent production certification. No claim of live service health or sales
 performance is made.
+
