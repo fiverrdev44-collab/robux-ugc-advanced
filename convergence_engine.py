@@ -18,6 +18,7 @@ from bot_core import get_db, get_research_db
 
 
 FAMILIES = {
+    "backgrounds": [92],
     "emotes":    [61],
     "hair":      [41],
     "headwear":  [8],
@@ -158,9 +159,9 @@ def _family_clause(family):
     except Exception:
         pass
 
-    # Unknown — no filter (better than returning nothing)
-    print(f"[convergence] unknown family '{family}' — no filter", flush=True)
-    return "", []
+    # Unknown categories must fail closed rather than mixing all asset types.
+    print(f"[convergence] unknown family '{family}' — empty result", flush=True)
+    return " and 1=0", []
 
 
 def _kw_pattern(keyword):
