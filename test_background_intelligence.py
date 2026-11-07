@@ -18,13 +18,13 @@ class FakeCur:
     def execute(self, query, params):
         self.sql.append((query, params))
         assert "92" in str(params) or query.strip().startswith("SELECT item_id"), query
-        if "COUNT(*)" in query:
+        if "FROM item_history" in query:
+            self._result = [(iid,) + tuple(values) for iid, values in self.obs.items()]
+        elif "COUNT(*)" in query:
             if "created_at" in query:
                 self._result = [(len(self.items),)]
             else:
                 self._result = [(len(self.items),)]
-        elif "FROM item_history" in query:
-            self._result = [(iid,) + tuple(values) for iid, values in self.obs.items()]
         else:
             self._result = [
                 (x["id"], x["name"], x["created_at"], x["favorite_count"],
