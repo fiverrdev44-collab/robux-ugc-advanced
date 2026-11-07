@@ -20,6 +20,7 @@ import avatar_backgrounds as ab  # noqa: E402
 import category_configs as cc  # noqa: E402
 import convergence_engine as ce  # noqa: E402
 import original_concept_engine as oce  # noqa: E402
+import market_xray  # noqa: E402
 import product_understanding as pu  # noqa: E402
 import scanner  # noqa: E402
 import ugc_playbook  # noqa: E402
@@ -110,6 +111,26 @@ def test_category_isolation_and_existing_families():
     assert ce.resolve_family_ids("backgrounds") == [92]
     assert ce.resolve_family_ids("emote") == [61]
     assert ce.resolve_family_ids("hair") == [41]
+
+
+def test_convergence_clause_and_xray_section():
+    clause, params = ce._family_clause("backgrounds")
+    assert "asset_type_id in (%s)" in clause
+    assert params == [92]
+    clause, params = ce._family_clause("background")
+    assert params == [92]
+    clause, params = ce._family_clause("avatar backgrounds")
+    assert params == [92]
+
+    cur = FakeCursor(items=_sample_rows(25), history=_history_rows())
+    xray = {
+        "health": {},
+        "categories": [],
+        "backgrounds": ab.analyze_market(cur, now=NOW),
+    }
+    report = market_xray.format_xray(xray)
+    assert "Avatar Backgrounds" in report
+    assert "Favorites are not sales" in report
 
 
 def test_catalog_item_filter_rejects_other_types():
