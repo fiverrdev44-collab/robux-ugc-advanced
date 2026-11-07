@@ -473,6 +473,74 @@ def test_planner_budget_is_global_per_user_and_counts_failures():
     print("PASS planner budget is global per user and counts failed attempts")
 
 
+def test_guide_and_experiments_write_scope_policy():
+    guide = cs.policy_for("guide")
+    assert guide["level"] == "public"
+    assert guide["user_scoped_write"] is True
+    assert guide["mutating"] is True
+
+    experiments = cs.policy_for("experiments")
+    assert experiments["level"] == "public"
+    assert experiments["owner_gated_mutation"] is True
+    assert experiments["mutating"] is True
+
+    source = open("commands_guide.py", encoding="utf-8").read()
+    assert "discord_id = ctx.author.id" in source
+    assert "get_or_create_profile(cur, discord_id" in source
+    assert "save_consultation(cur, discord_id" in source
+    assert "add_to_watchlist(cur, discord_id" in source
+    print("PASS guide is user-scoped and experiments mutations are owner-gated")
+
+
+def test_experiments_mutations_only_for_owner():
+    import test_public_command_callbacks as pub
+    import experiments
+    import matched_experiments
+
+    calls = []
+
+    def mark(name):
+        def fn(cur, *args, **kwargs):
+            calls.append(name)
+            return 1
+        return fn
+
+    patches = [
+        mock.patch.object(experiments, "auto_apply_changes", mark("auto")),
+        mock.patch.object(experiments, "measure_due", mark("measure")),
+        mock.patch.object(experiments, "summary", return_value={}),
+        mock.patch.object(experiments, "format_summary",
+                          return_value="EXPERIMENTS"),
+        mock.patch.object(matched_experiments, "evaluate_due",
+                          mark("evaluate")),
+        mock.patch.object(matched_experiments, "recent_lines",
+                          return_value=""),
+    ]
+    for patch in patches:
+        patch.start()
+    try:
+        with pub._db(pub._callback("experiments"), pub._rows_handler):
+            nonowner = pub.FakeCtx("experiments")
+            nonowner.author.id = NON_OWNER
+            pub._run("experiments", nonowner)
+        assert calls == []
+
+        calls.clear()
+        with pub._db(pub._callback("experiments"), pub._rows_handler), \
+                _owner_context():
+            owner = pub.FakeCtx("experiments")
+            owner.author.id = OWNER
+            pub._run("experiments", owner)
+        assert set(calls) == {"auto", "measure", "evaluate"}
+    finally:
+        for patch in patches:
+            try:
+                patch.stop()
+            except Exception:
+                pass
+    print("PASS experiments callbacks mutate only for authorized owners")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_")]

@@ -77,6 +77,11 @@ class FakeTyping:
     async def __aexit__(self, *args):
         return False
 
+    def __await__(self):
+        async def _done():
+            return self
+        return _done().__await__()
+
 
 class FakeCtx:
     def __init__(self, command_name=""):
@@ -244,6 +249,24 @@ def _rows_handler(sql, params):
         return {"all": [("dance emote", "cute dance"),
                         ("dance move", "fun dance"),
                         ("dance wave", "wave dance")]}
+    if "current_setting('TimeZone')" in sql:
+        return {"one": ("UTC", NOW, NOW.date())}
+    if "min(sale_date)" in sql:
+        return {"one": (0, None, None)}
+    if "GROUP BY sale_date" in sql:
+        return {"all": []}
+    if "select name, favorite_count, price, asset_type_id" in sql:
+        return {"one": None}
+    if "COUNT(DISTINCT item_id)" in sql:
+        return {"one": (0, 0, None, None, 0)}
+    if "HAVING COUNT(*) >= 2" in sql:
+        return {"one": (0,)}
+    if "MAX(favorite_count) - MIN(favorite_count) > 5" in sql:
+        return {"one": (0,)}
+    if "COALESCE(SUM(amount_robux" in sql:
+        return {"one": (0, 0)}
+    if "SELECT LOWER(name), COALESCE" in sql:
+        return {"all": [("a", "cute"), ("b", "cute"), ("c", "cute")]}
     if "SELECT LOWER(name)" in sql:
         return {"all": [("a",), ("b",), ("c",)]}
     if "FROM items" in sql:

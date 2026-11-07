@@ -142,12 +142,12 @@
       "id": "F-13",
       "severity": "P2",
       "area": "testing/coverage",
-      "status": "partial_public_complete",
+      "status": "fixed_except_selftest",
       "title": "Command behavior coverage remains incomplete",
       "location": "FINAL_COMMAND_MATRIX.csv",
-      "evidence": "test_public_command_callbacks.py executes actual callbacks for all 34 previously NOT TESTED public commands with isolated Discord contexts, mocked DB/API/AI, fixtures, and output assertions; 25 test functions / 34 commands pass. FINAL_COMMAND_MATRIX.csv now reports 36 callback PASS, 54 owner-only/mutating/AI/API BLOCKED, 0 NOT TESTED.",
-      "correction": "All 34 public NOT TESTED callbacks now have behavioral evidence. Owner-only/mutating/AI/API callbacks remain deliberately blocked from offline execution.",
-      "remaining_risk": "The 54 owner-only/mutating/AI/API callbacks still lack callback-level behavioral evidence; live smoke is not performed."
+      "evidence": "test_public_command_callbacks.py executes 34/34 previously untested public callbacks. test_restricted_command_callbacks.py executes 53/54 restricted callbacks with owner identities, mocked DB/API/AI/filesystem/process operations, and output assertions; only selftest is blocked by its composite real-subcommand runtime exceeding the isolated callback budget. Matrix: 89 callback PASS, 1 BLOCKED, 0 NOT TESTED.",
+      "correction": "87 public/restricted callbacks have direct behavioral evidence; selftest remains a documented composite-test blocker.",
+      "remaining_risk": "selftest and live production smoke remain unverified."
     },
     {
       "id": "F-14",

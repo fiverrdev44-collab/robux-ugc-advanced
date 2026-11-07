@@ -50,6 +50,8 @@ OWNER_ONLY = {
 }
 
 PUBLIC_RATE_LIMITED = {"emote_title"}
+USER_SCOPED_WRITE = {"guide"}
+OWNER_GATED_MUTATION = {"experiments"}
 
 AI_COST = {
     "ai_debug", "analyze_image", "autopsy", "brainstorm", "chain", "concept",
@@ -136,16 +138,22 @@ def policy_for(name):
             "external_api": False,
             "sensitive": True,
             "public_exception": False,
+            "user_scoped_write": False,
+            "owner_gated_mutation": False,
             "known": False,
         }
     return {
         "command": canonical,
         "level": "owner" if canonical in OWNER_ONLY else "public",
-        "mutating": canonical in MUTATING,
+        "mutating": (canonical in MUTATING
+                     or canonical in USER_SCOPED_WRITE
+                     or canonical in OWNER_GATED_MUTATION),
         "ai_cost": canonical in AI_COST,
         "external_api": canonical in EXTERNAL_API,
         "sensitive": canonical in SENSITIVE,
         "public_exception": canonical in PUBLIC_RATE_LIMITED,
+        "user_scoped_write": canonical in USER_SCOPED_WRITE,
+        "owner_gated_mutation": canonical in OWNER_GATED_MUTATION,
         "known": True,
     }
 

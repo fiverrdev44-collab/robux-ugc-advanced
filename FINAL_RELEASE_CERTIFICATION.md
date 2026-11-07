@@ -16,6 +16,9 @@ API-budget increases, or automatic merges were performed.
 - Every command has a registration, alias, dispatch, and authorization contract.
 - All 34 previously untested public commands now execute through real registered
   callbacks with isolated Discord/DB/API/AI fixtures and output assertions.
+- 53 of 54 restricted callbacks execute through real registered callbacks with
+  owner identities, mocked DB/API/AI/filesystem/process operations, and output
+  assertions. Only `!selftest` remains BLOCKED.
 - Central authorization denies non-owners for owner-only commands before callbacks.
 - Aliases cannot bypass authorization; unknown commands fail closed.
 - `!ai_debug` no longer exposes key prefixes, lengths, or key material.
@@ -69,11 +72,11 @@ API-budget increases, or automatic merges were performed.
    enforce modes, and invalid modes now raise a hard configuration error. It is
    not wired into ingestion; enforcement requires approved webhook/sender IDs
    and rollout.
-9. **F-13:** All 34 previously NOT TESTED public commands now have genuine
-   callback PASS evidence. Matrix: 36 PASS, 54 BLOCKED, 0 NOT TESTED for
-   callback behavior; all 90 have contract/auth PASS. The 54 owner-only/
-   mutating/AI/API callbacks remain deliberately blocked from offline execution,
-   and live smoke is not performed.
+9. **F-13:** All 34 previously NOT TESTED public commands and 53/54 restricted
+   commands have genuine callback PASS evidence. Matrix: 89 PASS, 1 BLOCKED,
+   0 NOT TESTED; all 90 have contract/auth PASS. `!selftest` remains BLOCKED
+   because its composite real-subcommand runtime exceeds the isolated callback
+   budget. Live smoke is not performed.
 
 F-11 is now fixed and verified: the disposable PostgreSQL test proves distinct
 source event IDs survive and duplicate event IDs collapse.
@@ -87,8 +90,8 @@ source event IDs survive and duplicate event IDs collapse.
 3. Fix composite creator identity and Creator Brain/ORACLE grouping.
 4. Implement ORACLE per-creator rate-limit recovery within the existing budget.
 5. Standardize timestamp semantics or prove timezone-safe behavior.
-6. Complete controlled callback tests for the 54 owner-only/mutating/AI/API
-   commands and perform production-only smoke tests.
+6. Complete a staged `!selftest` harness and perform production-only smoke
+   tests.
 7. Approve trusted webhook/sender identities and roll out sales-source validation
    in dry-run, then enforce.
 8. Keep `PHASE2_M4_ENABLED=0` until M4 M3-evidence integration is completed.
@@ -134,7 +137,8 @@ Until the P1 blockers are closed:
 ## Final certification verdict
 
 **NO-GO.** The audit produced credible, repeatable evidence for the repaired
-defects, all command authorization contracts, and all 34 previously untested
-public callback behaviors. Unresolved P1 API/release controls, 54 owner-only
-callback gaps, and unperformed production smoke tests prevent production
-certification. No claim of live service health or sales performance is made.
+defects, all command authorization contracts, and 87 previously untested public
+and restricted callback behaviors. Unresolved P1 API/release controls, the
+`!selftest` composite-callback blocker, and unperformed production smoke tests
+prevent production certification. No claim of live service health or sales
+performance is made.
