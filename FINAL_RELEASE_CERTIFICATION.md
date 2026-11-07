@@ -3,7 +3,7 @@
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Certification branch:** `audit/final-vanta73-certification`
 - **Remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final verified branch HEAD:** `de327c23867888b98aef6e2f061fc5dc2944ffe5`
+- **Final code commit under certification:** `179cf329d848e4089899ef4c683e70a2a4c878ff`
 - **Verdict:** **NO-GO for production release certification**
 
 Feature freeze was respected. No new commands, AI engines, marketplace-learning
