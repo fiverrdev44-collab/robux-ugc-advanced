@@ -1,0 +1,91 @@
+command,aliases,module,level,ai_cost,external_api,mutating,public_exception,contract_result,callback_result,live_smoke,overall,evidence
+ai_debug,,commands_ai,owner,true,false,false,false,PASS,PASS,NOT TESTED,PASS,"test_m6a_security.py (real callback, mocked providers)"
+ai_status,,commands_ai,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+analyze,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+analyze_image,,commands_ai,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+applied,apply_rec,commands_experiments,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+autopsy,,commands_intel,owner,true,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+bot_update,selfupdate;update_bot,commands_supercomputer,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+brainstorm,,commands_ai,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+chain,,commands_advanced,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+classic,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+concept,,commands_concept,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+converge,,commands_advanced,public,false,true,false,false,PASS,PASS,NOT TESTED,PASS,test_command_cancellation.py (real callback)
+converge_debug,,commands_advanced,owner,false,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+cookie_check,,commands_sales,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+creative,,commands_advanced,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+creative_raw,,commands_advanced,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+creator_brain,cohort;meta,commands_intel,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+data_audit,integrity,commands_market,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+dbtest,,commands_market,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+desc_analyze,,commands_market,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+desc_forge,,commands_advanced,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+early,,commands_xray,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+emote,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+emote_status,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+emote_title,,commands_emote,public,true,true,false,true,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+enrich_run,run_enricher,commands_supercomputer,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+experiments,labs;results,commands_experiments,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+failures,,commands_xray,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+gap,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+golden_hour,golden,commands_supercomputer,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+group_metrics,gmetrics,commands_sales,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+guide,,commands_guide,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+help,,discord.ext.commands.help,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+history,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+hitrate,hit_rate,commands_supercomputer,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+ignored,skip_rec,commands_experiments,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+launch,log_launch,commands_supercomputer,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+launch_sync,sync_launches,commands_supercomputer,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+ledger_sync,sync_ledger,commands_supercomputer,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+link,,commands_astra,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+logs,log,commands_supercomputer,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+meta_sniper,sniper,commands_supercomputer,owner,true,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+momentum,,commands_intel,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+momentum_debug,,commands_intel,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+nextwave,,commands_intel,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+opportunities,,commands_intel,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+opportunity,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+oracle,,commands_intel,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+outcome,,commands_astra,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+path,roadmap,commands_supercomputer,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+patterns,,commands_xray,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+playbook,tactics,commands_supercomputer,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+predict,,commands_intel,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+rename,,commands_astra,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+rescue,,commands_ai,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+revive,revive_item,commands_intel,owner,true,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+revsim,simulator,commands_supercomputer,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+rising_gaps,,commands_advanced,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+sales_backfill,,commands_sales,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+sales_debug,,commands_sales,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+sales_for,,commands_sales,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+sales_keywords,sales_words,commands_supercomputer,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+sales_post_now,,commands_sales,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+sales_probe,,commands_sales,owner,false,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+sales_report,,commands_sales,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+sales_scan,,commands_sales,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+scan_run,run_scanner,commands_supercomputer,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+scan_status,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+selftest,certify,commands_supercomputer,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+selftest_db,healthcheck_db,commands_supercomputer,owner,false,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+snapshot_now,,commands_advanced,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+start,,menu,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+stealth,stealth_desc,commands_supercomputer,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+suggest_probe,probe_suggest,commands_supercomputer,owner,false,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+suggest_run,scrape_suggest,commands_supercomputer,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+tags,,commands_advanced,owner,true,false,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+track,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+train,retrain,commands_supercomputer,owner,false,false,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+trends,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+vacuum,snipe,commands_supercomputer,owner,false,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+velocity,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+verdict,,commands_intel,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+verified_scan,scan_verified,commands_intel,owner,false,true,false,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+version,about;ver,commands_supercomputer,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+visibility,,commands_visibility,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+visibility_run,,commands_visibility,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+visibility_seed,,commands_visibility,owner,false,true,true,false,PASS,BLOCKED,NOT TESTED,BLOCKED,"Registration/alias/auth PASS; callback not executed because it is owner-only and mutating, AI-cost, or external-API."
+watchlist,,commands_market,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+whales,whale,commands_supercomputer,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.
+xray,,commands_xray,public,false,false,false,false,PASS,NOT TESTED,NOT TESTED,NOT TESTED,Registration/alias/auth PASS; no controlled callback fixture executed.

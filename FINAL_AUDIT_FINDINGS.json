@@ -1,0 +1,228 @@
+{
+  "baseline_sha": "d6976d3e404303f6ddccb8f64785c84112c2ffc6",
+  "certification_branch": "audit/final-vanta73-certification",
+  "implementation_sha": "0e1510d2e160c5792592d74e681135c806e90233",
+  "verdict": "NO-GO",
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "P1",
+      "area": "security/authorization",
+      "status": "fixed_verified",
+      "title": "Central command authorization and AI-cost controls",
+      "location": "command_security.py; discord_ugc_bot.py:44-54; vanta_conversation.py:800-815",
+      "evidence": "All 90 commands have explicit policy entries. Real before_invoke and conversation-router tests deny non-owners before callbacks. M6-A suite: 17/17.",
+      "correction": "Central policy + aliases + owner checks + AI quotas; unknown commands fail closed.",
+      "remaining_risk": "Owner credentials remain powerful; public read-only commands are intentionally allowed."
+    },
+    {
+      "id": "F-02",
+      "severity": "P1",
+      "area": "security/secrets",
+      "status": "fixed_verified",
+      "title": "ai_debug secret exposure",
+      "location": "commands_ai.py:1701-1755; command_security.redact_secrets",
+      "evidence": "ai_debug reports configured/not configured only; mock-key tests prove keys and key lengths never appear in output or exception text.",
+      "correction": "Owner-only diagnostics, redaction, no prefixes/lengths.",
+      "remaining_risk": "None observed in tested paths."
+    },
+    {
+      "id": "F-03",
+      "severity": "P1",
+      "area": "ai/evidence-integrity",
+      "status": "fixed_verified",
+      "title": "Heuristic score presented as success probability",
+      "location": "predictor.py:1-120; commands_intel.py:172; opportunity_feed.py; menu.py",
+      "evidence": "Test_final_certification.py asserts heuristic-score language and removes attack/launch directives. No success-probability wording remains in predictor output.",
+      "correction": "Renamed user-facing output to heuristic opportunity score; kept backward-compatible data key but labels it non-probability.",
+      "remaining_risk": "Historical heuristic scoring factors remain uncalibrated; now labeled."
+    },
+    {
+      "id": "F-04",
+      "severity": "P1",
+      "area": "market/evidence-integrity",
+      "status": "fixed_verified",
+      "title": "Expected sales/revenue fabricated from favorites",
+      "location": "bot_core.py:550-575; commands_guide.py:505-530",
+      "evidence": "_compute_roi now returns expected_sales=None, expected_revenue=None, sales_evidence='unavailable'. Guide no longer displays expected sales/revenue. Regression test passes.",
+      "correction": "Removed fabricated financial estimates; retained heuristic favorite expectation only.",
+      "remaining_risk": "Heuristic expected favorites remains a non-sales engagement signal."
+    },
+    {
+      "id": "F-05",
+      "severity": "P1",
+      "area": "roblox-api",
+      "status": "open",
+      "title": "Direct Roblox API calls bypass shared scheduler/circuit",
+      "location": "commands_sales.py:262,336,349,359,448,479; commands_supercomputer.py:1107; creative_pivot.py:210; desc_forge.py:273; recovery_brain.py:373,413,427,442,503,532; suggest.py:86; tag_generator.py:285,289,297; roblox_batch_client.py:110-162",
+      "evidence": "Static call-site audit; no shared circuit/pacing on these paths. Production 429 history previously observed.",
+      "correction": "Not implemented in this pass: route all calls through one scheduler/client with shared circuit and Retry-After.",
+      "remaining_risk": "Rate-limit contention; a circuit in one path does not protect others."
+    },
+    {
+      "id": "F-06",
+      "severity": "P1",
+      "area": "release/governance",
+      "status": "open",
+      "title": "main unprotected and auto-deploy without required CI",
+      "location": "GitHub branch settings; .github/workflows/deploy.yml:1-34",
+      "evidence": "GET branches/main reports protected=false; frozen main SHA had only an auto-deploy run, no Survival/PostgreSQL checks. Deploy install failure suppression was fixed, but branch protection remains external to the repo.",
+      "correction": "Requires repository settings: protect main, require PR + Survival/PostgreSQL checks, require deployment approval.",
+      "remaining_risk": "Direct push can deploy untested code."
+    },
+    {
+      "id": "F-07",
+      "severity": "P2",
+      "area": "database/identity",
+      "status": "open",
+      "title": "tracked_creators keyed only by numeric creator_id",
+      "location": "database.py:465-473; creator_tracker.py:217-220; oracle_worker.py:270",
+      "evidence": "PRIMARY KEY (creator_id), creator_type default 'User'; ON CONFLICT (creator_id) DO NOTHING.",
+      "correction": "Requires reviewed composite-identity migration; not executed.",
+      "remaining_risk": "User/Group numeric-ID collisions can misattribute types."
+    },
+    {
+      "id": "F-08",
+      "severity": "P2",
+      "area": "oracle/identity",
+      "status": "open",
+      "title": "Creator Brain cohorts/patterns use display names",
+      "location": "creator_brain.py:40-45,64-70,130-135",
+      "evidence": "Groups by lower(creator_name), not (creator_type, creator_id).",
+      "correction": "Requires stable-identity cohort migration and backfill plan; not executed.",
+      "remaining_risk": "Name collisions merge creators; renames split them."
+    },
+    {
+      "id": "F-09",
+      "severity": "P2",
+      "area": "oracle/reliability",
+      "status": "open",
+      "title": "One discovery rate limit aborts the ORACLE creator pass",
+      "location": "oracle_worker.py:301-307",
+      "evidence": "RateLimited records discovery_rate_limited and breaks the loop. Prior production evidence showed creators_scanned=0, observations_inserted=0.",
+      "correction": "Requires per-creator isolation/resumable discovery within existing budget; not executed.",
+      "remaining_risk": "Zero-observation scans under persistent rate limits."
+    },
+    {
+      "id": "F-10",
+      "severity": "P2",
+      "area": "database/time",
+      "status": "open",
+      "title": "Mixed timestamp/timezone semantics",
+      "location": "database.py:71-95; opportunity_validation.py window queries",
+      "evidence": "items.created_at/item_history.snapshot_at are TIMESTAMP without timezone; queries compare with NOW().",
+      "correction": "Requires timestamp-standardization migration/plan; not executed.",
+      "remaining_risk": "Session timezone can shift window membership/freshness."
+    },
+    {
+      "id": "F-11",
+      "severity": "P2",
+      "area": "database/historical-integrity",
+      "status": "fixed_code_verification_blocked",
+      "title": "Startup sales dedupe could delete distinct transactions",
+      "location": "database.py:273-280",
+      "evidence": "Dedupe now requires identical source_event_id. Static regression test passes. Direct setup_database execution is blocked by hardcoded PostgreSQL SSL in the disposable environment.",
+      "correction": "Dedupe is event-ID aware; migration flag remains off by default.",
+      "remaining_risk": "Needs an SSL-capable disposable PostgreSQL verification before release."
+    },
+    {
+      "id": "F-12",
+      "severity": "P2",
+      "area": "market/m4",
+      "status": "open",
+      "title": "M4 command does not receive an M3 bundle",
+      "location": "commands_concept.py; original_concept_engine.py:render_concept_request",
+      "evidence": "m3_bundle defaults to None; EXPERIMENT CANDIDATE requires an M3 VALIDATE verdict. M4 remains disabled.",
+      "correction": "Requires stored M3 evidence bridge or removal of the unreachable status claim; not activated.",
+      "remaining_risk": "Dormant M4 cannot consume M3 evidence in normal use."
+    },
+    {
+      "id": "F-13",
+      "severity": "P2",
+      "area": "testing/coverage",
+      "status": "partial",
+      "title": "Command behavior coverage remains incomplete",
+      "location": "FINAL_COMMAND_MATRIX.csv",
+      "evidence": "All 90 commands pass registration/alias/authorization contracts. Callback execution is PASS for 2, BLOCKED for 54 owner-only/mutating/costly/API commands, and NOT TESTED for 34 public commands.",
+      "correction": "Added all-command contract tests and final matrix; full per-command callback fixtures remain outstanding.",
+      "remaining_risk": "Public read-only command behavior is not certified end-to-end."
+    },
+    {
+      "id": "F-14",
+      "severity": "P1",
+      "area": "ai/cost-control",
+      "status": "fixed_verified_with_limitation",
+      "title": "AI cost controls and planner budget",
+      "location": "command_security.py AIUsageLimiter; vanta_conversation.py plan_message",
+      "evidence": "Owner AI limits, public emote_title exception, and process-global planner limits are tested. Provider failures/invalid responses are charged once. Planner limits are process-local.",
+      "correction": "Bounded per-user/global command and planner limits.",
+      "remaining_risk": "Multi-process deployments need shared quota storage."
+    },
+    {
+      "id": "F-15",
+      "severity": "P3",
+      "area": "dependencies/CI",
+      "status": "partial",
+      "title": "CI/dependency/deploy hardening",
+      "location": ".github/workflows/sales-integrity-tests.yml; deploy.yml; requirements.txt",
+      "evidence": "Duplicate offline-regression job name fixed to sales-integrity; deploy now fails on pip install error. Python dependencies and appleboy/ssh-action remain unpinned.",
+      "correction": "Pin dependencies/actions in a reviewed rollout.",
+      "remaining_risk": "Non-reproducible builds and supply-chain drift."
+    },
+    {
+      "id": "F-16",
+      "severity": "P3",
+      "area": "reliability/operability",
+      "status": "fixed_verified",
+      "title": "Import starts scheduler",
+      "location": "discord_ugc_bot.py:205-210, main guard",
+      "evidence": "Scheduler startup moved under __main__. test_final_certification asserts importing the bot does not import scheduler.",
+      "correction": "Import is side-effect free for scheduler startup.",
+      "remaining_risk": "Service restart still starts one scheduler as intended."
+    },
+    {
+      "id": "F-17",
+      "severity": "P3",
+      "area": "security/diagnostics",
+      "status": "fixed_verified",
+      "title": "DB Check workflow prints host/name/user",
+      "location": ".github/workflows/db_check.yml",
+      "evidence": "Workflow now prints only configured/missing target plus counts.",
+      "correction": "Redacted environment metadata.",
+      "remaining_risk": "Exception text may still include a host string; no credentials are printed."
+    },
+    {
+      "id": "F-18",
+      "severity": "P2",
+      "area": "sales/source-authenticity",
+      "status": "open_documented",
+      "title": "Sales embeds are not authenticated against a trusted webhook/sender",
+      "location": "discord_ugc_bot.py:80-93; sales_listener.py:699-715; M6A1_SALES_SOURCE_REVIEW.md",
+      "evidence": "Only SALES_CHANNEL_ID is checked; no webhook-ID/sender allowlist. Ingestion behavior was intentionally not changed.",
+      "correction": "Proposed dry-run/enforce webhook-ID allowlist design; requires separate rollout.",
+      "remaining_risk": "Untrusted channel writers can inject sales observations."
+    },
+    {
+      "id": "F-19",
+      "severity": "P1",
+      "area": "security/classification",
+      "status": "fixed_verified",
+      "title": "verdict/hitrate/creator_brain were classified public read-only but write/API",
+      "location": "command_security.py OWNER_ONLY/MUTATING/EXTERNAL_API",
+      "evidence": "verdict calls live Roblox + save_item_to_db; hitrate calls fill_ledger/commit; creator_brain saves patterns/commit. All now owner-only and marked mutating; tests pass.",
+      "correction": "Corrected classification and authorization policy.",
+      "remaining_risk": "These commands are no longer public; this is the intended security change."
+    },
+    {
+      "id": "F-20",
+      "severity": "P2",
+      "area": "intelligence/claims",
+      "status": "fixed_text_unverified",
+      "title": "Unsupported CTR and universal algorithm doctrine",
+      "location": "algo_brain.py:1-20; menu.py:486-505,670-690; commands_supercomputer.py:411",
+      "evidence": "algo_brain described CTR thresholds and freshness rates as platform truths; menu claimed 'highest ROI' and 'nobody sells'. Text softened to heuristic/diagnostic language. No empirical platform validation exists.",
+      "correction": "Removed universal CTR/ROI claims; remaining heuristic guidance is labeled non-guaranteed.",
+      "remaining_risk": "Platform ranking behaviour is not independently validated; treat guidance as heuristic."
+    }
+  ]
+}

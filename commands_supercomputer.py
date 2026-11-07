@@ -408,7 +408,7 @@ def register_supercomputer_commands(bot):
     @bot.command(name="stealth", aliases=["stealth_desc"])
     async def stealth_command(ctx, *, args: str):
         """
-        Generate spam-immune, high-CTR description for Roblox Studio.
+        Generate a spam-immune, discovery-oriented description for Roblox Studio. Do not claim measured CTR or sales.
         Usage: !stealth <Item Name> | [Category] | [Style]
         Example: !stealth Void Katana | Back Accessory | Dark Cyberpunk
         """

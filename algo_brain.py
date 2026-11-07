@@ -1,6 +1,7 @@
 """
-algo_brain.py — Roblox marketplace algorithm knowledge.
-Feeds real ranking mechanics into AI prompts. No thumbnail advice.
+algo_brain.py — Heuristic Roblox marketplace ranking guidance.
+These notes are prompt guidance, not measured platform truths or guarantees.
+No thumbnail advice.
 """
 
 RANKING_SYSTEMS = {
@@ -14,8 +15,10 @@ RANKING_SYSTEMS = {
     "discover_feed": {
         "weights": {"ctr_first_6h": 15, "category_vibe_match": 12,
                     "freshness_boost": 9, "favorite_rate": 7, "purchase_rate": 6},
-        "notes": ["CTR is THE signal. Under 2.5% and you die in 48h.",
-                  "Freshness decays: Day1=100%, Day3=60%, Day7=20%."],
+        "notes": ["CTR can be a useful early signal when measured; thresholds "
+                  "vary by surface and are not universal.",
+                  "Freshness is widely believed to decay; exact rates are not "
+                  "verified here."],
     },
     "homepage_curation": {
         "weights": {"sales_velocity_24h": 14, "returning_buyer_rate": 8,
