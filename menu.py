@@ -117,7 +117,7 @@ MANUAL_SECTIONS = {
         "**`!trends`** — top words across titles\n"
         "**`!momentum`** — keyword velocity\n"
         "**`!oracle anime`** — trend forecast\n"
-        "**`!predict <idea>`** — success probability\n"
+        "**`!predict <idea>`** — heuristic opportunity score (not a probability)\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "Use these to confirm a niche before building.",
     ),

@@ -9,6 +9,7 @@ on:
       - fix/convergence-budget-integrity
       - feat/phase2-m4-original-ugc
       - fix/m6a-security-authorization
+      - audit/final-vanta73-certification
   pull_request:
     branches:
       - main

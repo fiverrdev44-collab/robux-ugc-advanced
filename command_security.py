@@ -39,6 +39,7 @@ OWNER_ONLY = {
     "brainstorm", "chain", "concept", "converge_debug", "cookie_check",
     "creative", "creative_raw", "data_audit", "dbtest", "desc_analyze",
     "desc_forge", "enrich_run", "group_metrics", "ignored", "launch",
+    "creator_brain", "hitrate", "verdict",
     "launch_sync", "ledger_sync", "link", "logs", "meta_sniper",
     "momentum_debug", "outcome", "path", "playbook", "rename", "rescue",
     "revive", "revsim", "sales_backfill", "sales_debug",
@@ -58,17 +59,18 @@ AI_COST = {
 }
 
 MUTATING = {
-    "applied", "ignored", "link", "outcome", "rename", "snapshot_now",
-    "sales_backfill", "sales_post_now", "visibility_seed", "visibility_run",
-    "launch", "launch_sync", "ledger_sync", "scan_run", "enrich_run", "train",
-    "sales_scan", "suggest_run",
+    "applied", "creator_brain", "hitrate", "ignored", "link", "outcome",
+    "rename", "snapshot_now", "sales_backfill", "sales_post_now",
+    "visibility_seed", "visibility_run", "launch", "launch_sync",
+    "ledger_sync", "scan_run", "enrich_run", "train", "sales_scan",
+    "suggest_run", "verdict",
 }
 
 EXTERNAL_API = {
     "autopsy", "converge", "converge_debug", "emote_title", "enrich_run",
-    "meta_sniper", "revive", "sales_probe", "sales_scan", "scan_run",
-    "snapshot_now", "suggest_probe", "suggest_run", "vacuum",
-    "verified_scan", "visibility_run", "visibility_seed",
+    "hitrate", "meta_sniper", "revive", "sales_probe", "sales_scan",
+    "scan_run", "snapshot_now", "suggest_probe", "suggest_run", "vacuum",
+    "verdict", "verified_scan", "visibility_run", "visibility_seed",
 }
 
 SENSITIVE = {

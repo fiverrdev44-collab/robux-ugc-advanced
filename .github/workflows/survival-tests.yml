@@ -19,6 +19,7 @@ on:
       - fix/convergence-budget-integrity
       - feat/phase2-m4-original-ugc
       - fix/m6a-security-authorization
+      - audit/final-vanta73-certification
   pull_request:
     branches:
       - main
@@ -78,6 +79,10 @@ jobs:
         run: python test_phase2_milestone3.py
       - name: Run Phase 2 Milestone 4 original concept regressions
         run: python test_phase2_milestone4.py
+      - name: Run final certification regressions
+        run: python test_final_certification.py
+      - name: Run final command contract regressions
+        run: python test_final_command_contracts.py
       - name: Run snapshot selection regressions
         run: python test_snapshot_batch.py
       - name: Run Astra and product understanding regressions

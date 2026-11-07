@@ -277,6 +277,7 @@ def setup_database():
               AND a.item_name IS NOT DISTINCT FROM b.item_name
               AND a.buyer IS NOT DISTINCT FROM b.buyer
               AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
+              AND a.source_event_id IS NOT DISTINCT FROM b.source_event_id
         """)
         conn.commit()
     except Exception as e:

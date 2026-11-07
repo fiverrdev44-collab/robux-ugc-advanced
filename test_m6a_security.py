@@ -43,6 +43,7 @@ def test_owner_only_commands_deny_non_owner_and_allow_owner():
         "brainstorm", "rescue", "analyze_image", "concept", "chain",
         "creative", "creative_raw", "desc_forge", "applied", "ignored",
         "link", "rename", "outcome", "scan_run", "train", "vacuum",
+        "verdict", "hitrate", "creator_brain",
     ]
     with _owner_context():
         for name in restricted:
@@ -57,8 +58,8 @@ def test_owner_only_commands_deny_non_owner_and_allow_owner():
 def test_public_read_only_commands_still_work():
     public = [
         "guide", "help", "version", "start", "watchlist", "track",
-        "sales_report", "sales_for", "converge", "verdict", "predict",
-        "creator_brain", "momentum", "experiments",
+        "sales_report", "sales_for", "converge", "predict",
+        "momentum", "experiments",
     ]
     with _owner_context():
         for name in public:

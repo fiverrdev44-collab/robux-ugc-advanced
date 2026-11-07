@@ -202,14 +202,6 @@ except Exception as e:
 
 
 
-# ── Start background scheduler ───────────────────────────────
-try:
-    from scheduler import start_scheduler
-    start_scheduler()
-except Exception as e:
-    print(f"⚠️ [scheduler] Failed to start: {e}", flush=True)
-
-
 # ── Flask health check + report trigger for Render ───────────
 app = Flask(__name__)
 
@@ -289,6 +281,12 @@ def watchdog():
 
 # ── Main entry ───────────────────────────────────────────────
 if __name__ == "__main__":
+    try:
+        from scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        print(f"⚠️ [scheduler] Failed to start: {e}", flush=True)
+
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
