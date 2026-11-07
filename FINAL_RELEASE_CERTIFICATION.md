@@ -3,7 +3,7 @@
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Certification branch:** `audit/final-vanta73-certification`
 - **Remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final tested code HEAD:** `6423f791506705bf36b06e40ac15715b7b3efaca`
+- **Final tested code HEAD:** `bf1626dcd661e98fb745f833996f3da1c478352e`
 - **Verdict:** **NO-GO for production release certification**
 
 Feature freeze was respected. No new commands, AI engines, marketplace-learning
@@ -32,8 +32,8 @@ API-budget increases, or automatic merges were performed.
   `survival-tests`/`sales-integrity`; deploy now fails on dependency-install error.
 - 29 offline suites and 24 disposable-PostgreSQL tests pass.
 - CI Survival and PostgreSQL workflows pass on the remediation SHA.
-  - Survival: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42397630165`
-  - PostgreSQL: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42397630073`
+  - Survival: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923742`
+  - PostgreSQL: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923774`
 
 ## Governance state (corrected)
 

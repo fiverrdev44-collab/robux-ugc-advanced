@@ -3,7 +3,7 @@
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Branch:** `audit/final-vanta73-certification`
 - **Implementation/remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final tested code HEAD:** `6423f791506705bf36b06e40ac15715b7b3efaca`
+- **Final tested code HEAD:** `bf1626dcd661e98fb745f833996f3da1c478352e`
 - **Host:** Windows, Python 3.12.10
 - **Integration DB:** disposable PostgreSQL 16.2
 - **Production:** not used for tests; no production writes, migrations, deployments, or API load tests.
@@ -118,9 +118,9 @@ The matrix distinguishes contract evidence from callback and live evidence. Publ
 ## CI results
 
 - Phase 2 PostgreSQL Integration: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42397630073`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923774`
 - Survival Intelligence Tests: **success**
-  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42397630165`
+  `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42398923742`
 
 ## Skipped / blocked
 

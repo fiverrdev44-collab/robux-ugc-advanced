@@ -3,7 +3,7 @@
   "certification_branch": "audit/final-vanta73-certification",
   "implementation_sha": "0e1510d2e160c5792592d74e681135c806e90233",
   "remediation_sha": "aa0aef932b61ec8753e496ab8527cba65942b2b8",
-  "final_certification_sha": "6423f791506705bf36b06e40ac15715b7b3efaca",
+  "final_certification_sha": "bf1626dcd661e98fb745f833996f3da1c478352e",
   "verdict": "NO-GO",
   "findings": [
     {
