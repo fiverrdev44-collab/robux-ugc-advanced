@@ -29,6 +29,17 @@ def _safe_exec(cur, sql, label=""):
         print(f"⚠️ [setup] {label or 'stmt'} failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
 
 
+MY_SALES_DEDUPE_SQL = """
+    DELETE FROM my_sales a USING my_sales b
+    WHERE a.id > b.id
+      AND a.sale_time = b.sale_time
+      AND a.item_name IS NOT DISTINCT FROM b.item_name
+      AND a.buyer IS NOT DISTINCT FROM b.buyer
+      AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
+      AND a.source_event_id IS NOT DISTINCT FROM b.source_event_id
+"""
+
+
 def setup_database():
     try:
         conn = get_db_connection()
@@ -270,15 +281,7 @@ def setup_database():
     # matching unique index. A hand-created live table may be missing it,
     # which makes EVERY sale insert fail silently in the listener.
     try:
-        cur.execute("""
-            DELETE FROM my_sales a USING my_sales b
-            WHERE a.id > b.id
-              AND a.sale_time = b.sale_time
-              AND a.item_name IS NOT DISTINCT FROM b.item_name
-              AND a.buyer IS NOT DISTINCT FROM b.buyer
-              AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
-              AND a.source_event_id IS NOT DISTINCT FROM b.source_event_id
-        """)
+        cur.execute(MY_SALES_DEDUPE_SQL)
         conn.commit()
     except Exception as e:
         print(

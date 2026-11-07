@@ -16,6 +16,8 @@ import aiohttp
 import subprocess
 import discord
 from collections import Counter, defaultdict
+
+from safe_roblox import get as safe_get
 from datetime import datetime, timezone
 
 from bot_core import get_db, rollback_quietly
@@ -1104,7 +1106,8 @@ def register_supercomputer_commands(bot):
             out = []
             for label, url, params in endpoints:
                 try:
-                    r = requests.get(url, params=params, headers=headers, timeout=10)
+                    r = safe_get("games_search", url, params=params,
+                                 headers=headers, timeout=10)
                     body = r.text[:200].replace("\n", " ")
                     out.append((label, r.status_code, body))
                 except Exception as e:

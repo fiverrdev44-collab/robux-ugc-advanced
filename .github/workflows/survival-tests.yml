@@ -83,6 +83,10 @@ jobs:
         run: python test_final_certification.py
       - name: Run final command contract regressions
         run: python test_final_command_contracts.py
+      - name: Run safe Roblox API wrapper regressions
+        run: python test_safe_roblox.py
+      - name: Run sales source validation regressions
+        run: python test_sales_source_validation.py
       - name: Run snapshot selection regressions
         run: python test_snapshot_batch.py
       - name: Run Astra and product understanding regressions
