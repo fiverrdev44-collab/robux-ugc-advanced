@@ -76,7 +76,7 @@ def _rollback(conn):
         pass
 
 
-def run_selftest(bot=None, progress=None):
+def run_selftest(bot=None, progress=None, offline=False):
     results = []
 
     def stage(name):
@@ -197,7 +197,11 @@ def run_selftest(bot=None, progress=None):
         add("db", "ledger rows", ledger_n > 0, f"{ledger_n:,} rows")
 
         cur.execute("SELECT count(*) FROM failed_items")
-        add("db", "failed items", True, f"{cur.fetchone()[0]:,} skipped")
+        failed_n = int(cur.fetchone()[0] or 0)
+        add(
+            "db", "failed items", failed_n == 0,
+            f"{failed_n:,} skipped", warning=failed_n > 0,
+        )
 
         for idx in REQUIRED_INDEXES:
             cur.execute("SELECT 1 FROM pg_indexes WHERE indexname = %s", (idx,))
@@ -390,51 +394,65 @@ def run_selftest(bot=None, progress=None):
     stage("ENGINES")
 
     # ── Live Roblox cross-reference (3 items) ───────────────────
-    try:
-        from recovery_brain import fetch_item_from_roblox
-        cookie = os.getenv("ROBLOSECURITY_COOKIE_1")
-        if samples:
-            for idx, (sid, sname, sfavs, sprice, screator) in enumerate(samples, 1):
-                live = fetch_item_from_roblox(sid, cookie)
-                if not live:
-                    add("live", f"item{idx}", False, "fetch returned None", warning=True)
-                    continue
-                name_ok = (
-                    (live.get("name") or "").strip().lower()
-                    == (sname or "").strip().lower()
-                )
-                add(
-                    "live", f"item{idx} name", name_ok,
-                    f"db={(sname or '')[:36]} live={(live.get('name') or '')[:36]}",
-                )
-                if (screator or "").strip():
-                    creator_ok = (
-                        (live.get("creator_name") or "").strip().lower()
-                        == (screator or "").strip().lower()
+    if offline:
+        add("live", "items", False, "skipped in offline certification",
+            warning=True)
+        stage("LIVE MARKETPLACE")
+    else:
+        try:
+            from recovery_brain import fetch_item_from_roblox
+            cookie = os.getenv("ROBLOSECURITY_COOKIE_1")
+            if samples:
+                for idx, (sid, sname, sfavs, sprice, screator) in enumerate(
+                        samples, 1):
+                    live = fetch_item_from_roblox(sid, cookie)
+                    if not live:
+                        add("live", f"item{idx}", False,
+                            "fetch returned None", warning=True)
+                        continue
+                    name_ok = (
+                        (live.get("name") or "").strip().lower()
+                        == (sname or "").strip().lower()
                     )
                     add(
-                        "live", f"item{idx} creator", creator_ok,
-                        f"db={screator} live={live.get('creator_name')}",
+                        "live", f"item{idx} name", name_ok,
+                        f"db={(sname or '')[:36]} "
+                        f"live={(live.get('name') or '')[:36]}",
                     )
-                else:
+                    if (screator or "").strip():
+                        creator_ok = (
+                            (live.get("creator_name") or "").strip().lower()
+                            == (screator or "").strip().lower()
+                        )
+                        add(
+                            "live", f"item{idx} creator", creator_ok,
+                            f"db={screator} live={live.get('creator_name')}",
+                        )
+                    else:
+                        add(
+                            "live", f"item{idx} creator", True,
+                            "db creator empty", warning=True,
+                        )
+                    live_favs = live.get("favorite_count")
                     add(
-                        "live", f"item{idx} creator", True,
-                        "db creator empty", warning=True,
+                        "live", f"item{idx} favorites",
+                        live_favs is not None
+                        and int(live_favs) == int(sfavs or 0),
+                        f"db={sfavs} live={live_favs}",
+                        warning=True,
                     )
-                add(
-                    "live", f"item{idx} favorites", True,
-                    f"db={sfavs} live={live.get('favorite_count')}",
-                    warning=True,
-                )
-                add(
-                    "live", f"item{idx} price", True,
-                    f"db={sprice} live={live.get('price')}",
-                    warning=True,
-                )
-        else:
-            add("live", "items", False, "no sample items", warning=True)
-    except Exception as e:
-        add("live", "items", False, f"{type(e).__name__}: {e}", warning=True)
+                    live_price = live.get("price")
+                    add(
+                        "live", f"item{idx} price",
+                        int(live_price or 0) == int(sprice or 0),
+                        f"db={sprice} live={live_price}",
+                        warning=True,
+                    )
+            else:
+                add("live", "items", False, "no sample items", warning=True)
+        except Exception as e:
+            add("live", "items", False, f"{type(e).__name__}: {e}",
+                warning=True)
     stage("LIVE MARKETPLACE")
 
     # ── Commands ────────────────────────────────────────────────
@@ -645,6 +663,40 @@ class _MockInteraction:
         self.message = _MockMessageObj()
 
 
+_PERMISSION_FAILURE_MARKERS = (
+    "owner-only",
+    "unauthorized",
+    "not authorized",
+    "not registered",
+    "unknown command",
+    "command not found",
+)
+
+
+def _sent_text(sent):
+    """Flatten the content and embeds captured by the mock Discord objects."""
+    parts = []
+    for item in sent:
+        if item.get("content"):
+            parts.append(str(item["content"]))
+        embed = item.get("embed")
+        if embed is not None:
+            parts.append(str(getattr(embed, "title", "")))
+            parts.append(str(getattr(embed, "description", "")))
+            for field in getattr(embed, "fields", []) or []:
+                parts.append(str(getattr(field, "name", "")))
+                parts.append(str(getattr(field, "value", "")))
+    return "\n".join(parts)
+
+
+def _responses_ok(sent):
+    """A response counts only if it is not an authorization/dispatch denial."""
+    if not sent:
+        return False
+    text = _sent_text(sent).lower()
+    return not any(marker in text for marker in _PERMISSION_FAILURE_MARKERS)
+
+
 SAFE_COMMANDS = [
     ("dbtest", [], {}),
     ("scan_status", [], {}),
@@ -716,7 +768,7 @@ async def run_command_harness(bot, progress=None):
                     )
                 add(
                     "menu_live", label,
-                    bool(inter.sent),
+                    _responses_ok(inter.sent),
                     f"{len(inter.sent)} responses",
                 )
                 print(f"[selftest] menu {label} ok", flush=True)
@@ -755,7 +807,7 @@ async def run_command_harness(bot, progress=None):
             )
             add(
                 "commands_live", name,
-                bool(ctx.sent),
+                _responses_ok(ctx.sent),
                 f"{len(ctx.sent)} responses",
             )
             print(f"[selftest] {name} ok", flush=True)

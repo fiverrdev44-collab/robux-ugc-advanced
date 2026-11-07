@@ -28,6 +28,35 @@ def test_fixed_public_read_only_misclassifications():
     print("PASS verdict/hitrate/creator_brain are owner-only and marked mutating")
 
 
+def test_selftest_is_not_classified_read_only():
+    policy = cs.policy_for("selftest")
+    assert policy["level"] == "owner"
+    assert policy["mutating"] is True
+    assert policy["external_api"] is True
+    assert policy["sensitive"] is True
+    print("PASS selftest is classified as owner-only, mutating, external, sensitive")
+
+
+def test_public_read_only_excludes_scoped_mutations():
+    for name in ("guide", "experiments"):
+        assert name in cs.PUBLIC_COMMANDS, name
+        assert name not in cs.PUBLIC_READ_ONLY, name
+        assert cs.policy_for(name)["mutating"] is True, name
+    print("PASS public read-only excludes guide and experiments")
+
+
+def test_selftest_harness_does_not_count_denials_as_success():
+    import selftest
+
+    assert selftest._responses_ok([{"content": "normal output", "embed": None}])
+    assert not selftest._responses_ok([])
+    assert not selftest._responses_ok(
+        [{"content": "🚫 Owner-only command.", "embed": None}])
+    assert not selftest._responses_ok(
+        [{"content": "Unknown command", "embed": None}])
+    print("PASS selftest harness rejects empty and denied responses")
+
+
 def test_predictor_language_is_heuristic():
     from predictor import format_prediction
     pred = {

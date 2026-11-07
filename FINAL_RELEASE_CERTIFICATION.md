@@ -3,7 +3,7 @@
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Certification branch:** `audit/final-vanta73-certification`
 - **Remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
-- **Final tested code HEAD:** `e8750da903906f29d55dbc2dc311197c91da9f85`
+- **Final verified branch HEAD:** `de327c23867888b98aef6e2f061fc5dc2944ffe5`
 - **Verdict:** **NO-GO for production release certification**
 
 Feature freeze was respected. No new commands, AI engines, marketplace-learning
@@ -13,12 +13,20 @@ API-budget increases, or automatic merges were performed.
 ## What is now verified
 
 - 90 registered commands are inventoried in `FINAL_COMMAND_MATRIX.csv`.
+  `verification_scope=callback_execution_only` means the real registered
+  callback executed with mocked dependencies. `overall=PASS` is callback
+  coverage, not proof of live functional behavior; `live_smoke` remains
+  `NOT TESTED` for every command.
 - Every command has a registration, alias, dispatch, and authorization contract.
 - All 34 previously untested public commands now execute through real registered
   callbacks with isolated Discord/DB/API/AI fixtures and output assertions.
-- 53 of 54 restricted callbacks execute through real registered callbacks with
+- All 54 restricted callbacks execute through real registered callbacks with
   owner identities, mocked DB/API/AI/filesystem/process operations, and output
-  assertions. Only `!selftest` remains BLOCKED.
+  assertions.
+- `!selftest`'s composite callback is exercised end-to-end with the selftest
+  engine and command harness mocked, so no subcommand, DB, or external API is
+  invoked. Success, hard-failure, and harness-timeout paths are covered; only a
+  clean run can produce a certificate.
 - Central authorization denies non-owners for owner-only commands before callbacks.
 - Aliases cannot bypass authorization; unknown commands fail closed.
 - `!ai_debug` no longer exposes key prefixes, lengths, or key material.
@@ -26,6 +34,11 @@ API-budget increases, or automatic merges were performed.
 - Conversation-planner AI is bounded per user and globally.
 - `verdict`, `hitrate`, and `creator_brain` were corrected from public read-only
   to owner-only/mutating classifications.
+- `!selftest` was corrected from read-only to owner-only, mutating, external-API,
+  and sensitive because it can write ledger data and exercises live/operational
+  checks.
+- `PUBLIC_READ_ONLY` excludes the user-scoped `guide` write and the owner-gated
+  `experiments` mutation; both remain public but are classified mutating.
 - Predictor output is heuristic, not a success probability.
 - ROI output no longer fabricates sales/revenue.
 - Sales dedupe now requires identical source-event IDs.
@@ -34,6 +47,11 @@ API-budget increases, or automatic merges were performed.
 - Duplicate GitHub Actions job name `offline-regression` was split into
   `survival-tests`/`sales-integrity`; deploy now fails on dependency-install error.
 - 29 offline suites and 24 disposable-PostgreSQL tests pass.
+- The complete offline regression suite (32 scripts, including sales-integrity)
+  passed on the certification working tree.
+- The certification, command-contract, public-callback, restricted-callback,
+  M6-A security, and command-cancellation suites were re-run and pass with these
+  evidence updates applied.
 - CI Survival and PostgreSQL workflows pass on the remediation SHA.
   - Survival: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066454`
   - PostgreSQL: `https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42404066436`
@@ -72,14 +90,15 @@ API-budget increases, or automatic merges were performed.
    enforce modes, and invalid modes now raise a hard configuration error. It is
    not wired into ingestion; enforcement requires approved webhook/sender IDs
    and rollout.
-9. **F-13:** All 34 previously NOT TESTED public commands and 53/54 restricted
-   commands have genuine callback PASS evidence. Matrix: 89 PASS, 1 BLOCKED,
-   0 NOT TESTED; all 90 have contract/auth PASS. `!selftest` remains BLOCKED
-   because its composite real-subcommand runtime exceeds the isolated callback
-   budget. Live smoke is not performed.
 
 F-11 is now fixed and verified: the disposable PostgreSQL test proves distinct
 source event IDs survive and duplicate event IDs collapse.
+
+F-13 is now resolved: all 34 previously NOT TESTED public commands and all 54
+restricted commands have genuine callback PASS evidence. Matrix: 90 PASS,
+0 BLOCKED, 0 NOT TESTED; all 90 have contract/auth PASS. `!selftest` is verified
+through its real composite callback with the selftest engine and command harness
+mocked; live smoke is not performed.
 
 ## Deployment requirements before a future GO
 
@@ -90,8 +109,9 @@ source event IDs survive and duplicate event IDs collapse.
 3. Fix composite creator identity and Creator Brain/ORACLE grouping.
 4. Implement ORACLE per-creator rate-limit recovery within the existing budget.
 5. Standardize timestamp semantics or prove timezone-safe behavior.
-6. Complete a staged `!selftest` harness and perform production-only smoke
-   tests.
+6. Run a staged `!selftest` in a controlled production-like environment and
+   perform the production-only smoke tests; callback orchestration is already
+   covered offline.
 7. Approve trusted webhook/sender identities and roll out sales-source validation
    in dry-run, then enforce.
 8. Keep `PHASE2_M4_ENABLED=0` until M4 M3-evidence integration is completed.
@@ -137,9 +157,20 @@ Until the P1 blockers are closed:
 ## Final certification verdict
 
 **NO-GO.** The audit produced credible, repeatable evidence for the repaired
-defects, all command authorization contracts, and 87 previously untested public
-and restricted callback behaviors. Unresolved P1 API/release controls, the
-`!selftest` composite-callback blocker, and unperformed production smoke tests
-prevent production certification. No claim of live service health or sales
-performance is made.
+defects, all command authorization contracts, and 88 previously untested public
+and restricted callback behaviors (`!selftest` now included). Unresolved P1
+API/release controls and unperformed production smoke tests prevent production
+certification. No claim of live service health or sales performance is made.
+
+## Remaining release risks
+
+- F-05 remains partial: some untargeted direct request paths are outside the
+  shared pacing/circuit controls.
+- No live/production smoke test has been performed; `live_smoke` is `NOT TESTED`
+  for every command, including a staged `!selftest`.
+- F-07, F-08, F-09, F-10, F-12, and F-18 remain open as documented above.
+- Governance still has zero required approving reviews and no independently
+  verified manual production deployment approval.
+- `PHASE2_M4_ENABLED` must remain `0` until the M4 M3-evidence integration is
+  completed.
 

@@ -3,6 +3,7 @@
 All callbacks are the real registered callbacks. External providers, DB, files,
 process restarts, and deployment actions are mocked; production is never used.
 """
+import asyncio
 import os
 import subprocess
 import sys
@@ -92,7 +93,11 @@ def _run(name, extra=(), **kwargs):
         for context in extra:
             stack.enter_context(context)
         pub._run(name, ctx, **kwargs)
-    assert ctx.text(), name
+    text = ctx.text()
+    assert text, name
+    lowered = text.lower()
+    for marker in ("owner-only command", "unauthorized", "not authorized"):
+        assert marker not in lowered, f"{name} was denied: {text[:200]}"
     return ctx
 
 
@@ -197,6 +202,89 @@ def test_operational_restricted_callbacks():
     ):
         _run(name, extras, **kwargs)
     print("PASS restricted operational callbacks execute")
+
+
+def test_selftest_composite_callback():
+    """Exercise the real composite callback with every dependency mocked."""
+    import selftest as st
+
+    calls = {"selftest": 0, "harness": 0}
+
+    def fake_run_selftest(bot=None, progress=None, offline=False):
+        calls["selftest"] += 1
+        assert offline is False
+        progress("ENVIRONMENT", [])
+        return [
+            {"group": "env", "name": "DATABASE_URL", "ok": True,
+             "warning": False, "detail": "set"},
+            {"group": "db", "name": "connect", "ok": True,
+             "warning": False, "detail": "ok"},
+        ]
+
+    async def fake_harness(bot, progress=None):
+        calls["harness"] += 1
+        if progress:
+            await progress("COMMAND HARNESS", [])
+        return [
+            {"group": "commands_live", "name": "version", "ok": True,
+             "warning": False, "detail": "1 response"},
+        ]
+
+    async def no_sleep(*args, **kwargs):
+        return None
+
+    with mock.patch.object(st, "run_selftest", fake_run_selftest), \
+            mock.patch.object(st, "run_command_harness", fake_harness), \
+            mock.patch.object(csc.asyncio, "sleep", no_sleep):
+        ctx = _run("selftest")
+
+    text = ctx.text()
+    assert calls == {"selftest": 1, "harness": 1}
+    assert "NASA-GRADE AUDIT — RESULTS" in text
+    assert "NASA-GRADE CERTIFIED" in text
+    assert "Not certified" not in text
+    assert "3/3" in text
+
+    def failing_selftest(bot=None, progress=None, offline=False):
+        return [{"group": "db", "name": "connect", "ok": False,
+                 "warning": False, "detail": "synthetic failure"}]
+
+    async def empty_harness(bot, progress=None):
+        return []
+
+    with mock.patch.object(st, "run_selftest", failing_selftest), \
+            mock.patch.object(st, "run_command_harness", empty_harness), \
+            mock.patch.object(csc.asyncio, "sleep", no_sleep):
+        failed_ctx = _run("selftest")
+
+    failed_text = failed_ctx.text()
+    assert "Not certified" in failed_text
+    assert "NASA-GRADE CERTIFIED" not in failed_text
+
+    real_wait_for = asyncio.wait_for
+
+    async def selective_timeout(awaitable, timeout=None):
+        if timeout == 420:
+            close = getattr(awaitable, "close", None)
+            if close is not None:
+                close()
+            raise asyncio.TimeoutError
+        return await real_wait_for(awaitable, timeout)
+
+    async def hanging_harness(bot, progress=None):
+        return []
+
+    with mock.patch.object(st, "run_selftest", fake_run_selftest), \
+            mock.patch.object(st, "run_command_harness", hanging_harness), \
+            mock.patch.object(csc.asyncio, "wait_for", selective_timeout), \
+            mock.patch.object(csc.asyncio, "sleep", no_sleep):
+        timeout_ctx = _run("selftest")
+
+    timeout_text = timeout_ctx.text()
+    assert "harness timeout after 7 min" in timeout_text
+    assert "Not certified" in timeout_text
+    assert "NASA-GRADE CERTIFIED" not in timeout_text
+    print("PASS selftest composite callback covers success, failure, timeout")
 
 
 def test_restricted_coverage_count():

@@ -23,8 +23,11 @@ def test_every_registered_command_is_classified():
     assert not (cs.OWNER_ONLY & cs.PUBLIC_READ_ONLY)
     assert not (cs.OWNER_ONLY & cs.PUBLIC_RATE_LIMITED)
     assert not (cs.PUBLIC_READ_ONLY & cs.PUBLIC_RATE_LIMITED)
+    assert not (cs.PUBLIC_READ_ONLY & cs.PUBLIC_MUTATING)
     assert (cs.OWNER_ONLY | cs.PUBLIC_READ_ONLY
-            | cs.PUBLIC_RATE_LIMITED) == cs.ALL_COMMANDS
+            | cs.PUBLIC_RATE_LIMITED | cs.PUBLIC_MUTATING) == cs.ALL_COMMANDS
+    assert cs.PUBLIC_MUTATING == (cs.USER_SCOPED_WRITE
+                                  | cs.OWNER_GATED_MUTATION)
     for name in cs.ALL_COMMANDS:
         policy = cs.policy_for(name)
         assert policy["known"] is True
@@ -57,12 +60,13 @@ def test_owner_only_commands_deny_non_owner_and_allow_owner():
 
 def test_public_read_only_commands_still_work():
     public = [
-        "guide", "help", "version", "start", "watchlist", "track",
+        "help", "version", "start", "watchlist", "track",
         "sales_report", "sales_for", "converge", "predict",
-        "momentum", "experiments",
+        "momentum",
     ]
     with _owner_context():
         for name in public:
+            assert name in cs.PUBLIC_READ_ONLY, name
             decision = cs.authorize_command(name, NON_OWNER)
             assert decision.allowed, name
             assert decision.level == "public"
@@ -478,11 +482,13 @@ def test_guide_and_experiments_write_scope_policy():
     assert guide["level"] == "public"
     assert guide["user_scoped_write"] is True
     assert guide["mutating"] is True
+    assert "guide" not in cs.PUBLIC_READ_ONLY
 
     experiments = cs.policy_for("experiments")
     assert experiments["level"] == "public"
     assert experiments["owner_gated_mutation"] is True
     assert experiments["mutating"] is True
+    assert "experiments" not in cs.PUBLIC_READ_ONLY
 
     source = open("commands_guide.py", encoding="utf-8").read()
     assert "discord_id = ctx.author.id" in source
