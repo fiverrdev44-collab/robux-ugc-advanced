@@ -11,16 +11,16 @@ import re
 ASSET_TYPE = 92
 MAX_SCAN = 1500
 THEME_PATTERNS = {
-    "celestial / space": r"\\b(?:celestial|galaxy|space|cosmic|starry|nebula|planet|moon|stars?)\\b",
-    "fantasy / magical": r"\\b(?:fantasy|magic|magical|enchanted|fairy|castle|wizard|dragon)\\b",
-    "cozy / interiors": r"\\b(?:cozy|cosy|bedroom|library|room|cafe|home|fireplace)\\b",
-    "city / cyber": r"\\b(?:cyber|neon|city|urban|street|nightlife|futuristic|scifi|sci.fi)\\b",
-    "nature / landscapes": r"\\b(?:forest|nature|mountain|lake|ocean|beach|sunset|garden|river|waterfall)\\b",
-    "gothic / dark": r"\\b(?:goth|gothic|dark|void|horror|haunted|graveyard|shadow)\\b",
-    "cute / pastel": r"\\b(?:cute|kawaii|pastel|pink|soft|bunny|heart|plush)\\b",
-    "anime / illustration": r"\\b(?:anime|manga|cartoon|illustrated|chibi|2d)\\b",
-    "luxury / royal": r"\\b(?:luxury|golden|royal|palace|marble|diamond|rich)\\b",
-    "minimal / abstract": r"\\b(?:minimal|simple|abstract|gradient|geometric|solid|plain)\\b",
+    "celestial / space": r"\b(?:celestial|galaxy|space|cosmic|starry|nebula|planet|moon|stars?)\b",
+    "fantasy / magical": r"\b(?:fantasy|magic|magical|enchanted|fairy|castle|wizard|dragon)\b",
+    "cozy / interiors": r"\b(?:cozy|cosy|bedroom|library|room|cafe|home|fireplace)\b",
+    "city / cyber": r"\b(?:cyber|neon|city|urban|street|nightlife|futuristic|scifi|sci.fi)\b",
+    "nature / landscapes": r"\b(?:forest|nature|mountain|lake|ocean|beach|sunset|garden|river|waterfall)\b",
+    "gothic / dark": r"\b(?:goth|gothic|dark|void|horror|haunted|graveyard|shadow)\b",
+    "cute / pastel": r"\b(?:cute|kawaii|pastel|pink|soft|bunny|heart|plush)\b",
+    "anime / illustration": r"\b(?:anime|manga|cartoon|illustrated|chibi|2d)\b",
+    "luxury / royal": r"\b(?:luxury|golden|royal|palace|marble|diamond|rich)\b",
+    "minimal / abstract": r"\b(?:minimal|simple|abstract|gradient|geometric|solid|plain)\b",
 }
 
 
