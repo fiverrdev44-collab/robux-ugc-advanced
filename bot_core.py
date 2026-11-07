@@ -58,7 +58,7 @@ ASSET_TYPE_NAMES = {
     2: "T-Shirt", 8: "Hat", 11: "Shirt", 12: "Pants", 17: "Head",
     18: "Face", 19: "Gear", 41: "Hair", 42: "Face Acc", 43: "Neck Acc",
     44: "Shoulder Acc", 45: "Front Acc", 46: "Back Acc", 47: "Waist Acc",
-    61: "Emote", 64: "3D T-Shirt", 65: "3D Shirt", 66: "3D Pants",
+    61: "Emote", 92: "Avatar Background", 64: "3D T-Shirt", 65: "3D Shirt", 66: "3D Pants",
     67: "3D Jacket", 68: "3D Sweater", 69: "3D Shorts",
     70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
 }
