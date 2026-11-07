@@ -2,7 +2,8 @@
 
 - **Baseline:** `d6976d3e404303f6ddccb8f64785c84112c2ffc6`
 - **Certification branch:** `audit/final-vanta73-certification`
-- **Implementation SHA:** `0e1510d2e160c5792592d74e681135c806e90233`
+- **Remediation SHA:** `aa0aef932b61ec8753e496ab8527cba65942b2b8`
+- **Final tested HEAD:** reported in the final delivery after artifact commit
 - **Verdict:** **NO-GO for production release certification**
 
 Feature freeze was respected. No new commands, AI engines, marketplace-learning
@@ -44,10 +45,11 @@ API-budget increases, or automatic merges were performed.
 ## Unresolved blockers
 
 ### P1
-1. **F-05 (partial):** Read-only GET paths now use `safe_roblox` with shared
-   pacing, Retry-After, and circuit state. Authenticated POST/probe paths and
-   `roblox_batch_client` still use separate request paths; the circuit is not
-   universal.
+1. **F-05 (partial):** Read-only GETs and targeted authenticated sales POST/
+   CSRF calls now use `safe_roblox` with shared pacing, Retry-After, a bounded
+   POST budget, and shared circuit state. The batch client checks/trips the
+   shared circuit on 429. Remaining untargeted direct request paths mean the
+   circuit is not yet universal.
 2. **F-14 limitation (P3):** One active bot process was verified. Quotas are
    process-local and sufficient for the verified single-process deployment;
    multi-process would require shared storage.
@@ -60,8 +62,9 @@ API-budget increases, or automatic merges were performed.
 6. **F-10:** Mixed `TIMESTAMP`/`TIMESTAMPTZ` semantics remain.
 7. **F-12:** M4 is dormant and does not receive an M3 bundle in the command path.
 8. **F-18:** Sales source validation is implemented and tested in off/dry-run/
-   enforce modes but not wired into ingestion; enforcement requires approved
-   webhook/sender IDs and rollout.
+   enforce modes, and invalid modes now raise a hard configuration error. It is
+   not wired into ingestion; enforcement requires approved webhook/sender IDs
+   and rollout.
 9. **F-13:** Full per-command callback/live coverage remains incomplete. Matrix:
    2 PASS, 54 BLOCKED, 34 NOT TESTED for callback behavior; all 90 have
    contract/auth PASS.
@@ -71,8 +74,8 @@ source event IDs survive and duplicate event IDs collapse.
 
 ## Deployment requirements before a future GO
 
-1. Finish F-05 by routing all remaining authenticated POST/probe and batch-client
-   paths through shared pacing/circuit controls.
+1. Finish F-05 by routing all remaining untargeted direct POST/probe paths
+   through shared pacing/circuit controls.
 2. Add at least one required approving review and a manual production deployment
    approval; do not modify rulesets without approval.
 3. Fix composite creator identity and Creator Brain/ORACLE grouping.

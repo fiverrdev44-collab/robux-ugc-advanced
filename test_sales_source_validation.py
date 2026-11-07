@@ -74,12 +74,14 @@ def test_enforce_rejects_untrusted_user_and_wrong_channel():
     print("PASS enforce rejects untrusted user and wrong channel")
 
 
-def test_invalid_mode_falls_back_to_off():
-    decision = validate_sales_message(Message(), mode="bogus",
-                                      channel_id=10)
-    assert decision.allowed
-    assert not decision.would_reject
-    print("PASS invalid mode fails safe to off")
+def test_invalid_mode_is_a_hard_configuration_error():
+    try:
+        validate_sales_message(Message(), mode="bogus", channel_id=10)
+    except ValueError as exc:
+        assert "invalid sales source mode" in str(exc)
+    else:
+        raise AssertionError("invalid mode must not silently disable enforcement")
+    print("PASS invalid sales source mode is a hard configuration error")
 
 
 if __name__ == "__main__":

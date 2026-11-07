@@ -28,7 +28,8 @@ def validate_sales_message(message, mode="off", channel_id=None,
                            webhook_ids=(), sender_ids=()):
     mode = str(mode or "off").lower()
     if mode not in {"off", "dry-run", "enforce"}:
-        mode = "off"
+        raise ValueError(
+            "invalid sales source mode; expected off, dry-run, or enforce")
 
     channel = getattr(message, "channel", None)
     actual_channel = _id(getattr(channel, "id", None))

@@ -51,7 +51,7 @@ python test_recommendation_lifecycle.py
 | M6-A security | PASS | 17 |
 | Final certification | PASS | 6 |
 | Final command contracts | PASS | 2 |
-| Safe Roblox API wrapper | PASS | 4 |
+| Safe Roblox API wrapper | PASS | 8 |
 | Sales source validation | PASS | 5 |
 | Convergence live | PASS | 49 |
 | Execution policy | PASS | 25 |

@@ -11,6 +11,7 @@ import time
 import aiohttp
 
 from creator_identity import catalog_identity
+from safe_roblox import shared_circuit_open, trip_shared_circuit
 
 CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
 USER_AGENT = (
@@ -112,6 +113,10 @@ class RobloxBatchClient:
             raise RuntimeError("use RobloxBatchClient as an async context manager")
         payload = {"items": [{"itemType": "Asset", "id": int(i)} for i in ids]}
         failed = {}
+        if shared_circuit_open():
+            for i in ids:
+                failed[int(i)] = "circuit open"
+            return [], failed
         for attempt in range(5):
             await self.bucket.acquire()
             await self._window_acquire()
@@ -139,6 +144,8 @@ class RobloxBatchClient:
                             continue
                         if resp.status == 429:
                             self._aimd_congestion()
+                            trip_shared_circuit(
+                                resp.headers.get("Retry-After"))
                             await asyncio.sleep(self._backoff(
                                 attempt, resp.headers.get("Retry-After")))
                             continue
