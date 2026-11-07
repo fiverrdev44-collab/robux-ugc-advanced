@@ -27,6 +27,7 @@ FAMILY_KEYWORDS = {
                  "outfit", "layered", "classic"),
     "emotes": ("emote", "dance", "pose", "idle", "animation", "moonwalk",
                "sway", "kick"),
+    "backgrounds": ("background", "avatar background", "backdrop"),
 }
 
 MOTION_TOKENS = {
@@ -48,7 +49,8 @@ DETAIL_WORDS = {
 }
 
 STATIC_FAMILIES = {"headwear", "face", "neck", "shoulder", "front", "back",
-                   "waist", "hair", "clothing"}
+                   "waist", "hair", "clothing", "backgrounds"}
+SCENE_FAMILIES = {"backgrounds"}
 
 
 def _tokens(text):
@@ -120,9 +122,11 @@ def from_image(vision, text="", image_kind="attachment"):
     family_map = {"hat": "headwear", "hair": "hair", "face": "face",
                   "neck": "neck", "shoulder": "shoulder", "front": "front",
                   "back": "back", "waist": "waist", "emote": "emotes",
-                  "shirt": "clothing", "pants": "clothing",
-                  "jacket": "clothing", "3d_clothing": "clothing",
-                  "bundle": "clothing", "gear": "back"}
+                   "shirt": "clothing", "pants": "clothing",
+                   "jacket": "clothing", "3d_clothing": "clothing",
+                   "bundle": "clothing", "gear": "back",
+                   "background": "backgrounds",
+                   "avatar background": "backgrounds"}
     if base["family"] == "unknown" and vfam:
         base["family"] = family_map.get(vfam, "unknown")
         base["family_source"] = SOURCE_VISUAL
@@ -186,7 +190,7 @@ def validate_title(concept, title, family=None, understanding=None):
         return False, "platform word"
     if motion_allowed(fam) and not identity_lock_ok(concept, title):
         return False, "motion swapped"
-    if fam in STATIC_FAMILIES:
+    if fam in STATIC_FAMILIES and fam not in SCENE_FAMILIES:
         toks = set(_tokens(title))
         if toks & MOTION_TOKENS:
             return False, "static accessory must not claim motion"

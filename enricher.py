@@ -313,6 +313,7 @@ def enrich_items():
     cur = conn.cursor()
     enriched = 0
     emote_count = 0
+    background_count = 0
     db_errors = 0
     dates_filled = 0
 
@@ -320,8 +321,11 @@ def enrich_items():
     for item_id, d in results.items():
         try:
             rows.append(_item_row(item_id, d))
-            if _safe_int(d.get("asset_type_id"), 1000) == 61:
+            atype = _safe_int(d.get("asset_type_id"), 1000)
+            if atype == 61:
                 emote_count += 1
+            elif atype == 92:
+                background_count += 1
         except Exception as e:
             db_errors += 1
             log(f"  row build error {item_id}: {e}")
@@ -348,6 +352,7 @@ def enrich_items():
     conn.commit()
     cur.close(); conn.close()
     log(f"✅ Enriched {enriched} items ({emote_count} emotes, "
+        f"{background_count} backgrounds, "
         f"{dates_filled} dates) in {time.time()-start:.1f}s — {db_errors} DB errors · "
         f"{len(failed_ids)} permanently failed")
 

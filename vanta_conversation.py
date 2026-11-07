@@ -38,6 +38,8 @@ FAMILIES = {
     "clothing": ("clothing", "clothes", "shirt", "pants", "dress",
                  "jacket", "hoodie", "shoes"),
     "gear": ("sword", "staff", "shield", "wand", "gear"),
+    "backgrounds": ("background", "backgrounds", "avatar background",
+                    "backdrop"),
 }
 
 INTENTS = {
@@ -598,7 +600,7 @@ Allowed intents:
 - help
 - clarify
 Return ONLY JSON:
-{{"intent":"...", "item_id": 123 or null, "concept": "short phrase or null", "family": "emote|hair|headwear|face|accessory|clothing|gear|null"}}
+{{"intent":"...", "item_id": 123 or null, "concept": "short phrase or null", "family": "emote|hair|headwear|face|accessory|clothing|gear|backgrounds|null"}}
 Never invent a command or an ID. If unclear, use clarify.
 USER: {text[:600]}
 """
@@ -1057,7 +1059,7 @@ has_attachment: {has_attachment}
 
 JSON SCHEMA
 {{"action": "one_allowed_action", "item_id": 123 or null,
-  "concept": "short phrase or null", "family": "emote|hair|headwear|face|accessory|clothing|gear|null",
+  "concept": "short phrase or null", "family": "emote|hair|headwear|face|accessory|clothing|gear|backgrounds|null",
   "confidence": 0.0, "clarify": "one short question or null"}}
 
 USER MESSAGE

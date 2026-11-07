@@ -76,6 +76,8 @@ COMMUNITY_CATEGORY = 13
 
 SALES_TYPE_FOR_SALE = 1
 ASSET_TYPE_EMOTE = 61
+ASSET_TYPE_BACKGROUND = 92
+BACKGROUND_KEYWORDS = ["avatar background"]
 
 # ============================================================
 # ID BOUNDS — CRITICAL FIX
@@ -191,6 +193,15 @@ def is_asset_item(item):
     return is_valid_asset_id(item.get("id"))
 
 
+def accepts_catalog_item(item, asset_filter=None):
+    """Return True when an item passes dispatch and the optional type filter."""
+    if not isinstance(item, dict):
+        return False
+    if asset_filter is not None and item.get("assetType") != asset_filter:
+        return False
+    return is_asset_item(item)
+
+
 def get_dynamic_keywords():
     log("🧠 Loading learned keywords...")
     try:
@@ -219,9 +230,10 @@ def try_api(api_url, params):
     cursor = ""
     pages = 0
     retries_429 = 0
+    asset_filter = params.get("_asset_type_filter")
 
     while pages < MAX_PAGES_PER_QUERY:
-        p = params.copy()
+        p = {k: v for k, v in params.items() if not k.startswith("_")}
         p["cursor"] = cursor
         try:
             resp = session.get(api_url, params=p, timeout=HTTP_TIMEOUT)
@@ -240,7 +252,7 @@ def try_api(api_url, params):
 
             data = resp.json()
             for item in data.get("data", []):
-                if is_asset_item(item):
+                if accepts_catalog_item(item, asset_filter):
                     found.add(int(item["id"]))
 
             cursor = data.get("nextPageCursor")
@@ -316,6 +328,20 @@ def build_all_queries():
             "sortType": sort,
             "limit": 30,
             "salesTypeFilter": SALES_TYPE_FOR_SALE,
+        })
+
+    # ---- Dedicated avatar-background discovery ----
+    # Roblox's catalog /details endpoint ignores assetType=92 as a filter
+    # (verified: assetType=92 returns unrelated hair). Use a keyword query and
+    # post-filter on the response's assetType field so ordinary images/decals
+    # cannot enter background results.
+    for kw in BACKGROUND_KEYWORDS:
+        queries.append({
+            "keyword": kw,
+            "sortType": 2,
+            "limit": 30,
+            "salesTypeFilter": SALES_TYPE_FOR_SALE,
+            "_asset_type_filter": ASSET_TYPE_BACKGROUND,
         })
 
     # ---- General keyword sweeps ----

@@ -31,6 +31,7 @@ FAMILIES = {
     "classic":   [2, 11, 12],
     "clothing":  [64, 65, 66, 67, 68, 69, 70, 71, 72, 2, 11, 12],
     "gear":      [19],
+    "backgrounds": [92],
 }
 
 ASSET_TO_FAMILY = {}

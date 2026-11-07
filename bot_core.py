@@ -54,6 +54,11 @@ EMOTE_KEYWORDS_HINT = {
     "milky", "smooth", "spin", "kick", "bounce", "hype", "party"
 }
 
+ASSET_TYPE_BACKGROUND = 92
+BACKGROUND_KEYWORDS_HINT = {
+    "background", "backgrounds", "backdrop", "scene", "environment",
+}
+
 ASSET_TYPE_NAMES = {
     2: "T-Shirt", 8: "Hat", 11: "Shirt", 12: "Pants", 17: "Head",
     18: "Face", 19: "Gear", 41: "Hair", 42: "Face Acc", 43: "Neck Acc",
@@ -61,6 +66,7 @@ ASSET_TYPE_NAMES = {
     61: "Emote", 64: "3D T-Shirt", 65: "3D Shirt", 66: "3D Pants",
     67: "3D Jacket", 68: "3D Sweater", 69: "3D Shorts",
     70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
+    92: "Avatar Background",
 }
 
 FILLER_WORDS = {
@@ -173,6 +179,22 @@ def is_emote_word(cur, word):
         return False
 
 
+def is_background_word(cur, word):
+    if word in BACKGROUND_KEYWORDS_HINT:
+        return True
+    try:
+        pattern = word_boundary_pattern(word)
+        cur.execute("""
+            SELECT COUNT(*) FROM items
+            WHERE name ~* %s AND asset_type_id = 92 AND favorite_count > 0
+        """, (pattern,))
+        count = cur.fetchone()[0] or 0
+        return count >= 3
+    except Exception:
+        rollback_quietly(cur)
+        return False
+
+
 def classify_word(word):
     w = word.lower().strip()
     if w in SLANG_WORDS: return "slang"
@@ -180,6 +202,7 @@ def classify_word(word):
     if w in STYLE_WORDS: return "style"
     if w in ITEM_WORDS: return "item"
     if w in EMOTE_KEYWORDS_HINT: return "emote"
+    if w in BACKGROUND_KEYWORDS_HINT: return "background"
     if w.isdigit(): return "number"
     return "unknown"
 
@@ -189,6 +212,10 @@ def analyze_opportunity(cur, kw):
     kw_words = [w for w in kw.lower().split() if len(w) >= 2]
     pattern = word_boundary_pattern(kw)
     is_emote_seed = any(is_emote_word(cur, w) for w in kw_words)
+    is_background_seed = (
+        not is_emote_seed
+        and any(is_background_word(cur, w) for w in kw_words)
+    )
 
     all_items = []
     try:
@@ -212,6 +239,17 @@ def analyze_opportunity(cur, kw):
                       AND favorite_count > 0 LIMIT 2000
                 """, (pattern, pattern))
                 all_items = cur.fetchall()
+        elif is_background_seed:
+            cur.execute("""
+                SELECT id, LOWER(name), COALESCE(LOWER(description), ''),
+                       favorite_count, price, creator_name
+                FROM items
+                WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                  AND favorite_count > 0
+                  AND asset_type_id = 92
+                LIMIT 2000
+            """, (pattern, pattern))
+            all_items = cur.fetchall()
         else:
             cur.execute("""
                 SELECT id, LOWER(name), COALESCE(LOWER(description), ''), 
@@ -240,6 +278,16 @@ def analyze_opportunity(cur, kw):
                         WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
                           AND favorite_count > 0
                           AND (asset_type_id = 61 OR asset_type_id IS NULL OR asset_type_id = 0)
+                        LIMIT 2000
+                    """, (p, p))
+                elif is_background_seed:
+                    cur.execute("""
+                        SELECT id, LOWER(name), COALESCE(LOWER(description), ''),
+                               favorite_count, price, creator_name
+                        FROM items
+                        WHERE (name ~* %s OR COALESCE(description, '') ~* %s)
+                          AND favorite_count > 0
+                          AND asset_type_id = 92
                         LIMIT 2000
                     """, (p, p))
                 else:
@@ -365,6 +413,7 @@ def analyze_opportunity(cur, kw):
         "study_items": study_items,
         "used_fallback": used_fallback,
         "is_emote_seed": is_emote_seed,
+        "is_background_seed": is_background_seed,
     }
 
 

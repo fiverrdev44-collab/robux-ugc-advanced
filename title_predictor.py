@@ -25,7 +25,7 @@ ITEM_TYPE_WORDS = {
     "emote","dance","hat","beanie","crown","cap","hair","face","mask",
     "shirt","pants","jacket","shoes","wing","wings","tail","ears","horn",
     "horns","glasses","necklace","chain","backpack","sword","pet","bag",
-    "scarf","bandana","beret","visor",
+    "scarf","bandana","beret","visor","background",
 }
 
 

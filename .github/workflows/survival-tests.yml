@@ -87,6 +87,8 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run avatar backgrounds category regressions
+        run: python test_avatar_backgrounds.py
       - name: Run safe Roblox API wrapper regressions
         run: python test_safe_roblox.py
       - name: Run sales source validation regressions

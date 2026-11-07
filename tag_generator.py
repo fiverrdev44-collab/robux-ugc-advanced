@@ -66,6 +66,7 @@ CATEGORY_HINTS = {
     "waist":    ["waist", "belt", "tail", "skirt", "shorts"],
     "classic":  ["shirt", "tshirt", "t-shirt", "pants", "jacket", "hoodie",
                  "sweater", "sweatshirt", "classic"],
+    "backgrounds": ["background", "avatar background", "backdrop", "scene"],
     "tops":     ["tank", "tank top", "crop", "crop top", "blouse", "camisole"],
     "gear":     ["sword", "staff", "wand", "bow", "shield", "gear"],
 }

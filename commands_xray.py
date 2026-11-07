@@ -8,7 +8,8 @@ Commands:
     !failures [family]   — words that correlate with low-fav items
 
 Family argument:
-    emote | hair | headwear | face | accessory | clothing | bundle | gear
+    emote | hair | headwear | face | accessory | clothing | bundle | gear |
+    backgrounds
     OR "all" / "*" / "every" for cross-catalog mining
 """
 import asyncio
