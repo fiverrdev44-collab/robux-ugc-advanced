@@ -4,12 +4,51 @@ A Discord operations bot for Roblox UGC creators: catalog discovery and enrichme
 scoring, verified title/description generation, live marketplace checks, launch tracking,
 sales ingestion, and closed-loop experiments.
 
-**What it is:** a verification and decision-support system. Every AI title, claim, pivot, and
-description is gated against real data before it reaches you. It talks like a person (VANTA),
-routes to the existing engines, and never executes arbitrary model output.
+**What it is:** a verification and decision-support system. Creative pipelines apply product,
+identity, claim, and marketplace-evidence checks where supported; coverage and live-data
+completeness vary by command. It talks like a person (VANTA), routes to registered engines,
+and does not execute arbitrary model-generated commands.
 
 **What it is not:** a guaranteed sales predictor. The ranking model is still experimental;
 current accuracy and data gaps are documented below.
+
+---
+
+## Release status and final audit (2026-11-07)
+
+> **Current state: M6-A merged and automatically deployed; final A–Z certification is still pending.**
+> VANTA 73 is a research/decision-support tool, not a validated CTR, conversion, or revenue predictor.
+
+| Milestone or gate | Verified status |
+|---|---|
+| Protected production branch | `main` at [`d6976d3`](https://github.com/fiverrdev44-collab/robux-ugc-advanced/commit/d6976d3e404303f6ddccb8f64785c84112c2ffc6); active ruleset |
+| M6-A authorization, secrets, and AI usage limits | [PR #12](https://github.com/fiverrdev44-collab/robux-ugc-advanced/pull/12) merged on 2026-11-06 21:41 UTC |
+| Oracle Auto-Deploy | [GitHub Actions run 42298766141](https://github.com/fiverrdev44-collab/robux-ugc-advanced/actions/runs/42298766141) succeeded on that exact merge commit |
+| Production Discord smoke checks reported by operator | `!help`, `!ai_status`, and owner `!ai_debug` responded; provider hello checks succeeded without revealing key material |
+| Remaining runtime smoke checks | Non-owner authorization, `!version`, service health/logs and M4 environment flag require explicit production evidence |
+| Registered commands | **90** in `command_security.ALL_COMMANDS`; runtime dispatch inventory must be reconfirmed in the final audit |
+| Historic command coverage matrix | `COMMAND_COVERAGE_MATRIX.md` lists **84**, including **13 automated**, **5 manual**, **66 not exercised**; stale baseline, **not** a current post-M6-A coverage claim |
+| Final release verdict | **NOT CERTIFIED** — final command-by-command, data-integrity, intelligence-quality and production checks outstanding |
+
+**Feature freeze:** No new command families, autonomous learning, expanded scraping, or M4 activation during final certification. A successful merge/deploy is not proof that all 90 commands work.
+
+### Completed milestones at a glance
+
+- **Phase 2 M1–M3:** existing evidence-labeling, creator-discovery and opportunity-validation improvements connect marketplace observations, cohort comparisons, and live checks without treating favorites as sales.
+- **Phase 2 M4:** original-UGC concept work is merged into `main` but **dormant**. `PHASE2_M4_ENABLED` was last reported OFF by the operator; its actual live value is **not independently verified here**. Do not enable until its separate activation gate is approved.
+- **M5:** read-only A–Z assessment identified remaining security, model-accuracy, API-budget, creator-identity, DB/ORACLE, CI, and command-coverage defects. That audit does **not** constitute a passing release certificate.
+- **M6-A:** centralized authorization, secret-safe AI diagnostics, per-user/global AI throttling, planner limits, aliases and integration/security tests delivered and merged through protected `main`. See [M6A_SECURITY_CORRECTION.md](M6A_SECURITY_CORRECTION.md) and [M6A1_SALES_SOURCE_REVIEW.md](M6A1_SALES_SOURCE_REVIEW.md). Those files were written before the merge; this status table supersedes their original “not deployed” statements.
+
+### What the creator workflow is intended to accomplish
+
+```text
+Discover across UGC categories  ->  Compare niche and creator cohorts
+-> Validate product idea and title  ->  Launch / record baseline
+-> Observe favorites, visibility and owned sales
+-> Compare against relevant peers  ->  Keep / test a change / move on
+```
+
+This is a decision workflow, **not** an automatic sales-optimization guarantee. Owned-item sales records require trusted source attribution; competitor sales, CTR, and revenue cannot be inferred from favorites.
 
 ---
 
@@ -101,6 +140,21 @@ Intent set: `inspect_item`, `diagnose_item`, `revive_item`, `analyze_image`,
 
 ---
 
+## M6-A security and deployment controls
+
+M6-A is the first merged security-hardening release ([PR #12](https://github.com/fiverrdev44-collab/robux-ugc-advanced/pull/12)).
+
+- **Authorization before command execution:** `command_security.py` classifies 90 canonical commands; the declared policy has 52 owner-only, 37 public read-only, and one public rate-limited AI command (`!emote_title`). Unknown commands fail closed, and aliases resolve to their canonical command. **Note:** policy labels still require a side-effect audit (see below).
+- **Secret-safe diagnostics:** `!ai_debug` is owner-only; API keys are reported as configured/not configured, not as key prefixes, lengths, or values. Provider connectivity probes can incur calls.
+- **AI-cost protection:** standard owner AI commands use a sliding 600-second limiter (owner 20 and global 30 by default; non-owner default 5 where applicable). `!emote_title` remains public with its own **10 non-owner / 20 owner / 30 global** calls per 600 seconds. Rejected requests are blocked before callbacks.
+- **Conversation AI planner:** deterministic routes avoid provider calls; non-owner **20/hour**, owner **100/hour**, and global **200/hour** attempt quotas apply *before* external calls. Failed/time-out attempts count. Limits are process-local and restart with the bot; do not treat them as distributed quotas.
+- **Protected deployments:** active main-branch ruleset requires a PR, disallows force-push/deletion, and requires up-to-date `offline-regression` and `phase2-postgres` GitHub Actions checks. Merging to `main` invokes the Oracle SSH auto-deploy; the workflow does **not** automatically apply DB migrations.
+- **CI cleanup still needed:** Sales Integrity Tests and Survival Intelligence Tests both publish a job called `offline-regression`. Unique check names and corresponding ruleset updates are a release-hardening task.
+
+**Do not confuse "public read-only" in the declared policy with a verified absence of side effects.** For example, the current `!verdict` callback can fetch live Roblox item data and upsert it to PostgreSQL; `!creator_brain` saves computed findings; `!hitrate` refreshes ledger records. All require accurate reclassification, authorization review, and integration tests during the final audit.
+
+---
+
 ## Command reference
 
 All commands use the `!` prefix. Arguments in `[brackets]` are optional.
@@ -115,7 +169,10 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!chain <concept>` | Full pipeline: product understanding → niche/market → competitors → verified AI titles → statistical ranking → seven-section Analyst Report |
 | `!chain variant <item_id> [theme]` | Variant of a proven winner |
 | `!chain <family>:<concept>` | Family-scoped chain |
-| `!verdict <item_id>` | KEEP / RENAME / KILL with age, favorites, velocity, percentile, live sales, confidence interval |
+| `!emote_title <movement description> [reference URL]` | Emote-specific original title generator, product/motion validation, bounded category-correct DB/live comparison, creative-quality scoring and launch-observation plan; owner or bounded public quota |
+| `!concept <category> \| <creative request>` | Dormant Phase 2 M4 original-UGC command; requires separately approved feature-flag activation |
+| `!help [command]` | Registered Discord command help |
+| `!verdict <item_id>` | Item evidence and KEEP/RENAME/KILL options; **currently may live-refresh/upsert PostgreSQL**, so not verified read-only |
 | `!autopsy <item_id> [notes]` | Scale-vs-recovery routing: sales > 0 or KEEP/DOUBLE_DOWN runs SCALE PROTOCOL; only KILL/RENAME with zero sales runs failure diagnosis, peer autopsy, recovery titles, live check, experiment record |
 | `!revive <item_id>` (alias `revive_item`) | Full rebuild: live stats, niche scan, variant chain, peer autopsy, 14-day plan |
 | `!brainstorm <description>` | AI concept expansion with verified titles |
@@ -140,11 +197,11 @@ All commands use the `!` prefix. Arguments in `[brackets]` are optional.
 | `!rising_gaps [days] [category] [seed]` | Rising, low-competition keywords |
 | `!momentum [days]` | Favorites momentum ranking |
 | `!momentum_debug` | Momentum engine diagnostics |
-| `!predict <idea>` | Six-factor success score |
+| `!predict <idea>` | Six-factor **uncalibrated heuristic**; currently mislabels score as a success probability (open accuracy defect) |
 | `!oracle <keyword>` | Trend forecast and next-wave detection |
 | `!nextwave` | Emerging keywords before they peak |
 | `!opportunities` | Daily ranked opportunity feed |
-| `!gap [keyword]` | Golden, sweet, and saturated keyword gaps |
+| `!gap [keyword]` | Emote-only keyword gap sample (current SQL filters to asset type 61); not an all-UGC scan |
 | `!classic <keyword>` | Classic-clothing keyword gaps |
 | `!emote <keyword>` | Emote market data |
 | `!emote_status` | Emote catalog coverage and demand |
@@ -516,6 +573,8 @@ throughput guarantee.
 ## Testing
 
 ```
+python test_m6a_security.py               # M6-A authorization, secret redaction, AI cost, planner and dispatch guards
+python test_phase2_pg_integration.py       # Phase 2 PostgreSQL integration; disposable DB only
 python test_project_oracle.py           # ORACLE Phase 1 cohorts, append-only observations and velocity
 python tests/test_oracle_worker.py        # ORACLE Phase 2 worker, coverage, retries, transactions and CLI
 python test_vanta_conversation.py         # router/planner, rename/selection, memory, pending chain
@@ -691,6 +750,35 @@ Tuning knobs include `ENRICH_BATCH_SIZE`, `SNAPSHOT_TOP_ITEMS`, `SNAPSHOT_MIN_FA
 
 ---
 
+## Final stabilization backlog — release blockers, not future features
+
+The following items were identified by the M5 review and/or source inspection. **They have not all been corrected or certified.** Severity and scope must be reconciled against the current runtime in the final A–Z audit.
+
+| Area | Open verification / repair |
+|---|---|
+| Misleading prediction and ROI | `predictor.py` / `!predict` presents a weighted heuristic as a percentage probability; `bot_core._compute_roi()` estimates sales/revenue from unsupported favorites-per-sale ratios. Never interpret these as verified odds or earnings. |
+| Marketplace HTTP budgets | Audit direct `requests` paths (including creator tracking) against the shared retry, circuit-breaker and budget policy. `creator_tracker.py` currently switches Roblox cookies after 429; replace that behavior with safe cooldown, not identity-based quota bypass. |
+| Identity and ORACLE correctness | Resolve numeric User/Group creator-ID collisions, name-based cohort grouping, rate-limit recovery, timestamp consistency, and incomplete-scan coverage semantics. |
+| Sales integrity | Reconcile item identity, source event IDs, and any deduplication capable of deleting distinct records. Sales-channel ingestion presently lacks verified sender/webhook allowlisting ([review](M6A1_SALES_SOURCE_REVIEW.md)); escalate priority where the channel admits untrusted senders. |
+| Runtime command behavior | Rebuild coverage from all 90 registered commands, not the outdated 84-row matrix. Verify real callback dispatch, permissions, limits, side effects, errors, API failures, database integration and useful output. |
+| M4 dormant integration | Check M3 experiment compatibility and test dormant functionality in isolation. Do not enable production `PHASE2_M4_ENABLED` under the final audit. |
+| CI / startup / diagnostics | Resolve duplicate `offline-regression` names, workflow pinning and swallowed failures, scheduler startup/import side effects, and unnecessary DB metadata in CI logs. |
+| Production proof | Verify `!version` against the merge SHA, service health, non-owner denial tests, live feature flags, sale-source trust and rollback readiness. The passing auto-deploy workflow alone is insufficient. |
+
+**Evidence boundaries:** favorites are not units sold; search suggestions and sampled listings are not complete search demand or marketplace supply; a Roblox badge is not proof of strong creator sales; generated title scores are not measured CTR. The catalog may support useful comparative research, but neither causal attribution nor a high-CTR guarantee follows automatically.
+
+### Final release gate
+
+1. Freeze new features and create an isolated audit branch.
+2. Enumerate all registered commands and aliases at runtime; test every callback with realistic mocked services and disposable PostgreSQL, including negative, authorization and fault-injection paths.
+3. Resolve all release-blocking findings, retain regression evidence, and run both required CI checks on a protected PR.
+4. Merge/deploy **only after explicit human approval**; verify production health, permissions, the deployed SHA and disabled M4 separately.
+5. Publish a final command matrix, audit findings, test results, intelligence-quality limitations and a **GO/NO-GO** verdict. A tool self-test score or green deploy is not by itself a certification.
+
+**Then transition to maintenance mode:** monitor incidents, fix regressions and patch security issues; defer new marketplace-learning work until independently justified by sufficient owned-item outcomes.
+
+---
+
 ## Accuracy status (2026-10-23)
 
 Backtest: time-split holdout; 2,500+ launches across emotes, hair, headwear, accessories, clothing.
@@ -744,9 +832,9 @@ Known data gaps:
   sensitive details. Thread ownership is HMAC-verified; the visible user ID alone is not trusted.
 - Conversation context persists in `conversation_memory` (user+channel scoped, 24h TTL) across
   restarts; it stores router context, not full transcripts.
-- The AI planner is bounded: allow-listed actions only, ~400 output tokens, 20 calls/hour per
-  conversation (100 for bot owners), 30s timeout, deterministic routing first, and a tool registry
-  of registered commands injected into the prompt. No mutating operation is routed from
-  casual language.
+- The AI planner uses allow-listed actions, a ~400-token output bound, a 30s timeout,
+  deterministic routing first, and user-scoped 20/hour (owner 100/hour) plus global
+  200/hour process-local limits; see the M6-A security section. The command-authorization
+  gate still applies to planner-dispatched actions.
 - Provider-reported token usage is logged per AI call; otherwise an explicit input estimate is
   logged.
