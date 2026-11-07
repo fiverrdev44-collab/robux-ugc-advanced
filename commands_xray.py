@@ -61,8 +61,28 @@ def register_xray_commands(bot, get_db):
             await asyncio.sleep(0.3)
 
     @bot.command(name="early")
-    async def early_cmd(ctx, days: int = 14):
-        """Show early winners."""
+    async def early_cmd(ctx, days: int = 14, family: str = ""):
+        """Show early winners; use `!early 7 backgrounds` for background intelligence."""
+        if (family or "").strip().lower() in ("background", "backgrounds", "avatarbackground", "avatar_background"):
+            from background_intelligence import build_report
+            days = max(1, min(int(days), 30))
+            def _backgrounds():
+                conn = get_db(); cur = conn.cursor()
+                try:
+                    return build_report(cur, days=days)
+                finally:
+                    cur.close(); conn.close()
+            try:
+                body = await asyncio.to_thread(_backgrounds)
+            except Exception as e:
+                await ctx.send(f"❌ Background market data unavailable ({type(e).__name__}).")
+                return
+            for i in range(0, len(body), 1900):
+                await ctx.send(body[i:i+1900])
+            return
+        if family:
+            await ctx.send("❌ `!early` currently supports `backgrounds` or no family filter.")
+            return
         days = max(3, min(int(days), 30))
         progress = await ctx.send(f"⚡ **Scanning for early winners (last {days}d)...**")
 
