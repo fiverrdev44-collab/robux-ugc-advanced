@@ -7,6 +7,7 @@ import time
 import requests
 from datetime import datetime
 from database import get_db_connection
+from safe_roblox import get as safe_get, shared_circuit_open
 
 
 def log(msg):
@@ -17,12 +18,14 @@ DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
 
 
 def fetch_created_date(asset_id, session):
-    """Get the creation date via the economy details endpoint (returns Created field)."""
+    """Get the creation date via the shared catalog-details transport."""
     try:
-        r = session.get(DETAILS_URL.format(asset_id), timeout=10)
+        r = safe_get(
+            "catalog_details", DETAILS_URL.format(asset_id),
+            session=session, timeout=10)
         if r.status_code != 200:
             return None
-        data = r.json()
+        data = r.json() or {}
         created_str = data.get("Created")
         if not created_str:
             return None
@@ -66,6 +69,9 @@ def backfill(batch_size=2000):
     start = time.time()
 
     for i, asset_id in enumerate(ids, 1):
+        if shared_circuit_open("catalog_details"):
+            log("⏸️ Shared Roblox circuit open — stopping backfill early.")
+            break
         created = fetch_created_date(asset_id, session)
         if created:
             try:
@@ -89,8 +95,6 @@ def backfill(batch_size=2000):
             elapsed = time.time() - start
             rate = i / elapsed if elapsed > 0 else 0
             log(f"  [{i}/{len(ids)}] filled={filled} failed={failed} ({rate:.1f}/s)")
-
-        time.sleep(0.35)
 
     cur.close()
     conn.close()

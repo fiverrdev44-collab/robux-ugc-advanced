@@ -547,16 +547,22 @@ class RobloxScheduler:
         return min(pol.backoff_cap, pol.backoff_base * (2 ** attempt))
 
     def request(self, endpoint, url, params=None, headers=None, timeout=12,
-                method="GET", cache_key=None, use_cache=True):
+                method="GET", cache_key=None, use_cache=True,
+                request_fn=None):
         """Perform one logical request with pacing, retries, and dedup.
 
         Only GET is supported (read-only policy). Any other method is rejected
         rather than silently executed as GET by the default transport.
+
+        ``request_fn`` may override the transport for this call (for example an
+        authenticated requests.Session). Pacing, retry, dedupe and circuit
+        state remain owned by this shared scheduler.
         """
         method = str(method or "GET").upper()
         if method != "GET":
             return SchedulerResult(ok=False, endpoint=endpoint,
                                    error=f"unsupported HTTP method: {method}")
+        transport = request_fn or self._request_fn
         pol = self._policy(endpoint)
         if self._circuit_open(endpoint):
             return SchedulerResult(ok=False, endpoint=endpoint,
@@ -607,8 +613,8 @@ class RobloxScheduler:
                 if sem is not None:
                     sem.acquire()
                 try:
-                    resp = self._request_fn(url, params=params,
-                                            headers=headers, timeout=timeout)
+                    resp = transport(url, params=params,
+                                     headers=headers, timeout=timeout)
                 except Exception as e:
                     result = SchedulerResult(ok=False, endpoint=endpoint,
                                              error=type(e).__name__,

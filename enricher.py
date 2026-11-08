@@ -6,6 +6,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 from creator_identity import catalog_identity, has_creator_type
+from safe_roblox import (
+    get as safe_get,
+    post as safe_post,
+    shared_circuit_open,
+)
 
 COOKIES = []
 for i in range(1, 6):
@@ -69,7 +74,7 @@ def log(msg):
 
 def get_csrf_token(session):
     try:
-        resp = session.post(AUTH_URL, timeout=10)
+        resp = safe_post(AUTH_URL, session=session, timeout=10)
         token = resp.headers.get("X-CSRF-Token")
         if token:
             session.headers["X-CSRF-Token"] = token
@@ -82,10 +87,14 @@ def get_csrf_token(session):
 def fetch_favorites(session, item_id):
     """Catalog endpoint returns favoriteCount. Falls back to anonymous."""
     for s in (session, ANON_SESSION):
+        if shared_circuit_open("catalog_details"):
+            return None
         try:
-            resp = s.get(FAVORITES_URL.format(item_id), timeout=10)
+            resp = safe_get(
+                "catalog_details", FAVORITES_URL.format(item_id),
+                session=s, timeout=10)
             if resp.status_code == 200:
-                data = resp.json()
+                data = resp.json() or {}
                 favs = data.get("favoriteCount")
                 if favs is None:
                     return None
@@ -95,8 +104,7 @@ def fetch_favorites(session, item_id):
                     return None
             if resp.status_code == 429:
                 _fail_codes[429] = _fail_codes.get(429, 0) + 1
-                time.sleep(2)
-                continue
+                return None
             if resp.status_code in (401, 403):
                 # Invalid cookie — retry anonymously.
                 _fail_codes[403] = _fail_codes.get(403, 0) + 1
@@ -112,12 +120,17 @@ def fetch_worker(session, ids, worker_id):
     results = {}
     failed = {}
     for idx, item_id in enumerate(ids):
-        for attempt in range(3):
+        if shared_circuit_open("catalog_details"):
+            failed[item_id] = "circuit open"
+            break
+        for attempt in range(2):
             try:
-                resp = session.get(DETAILS_URL.format(item_id), timeout=12)
+                resp = safe_get(
+                    "catalog_details", DETAILS_URL.format(item_id),
+                    session=session, timeout=12)
                 code = resp.status_code
                 if code == 200:
-                    data = resp.json()
+                    data = resp.json() or {}
                     favs = fetch_favorites(session, item_id)
                     if favs is not None:
                         data["FavoriteCount"] = favs
@@ -129,19 +142,18 @@ def fetch_worker(session, ids, worker_id):
                     break
                 if code == 429:
                     _fail_codes[429] = _fail_codes.get(429, 0) + 1
-                    retry_after = int(resp.headers.get("Retry-After", 3))
-                    time.sleep(retry_after)
-                    continue
-                if code == 403:
+                    failed[item_id] = "rate limited"
+                    break
+                if code == 403 and attempt == 0:
                     _fail_codes[403] = _fail_codes.get(403, 0) + 1
                     get_csrf_token(session)
                     continue
                 _fail_codes[code] = _fail_codes.get(code, 0) + 1
+                failed[item_id] = str(code)
                 break
             except Exception:
                 _fail_codes["exc"] = _fail_codes.get("exc", 0) + 1
-                time.sleep(1)
-        time.sleep(SESSION_DELAY)
+                break
 
         if (idx + 1) % 100 == 0:
             log(f"  [worker {worker_id}] {idx+1}/{len(ids)} done, "

@@ -11,6 +11,7 @@ import time
 import aiohttp
 
 from creator_identity import catalog_identity
+from execution_policy import _parse_retry_after
 from safe_roblox import shared_circuit_open, trip_shared_circuit
 
 CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
@@ -101,11 +102,9 @@ class RobloxBatchClient:
 
     @staticmethod
     def _backoff(attempt, retry_after=None):
-        if retry_after:
-            try:
-                return max(0.0, float(retry_after))
-            except (TypeError, ValueError):
-                pass
+        parsed = _parse_retry_after(retry_after)
+        if parsed is not None:
+            return max(0.0, min(float(parsed), 60.0))
         return random.uniform(0, min(30.0, 1.0 * (2 ** attempt)))
 
     async def _post(self, ids):
@@ -117,7 +116,11 @@ class RobloxBatchClient:
             for i in ids:
                 failed[int(i)] = "circuit open"
             return [], failed
-        for attempt in range(5):
+        for attempt in range(3):
+            if shared_circuit_open():
+                for i in ids:
+                    failed[int(i)] = "circuit open"
+                return [], failed
             await self.bucket.acquire()
             await self._window_acquire()
             try:
@@ -136,19 +139,23 @@ class RobloxBatchClient:
                                 failed[missing] = "not found (batch)"
                             return data, failed
                         if resp.status == 403:
-                            # CSRF challenge: capture the token and retry.
+                            # CSRF challenge: capture the token and retry once.
                             token = resp.headers.get("X-CSRF-TOKEN")
                             if token:
                                 self._csrf = token
-                            await asyncio.sleep(0.25)
-                            continue
+                            if attempt < 2:
+                                await asyncio.sleep(0.25)
+                                continue
+                            for i in ids:
+                                failed[int(i)] = "HTTP 403"
+                            return [], failed
                         if resp.status == 429:
-                            self._aimd_congestion()
+                            _aimd_congestion()
                             trip_shared_circuit(
                                 resp.headers.get("Retry-After"))
-                            await asyncio.sleep(self._backoff(
-                                attempt, resp.headers.get("Retry-After")))
-                            continue
+                            for i in ids:
+                                failed[int(i)] = "rate limited"
+                            return [], failed
                         if resp.status == 404:
                             for i in ids:
                                 failed[int(i)] = "404"
@@ -157,15 +164,22 @@ class RobloxBatchClient:
                             for i in ids:
                                 failed[int(i)] = f"HTTP {resp.status}"
                             return [], failed
-                        await asyncio.sleep(self._backoff(attempt))
+                        if attempt < 2:
+                            await asyncio.sleep(self._backoff(attempt))
+                            continue
+                        for i in ids:
+                            failed[int(i)] = f"HTTP {resp.status}"
+                        return [], failed
             except asyncio.CancelledError:
                 raise
             except Exception:
-                await asyncio.sleep(self._backoff(attempt))
+                if attempt < 2:
+                    await asyncio.sleep(self._backoff(attempt))
+                    continue
             finally:
                 await self._window_release()
         for i in ids:
-            failed[int(i)] = "rate limited"
+            failed[int(i)] = "unavailable"
         return [], failed
 
     async def fetch_many_items(self, asset_ids):

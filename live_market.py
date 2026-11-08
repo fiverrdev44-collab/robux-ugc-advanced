@@ -4,12 +4,9 @@ Used to verify that a generated title is not already an exact catalog name and
 to show what the live search returns. It is a first-page sample (30 results),
 not a full catalog count.
 """
-import email.utils
 import re
-import time
-from datetime import datetime, timezone
 
-import requests
+from safe_roblox import get as safe_get, post as safe_post
 
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 HEADERS = {
@@ -33,43 +30,24 @@ def _tokens(text):
 
 
 def _get_with_backoff(url, params, max_attempts=3, timeout=12):
-    """GET with exponential backoff that honours Retry-After on 429."""
-    resp = None
-    for attempt in range(max_attempts):
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
-        if resp.status_code != 429:
-            return resp
-        if attempt == max_attempts - 1:
-            return resp
-        wait = 2 ** attempt
-        retry_after = resp.headers.get("Retry-After")
-        if retry_after:
-            parsed = None
-            try:
-                parsed = float(retry_after)
-            except (TypeError, ValueError):
-                try:
-                    dt = email.utils.parsedate_to_datetime(retry_after)
-                    if dt is not None:
-                        parsed = max(
-                            0.0,
-                            (dt - datetime.now(timezone.utc)).total_seconds(),
-                        )
-                except (TypeError, ValueError, OverflowError):
-                    parsed = None
-            if parsed is not None:
-                wait = parsed
-        time.sleep(min(max(wait, 1.0), 60.0))
-    return resp
+    """Compatibility wrapper over the shared Roblox GET transport.
+
+    The shared scheduler owns pacing, Retry-After parsing, circuit state and
+    request budgets. ``max_attempts`` is accepted for call-site compatibility;
+    it is not used to add physical retries.
+    """
+    return safe_get(
+        "catalog_search", url, params=params, headers=HEADERS,
+        timeout=timeout)
 
 
 def fetch_csrf_token(session, url):
-    """Fetch an X-CSRF-TOKEN for POST endpoints.
+    """Fetch an X-CSRF-TOKEN for POST endpoints through the shared POST path.
 
     The catalog search used here is a GET and does not need CSRF; this helper
-    exists for any future POST call that requires it.
+    preserves authenticated-session behavior for any future POST call.
     """
-    resp = session.post(url, headers=HEADERS, timeout=12)
+    resp = safe_post(url, headers=HEADERS, timeout=12, session=session)
     return resp.headers.get("X-CSRF-TOKEN")
 
 
@@ -86,6 +64,10 @@ def check_title(title, limit=30, max_pages=10):
                 params["Cursor"] = cursor
             r = _get_with_backoff(SEARCH_URL, params)
             pages += 1
+            if r.status_code == 0 and r.error == "circuit open":
+                if rows:
+                    break
+                return {"ok": False, "error": "circuit open"}
             if r.status_code == 429:
                 if rows:
                     break

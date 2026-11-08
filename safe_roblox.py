@@ -28,6 +28,7 @@ _POST_RATE_PER_MIN = 20
 
 _ENDPOINTS = {
     "catalog_search": {"rate_per_min": 30, "max_concurrency": 2},
+    "catalog_details": {"rate_per_min": 30, "max_concurrency": 2},
     "desc_search": {"rate_per_min": 30, "max_concurrency": 2},
     "games_search": {"rate_per_min": 20, "max_concurrency": 2},
     "groups": {"rate_per_min": 20, "max_concurrency": 2},
@@ -92,19 +93,36 @@ def _scheduler():
     return scheduler
 
 
-def get(endpoint, url, params=None, headers=None, timeout=12, cache_key=None):
+def get(endpoint, url, params=None, headers=None, timeout=12, cache_key=None,
+        session=None):
+    """Shared GET. ``session`` preserves authenticated-session transport."""
+    if shared_circuit_open(endpoint):
+        return SafeResponse(SchedulerResult(
+            ok=False, endpoint=endpoint, status=0,
+            error="circuit open", deferred=True))
     scheduler = _scheduler()
+    request_fn = None
+    if session is not None:
+        request_fn = (
+            lambda u, params=None, headers=None, timeout=12:
+            session.get(u, params=params, headers=headers, timeout=timeout)
+        )
     result = scheduler.request(
         endpoint, url, params=params, headers=headers, timeout=timeout,
-        cache_key=cache_key, use_cache=False)
-    return SafeResponse(result)
+        cache_key=cache_key, use_cache=False, request_fn=request_fn)
+    response = SafeResponse(result)
+    if response.status_code == 429:
+        # Make a rate-limit event visible to every module that consults the
+        # global circuit, regardless of the endpoint used for this request.
+        trip_shared_circuit(response.headers.get("Retry-After"))
+    return response
 
 
 def shared_circuit_open(endpoint="catalog_search"):
     if time.monotonic() < _POST_CIRCUIT_UNTIL:
         return True
     try:
-        return default_scheduler().is_circuit_open(endpoint)
+        return _scheduler().is_circuit_open(endpoint)
     except Exception:
         return False
 
@@ -119,7 +137,7 @@ def trip_shared_circuit(retry_after=None, endpoint="catalog_search"):
         _POST_CIRCUIT_UNTIL = max(_POST_CIRCUIT_UNTIL,
                                   time.monotonic() + wait)
     try:
-        default_scheduler().trip(endpoint, retry_after)
+        _scheduler().trip(endpoint, retry_after)
     except Exception:
         pass
 
@@ -137,11 +155,12 @@ def _post_budget_available(now=None):
 
 
 def post(url, json=None, headers=None, timeout=15,
-         endpoint="roblox_post"):
+         endpoint="roblox_post", session=None):
     """One bounded POST attempt sharing the global Roblox circuit/budget.
 
     No retry loop is added here; command-specific CSRF handling remains in the
     caller. A 429 or an already-open circuit defers without a request.
+    ``session`` preserves authenticated-session transport when supplied.
     """
     if shared_circuit_open():
         return SafeResponse(SchedulerResult(
@@ -152,8 +171,9 @@ def post(url, json=None, headers=None, timeout=15,
             ok=False, endpoint=endpoint, status=0,
             error="POST budget exhausted", deferred=True))
     try:
-        resp = requests.post(url, json=json, headers=headers,
-                             timeout=timeout)
+        sender = session.post if session is not None else requests.post
+        resp = sender(url, json=json, headers=headers,
+                      timeout=timeout)
     except Exception as exc:
         return SafeResponse(SchedulerResult(
             ok=False, endpoint=endpoint, status=0,

@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from safe_roblox import get as safe_get, shared_circuit_open
+
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 PAGE_SIZE = 30
 DELAY = 1.0          # seconds between requests — be polite
@@ -87,32 +89,31 @@ LAST_ERROR = None
 
 
 def _get_json(s, params):
-    """One request with polite backoff on 429."""
+    """One logical request through the shared catalog-search protection."""
     global LAST_ERROR
-    for attempt in range(3):
-        try:
-            r = s.get(SEARCH_URL, params=params, timeout=15)
-        except Exception as e:
-            LAST_ERROR = f"request failed: {type(e).__name__}"
-            print(f"[creator-tracker] request failed: {e}", flush=True)
-            return None
-
-        if r.status_code == 200:
-            return r.json()
-        LAST_ERROR = f"HTTP {r.status_code}"
-        if r.status_code == 429 and attempt < 2:
-            try:
-                wait = int(r.headers.get("Retry-After", 15))
-            except (TypeError, ValueError):
-                wait = 15
-            time.sleep(min(max(wait, 5), 60))
-            continue
-        if r.status_code == 429:
-            LAST_ERROR = "rate limited (429)"
-            raise RateLimited()
-        if r.status_code != 200:
-            print(f"[creator-tracker] HTTP {r.status_code}", flush=True)
+    if shared_circuit_open("catalog_search"):
+        LAST_ERROR = "circuit open"
         return None
+    try:
+        resp = safe_get(
+            "catalog_search", SEARCH_URL, params=params, session=s, timeout=15)
+    except Exception as e:
+        LAST_ERROR = f"request failed: {type(e).__name__}"
+        print(f"[creator-tracker] request failed: {type(e).__name__}",
+              flush=True)
+        return None
+
+    if resp.status_code == 200:
+        return resp.json()
+    if resp.status_code == 0 and resp.error == "circuit open":
+        LAST_ERROR = "circuit open"
+        return None
+    LAST_ERROR = f"HTTP {resp.status_code}"
+    if resp.status_code == 429:
+        LAST_ERROR = "rate limited (429)"
+        raise RateLimited()
+    if resp.status_code != 200:
+        print(f"[creator-tracker] HTTP {resp.status_code}", flush=True)
     return None
 
 
@@ -157,11 +158,12 @@ def verify_creator_badge(s, creator_id, creator_type="User"):
         url = f"https://groups.roblox.com/v1/groups/{creator_id}"
     else:
         url = f"https://users.roblox.com/v1/users/{creator_id}"
+    endpoint = "groups" if ctype.startswith("group") else "users"
     try:
-        r = s.get(url, timeout=10)
-        if r.status_code != 200:
+        resp = safe_get(endpoint, url, session=s, timeout=10)
+        if resp.status_code != 200:
             return None
-        data = r.json() or {}
+        data = resp.json() or {}
         if "hasVerifiedBadge" in data:
             return bool(data.get("hasVerifiedBadge"))
         return None
@@ -415,7 +417,6 @@ def run_batch(cur, limit=10):
         return 0, 0, 0, f"cooling down for {remaining // 60}m {remaining % 60}s"
 
     cookies = _cookie_values()
-    session_idx = 0
     s = _session(cookies[0] if cookies else None)
 
     # Scan tracked creators first. Discovery is a 34-search burst and used to
@@ -446,22 +447,14 @@ def run_batch(cur, limit=10):
     budget = MAX_REQUESTS
 
     for cid, ctype, _name in batch:
-        items = None
-        while items is None:
-            try:
-                items = search_creator(s, cid, ctype or "User")
-            except RateLimited:
-                if session_idx + 1 < len(cookies):
-                    session_idx += 1
-                    s = _session(cookies[session_idx])
-                    print(f"[creator-tracker] rotating to cookie {session_idx + 1}",
-                          flush=True)
-                    continue
-                _set_cooldown(cur, 5)
-                print("[creator-tracker] rate limited on all cookies — stopping",
-                      flush=True)
-                return (scanned, upserted, new_creators,
-                        "rate limited on all cookies — cooling down 5m")
+        try:
+            items = search_creator(s, cid, ctype or "User")
+        except RateLimited:
+            _set_cooldown(cur, 5)
+            print("[creator-tracker] rate limited — cooling down 5m, "
+                  "no cookie rotation", flush=True)
+            return (scanned, upserted, new_creators,
+                    "rate limited — cooling down 5m")
         upserted += upsert_items(cur, items)
         mark_scanned(cur, cid)
         cur.connection.commit()

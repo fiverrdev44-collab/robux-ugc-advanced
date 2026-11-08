@@ -1,31 +1,25 @@
 """Regression tests for shared repairs (no network; DB section skipped locally)."""
 import os
 import sys
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gap_engine
 import live_market
+import safe_roblox
 import search_visibility as sv
+from execution_policy import default_scheduler
+
+
+def _reset_shared():
+    safe_roblox.reset_for_tests()
+    default_scheduler().reset()
 
 
 class _Resp429:
     status_code = 429
     headers = {"Retry-After": "0"}
-
-
-class _Resp200:
-    status_code = 200
-    headers = {}
-
-
-class _Session429Then200:
-    def __init__(self):
-        self.calls = 0
-
-    def get(self, *a, **k):
-        self.calls += 1
-        return _Resp429() if self.calls == 1 else _Resp200()
 
 
 class _Session429:
@@ -46,13 +40,15 @@ class _SessionEmpty:
 
 
 def test_fetch_query_429_sets_error():
+    _reset_shared()
     rows, pages, status, error = sv._fetch_query(_Session429(), "query")
-    assert status == "failed"
+    assert status == "rate_limited", status
     assert error == "HTTP 429 rate limited", error
     print("PASS visibility 429 error capture")
 
 
 def test_fetch_query_empty_is_completed():
+    _reset_shared()
     rows, pages, status, error = sv._fetch_query(_SessionEmpty(), "query")
     assert status == "completed" and rows == [] and error is None
     print("PASS visibility empty completed")
@@ -68,25 +64,18 @@ def test_gap_rejects_cross_family_words():
     print("PASS gap family filtering")
 
 
-def test_live_market_backoff_honours_retry_after():
-    slept = []
-    original_sleep = live_market.time.sleep
-    original_get = live_market.requests.get
-    session = _Session429Then200()
+def test_live_market_uses_shared_transport_without_local_retry():
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "0"}
 
-    def fake_get(*a, **k):
-        return session.get()
-
-    live_market.time.sleep = lambda s: slept.append(s)
-    live_market.requests.get = fake_get
-    try:
+    with mock.patch.object(
+            live_market, "safe_get", return_value=Response()) as shared_get:
         r = live_market._get_with_backoff("http://x", {"Keyword": "k"})
-        assert r.status_code == 200
-        assert slept and slept[0] == 1.0, slept  # Retry-After 0 clamped to 1s
-    finally:
-        live_market.time.sleep = original_sleep
-        live_market.requests.get = original_get
-    print("PASS live_market 429 backoff")
+    assert r.status_code == 429
+    shared_get.assert_called_once()
+    assert shared_get.call_args.args[:2] == ("catalog_search", "http://x")
+    print("PASS live_market delegates to shared transport")
 
 
 def test_chain_fallback_without_ai():
@@ -199,7 +188,7 @@ if __name__ == "__main__":
     test_fetch_query_429_sets_error()
     test_fetch_query_empty_is_completed()
     test_gap_rejects_cross_family_words()
-    test_live_market_backoff_honours_retry_after()
+    test_live_market_uses_shared_transport_without_local_retry()
     test_chain_fallback_without_ai()
     test_batch_client_chunks_and_backoff()
     test_chain_type_detection_word_boundary()

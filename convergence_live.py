@@ -17,7 +17,12 @@ from datetime import datetime, timezone
 
 from live_market import SEARCH_URL, _get_with_backoff
 from convergence_engine import FAMILIES
-from execution_policy import RobloxScheduler
+from execution_policy import RobloxScheduler, default_scheduler
+from safe_roblox import (
+    shared_circuit_open,
+    trip_shared_circuit,
+    reset_for_tests as reset_shared_for_tests,
+)
 
 # Accessory covers the five sub-types; the engine aggregates them.
 _EXPECTED_ASSET_TYPES = dict(FAMILIES)
@@ -59,6 +64,8 @@ _CIRCUIT_LOCK = threading.Lock()
 
 
 def _circuit_open():
+    if shared_circuit_open("catalog_search"):
+        return True
     s = _SCHEDULER
     return bool(s is not None and s.is_circuit_open("catalog_search"))
 
@@ -85,6 +92,7 @@ def _parse_retry_after(value):
 
 
 def _trip_circuit(seconds=None):
+    trip_shared_circuit(seconds)
     s = _SCHEDULER
     if s is not None:
         s.trip("catalog_search", seconds)
@@ -94,6 +102,11 @@ def _reset_circuit():
     s = _SCHEDULER
     if s is not None:
         s.reset()
+    reset_shared_for_tests()
+    try:
+        default_scheduler().reset()
+    except Exception:
+        pass
 
 
 def _expected_asset_types(family):
