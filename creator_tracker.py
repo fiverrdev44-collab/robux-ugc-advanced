@@ -17,6 +17,7 @@ import requests
 
 from safe_roblox import get as safe_get, shared_circuit_open
 from execution_policy import _parse_retry_after
+from time_utils import ensure_utc, utc_now
 from creator_identity import (
     has_composite_creator_pk,
     is_known_creator_type,
@@ -416,16 +417,16 @@ def _cooldown_remaining(cur):
         row = cur.fetchone()
         if not row:
             return 0
-        until = datetime.fromisoformat(row[0])
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=timezone.utc)
-        return max(0, int((until - datetime.now(timezone.utc)).total_seconds()))
+        until = ensure_utc(datetime.fromisoformat(row[0]), naive_is_utc=True)
+        if until is None:
+            return 0
+        return max(0, int((until - utc_now()).total_seconds()))
     except Exception:
         return 0
 
 
 def _set_cooldown(cur, minutes=10):
-    until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    until = utc_now() + timedelta(minutes=minutes)
     try:
         cur.execute("""
             INSERT INTO creator_patterns (pattern_key, pattern_value, updated_at)

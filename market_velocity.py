@@ -93,7 +93,8 @@ def compute_trajectory(cur, keyword, weeks=4, asset_ids=None):
         return {}
 
     sql = """
-        SELECT DATE_TRUNC('week', created_at)::date AS wk, COUNT(*) AS cnt
+        SELECT DATE_TRUNC('week', created_at AT TIME ZONE 'UTC')::date AS wk,
+               COUNT(*) AS cnt
         FROM items
         WHERE LOWER(name) LIKE %s
           AND created_at IS NOT NULL

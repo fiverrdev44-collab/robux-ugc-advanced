@@ -13,7 +13,7 @@ import importlib
 import os
 import subprocess
 import time
-from datetime import datetime
+from time_utils import db_utc, utc_now
 
 
 CORE_MODULES = [
@@ -162,28 +162,31 @@ def run_selftest(bot=None, progress=None, offline=False):
 
         cur.execute("SELECT max(fetched_at) FROM items")
         last_enrich = cur.fetchone()[0]
+        last_enrich_utc = db_utc(last_enrich)
         add(
             "pipeline", "recent enrichment",
-            last_enrich is not None
-            and (datetime.utcnow() - last_enrich.replace(tzinfo=None)).total_seconds() < 86400,
+            last_enrich_utc is not None
+            and (utc_now() - last_enrich_utc).total_seconds() < 86400,
             last_enrich,
         )
 
         cur.execute("SELECT max(snapshot_at) FROM item_history")
         last_snap = cur.fetchone()[0]
+        last_snap_utc = db_utc(last_snap)
         add(
             "pipeline", "recent snapshot",
-            last_snap is not None
-            and (datetime.utcnow() - last_snap.replace(tzinfo=None)).total_seconds() < 172800,
+            last_snap_utc is not None
+            and (utc_now() - last_snap_utc).total_seconds() < 172800,
             last_snap,
         )
 
         cur.execute("SELECT max(fetched_at) FROM search_suggestions")
         last_sugg = cur.fetchone()[0]
+        last_sugg_utc = db_utc(last_sugg)
         add(
             "pipeline", "recent suggestions",
-            last_sugg is not None
-            and (datetime.utcnow() - last_sugg.replace(tzinfo=None)).total_seconds() < 7 * 86400,
+            last_sugg_utc is not None
+            and (utc_now() - last_sugg_utc).total_seconds() < 7 * 86400,
             last_sugg,
             warning=True,
         )
@@ -596,7 +599,7 @@ class _MockChannel:
 class _MockMessageObj:
     id = 0
     content = ""
-    created_at = datetime.utcnow()
+    created_at = utc_now()
     attachments = []
     embeds = []
 

@@ -662,10 +662,10 @@ def _make_design_brief(idea, word_stats, adjacent, data):
 
 
 def build_full_report(session, verdict, roi, risks, pricing, portfolio, design, timing, window, ab_titles, graph, dominance):
-    from datetime import datetime
+    from datetime import datetime, timezone
     emoji, label, explanation = verdict
     lines = ["=" * 60, f"UGC CONSULTATION REPORT — {session.seed.upper()}",
-             f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", "=" * 60, "",
+             f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", "=" * 60, "",
              f"VERDICT: {emoji} {label}", explanation]
     for w in session.word_stats:
         lines.append(f"  {w['word']}: {w['count']} items, avg {w['avg_favs']:,.0f} favs")

@@ -64,7 +64,7 @@ def select_emerging(cur, limit=COHORT_SIZE["EMERGING"], exclude=None):
                    GREATEST(EXTRACT(EPOCH FROM
                        (max(h.snapshot_at) - min(h.snapshot_at))) / 86400.0, 1)
                        AS velocity,
-                   count(DISTINCT date(h.snapshot_at)) AS days,
+                   count(DISTINCT date(h.snapshot_at AT TIME ZONE 'UTC')) AS days,
                    min(h.favorite_count) AS first_favs,
                    max(h.favorite_count) AS last_favs
             FROM items i
@@ -74,7 +74,7 @@ def select_emerging(cur, limit=COHORT_SIZE["EMERGING"], exclude=None):
               AND h.favorite_count IS NOT NULL
               AND h.snapshot_at > now() - interval '14 days'
             GROUP BY i.creator_type, i.creator_id, i.id
-            HAVING count(DISTINCT date(h.snapshot_at)) >= %s
+            HAVING count(DISTINCT date(h.snapshot_at AT TIME ZONE 'UTC')) >= %s
                AND min(h.favorite_count) IS NOT NULL
         )
         SELECT creator_type, creator_id,

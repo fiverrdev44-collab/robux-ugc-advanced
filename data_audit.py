@@ -82,7 +82,7 @@ def snapshot_integrity(cur):
     """)
     dup_days = _one(cur, """
         SELECT COUNT(*) FROM (
-            SELECT item_id, snapshot_at::date
+            SELECT item_id, (snapshot_at AT TIME ZONE 'UTC')::date
             FROM item_history
             GROUP BY 1,2 HAVING COUNT(*) > 1
         ) t

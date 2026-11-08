@@ -23,6 +23,7 @@ on:
       - fix/f05-unified-roblox-api-safety
       - fix/f07-f08-creator-identity-integrity
       - fix/f09-oracle-rate-limit-recovery
+      - fix/f10-timestamp-integrity
   pull_request:
     branches:
       - main
@@ -90,6 +91,8 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run F-10 timestamp integrity regressions
+        run: python test_f10_timestamp_integrity.py
       - name: Run F-09 ORACLE recovery regressions
         run: python test_f09_oracle_recovery.py
       - name: Run F-07/F-08 creator identity regressions

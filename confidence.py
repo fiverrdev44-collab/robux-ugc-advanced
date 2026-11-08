@@ -263,12 +263,12 @@ def sales_ratio(cur, days=90, min_favs=10, min_items=5):
 
 def sales_history_ci(cur, item_name, days=90, confidence=CONFIDENCE,
                      min_units=5):
-    from datetime import date, timedelta
-    end = date.today()
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=days - 1)
     try:
         cur.execute("""
-            select created_at::date
+            select (created_at AT TIME ZONE 'UTC')::date
             from items
             where lower(name) = lower(%s) and created_at is not null
             order by favorite_count desc nulls last
@@ -278,10 +278,14 @@ def sales_history_ci(cur, item_name, days=90, confidence=CONFIDENCE,
         if row and row[0] and row[0] > start:
             start = row[0]
         cur.execute("""
-            select coalesce(sale_date, sale_time::date) as d, count(*)
+            select coalesce(sale_date,
+                            (sale_time AT TIME ZONE 'UTC')::date) as d,
+                   count(*)
             from my_sales
             where lower(item_name) = lower(%s)
-              and coalesce(sale_date, sale_time::date) between %s and %s
+              and coalesce(sale_date,
+                           (sale_time AT TIME ZONE 'UTC')::date)
+                  between %s and %s
             group by 1
         """, (item_name, start, end))
         rows = cur.fetchall()

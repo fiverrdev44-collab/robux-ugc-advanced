@@ -176,7 +176,7 @@ def _ensure_table(cur):
             weights JSONB,
             trained_on_count INTEGER,
             accuracy DOUBLE PRECISION,
-            trained_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            trained_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cur.connection.commit()

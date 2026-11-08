@@ -13,7 +13,7 @@ import re
 import json
 import asyncio
 import math
-from datetime import datetime
+from time_utils import ensure_utc, utc_now
 
 from execution_policy import to_thread_cancellable
 from bot_core import get_research_db
@@ -523,10 +523,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 )
                 if live_created:
                     try:
-                        age_days = (datetime.utcnow() - live_created.replace(tzinfo=None)).total_seconds() / 86400
-                        cur.execute("UPDATE items SET created_at = %s WHERE id = %s",
-                                    (live_created, item_id))
-                        conn.commit()
+                        live_utc = ensure_utc(live_created, naive_is_utc=True)
+                        if live_utc is not None:
+                            age_days = (utc_now() - live_utc).total_seconds() / 86400
+                            cur.execute(
+                                "UPDATE items SET created_at = %s WHERE id = %s",
+                                (live_utc, item_id))
+                            conn.commit()
                     except Exception: pass
 
             name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:5]
