@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from safe_roblox import get as safe_get, shared_circuit_open
+from execution_policy import _parse_retry_after
 from creator_identity import (
     has_composite_creator_pk,
     is_known_creator_type,
@@ -92,34 +93,59 @@ def _to_item(d):
 
 
 LAST_ERROR = None
+LAST_ERROR_KIND = None
+LAST_RETRY_AFTER = None
 
 
 def _get_json(s, params):
-    """One logical request through the shared catalog-search protection."""
-    global LAST_ERROR
+    """One logical request through the shared catalog-search protection.
+
+    Returns parsed JSON only on a valid 200 response. Failure details are
+    exposed through LAST_ERROR_KIND / LAST_ERROR / LAST_RETRY_AFTER so callers
+    can distinguish completion from a failure without treating it as empty
+    data. 429 still raises RateLimited for backward compatibility.
+    """
+    global LAST_ERROR, LAST_ERROR_KIND, LAST_RETRY_AFTER
+    LAST_ERROR = None
+    LAST_ERROR_KIND = None
+    LAST_RETRY_AFTER = None
     if shared_circuit_open("catalog_search"):
         LAST_ERROR = "circuit open"
+        LAST_ERROR_KIND = "deferred"
         return None
     try:
         resp = safe_get(
             "catalog_search", SEARCH_URL, params=params, session=s, timeout=15)
     except Exception as e:
         LAST_ERROR = f"request failed: {type(e).__name__}"
+        LAST_ERROR_KIND = ("timeout" if "timeout" in type(e).__name__.lower()
+                           else "unavailable")
         print(f"[creator-tracker] request failed: {type(e).__name__}",
               flush=True)
         return None
 
-    if resp.status_code == 200:
-        return resp.json()
-    if resp.status_code == 0 and resp.error == "circuit open":
+    code = resp.status_code or 0
+    if code == 200:
+        data = resp.json()
+        if not isinstance(data, dict):
+            LAST_ERROR = "invalid JSON response"
+            LAST_ERROR_KIND = "invalid_response"
+            return None
+        return data
+    if code == 0 and resp.error == "circuit open":
         LAST_ERROR = "circuit open"
+        LAST_ERROR_KIND = "deferred"
         return None
-    LAST_ERROR = f"HTTP {resp.status_code}"
-    if resp.status_code == 429:
+    if code == 429:
         LAST_ERROR = "rate limited (429)"
+        LAST_ERROR_KIND = "rate_limited"
+        LAST_RETRY_AFTER = _parse_retry_after(
+            resp.headers.get("Retry-After"))
         raise RateLimited()
-    if resp.status_code != 200:
-        print(f"[creator-tracker] HTTP {resp.status_code}", flush=True)
+    LAST_ERROR = f"HTTP {code}"
+    LAST_ERROR_KIND = ("timeout" if "timeout" in str(resp.error or "").lower()
+                       else "unavailable")
+    print(f"[creator-tracker] HTTP {code}", flush=True)
     return None
 
 
@@ -533,15 +559,29 @@ def filter_recent_assets(items, max_age_days=30, now=None):
 
 
 def search_creator_complete(s, creator_id, creator_type=None, max_pages=10):
-    """Paginated creator search for a verified typed identity."""
+    """Paginated creator search with an explicit completion contract.
+
+    Compatibility keys (creator_id, creator_type, items, pages, truncated)
+    are preserved. ``status`` is one of complete, partial, rate_limited,
+    deferred, timeout, unavailable, invalid_response, page_cap_reached.
+    Valid pages are always returned even when the final page fails.
+    """
     ctype = normalize_creator_type(creator_type)
     if not is_known_creator_type(ctype):
-        return {"creator_id": creator_id, "creator_type": None,
-                "items": [], "pages": 0, "truncated": False}
+        return {
+            "creator_id": creator_id, "creator_type": None, "items": [],
+            "pages": 0, "truncated": False, "complete": False,
+            "status": "unavailable", "error": "unknown creator type",
+            "retry_after": None, "partial": False,
+        }
     items = []
     cursor = None
     pages = 0
-    while pages < max(1, int(max_pages)):
+    max_pages = max(1, int(max_pages))
+    status = "complete"
+    error = None
+    retry_after = None
+    while pages < max_pages:
         params = {
             "CreatorTargetId": creator_id,
             "CreatorType": ctype,
@@ -550,8 +590,22 @@ def search_creator_complete(s, creator_id, creator_type=None, max_pages=10):
         }
         if cursor:
             params["Cursor"] = cursor
-        data = _get_json(s, params)
-        if not data:
+        try:
+            data = _get_json(s, params)
+        except RateLimited:
+            status = "rate_limited"
+            error = LAST_ERROR or "rate limited (429)"
+            retry_after = LAST_RETRY_AFTER
+            break
+        if data is None:
+            status = LAST_ERROR_KIND or "unavailable"
+            error = LAST_ERROR or status
+            retry_after = LAST_RETRY_AFTER
+            break
+        if not isinstance(data, dict) or not isinstance(
+                data.get("data"), list):
+            status = "invalid_response"
+            error = "response data is not a list"
             break
         for d in (data.get("data") or []):
             item = _to_item(d)
@@ -562,8 +616,26 @@ def search_creator_complete(s, creator_id, creator_type=None, max_pages=10):
         pages += 1
         cursor = data.get("nextPageCursor")
         if not cursor:
+            status = "complete"
             break
-        time.sleep(DELAY)
-    return {"creator_id": creator_id, "creator_type": ctype,
-            "items": items, "pages": pages,
-            "truncated": bool(cursor) and pages >= max_pages}
+        if pages < max_pages:
+            time.sleep(DELAY)
+    else:
+        if cursor:
+            status = "page_cap_reached"
+            error = "page cap reached with remaining pages"
+    complete = status == "complete"
+    if status not in ("complete", "last_page"):
+        complete = False
+    return {
+        "creator_id": creator_id,
+        "creator_type": ctype,
+        "items": items,
+        "pages": pages,
+        "truncated": bool(cursor) and pages >= max_pages,
+        "complete": complete,
+        "partial": bool(items) and not complete,
+        "status": status,
+        "error": error,
+        "retry_after": retry_after,
+    }

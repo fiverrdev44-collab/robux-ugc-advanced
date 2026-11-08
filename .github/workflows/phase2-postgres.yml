@@ -12,6 +12,7 @@ on:
       - audit/final-vanta73-certification
       - fix/f05-unified-roblox-api-safety
       - fix/f07-f08-creator-identity-integrity
+      - fix/f09-oracle-rate-limit-recovery
   pull_request:
     branches:
       - main
@@ -68,6 +69,18 @@ jobs:
           if [ "$status" -ne 0 ]; then
             tail -n 120 f07-f08-pg.log | while IFS= read -r line; do
               echo "::error title=F-07/F-08 PG failure::$line"
+            done
+          fi
+          exit "$status"
+      - name: Run F-09 ORACLE recovery PostgreSQL persistence
+        shell: bash
+        run: |
+          set +e
+          python test_f09_oracle_recovery_pg.py 2>&1 | tee f09-oracle-pg.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 120 f09-oracle-pg.log | while IFS= read -r line; do
+              echo "::error title=F-09 ORACLE PG failure::$line"
             done
           fi
           exit "$status"
