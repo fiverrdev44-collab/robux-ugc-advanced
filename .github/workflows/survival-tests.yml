@@ -24,6 +24,7 @@ on:
       - fix/f07-f08-creator-identity-integrity
       - fix/f09-oracle-rate-limit-recovery
       - fix/f10-timestamp-integrity
+      - fix/f18-sales-source-authentication
   pull_request:
     branches:
       - main
@@ -91,6 +92,8 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run F-18 sales source security regressions
+        run: python test_f18_sales_source_security.py
       - name: Run F-10 timestamp integrity regressions
         run: python test_f10_timestamp_integrity.py
       - name: Run F-09 ORACLE recovery regressions

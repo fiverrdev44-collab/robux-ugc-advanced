@@ -33,6 +33,10 @@ import asyncio
 from datetime import datetime, timezone
 
 from bot_core import get_db
+from sales_source_validation import (
+    check_message,
+    diagnostics_snapshot,
+)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -575,8 +579,10 @@ def _do_insert(cur, sale, columns):
     return cur.rowcount > 0
 
 
-def _insert_sale_result(cur, sale, columns=None):
+def _insert_sale_result(cur, sale, columns=None, validated=False):
     """Insert if not already present. Returns (inserted: bool, reason: str)."""
+    if not validated and sale.get("_source_validated") is not True:
+        return False, "unvalidated_source"
     columns = columns or _sales_columns(cur)
     existing = _conflict_rows(cur, sale, columns)
     reason = duplicate_reason(sale, existing)
@@ -586,9 +592,13 @@ def _insert_sale_result(cur, sale, columns=None):
     return (True, "inserted") if inserted else (False, "unique_conflict")
 
 
-def _insert_sale(cur, sale):
-    """Backwards-compatible single-sale insert. Returns True if inserted."""
-    inserted, _ = _insert_sale_result(cur, sale)
+def _insert_sale(cur, sale, validated=False):
+    """Backwards-compatible single-sale insert. Returns True if inserted.
+
+    ``validated=True`` is only for explicitly marked tests/administrative
+    backfills; production callers use the source-validated listener paths.
+    """
+    inserted, _ = _insert_sale_result(cur, sale, validated=validated)
     return inserted
 
 
@@ -597,22 +607,31 @@ def _insert_sale(cur, sale):
 # ════════════════════════════════════════════════════════════════════
 
 def _save_sales_batch(sales_list):
-    """Insert many sales with ONE connection. Returns (inserted, skipped)."""
+    """Insert many validated sales with ONE connection. Returns (inserted, skipped)."""
     if not sales_list:
         return 0, 0
 
-    print(f"[sales_listener] batch starting — {len(sales_list)} rows",
+    valid_sales = [s for s in sales_list
+                   if s.get("_source_validated") is True]
+    unvalidated = len(sales_list) - len(valid_sales)
+    if unvalidated:
+        print(f"[sales_listener] skipped {unvalidated} unvalidated sale(s)",
+              flush=True)
+    if not valid_sales:
+        return 0, unvalidated
+
+    print(f"[sales_listener] batch starting — {len(valid_sales)} rows",
           flush=True)
 
     conn = None
     cur = None
     inserted = 0
-    skipped = 0
+    skipped = unvalidated
     try:
         conn = get_db()
         cur = conn.cursor()
         columns = _sales_columns(cur)
-        for sale in sales_list:
+        for sale in valid_sales:
             try:
                 cur.execute("SAVEPOINT sp_sale")
                 ok, reason = _insert_sale_result(cur, sale, columns)
@@ -659,6 +678,10 @@ def _save_sale_single(sale):
     """Single-sale save (used by live listener). Runs in thread."""
     if not sale:
         return False
+    if sale.get("_source_validated") is not True:
+        print("[sales_listener] refused unvalidated sale before DB access",
+              flush=True)
+        return False
     conn = None
     cur = None
     try:
@@ -697,11 +720,16 @@ def _save_sale_single(sale):
 # ════════════════════════════════════════════════════════════════════
 
 async def handle_sale_message(message):
-    """Called from on_message — runs DB writes off the event loop."""
+    """Called from on_message — validates source before parsing/DB writes."""
+    decision = check_message(message)
+    if not decision.allowed:
+        return False
     if not message.embeds:
         return False
     saved_any = False
     for sale in extract_sales_from_message(message):
+        sale["_source_validated"] = True
+        sale["_source_kind"] = decision.source_kind
         is_new = await asyncio.to_thread(_save_sale_single, sale)
         if is_new:
             print(
@@ -735,16 +763,25 @@ async def backfill_channel(bot, channel_id, limit=200):
 
     scanned = 0
     sales_batch = []
+    rejected = 0
     try:
         async for msg in ch.history(limit=limit):
             scanned += 1
-            sales_batch.extend(extract_sales_from_message(msg))
+            decision = check_message(msg)
+            if not decision.allowed:
+                rejected += 1
+                continue
+            for sale in extract_sales_from_message(msg):
+                sale["_source_validated"] = True
+                sale["_source_kind"] = decision.source_kind
+                sales_batch.append(sale)
     except Exception as e:
         print(f"[backfill] history read failed: {e}", flush=True)
         return scanned, 0
 
     print(f"[backfill] scanned {scanned} messages · "
-          f"found {len(sales_batch)} sales", flush=True)
+          f"found {len(sales_batch)} sales · rejected {rejected} · "
+          f"source diagnostics={diagnostics_snapshot()}", flush=True)
 
     if not sales_batch:
         return scanned, 0

@@ -215,10 +215,10 @@ def test_db_transaction():
             "amount_robux": 10, "status": "Complete",
             "source_event_id": "__writer_event__", "source": "test",
         }
-        assert _insert_sale(cur, sale) is True
-        assert _insert_sale(cur, dict(sale)) is False
+        assert _insert_sale(cur, sale, validated=True) is True
+        assert _insert_sale(cur, dict(sale), validated=True) is False
         other = dict(sale); other["source_event_id"] = "__writer_event_2__"
-        assert _insert_sale(cur, other) is True
+        assert _insert_sale(cur, other, validated=True) is True
         # Same daily snapshot is idempotent.
         cur.execute("""
             INSERT INTO item_history (item_id, favorite_count, price)
