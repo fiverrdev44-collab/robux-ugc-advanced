@@ -161,9 +161,11 @@ def test_migration_is_guarded_idempotent_and_rollback_documented():
     assert "CREATE OR REPLACE FUNCTION _f10_utc_column" in migration
     assert "timestamp without time zone" in migration
     assert "RAISE EXCEPTION" in migration
-    assert "pg_get_indexdef" in migration
+    assert "DROP INDEX IF EXISTS idx_item_history_daily" in migration
+    assert "CREATE UNIQUE INDEX idx_item_history_daily" in migration
     assert "Rollback (manual" in migration
-    assert "SET LOCAL TIME ZONE 'UTC'" in migration
+    assert "AT TIME ZONE 'UTC'" in migration
+    assert "SET LOCAL TIME ZONE" not in migration
     assert "DROP FUNCTION _f10_utc_column" in migration
     print("PASS migration is guarded, idempotent and rollback-documented")
 

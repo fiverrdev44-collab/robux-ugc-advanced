@@ -95,6 +95,21 @@ class TimestampPostgresTests(unittest.TestCase):
         except Exception:
             pass
 
+    def _apply_migration(self):
+        conn = open_test_connection()
+        conn.autocommit = False
+        try:
+            cur = conn.cursor()
+            cur.execute(f'SET search_path TO "{self.schema}"')
+            cur.execute(MIGRATION)
+            conn.commit()
+            cur.close()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _seed(self):
         self.cur.execute("""
             INSERT INTO items (id, created_at, updated_at, fetched_at)
@@ -121,7 +136,7 @@ class TimestampPostgresTests(unittest.TestCase):
         items_before = self.cur.fetchone()[0]
         self.cur.execute("SELECT count(*) FROM item_history")
         history_before = self.cur.fetchone()[0]
-        self.cur.execute(MIGRATION)
+        self._apply_migration()
 
         for table, column in (
                 ("items", "created_at"), ("items", "updated_at"),
@@ -148,23 +163,23 @@ class TimestampPostgresTests(unittest.TestCase):
         assert "AT TIME ZONE" in index_def and "UTC" in index_def
 
         # Re-running the migration is safe.
-        self.cur.execute(MIGRATION)
+        self._apply_migration()
         print("PASS migration preserves UTC instants, rows and UTC index")
 
     def test_utc_day_uniqueness_under_non_utc_session(self):
         self._seed()
-        self.cur.execute(MIGRATION)
-        self.cur.execute("SET TIME ZONE 'America/New_York'")
+        self._apply_migration()
+        self.cur.execute("SET TIME ZONE '-05:00'")
         try:
             self.cur.execute("""
                 SELECT (snapshot_at AT TIME ZONE 'UTC')::date,
                        snapshot_at::date
                 FROM item_history WHERE item_id=1
-                ORDER BY snapshot_at DESC LIMIT 1
+                ORDER BY snapshot_at ASC LIMIT 1
             """)
             utc_day, local_day = self.cur.fetchone()
-            assert utc_day.isoformat() == "2026-03-09"
-            assert local_day.isoformat() == "2026-03-08"
+            assert utc_day.isoformat() == "2026-03-08"
+            assert local_day.isoformat() == "2026-03-09"
 
             # Same UTC day must collide, despite the non-UTC session.
             with self.assertRaises(Exception):
@@ -178,7 +193,7 @@ class TimestampPostgresTests(unittest.TestCase):
                 VALUES (1, '2026-03-10 12:00:00+00')
             """)
         finally:
-            self.cur.execute("SET TIME ZONE 'UTC'")
+            self.cur.execute("SET TIME ZONE 'GMT'")
         print("PASS UTC-day uniqueness is independent of session timezone")
 
     def test_duplicate_utc_days_abort_transactionally(self):
@@ -189,9 +204,7 @@ class TimestampPostgresTests(unittest.TestCase):
                    (9, '2026-05-01 23:00:00')
         """)
         with self.assertRaises(Exception):
-            self.cur.execute(MIGRATION)
-        self.conn.rollback()
-        self.cur.execute(f'SET search_path TO "{self.schema}"')
+            self._apply_migration()
         self.cur.execute("""
             SELECT data_type FROM information_schema.columns
             WHERE table_schema = current_schema()
@@ -204,7 +217,8 @@ class TimestampPostgresTests(unittest.TestCase):
 
     def test_rollback_restores_naive_utc_and_old_index(self):
         self._seed()
-        self.cur.execute(MIGRATION)
+        self._apply_migration()
+        self.cur.execute("DROP INDEX idx_item_history_daily")
         self.cur.execute("""
             ALTER TABLE items
               ALTER COLUMN created_at TYPE timestamp
@@ -215,7 +229,6 @@ class TimestampPostgresTests(unittest.TestCase):
               ALTER COLUMN snapshot_at TYPE timestamp
               USING snapshot_at AT TIME ZONE 'UTC'
         """)
-        self.cur.execute("DROP INDEX idx_item_history_daily")
         self.cur.execute("""
             CREATE UNIQUE INDEX idx_item_history_daily
             ON item_history (item_id, (snapshot_at::date))
@@ -233,7 +246,7 @@ class TimestampPostgresTests(unittest.TestCase):
 
     def test_sales_offsets_remain_distinct_from_notification(self):
         self._seed()
-        self.cur.execute(MIGRATION)
+        self._apply_migration()
         self.cur.execute("""
             SELECT sale_time AT TIME ZONE 'UTC', sale_date
             FROM my_sales WHERE source_event_id='evt-1'
