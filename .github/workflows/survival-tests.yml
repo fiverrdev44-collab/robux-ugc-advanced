@@ -21,6 +21,7 @@ on:
       - fix/m6a-security-authorization
       - audit/final-vanta73-certification
       - fix/f05-unified-roblox-api-safety
+      - fix/f07-f08-creator-identity-integrity
   pull_request:
     branches:
       - main
@@ -88,6 +89,8 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run F-07/F-08 creator identity regressions
+        run: python test_f07_f08_creator_identity.py
       - name: Run F-05 unified Roblox API safety regressions
         run: python test_f05_api_safety.py
       - name: Run safe Roblox API wrapper regressions

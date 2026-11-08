@@ -467,12 +467,14 @@ def setup_database():
     # Verified creators monitored by creator_tracker.py.
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS tracked_creators (
-            creator_id BIGINT PRIMARY KEY,
-            creator_type TEXT DEFAULT 'User',
+            creator_id BIGINT NOT NULL,
+            creator_type TEXT NOT NULL DEFAULT 'unknown',
             creator_name TEXT,
             verified BOOLEAN DEFAULT TRUE,
             last_scanned TIMESTAMP,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            type_provenance TEXT,
+            PRIMARY KEY (creator_type, creator_id)
         );
     ''', "tracked_creators")
 

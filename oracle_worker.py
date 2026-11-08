@@ -82,27 +82,38 @@ class PostgresStore:
         finally:
             cur.close()
 
-    def creator_types(self, creator_ids):
+    def creator_types(self, creator_keys):
+        """Resolve typed identities; ``creator_keys`` is [(type, id), ...]."""
         types = {}
+        if not creator_keys:
+            return types
+        types_in = [t for t, _ in creator_keys]
+        ids_in = [i for _, i in creator_keys]
         cur = self.conn.cursor()
         try:
             cur.execute("""
-                select creator_id, creator_type from tracked_creators
-                where creator_id = any(%s) and creator_type is not null
-            """, (list(creator_ids),))
-            for cid, ctype in cur.fetchall():
-                types[cid] = ctype
+                select creator_type, creator_id from tracked_creators
+                where creator_type in ('User', 'Group')
+                  and (creator_type, creator_id) in (
+                      select * from unnest(%s::text[], %s::bigint[])
+                  )
+            """, (types_in, ids_in))
+            for ctype, cid in cur.fetchall():
+                types[(ctype, cid)] = ctype
             cur.execute("""
-                select creator_id, creator_type from trend_creator_cohorts
-                where creator_id = any(%s) and creator_type is not null
-            """, (list(creator_ids),))
-            for cid, ctype in cur.fetchall():
-                types.setdefault(cid, ctype)
+                select creator_type, creator_id from trend_creator_cohorts
+                where creator_type in ('User', 'Group')
+                  and (creator_type, creator_id) in (
+                      select * from unnest(%s::text[], %s::bigint[])
+                  )
+            """, (types_in, ids_in))
+            for ctype, cid in cur.fetchall():
+                types.setdefault((ctype, cid), ctype)
         finally:
             cur.close()
         return types
 
-    def insert_for_creator(self, creator_id, items, scan_run_id):
+    def insert_for_creator(self, creator_type, creator_id, items, scan_run_id):
         """One transaction per creator; rolls back only this creator."""
         counts = {"inserted": 0, "too_recent": 0, "duplicate": 0}
         conn = self.db_factory()
@@ -111,7 +122,8 @@ class PostgresStore:
                 cur = conn.cursor()
                 try:
                     for it in items:
-                        status = self._insert_one(cur, scan_run_id, it)
+                        status = self._insert_one(
+                            cur, scan_run_id, it, creator_type)
                         counts[status] = counts.get(status, 0) + 1
                 finally:
                     cur.close()
@@ -119,7 +131,7 @@ class PostgresStore:
             conn.close()
         return counts
 
-    def _insert_one(self, cur, scan_run_id, it):
+    def _insert_one(self, cur, scan_run_id, it, creator_type):
         item_id = it.get("id")
         cur.execute("""
             select extract(epoch from (now() - observed_at)) / 3600.0
@@ -144,11 +156,11 @@ class PostgresStore:
                 WHERE item_id = %s AND favorites IS NOT NULL
             )
             INSERT INTO trend_item_observations
-              (item_id, creator_id, observed_at, scan_run_id, favorites,
-               title, description, price, created_at, item_type,
+              (item_id, creator_id, creator_type, observed_at, scan_run_id,
+               favorites, title, description, price, created_at, item_type,
                sales_count, favorites_delta, hours_since_last,
                favorites_velocity, favorite_data_status)
-            SELECT %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, NULL,
+            SELECT %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, NULL,
                    CASE WHEN base.favorites IS NULL OR %s IS NULL THEN NULL
                         ELSE %s::int - base.favorites END,
                    base.hours,
@@ -160,7 +172,8 @@ class PostgresStore:
                    %s
             FROM base
             ON CONFLICT (scan_run_id, item_id) DO NOTHING
-        """, (item_id, item_id, it.get("creator_id"), scan_run_id, favorites,
+        """, (item_id, item_id, it.get("creator_type"), scan_run_id,
+              favorites,
               (it.get("name") or "")[:500],
               (it.get("description") or "")[:5000], price,
               it.get("created_at"), it.get("item_type"),
@@ -255,19 +268,24 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
         ref, cohort_rows = store.latest_cohort()
         summary["cohort_snapshot_ref"] = ref
         creators, seen = [], set()
-        for cid, ctype, ccreator in cohort_rows:
-            if cid in seen:
+        for cid, cohort_type, ctype in cohort_rows:
+            ctype = ctype if ctype in ("User", "Group") else None
+            key = (ctype or "unknown", cid)
+            if key in seen:
                 continue
-            seen.add(cid)
-            creators.append({"creator_id": cid, "cohort_type": ctype})
-            key = (ctype or "").lower()
-            if key in summary["per_cohort"]:
-                summary["per_cohort"][key] += 1
+            seen.add(key)
+            creators.append({"creator_id": cid, "creator_type": ctype,
+                             "cohort_type": cohort_type})
+            cohort_bucket = (cohort_type or "").lower()
+            if cohort_bucket in summary["per_cohort"]:
+                summary["per_cohort"][cohort_bucket] += 1
         summary["creators_eligible"] = len(creators)
         scan_run_id = store.create_scan_run(ref)
         summary["scan_run_id"] = scan_run_id
 
-        types = store.creator_types([c["creator_id"] for c in creators])
+        types = store.creator_types([
+            (c["creator_type"], c["creator_id"]) for c in creators
+        ])
         pages = max(DEFAULT_DISCOVERY_PAGES, 1)
         max_age = DEFAULT_MAX_ITEM_AGE_DAYS
         now = datetime.now(timezone.utc)
@@ -277,10 +295,13 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
 
         for c in creators:
             cid = c["creator_id"]
-            ctype = types.get(cid)
-            if not ctype:
+            ctype = c.get("creator_type")
+            if ctype not in ("User", "Group"):
+                ctype = types.get((ctype, cid))
+            if ctype not in ("User", "Group"):
                 summary["skipped_unknown_type"] += 1
                 continue
+            creator_label = f"{ctype}:{cid}"
             try:
                 if session is None:
                     session = session_fn()
@@ -302,17 +323,17 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
                 from creator_tracker import RateLimited
                 if isinstance(e, RateLimited):
                     discovery_rate_limited = True
-                    summary["truncated_creators"][str(cid)] = (
+                    summary["truncated_creators"][creator_label] = (
                         "discovery_rate_limited")
                     break
                 summary["creators_errored"] += 1
                 summary.setdefault("error_summary", {})
-                summary["error_summary"][f"discovery:{cid}"] = (
+                summary["error_summary"][f"discovery:{creator_label}"] = (
                     f"{type(e).__name__}: {e}")
                 continue
             summary["creators_scanned"] += 1
             if was_truncated:
-                summary["truncated_creators"][str(cid)] = {
+                summary["truncated_creators"][creator_label] = {
                     "reason": "page_cap_reached",
                     "pages_fetched": pages_fetched,
                     "items_returned": len(results),
@@ -325,7 +346,8 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
                 if it.get("id") is None:
                     continue
                 mapping[int(it["id"])] = {
-                    "creator_id": cid, "cohort_type": c["cohort_type"],
+                    "creator_id": cid, "creator_type": ctype,
+                    "cohort_type": c["cohort_type"],
                     "created_at": created,
                 }
         summary["items_discovered"] = len(mapping)
@@ -342,20 +364,24 @@ def run_oracle_scan(store=None, search_fn=None, batch_fn=None,
                 continue
             enriched = dict(batch_item)
             enriched["creator_id"] = meta["creator_id"]
+            enriched["creator_type"] = meta["creator_type"]
             enriched["created_at"] = meta["created_at"]
             enriched["item_type"] = _item_type(
                 batch_item.get("asset_type_id"))
-            by_creator.setdefault(meta["creator_id"], []).append(enriched)
+            by_creator.setdefault(
+                (meta["creator_type"], meta["creator_id"]), []).append(enriched)
 
-        for cid, rows in by_creator.items():
+        for (creator_type, cid), rows in by_creator.items():
             try:
-                counts = store.insert_for_creator(cid, rows, scan_run_id)
+                counts = store.insert_for_creator(
+                    creator_type, cid, rows, scan_run_id)
                 summary["observations_inserted"] += counts.get("inserted", 0)
                 summary["skipped_too_recent"] += counts.get("too_recent", 0)
             except Exception as e:
                 summary["creators_errored"] += 1
                 summary.setdefault("error_summary", {})
-                summary["error_summary"][f"insert:{cid}"] = (
+                summary["error_summary"][
+                    f"insert:{creator_type}:{cid}"] = (
                     f"{type(e).__name__}: {e}")
 
         for fid, reason in (failed or {}).items():

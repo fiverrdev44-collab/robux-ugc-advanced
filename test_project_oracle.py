@@ -51,12 +51,16 @@ def test_cohorts_freeze_and_counts():
 
     orig = (tc.select_elite, tc.select_emerging, tc.select_control)
     tc.select_elite = lambda cur_, limit=50: [
-        {"creator_id": i, "score": 1.0, "reason": "elite"} for i in range(50)]
+        {"creator_type": "User", "creator_id": i,
+         "creator_key": f"User:{i}", "score": 1.0, "reason": "elite"}
+        for i in range(50)]
     tc.select_emerging = lambda cur_, limit=25, exclude=None: [
-        {"creator_id": 100 + i, "score": 0.5, "reason": "emerging"}
+        {"creator_type": "User", "creator_id": 100 + i,
+         "creator_key": f"User:{100 + i}", "score": 0.5, "reason": "emerging"}
         for i in range(25)]
     tc.select_control = lambda cur_, limit=25, exclude=None, seed="oracle-v1": [
-        {"creator_id": 200 + i, "score": None, "reason": "control"}
+        {"creator_type": "Group", "creator_id": 200 + i,
+         "creator_key": f"Group:{200 + i}", "score": None, "reason": "control"}
         for i in range(25)]
     try:
         cur = FakeCur(one=(0,))
@@ -64,9 +68,9 @@ def test_cohorts_freeze_and_counts():
         assert out["counts"] == {"ELITE": 50, "EMERGING": 25, "CONTROL": 25}
         inserts = [c for c in cur.calls if c[0].upper().startswith("INSERT")]
         assert len(inserts) == 100
-        assert all("ON CONFLICT (COHORT_ID, CREATOR_ID) DO NOTHING" in c[0].upper()
-                   for c in inserts)
-        print("PASS cohort selection counts + unique constraint")
+        assert all("ON CONFLICT (COHORT_ID, CREATOR_KEY) DO NOTHING"
+                   in c[0].upper() for c in inserts)
+        print("PASS cohort selection counts + composite unique constraint")
     finally:
         tc.select_elite, tc.select_emerging, tc.select_control = orig
 
@@ -74,7 +78,8 @@ def test_cohorts_freeze_and_counts():
 def test_cohort_rollback():
     orig = (tc.select_elite, tc.select_emerging, tc.select_control)
     tc.select_elite = lambda cur_, limit=50: [
-        {"creator_id": 1, "score": 1.0, "reason": "elite"}]
+        {"creator_type": "User", "creator_id": 1, "creator_key": "User:1",
+         "score": 1.0, "reason": "elite"}]
     tc.select_emerging = lambda cur_, limit=25, exclude=None: []
     tc.select_control = lambda cur_, limit=25, exclude=None, seed="x": []
     try:
@@ -110,7 +115,7 @@ def test_discovery_timestamps():
     creator_tracker._get_json = lambda s, p: pages.pop(0) if pages else None
     try:
         out = creator_tracker.search_creator_complete(
-            object(), 123, max_pages=1)
+            object(), 123, creator_type="User", max_pages=1)
         assert out["truncated"] is True and out["pages"] == 1
         assert out["items"][0]["created_at"].year == 2026
         print("PASS pagination truncation + itemCreatedUtc preserved")
@@ -120,19 +125,20 @@ def test_discovery_timestamps():
 
 def test_observations_append_only():
     cur = FakeCur()
-    item = {"id": 7, "creator_id": 9, "name": "Pose", "description": "d",
-            "price": 5, "favorites": None, "created_at": None,
-            "favorite_data_status": "unknown"}
+    item = {"id": 7, "creator_id": 9, "creator_type": "User", "name": "Pose",
+            "description": "d", "price": 5, "favorites": None,
+            "created_at": None, "favorite_data_status": "unknown"}
     tr.record_observation(cur, 42, item)
     sql = cur.calls[-1][0].upper()
     assert "INSERT INTO TREND_ITEM_OBSERVATIONS" in sql
+    assert "CREATOR_TYPE" in sql
     assert "ON CONFLICT (SCAN_RUN_ID, ITEM_ID) DO NOTHING" in sql
     assert "UPDATE" not in " ".join(c[0].upper() for c in cur.calls)
-    assert cur.calls[-1][1][4] is None  # unknown stays NULL, never 0
+    assert cur.calls[-1][1][5] is None  # unknown stays NULL, never 0
     item["favorites"] = 0
     item["favorite_data_status"] = "known"
     tr.record_observation(cur, 43, item)
-    assert cur.calls[-1][1][4] == 0
+    assert cur.calls[-1][1][5] == 0
     print("PASS append-only observations; unknown != zero")
 
 

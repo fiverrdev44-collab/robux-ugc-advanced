@@ -16,6 +16,12 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from safe_roblox import get as safe_get, shared_circuit_open
+from creator_identity import (
+    has_composite_creator_pk,
+    is_known_creator_type,
+    normalize_creator_type,
+    stored_creator_type,
+)
 
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 PAGE_SIZE = 30
@@ -78,7 +84,7 @@ def _to_item(d):
         "creator_name": (d.get("creatorName") or "")[:200],
         "creator_id": d.get("creatorTargetId"),
         # Missing type/verification stays missing; never default to User/False.
-        "creator_type": d.get("creatorType") or None,
+        "creator_type": normalize_creator_type(d.get("creatorType")),
         "creator_verified": badge if isinstance(badge, bool) else None,
         "asset_type_id": d.get("assetType") or 0,
         "created_at": _parse_time(d.get("itemCreatedUtc")),
@@ -117,14 +123,17 @@ def _get_json(s, params):
     return None
 
 
-def search_creator(s, creator_id, creator_type="User", pages=MAX_PAGES):
-    """Return the creator's recent catalog items."""
+def search_creator(s, creator_id, creator_type=None, pages=MAX_PAGES):
+    """Return the creator's recent catalog items for a verified typed identity."""
+    ctype = normalize_creator_type(creator_type)
+    if ctype is None or not is_known_creator_type(ctype):
+        return []
     items = []
     cursor = None
     for _ in range(max(1, pages)):
         params = {
             "CreatorTargetId": creator_id,
-            "CreatorType": creator_type,
+            "CreatorType": ctype,
             "Limit": PAGE_SIZE,
             "SortType": 3,  # recently updated first
         }
@@ -151,14 +160,17 @@ DISCOVERY_KEYWORDS = (
 )
 
 
-def verify_creator_badge(s, creator_id, creator_type="User"):
-    """Live badge check. Returns True/False/None (None = API failed)."""
-    ctype = (creator_type or "User").lower()
-    if ctype.startswith("group"):
+def verify_creator_badge(s, creator_id, creator_type=None):
+    """Live badge check. Returns True/False/None (None = unknown/failed)."""
+    ctype = normalize_creator_type(creator_type)
+    if not is_known_creator_type(ctype):
+        return None
+    if ctype == "Group":
         url = f"https://groups.roblox.com/v1/groups/{creator_id}"
+        endpoint = "groups"
     else:
         url = f"https://users.roblox.com/v1/users/{creator_id}"
-    endpoint = "groups" if ctype.startswith("group") else "users"
+        endpoint = "users"
     try:
         resp = safe_get(endpoint, url, session=s, timeout=10)
         if resp.status_code != 200:
@@ -184,9 +196,11 @@ def discover_verified(s, keywords=DISCOVERY_KEYWORDS, pages=1):
             if not data:
                 break
             for d in data.get("data") or []:
-                if d.get("creatorHasVerifiedBadge") and d.get("creatorTargetId"):
-                    found[(int(d["creatorTargetId"]),
-                           d.get("creatorType") or "User")] = (
+                ctype = normalize_creator_type(d.get("creatorType"))
+                cid = d.get("creatorTargetId")
+                if (d.get("creatorHasVerifiedBadge") and cid
+                        and is_known_creator_type(ctype)):
+                    found[(int(cid), ctype)] = (
                         d.get("creatorName") or "?")
             cursor = data.get("nextPageCursor")
             if not cursor:
@@ -199,28 +213,55 @@ def discover_verified(s, keywords=DISCOVERY_KEYWORDS, pages=1):
 # ── Database side ───────────────────────────────────────────────
 
 def ensure_creators(cur, creators, session=None):
-    """creators: {(id, type): name}. Verifies the badge live when possible."""
+    """creators: {(id, type): name}. Types are stored explicitly.
+
+    Unknown types are stored as ``unknown`` and are never scanned. The
+    composite conflict target is used when the F-07 migration is applied; the
+    legacy single-column conflict target is retained only for pre-migration
+    deployments and cannot distinguish User/Group collisions.
+    """
     added = 0
+    composite = has_composite_creator_pk(cur)
     for (cid, ctype), name in creators.items():
-        cur.execute(
-            "select 1 from tracked_creators where creator_id = %s", (cid,)
-        )
+        ctype = normalize_creator_type(ctype)
+        if ctype is None:
+            ctype = "unknown"
+        if composite:
+            cur.execute("""
+                SELECT 1 FROM tracked_creators
+                WHERE creator_type = %s AND creator_id = %s
+            """, (ctype, cid))
+        else:
+            cur.execute(
+                "SELECT 1 FROM tracked_creators WHERE creator_id = %s", (cid,))
         if cur.fetchone():
             continue
         verified = True
-        if session is not None:
+        if session is not None and is_known_creator_type(ctype):
             checked = verify_creator_badge(session, cid, ctype)
             if checked is False:
                 continue
             if checked is None:
                 verified = True  # catalog flag already said verified
             time.sleep(0.5)
-        cur.execute("""
-            INSERT INTO tracked_creators (creator_id, creator_type, creator_name,
-                                          verified, last_scanned)
-            VALUES (%s, %s, %s, %s, NULL)
-            ON CONFLICT (creator_id) DO NOTHING
-        """, (cid, ctype, name, verified))
+        elif not is_known_creator_type(ctype):
+            verified = False
+        if composite:
+            cur.execute("""
+                INSERT INTO tracked_creators (creator_id, creator_type,
+                                              creator_name, verified,
+                                              last_scanned, type_provenance)
+                VALUES (%s, %s, %s, %s, NULL, 'catalog')
+                ON CONFLICT (creator_type, creator_id) DO NOTHING
+            """, (cid, ctype, name, verified))
+        else:
+            cur.execute("""
+                INSERT INTO tracked_creators (creator_id, creator_type,
+                                              creator_name, verified,
+                                              last_scanned)
+                VALUES (%s, %s, %s, %s, NULL)
+                ON CONFLICT (creator_id) DO NOTHING
+            """, (cid, ctype, name, verified))
         added += cur.rowcount or 0
     return added
 
@@ -230,6 +271,7 @@ def pick_batch(cur, limit=10, stale_hours=6):
         SELECT creator_id, creator_type, creator_name
         FROM tracked_creators
         WHERE verified IS TRUE
+          AND creator_type IN ('User', 'Group')
           AND (last_scanned IS NULL
                OR last_scanned < NOW() - (%s || ' hours')::interval)
         ORDER BY last_scanned NULLS FIRST
@@ -324,12 +366,16 @@ def upsert_items(cur, items):
     return inserted
 
 
-def mark_scanned(cur, creator_id):
+def mark_scanned(cur, creator_id, creator_type):
+    ctype = normalize_creator_type(creator_type)
+    if not is_known_creator_type(ctype):
+        return 0
     cur.execute("""
         UPDATE tracked_creators
         SET last_scanned = CURRENT_TIMESTAMP
-        WHERE creator_id = %s
-    """, (creator_id,))
+        WHERE creator_type = %s AND creator_id = %s
+    """, (ctype, creator_id))
+    return cur.rowcount or 0
 
 
 COOLDOWN_KEY = "crawl_cooldown_until"
@@ -448,7 +494,7 @@ def run_batch(cur, limit=10):
 
     for cid, ctype, _name in batch:
         try:
-            items = search_creator(s, cid, ctype or "User")
+            items = search_creator(s, cid, ctype)
         except RateLimited:
             _set_cooldown(cur, 5)
             print("[creator-tracker] rate limited — cooling down 5m, "
@@ -456,7 +502,7 @@ def run_batch(cur, limit=10):
             return (scanned, upserted, new_creators,
                     "rate limited — cooling down 5m")
         upserted += upsert_items(cur, items)
-        mark_scanned(cur, cid)
+        mark_scanned(cur, cid, ctype)
         cur.connection.commit()
         scanned += 1
         budget -= MAX_PAGES + 1
@@ -486,20 +532,19 @@ def filter_recent_assets(items, max_age_days=30, now=None):
     return out
 
 
-def search_creator_complete(s, creator_id, creator_type="User", max_pages=10):
-    """Paginated creator search that reports truncation instead of silently
-    treating the first page(s) as the complete catalogue.
-
-    SortType=3 is recently *updated* ordering; recency filtering must use the
-    itemCreatedUtc timestamp, not the sort order.
-    """
+def search_creator_complete(s, creator_id, creator_type=None, max_pages=10):
+    """Paginated creator search for a verified typed identity."""
+    ctype = normalize_creator_type(creator_type)
+    if not is_known_creator_type(ctype):
+        return {"creator_id": creator_id, "creator_type": None,
+                "items": [], "pages": 0, "truncated": False}
     items = []
     cursor = None
     pages = 0
     while pages < max(1, int(max_pages)):
         params = {
             "CreatorTargetId": creator_id,
-            "CreatorType": creator_type,
+            "CreatorType": ctype,
             "Limit": PAGE_SIZE,
             "SortType": 3,
         }
@@ -519,5 +564,6 @@ def search_creator_complete(s, creator_id, creator_type="User", max_pages=10):
         if not cursor:
             break
         time.sleep(DELAY)
-    return {"creator_id": creator_id, "items": items, "pages": pages,
+    return {"creator_id": creator_id, "creator_type": ctype,
+            "items": items, "pages": pages,
             "truncated": bool(cursor) and pages >= max_pages}

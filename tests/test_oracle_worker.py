@@ -41,17 +41,17 @@ class FakeStore:
     def latest_cohort(self):
         return "ORACLE-20261101", self.cohort_rows
 
-    def creator_types(self, ids):
+    def creator_types(self, keys):
         if self.fail_creator_types:
             raise RuntimeError("simulated fatal cohort-type lookup failure")
-        return {cid: self.types[cid] for cid in ids if cid in self.types}
+        return {key: self.types[key] for key in keys if key in self.types}
 
     def create_scan_run(self, ref):
         rid = 100 + len(self.scan_runs)
         self.scan_runs.append({"scan_run_id": rid, "ref": ref})
         return rid
 
-    def insert_for_creator(self, creator_id, items, scan_run_id):
+    def insert_for_creator(self, creator_type, creator_id, items, scan_run_id):
         if creator_id in self.error_creators:
             self.rollbacks.append(creator_id)
             raise RuntimeError("forced failure")
@@ -79,6 +79,7 @@ class FakeStore:
                     velocity = round(delta / (hours_since / 24.0), 3)
             row = {
                 "item_id": iid, "creator_id": creator_id,
+                "creator_type": creator_type,
                 "observed_at": NOW, "scan_run_id": scan_run_id,
                 "favorites": favs,
                 "title": it.get("name"), "description": it.get("description"),
@@ -148,7 +149,7 @@ def item(iid, name="Super Saiyan Battle Pose", favorites=10,
 def base_setup():
     rows = [(1, "ELITE", "User"), (2, "EMERGING", "User"),
             (2, "EMERGING", "User"), (3, "CONTROL", None)]
-    types = {1: "User", 2: "User"}
+    types = {("User", 1): "User", ("User", 2): "User"}
     return rows, types
 
 
@@ -294,7 +295,7 @@ def test_t11_truncation_flag():
     w = make_worker(store, search_map={1: response},
                     batch_items={600: item(600)})
     out = ow.run_oracle_scan(**w)
-    assert out["truncated_creators"]["1"]["reason"] == "page_cap_reached"
+    assert out["truncated_creators"]["User:1"]["reason"] == "page_cap_reached"
     assert out["status"] == "partial"
     print("T11 PASS exact API truncation flag makes scan partial")
 
@@ -412,7 +413,7 @@ def test_t20_discovery_rate_limited_reports_zero_observations():
     assert out["items_discovered"] == 0
     assert out["observations_inserted"] == 0
     assert out["status"] == "partial"
-    assert out["truncated_creators"]["1"] == "discovery_rate_limited"
+    assert out["truncated_creators"]["User:1"] == "discovery_rate_limited"
     assert not store.inserted
     print("T20 PASS discovery rate limit reported accurately, zero observations")
 
