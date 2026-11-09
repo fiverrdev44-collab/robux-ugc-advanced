@@ -26,6 +26,7 @@ on:
       - fix/f10-timestamp-integrity
       - fix/f18-sales-source-authentication
       - release/vanta73-final-certification-rc
+      - feat/backgrounds-92-rc-integration
   pull_request:
     branches:
       - main
@@ -93,6 +94,10 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run Avatar Backgrounds AssetType 92 regressions
+        run: python test_avatar_backgrounds.py
+      - name: Run Avatar Backgrounds routing regressions
+        run: python test_background_routing_rc.py
       - name: Run F-18 sales source security regressions
         run: python test_f18_sales_source_security.py
       - name: Run F-10 timestamp integrity regressions

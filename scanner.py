@@ -215,11 +215,14 @@ def try_api(api_url, params):
     found = set()
     cursor = ""
     pages = 0
+    filter_asset_type = params.get("_asset_type_filter")
+    if filter_asset_type is not None:
+        filter_asset_type = int(filter_asset_type)
 
     while pages < MAX_PAGES_PER_QUERY:
         if shared_circuit_open("catalog_search"):
             return found, len(found) > 0
-        p = params.copy()
+        p = {k: v for k, v in params.items() if k != "_asset_type_filter"}
         p["cursor"] = cursor
         try:
             resp = safe_get(
@@ -232,8 +235,15 @@ def try_api(api_url, params):
 
             data = resp.json() or {}
             for item in data.get("data", []):
-                if is_asset_item(item):
-                    found.add(int(item["id"]))
+                if not is_asset_item(item):
+                    continue
+                if filter_asset_type is not None:
+                    actual_type = item.get("assetType")
+                    if actual_type is None:
+                        actual_type = item.get("assetTypeId")
+                    if str(actual_type) != str(filter_asset_type):
+                        continue
+                found.add(int(item["id"]))
 
             cursor = data.get("nextPageCursor")
             if not cursor:

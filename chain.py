@@ -285,12 +285,19 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         intent = _fallback_intent(concept)
         print("[chain] using deterministic intent fallback", flush=True)
 
+    # Explicit background scene wording outranks an AI guess of "back".
+    from product_understanding import classify_family as _classify_family
+    from category_configs import resolve_family_name
+    text_family, _ = _classify_family(concept)
+    canonical_explicit = resolve_family_name(family) if family else None
     raw_family = family or intent.get("item_type", "unknown")
-    if family and family in FAMILIES:
+    if canonical_explicit == "backgrounds" or (
+            not family and text_family == "backgrounds"):
+        family = "backgrounds"
+    elif family and family in FAMILIES:
         family = family
     else:
         family = _map_family(raw_family)
-
     intent["item_type"] = family
     item_type = family
 
@@ -307,6 +314,7 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     except Exception as e:
         print(f"[chain] product understanding skipped: {e}", flush=True)
 
+    intent["item_type"] = family
     terms = all_terms(intent)
 
     type_override = _detect_type_override(concept)

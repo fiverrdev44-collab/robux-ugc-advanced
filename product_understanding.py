@@ -59,6 +59,8 @@ def _tokens(text):
 
 def classify_family(text):
     toks = set(_tokens(text))
+    if {"background", "backgrounds", "backdrop"} & toks:
+        return "backgrounds", 100
     best, score = None, 0
     for fam, words in FAMILY_KEYWORDS.items():
         hits = 0
