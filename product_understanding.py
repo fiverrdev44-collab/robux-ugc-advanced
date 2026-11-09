@@ -190,6 +190,14 @@ def validate_title(concept, title, family=None, understanding=None):
     fam = (understanding or {}).get("family") or family
     if contains_banned_platform(title):
         return False, "platform word"
+    if fam == "backgrounds":
+        # An Avatar Background is a scene, not a wearable back accessory.
+        forbidden_wearables = {
+            "wings", "wing", "cape", "cap", "backpack", "tail",
+            "necklace", "hat", "beanie", "mask", "shoulder", "shirt",
+        }
+        if set(_tokens(title)) & forbidden_wearables:
+            return False, "avatar background title claims wearable item"
     if motion_allowed(fam) and not identity_lock_ok(concept, title):
         return False, "motion swapped"
     if fam in STATIC_FAMILIES and fam not in SCENE_FAMILIES:

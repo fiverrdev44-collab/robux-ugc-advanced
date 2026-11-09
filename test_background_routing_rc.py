@@ -2,7 +2,7 @@
 import os
 import unittest
 os.environ.setdefault("ROBLOSECURITY_COOKIE", "test-cookie")
-from product_understanding import classify_family, from_text
+from product_understanding import classify_family, from_text, validate_title
 from category_configs import detect_family_from_asset_type, get_category_config
 from convergence_engine import resolve_family_ids, family_for_asset
 from chain import _map_family
@@ -20,6 +20,14 @@ class BackgroundRoutingTests(unittest.TestCase):
         self.assertEqual(detect_family_from_asset_type(92), "backgrounds")
         self.assertEqual(resolve_family_ids("back"), [46,67])
         self.assertEqual(classify_family("starry wings cape")[0], "back")
+    def test_wings_never_recommended_as_background(self):
+        concept = "i made a background starry sky fence and a distant village"
+        ok, reason = validate_title(concept, "Cozy Starry Night Wings",
+                                    family="backgrounds")
+        self.assertFalse(ok)
+        self.assertIn("wearable", reason)
+        self.assertTrue(validate_title(concept, "Starry Village Background",
+                                       family="backgrounds")[0])
     def test_substring_safe(self):
         self.assertNotEqual(classify_family("backpack with stars")[0], "backgrounds")
 
