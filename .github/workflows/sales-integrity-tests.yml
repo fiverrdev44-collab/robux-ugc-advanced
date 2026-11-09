@@ -1,4 +1,6 @@
 name: Sales Integrity Tests
+# Unified RC: recheck sales integrity without contacting production services.
+# No jobs ran on the previous failed GitHub workflow attempt; re-trigger CI.
 
 on:
   push:
