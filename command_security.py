@@ -39,6 +39,7 @@ OWNER_ONLY = {
     "brainstorm", "chain", "concept", "converge_debug", "cookie_check",
     "creative", "creative_raw", "data_audit", "dbtest", "desc_analyze",
     "desc_forge", "enrich_run", "group_metrics", "ignored", "launch",
+    "creator_brain", "hitrate", "verdict",
     "launch_sync", "ledger_sync", "link", "logs", "meta_sniper",
     "momentum_debug", "outcome", "path", "playbook", "rename", "rescue",
     "revive", "revsim", "sales_backfill", "sales_debug",
@@ -49,6 +50,8 @@ OWNER_ONLY = {
 }
 
 PUBLIC_RATE_LIMITED = {"emote_title"}
+USER_SCOPED_WRITE = {"guide"}
+OWNER_GATED_MUTATION = {"experiments"}
 
 AI_COST = {
     "ai_debug", "analyze_image", "autopsy", "brainstorm", "chain", "concept",
@@ -58,27 +61,29 @@ AI_COST = {
 }
 
 MUTATING = {
-    "applied", "ignored", "link", "outcome", "rename", "snapshot_now",
-    "sales_backfill", "sales_post_now", "visibility_seed", "visibility_run",
-    "launch", "launch_sync", "ledger_sync", "scan_run", "enrich_run", "train",
-    "sales_scan", "suggest_run",
+    "applied", "creator_brain", "hitrate", "ignored", "link", "outcome",
+    "rename", "snapshot_now", "sales_backfill", "sales_post_now",
+    "visibility_seed", "visibility_run", "launch", "launch_sync",
+    "ledger_sync", "scan_run", "enrich_run", "train", "sales_scan",
+    "selftest", "suggest_run", "verdict",
 }
 
 EXTERNAL_API = {
     "autopsy", "converge", "converge_debug", "emote_title", "enrich_run",
-    "meta_sniper", "revive", "sales_probe", "sales_scan", "scan_run",
-    "snapshot_now", "suggest_probe", "suggest_run", "vacuum",
-    "verified_scan", "visibility_run", "visibility_seed",
+    "hitrate", "meta_sniper", "revive", "sales_probe", "sales_scan",
+    "scan_run", "selftest", "snapshot_now", "suggest_probe", "suggest_run",
+    "vacuum", "verdict", "verified_scan", "visibility_run", "visibility_seed",
 }
 
 SENSITIVE = {
     "ai_debug", "converge_debug", "cookie_check", "data_audit", "dbtest",
     "group_metrics", "logs", "momentum_debug", "sales_debug", "sales_probe",
-    "sales_scan", "selftest_db",
+    "sales_scan", "selftest", "selftest_db",
 }
 
 PUBLIC_COMMANDS = ALL_COMMANDS - OWNER_ONLY
-PUBLIC_READ_ONLY = PUBLIC_COMMANDS - PUBLIC_RATE_LIMITED
+PUBLIC_MUTATING = USER_SCOPED_WRITE | OWNER_GATED_MUTATION
+PUBLIC_READ_ONLY = PUBLIC_COMMANDS - PUBLIC_RATE_LIMITED - PUBLIC_MUTATING
 
 COMMAND_ALIASES = {
     "about": "version", "apply_rec": "applied", "certify": "selftest",
@@ -134,16 +139,22 @@ def policy_for(name):
             "external_api": False,
             "sensitive": True,
             "public_exception": False,
+            "user_scoped_write": False,
+            "owner_gated_mutation": False,
             "known": False,
         }
     return {
         "command": canonical,
         "level": "owner" if canonical in OWNER_ONLY else "public",
-        "mutating": canonical in MUTATING,
+        "mutating": (canonical in MUTATING
+                     or canonical in USER_SCOPED_WRITE
+                     or canonical in OWNER_GATED_MUTATION),
         "ai_cost": canonical in AI_COST,
         "external_api": canonical in EXTERNAL_API,
         "sensitive": canonical in SENSITIVE,
         "public_exception": canonical in PUBLIC_RATE_LIMITED,
+        "user_scoped_write": canonical in USER_SCOPED_WRITE,
+        "owner_gated_mutation": canonical in OWNER_GATED_MUTATION,
         "known": True,
     }
 

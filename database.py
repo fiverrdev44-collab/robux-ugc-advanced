@@ -29,6 +29,17 @@ def _safe_exec(cur, sql, label=""):
         print(f"⚠️ [setup] {label or 'stmt'} failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
 
 
+MY_SALES_DEDUPE_SQL = """
+    DELETE FROM my_sales a USING my_sales b
+    WHERE a.id > b.id
+      AND a.sale_time = b.sale_time
+      AND a.item_name IS NOT DISTINCT FROM b.item_name
+      AND a.buyer IS NOT DISTINCT FROM b.buyer
+      AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
+      AND a.source_event_id IS NOT DISTINCT FROM b.source_event_id
+"""
+
+
 def setup_database():
     try:
         conn = get_db_connection()
@@ -63,7 +74,7 @@ def setup_database():
             id BIGINT PRIMARY KEY,
             reason TEXT,
             attempts INTEGER DEFAULT 1,
-            last_tried TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_tried TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "failed_items")
 
@@ -77,9 +88,9 @@ def setup_database():
             description TEXT,
             creator_name TEXT,
             asset_type_id INTEGER,
-            created_at TIMESTAMP,
-            updated_at TIMESTAMP,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ,
+            fetched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "items")
 
@@ -90,7 +101,7 @@ def setup_database():
             favorite_count INTEGER,
             total_sales INTEGER,
             price INTEGER,
-            snapshot_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            snapshot_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "item_history")
 
@@ -112,7 +123,7 @@ def setup_database():
             search_volume INTEGER,
             catalog_supply INTEGER,
             rank INTEGER,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            fetched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "search_suggestions")
 
@@ -172,7 +183,7 @@ def setup_database():
             avg_favorites DOUBLE PRECISION,
             avg_sales DOUBLE PRECISION,
             item_count INTEGER,
-            learned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            learned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "learned_keywords")
 
@@ -185,8 +196,8 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS user_profiles (
             discord_id BIGINT PRIMARY KEY,
             username TEXT,
-            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            first_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            last_active TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             total_consultations INTEGER DEFAULT 0,
             notes TEXT
         );
@@ -200,7 +211,7 @@ def setup_database():
             verdict_label TEXT,
             verdict_emoji TEXT,
             full_report TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "saved_consultations")
 
@@ -214,9 +225,9 @@ def setup_database():
             id SERIAL PRIMARY KEY,
             discord_id BIGINT,
             keyword TEXT,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             baseline_favs INTEGER DEFAULT 0,
-            last_checked TIMESTAMP,
+            last_checked TIMESTAMPTZ,
             alert_sent BOOLEAN DEFAULT FALSE,
             UNIQUE(discord_id, keyword)
         );
@@ -227,7 +238,7 @@ def setup_database():
             id SERIAL PRIMARY KEY,
             discord_id BIGINT,
             creator_name TEXT,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(discord_id, creator_name)
         );
     ''', "competitor_tracking")
@@ -240,7 +251,7 @@ def setup_database():
             item_name TEXT,
             claimed_keywords TEXT,
             claimed_price INTEGER,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(discord_id, item_id)
         );
     ''', "item_tracker")
@@ -270,14 +281,7 @@ def setup_database():
     # matching unique index. A hand-created live table may be missing it,
     # which makes EVERY sale insert fail silently in the listener.
     try:
-        cur.execute("""
-            DELETE FROM my_sales a USING my_sales b
-            WHERE a.id > b.id
-              AND a.sale_time = b.sale_time
-              AND a.item_name IS NOT DISTINCT FROM b.item_name
-              AND a.buyer IS NOT DISTINCT FROM b.buyer
-              AND a.amount_robux IS NOT DISTINCT FROM b.amount_robux
-        """)
+        cur.execute(MY_SALES_DEDUPE_SQL)
         conn.commit()
     except Exception as e:
         print(
@@ -349,7 +353,7 @@ def setup_database():
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS my_portfolio (
             item_id BIGINT PRIMARY KEY,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             notes TEXT
         );
     ''', "my_portfolio")
@@ -360,7 +364,7 @@ def setup_database():
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS launch_ledger (
             item_id BIGINT PRIMARY KEY,
-            launched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            launched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             family TEXT,
             title TEXT,
             asset_type_id INTEGER,
@@ -377,7 +381,7 @@ def setup_database():
             revenue_d30 INTEGER,
             recent_units_30d INTEGER,
             recent_revenue_30d INTEGER,
-            last_synced TIMESTAMP,
+            last_synced TIMESTAMPTZ,
             notes TEXT,
             features JSONB,
             label_beat_median BOOLEAN,
@@ -456,19 +460,21 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS creator_patterns (
             pattern_key TEXT PRIMARY KEY,
             pattern_value TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     ''', "creator_patterns")
 
     # Verified creators monitored by creator_tracker.py.
     _safe_exec(cur, '''
         CREATE TABLE IF NOT EXISTS tracked_creators (
-            creator_id BIGINT PRIMARY KEY,
-            creator_type TEXT DEFAULT 'User',
+            creator_id BIGINT NOT NULL,
+            creator_type TEXT NOT NULL DEFAULT 'unknown',
             creator_name TEXT,
             verified BOOLEAN DEFAULT TRUE,
-            last_scanned TIMESTAMP,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            last_scanned TIMESTAMPTZ,
+            added_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            type_provenance TEXT,
+            PRIMARY KEY (creator_type, creator_id)
         );
     ''', "tracked_creators")
 
@@ -523,7 +529,7 @@ def setup_database():
 
     _safe_exec(cur, """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_item_history_daily
-        ON item_history (item_id, (snapshot_at::date));
+        ON item_history (item_id, ((snapshot_at AT TIME ZONE 'UTC')::date));
     """, "idx_item_history_daily")
 
     # ── Search visibility history ───────────────────────────────────────

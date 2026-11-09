@@ -1,11 +1,11 @@
-"""
-recovery_brain.py — Post-launch failure detection + intelligent keyword classification.
+﻿"""
+recovery_brain.py â€” Post-launch failure detection + intelligent keyword classification.
 
 NEW in this version:
-- classify_keyword_health() — weighs supply AND demand (never calls saturated "weak")
-- compute_velocity() — favs/day from item age
-- find_pivot_keywords() — finds low-supply/high-demand alternatives from smart_pipeline
-- classify_competition_batch() — batch-classify keyword competition data
+- classify_keyword_health() â€” weighs supply AND demand (never calls saturated "weak")
+- compute_velocity() â€” favs/day from item age
+- find_pivot_keywords() â€” finds low-supply/high-demand alternatives from smart_pipeline
+- classify_competition_batch() â€” batch-classify keyword competition data
 - All original functions preserved (detect_failure_mode, format_recovery_report, etc.)
 """
 import os
@@ -13,6 +13,8 @@ import re
 import time
 import requests
 from datetime import datetime, timezone
+
+from safe_roblox import get as safe_get
 
 
 FAILURE_THRESHOLDS = {
@@ -54,7 +56,7 @@ RECOVERY_PROTOCOLS = {
         "step_2": "EDIT DESCRIPTION in SAME edit. Add urgency copy.",
         "step_3": "Do NOT change title.",
         "step_4": "Wait 72h. If sales still 0, pivot audience.",
-        "expected_result": "3-5% favs→sales conversion within 48h.",
+        "expected_result": "3-5% favsâ†’sales conversion within 48h.",
         "do_not": "Don't drop below category floor.",
     },
     "velocity_failure": {
@@ -78,7 +80,7 @@ RECOVERY_PROTOCOLS = {
 EDIT_RULES = [
     "Max 1 edit per 72h per item.",
     "Title edits > description edits in re-rank strength.",
-    "Price edits throttled harder — max 1 per 7 days.",
+    "Price edits throttled harder â€” max 1 per 7 days.",
     "Editing a ranking item RESETS velocity counter.",
     "Edits do NOT reset the 30-day age penalty.",
 ]
@@ -93,7 +95,7 @@ ESCALATION_LADDER = {
 
 
 # ============================================================
-# 🧠 NEW — KEYWORD HEALTH CLASSIFICATION (SUPERCOMPUTER LAYER)
+# ðŸ§  NEW â€” KEYWORD HEALTH CLASSIFICATION (SUPERCOMPUTER LAYER)
 # ============================================================
 def classify_keyword_health(comp_count, median_favs, median_age_days=None,
                             demand=None, demand_reliable=True):
@@ -103,12 +105,12 @@ def classify_keyword_health(comp_count, median_favs, median_age_days=None,
     Returns (bucket, emoji, reasoning).
 
     Buckets:
-      GOLD        — low supply, high demand
-      OPPORTUNITY — moderate supply, high demand
-      SATURATED   — high supply, high demand (NOT WEAK — high demand!)
-      WEAK        — low supply, low demand
-      DEAD        — essentially no demand
-      NEUTRAL     — everything else
+      GOLD        â€” low supply, high demand
+      OPPORTUNITY â€” moderate supply, high demand
+      SATURATED   â€” high supply, high demand (NOT WEAK â€” high demand!)
+      WEAK        â€” low supply, low demand
+      DEAD        â€” essentially no demand
+      NEUTRAL     â€” everything else
     """
     comp = comp_count or 0
     favs = median_favs or 0
@@ -123,24 +125,24 @@ def classify_keyword_health(comp_count, median_favs, median_age_days=None,
     if demand is not None and not demand_reliable:
         demand_note += " (low-confidence)"
     if favs < 15:
-        return ("DEAD", "🔴",
-                f"Only {favs:,} median favs{vel_note}{demand_note} — no meaningful demand")
+        return ("DEAD", "ðŸ”´",
+                f"Only {favs:,} median favs{vel_note}{demand_note} â€” no meaningful demand")
     if demand is not None and demand == 0 and demand_reliable:
-        return ("WEAK", "🟠",
-                f"{comp} competitors but zero live search demand{vel_note} — no pull")
+        return ("WEAK", "ðŸŸ ",
+                f"{comp} competitors but zero live search demand{vel_note} â€” no pull")
     if comp < 20 and favs >= 150:
-        return ("GOLD", "🟢",
-                f"Only {comp} competitors with {favs:,} median favs{vel_note}{demand_note} — rare opportunity")
+        return ("GOLD", "ðŸŸ¢",
+                f"Only {comp} competitors with {favs:,} median favs{vel_note}{demand_note} â€” rare opportunity")
     if comp < 50 and favs >= 80:
-        return ("OPPORTUNITY", "🔵",
-                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} — strong entry point")
+        return ("OPPORTUNITY", "ðŸ”µ",
+                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} â€” strong entry point")
     if comp >= 50 and favs >= 80:
-        return ("SATURATED", "🟡",
-                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} — HIGH DEMAND but saturated")
+        return ("SATURATED", "ðŸŸ¡",
+                f"{comp} competitors, {favs:,} median favs{vel_note}{demand_note} â€” HIGH DEMAND but saturated")
     if comp < 20 and favs < 50:
-        return ("WEAK", "🟠",
-                f"Only {comp} competitors but just {favs:,} median favs{vel_note} — low demand")
-    return ("NEUTRAL", "⚪",
+        return ("WEAK", "ðŸŸ ",
+                f"Only {comp} competitors but just {favs:,} median favs{vel_note} â€” low demand")
+    return ("NEUTRAL", "âšª",
             f"{comp} competitors, {favs:,} median favs{vel_note}")
 
 
@@ -242,24 +244,24 @@ def format_keyword_classifications(classification_result):
     lines = []
     seed = classification_result.get("seed")
     if seed:
-        lines.append(f"**SEED:** {seed['emoji']} `{seed['keyword']}` — "
+        lines.append(f"**SEED:** {seed['emoji']} `{seed['keyword']}` â€” "
                      f"**{seed['bucket']}** "
                      f"(supply={seed['supply']}, median_favs={seed['median_favs']})")
         lines.append(f"> {seed['reasoning']}")
         lines.append("")
     lines.append("**ALL KEYWORDS:**")
     for c in classification_result.get("classifications", []):
-        demand_part = (f" · demand={c['demand']}"
+        demand_part = (f" Â· demand={c['demand']}"
                        if c.get("demand") is not None else "")
         if c.get("demand") is not None and not c.get("demand_reliable", True):
             demand_part += " (low-confidence)"
-        lines.append(f"{c['emoji']} `{c['keyword']}` — {c['bucket']} "
-                     f"· supply={c['supply']} · median_favs={c['median_favs']}"
+        lines.append(f"{c['emoji']} `{c['keyword']}` â€” {c['bucket']} "
+                     f"Â· supply={c['supply']} Â· median_favs={c['median_favs']}"
                      f"{demand_part}")
     pivot = classification_result.get("best_pivot")
     if pivot:
         lines.append("")
-        lines.append(f"**🎯 BEST PIVOT:** {pivot['emoji']} `{pivot['keyword']}` "
+        lines.append(f"**ðŸŽ¯ BEST PIVOT:** {pivot['emoji']} `{pivot['keyword']}` "
                      f"(supply={pivot['supply']}, median_favs={pivot['median_favs']})")
         lines.append(f"> {pivot['reasoning']}")
     return "\n".join(lines)
@@ -309,11 +311,11 @@ def format_recovery_report(diagnosis, item_stats=None, show_sales=False):
         return "(no diagnosis)"
     mode = diagnosis.get("failure_mode")
     if mode == "healthy":
-        return f"✅ **{diagnosis.get('message', 'Item is healthy.')}**"
+        return f"âœ… **{diagnosis.get('message', 'Item is healthy.')}**"
 
-    lines = [f"# 🚨 FAILURE AUTOPSY — `{mode.upper()}`",
+    lines = [f"# ðŸš¨ FAILURE AUTOPSY â€” `{mode.upper()}`",
              f"**Severity:** {diagnosis.get('severity','?').upper()}",
-             f"**Fixable:** {'YES' if diagnosis.get('fixable') else 'NO — kill it'}",
+             f"**Fixable:** {'YES' if diagnosis.get('fixable') else 'NO â€” kill it'}",
              f"**Recovery window:** {diagnosis.get('recovery_window_hours',0)} hours",
              ""]
 
@@ -329,26 +331,26 @@ def format_recovery_report(diagnosis, item_stats=None, show_sales=False):
 
     proto = diagnosis.get("protocol", {})
     if proto:
-        lines.append("## 🛠️ RECOVERY PROTOCOL")
+        lines.append("## ðŸ› ï¸ RECOVERY PROTOCOL")
         for key in ("step_1", "step_2", "step_3", "step_4"):
             if proto.get(key):
                 lines.append(f"**{key.upper()}:** {proto[key]}")
         lines.append("")
         if proto.get("expected_result"):
-            lines.append(f"**📊 Expected result:** {proto['expected_result']}")
+            lines.append(f"**ðŸ“Š Expected result:** {proto['expected_result']}")
             lines.append("")
         if proto.get("do_not"):
-            lines.append(f"**🚫 DO NOT:** {proto['do_not']}")
+            lines.append(f"**ðŸš« DO NOT:** {proto['do_not']}")
             lines.append("")
 
     if diagnosis.get("edit_rules"):
-        lines.append("## ⏱️ EDIT THROTTLE RULES")
+        lines.append("## â±ï¸ EDIT THROTTLE RULES")
         for r in diagnosis["edit_rules"][:4]:
             lines.append(f"- {r}")
         lines.append("")
 
     if diagnosis.get("escalation"):
-        lines.append("## 🪜 ESCALATION LADDER")
+        lines.append("## ðŸªœ ESCALATION LADDER")
         for k, v in diagnosis["escalation"].items():
             lines.append(f"- **{k.replace('_', ' ')}:** {v}")
 
@@ -370,7 +372,7 @@ def fetch_user_sales(cookie, user_id, max_pages=3):
     for _ in range(max_pages):
         request_url = f"{url}&cursor={cursor}" if cursor else url
         try:
-            resp = requests.get(request_url, headers=headers, timeout=10)
+            resp = safe_get("recovery_live", request_url, headers=headers, timeout=10)
             if resp.status_code != 200:
                 break
             data = resp.json()
@@ -410,7 +412,7 @@ def fetch_item_from_roblox(item_id, cookie=None):
                f"{item_id}/details?itemType=Asset")
 
     try:
-        r1 = requests.get(details_url, headers=headers, timeout=10)
+        r1 = safe_get("recovery_live", details_url, headers=headers, timeout=10)
         if r1.status_code != 200:
             print(f"[live-fetch] details failed: HTTP {r1.status_code}", flush=True)
             return None
@@ -421,10 +423,11 @@ def fetch_item_from_roblox(item_id, cookie=None):
 
     # Favorites: the dedicated count endpoint is current; the catalog details
     # endpoint is CDN-cached and often hours behind (that's how items showed
-    # 11♥ when the site said 27). Fall back to details, then to None.
+    # 11â™¥ when the site said 27). Fall back to details, then to None.
     favs = None
     try:
-        r2 = requests.get(
+        r2 = safe_get(
+            "recovery_live",
             f"https://catalog.roblox.com/v1/favorites/assets/{item_id}/count",
             headers=headers, timeout=10,
         )
@@ -439,7 +442,7 @@ def fetch_item_from_roblox(item_id, cookie=None):
 
     if favs is None:
         try:
-            r2 = requests.get(fav_url, headers=headers, timeout=10)
+            r2 = safe_get("recovery_live", fav_url, headers=headers, timeout=10)
             if r2.status_code == 200:
                 favs = r2.json().get("favoriteCount")
         except Exception as e:
@@ -500,7 +503,7 @@ def save_item_to_db(cur, item):
 def save_item_and_created_at(cur, item, item_id):
     try:
         url = f"https://www.roblox.com/marketplace/productinfo?assetId={item_id}"
-        r = requests.get(url, timeout=10, headers={
+        r = safe_get("recovery_live", url, timeout=10, headers={
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json",
         })
@@ -529,7 +532,7 @@ def fetch_created_date_live(item_id, cookie=None):
         headers["Cookie"] = f".ROBLOSECURITY={cookie}"
     try:
         url = f"https://economy.roblox.com/v2/assets/{item_id}/details"
-        r = requests.get(url, headers=headers, timeout=10)
+        r = safe_get("recovery_live", url, headers=headers, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -580,3 +583,4 @@ def sales_guard_instruction(total_sales_30d):
         "FORBIDDEN: the phrases 'zero sales', 'no sales', 'failure', 'kill'.\n"
         "Recommend scaling or variant testing. Never recommend killing it.\n"
     )
+

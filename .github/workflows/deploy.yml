@@ -30,7 +30,7 @@ jobs:
 
             echo "📦 [Auto-Deploy] Checking dependencies..."
             source ~/ugc_env/bin/activate
-            pip install -q asyncpg aiohttp discord.py google-genai 2>/dev/null || true
+            pip install -q asyncpg aiohttp discord.py google-genai
 
             echo "🔄 [Auto-Deploy] Restarting ugc-bot service..."
             sudo systemctl restart ugc-bot

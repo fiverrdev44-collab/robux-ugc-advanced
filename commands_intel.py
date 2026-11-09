@@ -13,7 +13,7 @@ import re
 import json
 import asyncio
 import math
-from datetime import datetime
+from time_utils import ensure_utc, utc_now
 
 from execution_policy import to_thread_cancellable
 from bot_core import get_research_db
@@ -169,7 +169,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         words = re.findall(r"[a-z]{3,}", idea.lower())
         if not words:
             await ctx.send("❌ Need at least one word."); return
-        progress = await ctx.send("🎯 **Computing success probability...**")
+        progress = await ctx.send("🎯 **Computing heuristic opportunity score...**")
         def _run():
             conn = get_research_db(); cur = conn.cursor()
             try:
@@ -523,10 +523,13 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                 )
                 if live_created:
                     try:
-                        age_days = (datetime.utcnow() - live_created.replace(tzinfo=None)).total_seconds() / 86400
-                        cur.execute("UPDATE items SET created_at = %s WHERE id = %s",
-                                    (live_created, item_id))
-                        conn.commit()
+                        live_utc = ensure_utc(live_created, naive_is_utc=True)
+                        if live_utc is not None:
+                            age_days = (utc_now() - live_utc).total_seconds() / 86400
+                            cur.execute(
+                                "UPDATE items SET created_at = %s WHERE id = %s",
+                                (live_utc, item_id))
+                            conn.commit()
                     except Exception: pass
 
             name_words = [w for w in re.findall(r"[a-z]{3,}", (name or "").lower())][:5]
@@ -1913,10 +1916,12 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                     f"supply {f.get('saturation', '?')})"
                 )
 
-        if pred and pred.get("probability") is not None:
+        if pred and pred.get("heuristic_score") is not None:
             dlines.append(
-                f"\n**Success model:** **{pred.get('probability')}%** — "
-                f"{pred.get('verdict', '?')} · {pred.get('reason', '')}"
+                f"\n**Heuristic opportunity score:** "
+                f"**{pred.get('heuristic_score')}/100** â€” "
+                f"{pred.get('verdict', '?')} Â· {pred.get('reason', '')} "
+                "_(heuristic, not a probability)_"
             )
 
         score = 10
@@ -1931,10 +1936,10 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
         score += add
         details.append(f"convergence +{add}")
 
-        if pred.get("probability"):
-            add = round(0.25 * pred["probability"])
+        if pred.get("heuristic_score"):
+            add = round(0.25 * pred["heuristic_score"])
             score += add
-            details.append(f"model +{add}")
+            details.append(f"heuristic model +{add}")
 
         dirs = [(t or {}).get("direction")
                 for t in (intel.get("trajectory") or {}).values()]

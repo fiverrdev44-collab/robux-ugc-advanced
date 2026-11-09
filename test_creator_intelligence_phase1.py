@@ -248,15 +248,15 @@ class LearningReadinessTests(unittest.TestCase):
 class CreatorComparisonTests(unittest.TestCase):
     def test_representative_segments_include_nonverified(self):
         rows = [
-            ("alice", 10, 500, True),
-            ("bob", 3, 40, False),
-            ("carol", 8, 100, False),
-            ("dave", 2, 5, False),
-            ("erin", 6, 250, True),
-            ("frank", 4, 20, False),
+            ("User", 100, "alice", 10, 500, True),
+            ("User", 200, "bob", 3, 40, False),
+            ("User", 300, "carol", 8, 100, False),
+            ("Group", 400, "dave", 2, 5, False),
+            ("User", 500, "erin", 6, 250, True),
+            ("Group", 600, "frank", 4, 20, False),
         ]
         result = creator_brain.build_comparison_cohorts(
-            StubCursor([rows]))
+            StubCursor([rows]), has_type=True)
         segments = result["segments"]
         self.assertEqual(result["creators"], 6)
         self.assertEqual(segments["established"]["creators"], 3)
@@ -266,25 +266,32 @@ class CreatorComparisonTests(unittest.TestCase):
         self.assertEqual(segments["top_performers"]["creators"], 2)
         self.assertEqual(segments["average_performers"]["creators"], 2)
         self.assertEqual(segments["underperformers"]["creators"], 2)
+        self.assertEqual(result["selection"]["identity_key"],
+                         "(creator_type, creator_id)")
 
     def test_true_median(self):
         self.assertEqual(creator_brain._median([1, 2, 3, 4]), 2.5)
 
     def _sample_findings(self):
-        cohort = [("alice", 10, 500, 900), ("bob", 3, 40, 50)]
+        cohort = [("User", 100, "alice", 10, 500, 900),
+                  ("User", 200, "bob", 3, 40, 50)]
         items = [
-            ("alice", "glow hat", 100, 50, 10.0),
-            ("alice", "glow boots", 80, 40, 20.0),
-            ("bob", "plain hat", 5, 0, 30.0),
+            ("glow hat", 100, 50, 10.0),
+            ("glow boots", 80, 40, 20.0),
+            ("plain hat", 5, 0, 30.0),
         ]
         comparison_rows = [
-            ("alice", 10, 500, True), ("bob", 3, 40, False),
-            ("carol", 8, 100, False), ("dave", 2, 5, False),
-            ("erin", 6, 250, True), ("frank", 4, 20, False),
+            ("User", 100, "alice", 10, 500, True),
+            ("User", 200, "bob", 3, 40, False),
+            ("User", 300, "carol", 8, 100, False),
+            ("Group", 400, "dave", 2, 5, False),
+            ("User", 500, "erin", 6, 250, True),
+            ("Group", 600, "frank", 4, 20, False),
         ]
+        coverage = [(1, 6, 1, 8)]
         return creator_brain.learn(
-            StubCursor([cohort, items, comparison_rows]),
-            min_items=2, top_n=10)
+            StubCursor([cohort, items, comparison_rows, coverage]),
+            min_items=2, top_n=10, has_type=True)
 
     def test_learn_labels_success_and_comparison(self):
         findings = self._sample_findings()
@@ -299,7 +306,12 @@ class CreatorComparisonTests(unittest.TestCase):
         self.assertFalse(findings["comparison_selection"]["representative"])
         self.assertEqual(
             findings["comparison"]["selection"]["population"],
-            "all creators with >= 3 items and non-null favorites")
+            "typed creators with >= 3 items and non-null favorites")
+        self.assertEqual(
+            findings["comparison"]["selection"]["identity_key"],
+            "(creator_type, creator_id)")
+        self.assertIsNotNone(findings["identity_coverage"])
+        self.assertEqual(findings["identity_coverage"]["typed_items"], 6)
 
     def test_save_load_preserves_comparison(self):
         import json

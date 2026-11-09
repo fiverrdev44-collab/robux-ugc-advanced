@@ -16,7 +16,10 @@ import aiohttp
 import subprocess
 import discord
 from collections import Counter, defaultdict
+
+from safe_roblox import get as safe_get
 from datetime import datetime, timezone
+from time_utils import db_utc, ensure_utc, utc_now
 
 from bot_core import get_db, rollback_quietly
 from launch_ledger import (
@@ -408,7 +411,7 @@ def register_supercomputer_commands(bot):
     @bot.command(name="stealth", aliases=["stealth_desc"])
     async def stealth_command(ctx, *, args: str):
         """
-        Generate spam-immune, high-CTR description for Roblox Studio.
+        Generate a spam-immune, discovery-oriented description for Roblox Studio. Do not claim measured CTR or sales.
         Usage: !stealth <Item Name> | [Category] | [Style]
         Example: !stealth Void Katana | Back Accessory | Dark Cyberpunk
         """
@@ -1104,7 +1107,8 @@ def register_supercomputer_commands(bot):
             out = []
             for label, url, params in endpoints:
                 try:
-                    r = requests.get(url, params=params, headers=headers, timeout=10)
+                    r = safe_get("games_search", url, params=params,
+                                 headers=headers, timeout=10)
                     body = r.text[:200].replace("\n", " ")
                     out.append((label, r.status_code, body))
                 except Exception as e:
@@ -1251,7 +1255,6 @@ def register_supercomputer_commands(bot):
         Usage: !launch <item_id>
                !launch <item_id> 2026-09-01        (existing item)
         """
-        from datetime import datetime, timezone
 
         launch_dt = None
         if launched:
@@ -1266,9 +1269,9 @@ def register_supercomputer_commands(bot):
                 return await ctx.send(
                     "❌ Date must be `YYYY-MM-DD` or `YYYY-MM-DD HH:MM`."
                 )
-            launch_dt = parsed
+            launch_dt = ensure_utc(parsed, naive_is_utc=True)
         if launch_dt is None:
-            launch_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+            launch_dt = utc_now()
 
         def _do():
             conn = get_db()
@@ -1835,19 +1838,19 @@ def register_supercomputer_commands(bot):
 
                 cur.execute("SELECT max(fetched_at) FROM items")
                 last = cur.fetchone()[0]
+                last_utc = db_utc(last)
                 fresh = (
-                    last is not None
-                    and (datetime.utcnow() - last.replace(tzinfo=None)).total_seconds()
-                    < 86400
+                    last_utc is not None
+                    and (utc_now() - last_utc).total_seconds() < 86400
                 )
                 check("recent enrichment", fresh, last)
 
                 cur.execute("SELECT max(snapshot_at) FROM item_history")
                 last_snap = cur.fetchone()[0]
+                last_snap_utc = db_utc(last_snap)
                 fresh_snap = (
-                    last_snap is not None
-                    and (datetime.utcnow() - last_snap.replace(tzinfo=None)).total_seconds()
-                    < 172800
+                    last_snap_utc is not None
+                    and (utc_now() - last_snap_utc).total_seconds() < 172800
                 )
                 check("recent snapshot", fresh_snap, last_snap)
 

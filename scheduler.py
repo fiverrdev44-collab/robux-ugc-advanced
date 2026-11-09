@@ -14,7 +14,8 @@ import os
 import asyncio
 import time
 import traceback
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
+from time_utils import db_utc, utc_now
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
@@ -447,10 +448,11 @@ def start_scheduler():
         cur.close()
         conn.close()
 
-        now = datetime.now(timezone.utc)
+        now = utc_now()
+        last_snap_utc = db_utc(last_snap)
         stale = (
-            last_snap is None
-            or (now - last_snap.replace(tzinfo=timezone.utc)).total_seconds() > 86400
+            last_snap_utc is None
+            or (now - last_snap_utc).total_seconds() > 86400
         )
         if stale:
             _scheduler.add_job(

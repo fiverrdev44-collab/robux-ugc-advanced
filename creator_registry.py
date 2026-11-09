@@ -307,13 +307,12 @@ _REFRESH_SQL = """
                END AS type_provenance
         FROM items i
         LEFT JOIN LATERAL (
-            SELECT t2.creator_type
+            SELECT min(t2.creator_type) AS creator_type
             FROM tracked_creators t2
             WHERE t2.creator_id = i.creator_id
-              AND t2.creator_type IS NOT NULL
+              AND t2.creator_type IN ('User', 'Group')
               AND lower(t2.creator_name) = lower(i.creator_name)
-            ORDER BY t2.creator_type
-            LIMIT 1
+            HAVING count(DISTINCT t2.creator_type) = 1
         ) t ON true
         WHERE i.creator_id IS NOT NULL
     ),
@@ -432,13 +431,12 @@ _COMPARISON_SQL = """
            COALESCE(h.snapshots, 0) AS snapshots
     FROM items i
     LEFT JOIN LATERAL (
-        SELECT t2.creator_type
+        SELECT min(t2.creator_type) AS creator_type
         FROM tracked_creators t2
         WHERE t2.creator_id = i.creator_id
-          AND t2.creator_type IS NOT NULL
+          AND t2.creator_type IN ('User', 'Group')
           AND lower(t2.creator_name) = lower(i.creator_name)
-        ORDER BY t2.creator_type
-        LIMIT 1
+        HAVING count(DISTINCT t2.creator_type) = 1
     ) t ON true
     LEFT JOIN LATERAL (
         SELECT count(*) AS snapshots

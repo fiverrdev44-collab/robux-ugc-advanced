@@ -18,6 +18,7 @@ import requests
 from collections import Counter
 from bot_core import get_db
 from convergence_engine import ASSET_TO_FAMILY
+from safe_roblox import get as safe_get
 
 
 MIN_DB_RESULTS = 5
@@ -270,8 +271,8 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
         if cat:
             params["Category"] = cat
 
-        r = requests.get(ROBLOX_SEARCH_URL, params=params,
-                         headers=headers, timeout=15)
+        r = safe_get("desc_search", ROBLOX_SEARCH_URL, params=params,
+                     headers=headers, timeout=15)
 
         if r.status_code != 200:
             print(f"[desc_forge] live search HTTP {r.status_code}", flush=True)

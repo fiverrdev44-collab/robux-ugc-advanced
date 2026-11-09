@@ -18,11 +18,12 @@ def build_daily_feed(cur, top_n=5):
             pred = predict_success(cur, [word])
         except Exception:
             continue
-        if not pred or pred["probability"] < 40: continue
-        combined = pred["probability"] * min(m["momentum_ratio"], 5)
+        score = pred.get("heuristic_score", pred.get("probability", 0))
+        if not pred or score < 40: continue
+        combined = score * min(m["momentum_ratio"], 5)
         plays.append({
             "keyword": word, "combined_score": round(combined, 1),
-            "probability": pred["probability"], "verdict": pred["verdict"],
+            "heuristic_score": score, "verdict": pred["verdict"],
             "momentum_ratio": m["momentum_ratio"], "velocity": m["velocity_now"],
             "item_count": m["item_count"],
         })
@@ -33,10 +34,10 @@ def build_daily_feed(cur, top_n=5):
 def format_daily_feed(plays, next_wave=None):
     lines = ["# 📅 DAILY OPPORTUNITY FEED", ""]
     if plays:
-        lines.append("_Ranked by probability × momentum._\n")
+        lines.append("_Ranked by heuristic score × momentum; not a probability._\n")
         for i, p in enumerate(plays, 1):
             lines.append(f"## {i}. `{p['keyword']}` — {p['verdict']}\n"
-                         f"**Success probability:** {p['probability']}% · "
+                         f"**Heuristic score:** {p['heuristic_score']}/100 · "
                          f"**Momentum:** {p['momentum_ratio']:.1f}x · "
                          f"**Velocity:** {p['velocity']:.0f} favs/day · "
                          f"**Competitors:** {p['item_count']}\n")

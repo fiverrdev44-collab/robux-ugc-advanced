@@ -170,7 +170,7 @@ def test_live_enrich_details_extract_creator_identity():
             return self.payload
 
     class FakeSession:
-        def get(self, url, timeout=10):
+        def get(self, url, params=None, headers=None, timeout=10, **kwargs):
             if "catalog" in url:
                 return FakeResponse({"favoriteCount": 42})
             return FakeResponse({

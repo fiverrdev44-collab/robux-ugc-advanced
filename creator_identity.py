@@ -37,6 +37,57 @@ def _creator_type(value):
     return None
 
 
+def normalize_creator_type(value):
+    """Canonical User/Group, or ``None`` when the value is not verified."""
+    return _creator_type(value)
+
+
+def stored_creator_type(value):
+    """Canonical type for storage: User/Group/unknown (never a guessed User)."""
+    return _creator_type(value) or "unknown"
+
+
+def is_known_creator_type(value):
+    return _creator_type(value) in ("User", "Group")
+
+
+def creator_key(creator_type, creator_id, unresolved="unknown"):
+    """Stable composite identity key; preserves uncertainty explicitly."""
+    cid = _positive_int(creator_id)
+    if cid is None:
+        return None
+    ctype = _creator_type(creator_type) or unresolved
+    return f"{ctype}:{cid}"
+
+
+def parse_creator_key(value):
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    ctype, _, raw_id = value.partition(":")
+    cid = _positive_int(raw_id)
+    if cid is None:
+        return None
+    ctype = _creator_type(ctype) or "unknown"
+    return ctype, cid
+
+
+def has_composite_creator_pk(cur):
+    """True only when tracked_creators is keyed by (creator_type, creator_id)."""
+    try:
+        cur.execute("""
+            SELECT 1
+            FROM pg_constraint c
+            WHERE c.conrelid = 'tracked_creators'::regclass
+              AND c.contype = 'p'
+              AND pg_get_constraintdef(c.oid) =
+                  'PRIMARY KEY (creator_type, creator_id)'
+        """)
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+
 def catalog_identity(payload):
     """Identity from raw catalog rows or normalized batch-client dictionaries.
 
@@ -80,7 +131,7 @@ def economy_identity(payload):
             or creator.get("TargetId")
             or creator.get("CreatorTargetId")
         ),
-        "creator_type": _optional_text(
+        "creator_type": _creator_type(
             creator.get("CreatorType")
             or creator.get("Type")
             or payload.get("CreatorType")
