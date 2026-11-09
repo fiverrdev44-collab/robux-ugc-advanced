@@ -172,6 +172,16 @@ def is_valid_asset_id(iid):
     return MIN_VALID_ID <= n <= MAX_VALID_ID
 
 
+def accepts_catalog_item(item, expected_asset_type):
+    """Fail closed on unknown catalog type when a typed discovery is requested."""
+    if not is_asset_item(item):
+        return False
+    actual = item.get("assetType")
+    if actual is None:
+        actual = item.get("assetTypeId")
+    return str(actual) == str(expected_asset_type)
+
+
 def is_asset_item(item):
     """
     Accept items the API marks as Asset.
@@ -267,6 +277,14 @@ def scan_query(params):
 def build_all_queries():
     log("🔨 Building query list...")
     queries = []
+
+    # Dedicated background discovery, bounded to one query.
+    # Private hint is removed before HTTP; results require assetType 92.
+    queries.append({
+        "keyword": "avatar background",
+        "sortType": 3, "limit": 30,
+        "_asset_type_filter": 92,
+    })
 
     # ---- General category sweeps ----
     for cat in CATEGORIES:

@@ -291,8 +291,7 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     text_family, _ = _classify_family(concept)
     canonical_explicit = resolve_family_name(family) if family else None
     raw_family = family or intent.get("item_type", "unknown")
-    if canonical_explicit == "backgrounds" or (
-            not family and text_family == "backgrounds"):
+    if canonical_explicit == "backgrounds" or text_family == "backgrounds":
         family = "backgrounds"
     elif family and family in FAMILIES:
         family = family

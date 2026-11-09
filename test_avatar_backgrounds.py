@@ -326,30 +326,34 @@ class _Session:
         return response
 
 
-def test_rate_limited_discovery_filters_and_recovers():
+def test_background_discovery_filters_and_defers_on_429():
     background = {"id": 128422266252520, "assetType": 92, "itemType": "Asset"}
     hair = {"id": 451221329, "assetType": 41, "itemType": "Asset"}
-    session = _Session([
-        _Resp(429, {"errors": [{"message": "rate limited"}]},
-              {"Retry-After": "0"}),
-        _Resp(200, {"data": [background, hair], "nextPageCursor": None}),
-    ])
-    old_get_session = scanner.get_session
-    old_sleep = scanner.time.sleep
-    scanner.get_session = lambda: session
-    scanner.time.sleep = lambda *args: None
-    try:
-        found, ok = scanner.try_api(
-            "https://example.invalid/catalog",
-            {"keyword": "avatar background", "_asset_type_filter": 92},
-        )
-    finally:
-        scanner.get_session = old_get_session
-        scanner.time.sleep = old_sleep
-    assert ok
-    assert found == {128422266252520}
-    assert session.calls == 2
-    assert all("_asset_type_filter" not in params for params in session.params)
+    session = _Session([])
+    calls = []
+    class Response:
+        status_code = 200
+        def json(self):
+            return {"data": [background, hair], "nextPageCursor": None}
+    with mock.patch.object(scanner, "get_session", return_value=session), \
+         mock.patch.object(scanner, "shared_circuit_open", return_value=False), \
+         mock.patch.object(scanner, "safe_get", side_effect=lambda endpoint, url, **kwargs: (calls.append(kwargs), Response())[1]):
+        found, ok = scanner.try_api("https://example.invalid/catalog",
+                                  {"keyword": "avatar background", "_asset_type_filter": 92})
+    assert ok and found == {128422266252520}
+    assert len(calls) == 1
+    assert all("_asset_type_filter" not in kwargs.get("params", {}) for kwargs in calls)
+
+    class Limited:
+        status_code = 429
+    calls.clear()
+    with mock.patch.object(scanner, "get_session", return_value=session), \
+         mock.patch.object(scanner, "shared_circuit_open", return_value=False), \
+         mock.patch.object(scanner, "safe_get", side_effect=lambda *args, **kwargs: (calls.append(kwargs), Limited())[1]):
+        found, ok = scanner.try_api("https://example.invalid/catalog",
+                                  {"keyword": "avatar background", "_asset_type_filter": 92})
+    assert found == set() and not ok and len(calls) == 1
+
 
 
 def test_market_analysis_uses_only_asset_type_92():
