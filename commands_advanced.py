@@ -32,6 +32,13 @@ def _resolve_family_prefix(text):
     fm = maybe_fam.strip().lower()
     if fm in _CONV or fm in _CAT:
         return fm, rest.strip()
+    try:
+        from category_configs import resolve_family_name
+        resolved = resolve_family_name(fm)
+        if resolved:
+            return resolved, rest.strip()
+    except Exception:
+        pass
     return None, text
 
 
@@ -47,7 +54,7 @@ def register_advanced_commands(bot, get_db):
 
         tokens = (args or "").strip().split()
         valid_cats = ["emote", "hat", "hair", "face", "accessory",
-                      "shirt", "pants", "jacket", "gear"]
+                      "shirt", "pants", "jacket", "gear", "backgrounds"]
 
         for t in tokens:
             tl = t.lower()
@@ -268,7 +275,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="converge")
     async def converge_cmd(ctx, family: str = "all", limit: int = 10):
-        """!converge | !converge emotes | !converge all_families"""
+        """!converge | !converge emotes | !converge backgrounds | !converge all_families"""
         from convergence_engine import (scan_all_families, FAMILIES,
                                         clamp_convergence_limit)
 
@@ -295,6 +302,16 @@ def register_advanced_commands(bot, get_db):
                     )
                 await ctx.send("\n".join(lines)[:1900])
             return
+
+        if family != "all" and family != "accessory" and family not in FAMILIES:
+            try:
+                from category_configs import (resolve_family_name,
+                                              to_convergence_family)
+                resolved = resolve_family_name(family)
+                if resolved:
+                    family = to_convergence_family(resolved)
+            except Exception:
+                pass
 
         if family != "all" and family != "accessory" and family not in FAMILIES:
             valid = ", ".join(FAMILIES.keys())

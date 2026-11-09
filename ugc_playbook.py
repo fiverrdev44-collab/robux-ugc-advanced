@@ -16,6 +16,18 @@ TOPICS = {
         "Best window: 1–2 weeks before a niche saturates.",
         "Avoid niches where the top item owns >60% of favorites.",
     ],
+    "backgrounds": [
+        "Design for the avatar frame: keep the focal point readable in the "
+        "centre and lower-middle of a 2560x1440 canvas.",
+        "Use sRGB, flattened RGB, and no alpha channel; Roblox applies edge "
+        "fading automatically, so do not add your own alpha fade.",
+        "Keep critical detail away from the edges; avatar placement and "
+        "cropping vary between surfaces.",
+        "Check both mobile and desktop crops; do not rely on a local preview "
+        "matching Roblox's final rendering.",
+        "Do not copy existing scenes, brands, or protected characters; build "
+        "an original environment with a clear theme.",
+    ],
     "naming": [
         "Front-load the highest-volume keyword — search reads left to right.",
         "3–5 words is ideal; stay under ~50 characters.",
@@ -165,6 +177,8 @@ TOPIC_ALIASES = {
     "mistakes": "failure_modes",
     "catalog": "catalog",
     "niches": "niche",
+    "background": "backgrounds",
+    "backgrounds": "backgrounds",
 }
 
 

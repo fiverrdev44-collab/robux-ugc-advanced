@@ -24,7 +24,7 @@ ITEM_TYPES = {
     "emote","dance","hat","beanie","crown","cap","hair","face","mask",
     "shirt","pants","jacket","shoes","wing","wings","tail","ears","horn",
     "horns","glasses","necklace","chain","backpack","sword","pet","bag",
-    "scarf","bandana","beret","visor",
+    "scarf","bandana","beret","visor","background",
 }
 
 
@@ -219,6 +219,7 @@ def brute_force_combinations(cur, pool, item_type="emote",
         "hat": ["hat", "beanie", "cap"],
         "hair": ["hair"],
         "face": ["face", "mask"],
+        "backgrounds": ["background", "scene"],
     }.get(item_type, [item_type])
 
     combos = []

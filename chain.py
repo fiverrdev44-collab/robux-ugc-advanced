@@ -69,6 +69,9 @@ _FAMILY_MAP = {
     "shoes": "other", "classic": "classic",
     "emote": "emotes", "dance": "emotes", "emotes": "emotes",
     "gear": "gear", "bundle": "bundle",
+    "background": "backgrounds", "backgrounds": "backgrounds",
+    "avatarbackground": "backgrounds", "avatar_background": "backgrounds",
+    "avatar backgrounds": "backgrounds",
 }
 
 _HAT_WORDS = ("beanie", "hat", "cap", "beret", "crown", "bonnet",
@@ -101,6 +104,7 @@ _DEFAULT_TYPE_WORDS = {
     "tops": "shirt, top",
     "clothing": "outfit, clothing",
     "gear": "gear, accessory",
+    "backgrounds": "background, scene, environment",
 }
 
 
@@ -146,7 +150,7 @@ _TYPE_WORD = {
     "emotes": "Emote", "headwear": "Hat", "hair": "Hair", "face": "Face",
     "neck": "Necklace", "waist": "Belt", "front": "Chest", "back": "Back",
     "shoulder": "Shoulder", "classic": "Classic", "tops": "Top",
-    "clothing": "Outfit", "gear": "Gear",
+    "clothing": "Outfit", "gear": "Gear", "backgrounds": "Background",
 }
 
 

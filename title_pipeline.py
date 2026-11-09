@@ -24,7 +24,7 @@ ITEM_TYPES = {
     "emote","dance","hat","beanie","crown","cap","hair","face","mask",
     "shirt","pants","jacket","shoes","wing","wings","tail","ears","horn",
     "horns","glasses","necklace","chain","backpack","sword","pet","bag",
-    "scarf","bandana","beret","visor",
+    "scarf","bandana","beret","visor","background",
 }
 
 SATURATION_RED = 200
@@ -154,7 +154,7 @@ def find_alternatives(cur, saturated_seeds, category_asset_ids=None, limit=10):
 def build_titles_from_seeds(seeds, alternatives, item_type="emote"):
     type_variants = {
         "emote": ["emote", "dance"], "hat": ["hat", "beanie"],
-        "hair": ["hair"],
+        "hair": ["hair"], "backgrounds": ["background", "scene"],
     }.get(item_type, [item_type])
 
     good_seeds = list(seeds) if seeds else []

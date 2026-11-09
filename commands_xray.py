@@ -8,7 +8,8 @@ Commands:
     !failures [family]   — words that correlate with low-fav items
 
 Family argument:
-    emote | hair | headwear | face | accessory | clothing | bundle | gear
+    emote | hair | headwear | face | accessory | clothing | bundle | gear |
+    backgrounds
     OR "all" / "*" / "every" for cross-catalog mining
 """
 import asyncio
@@ -20,6 +21,10 @@ from pattern_forge import (
     format_patterns, format_failure_patterns,
 )
 from early_winners import find_early_winners, format_early_winners
+from avatar_backgrounds import (
+    find_background_early_winners,
+    format_background_early_winners,
+)
 
 
 _ALL_TOKENS = {"all", "*", "every", "any", ""}
@@ -61,14 +66,35 @@ def register_xray_commands(bot, get_db):
             await asyncio.sleep(0.3)
 
     @bot.command(name="early")
-    async def early_cmd(ctx, days: int = 14):
-        """Show early winners."""
+    async def early_cmd(ctx, days: int = 14, family: str = None):
+        """Show early winners. Use `!early 7 backgrounds` for backgrounds."""
         days = max(3, min(int(days), 30))
-        progress = await ctx.send(f"⚡ **Scanning for early winners (last {days}d)...**")
+        target = None
+        if family:
+            try:
+                from category_configs import resolve_family_name
+                target = resolve_family_name(family)
+            except Exception:
+                target = None
+            if target != "backgrounds":
+                await ctx.send(
+                    "❌ `!early` category filter currently supports "
+                    "`backgrounds` only.")
+                return
+
+        if target == "backgrounds":
+            progress = await ctx.send(
+                f"⚡ **Scanning for early background winners "
+                f"(last {days}d)...**")
+        else:
+            progress = await ctx.send(
+                f"⚡ **Scanning for early winners (last {days}d)...**")
 
         def _run():
             conn = get_db(); cur = conn.cursor()
             try:
+                if target == "backgrounds":
+                    return find_background_early_winners(cur, days=days)
                 return find_early_winners(cur, days=days)
             finally:
                 cur.close(); conn.close()
@@ -82,7 +108,10 @@ def register_xray_commands(bot, get_db):
         try: await progress.delete()
         except Exception: pass
 
-        body = format_early_winners(results, days=days)
+        if target == "backgrounds":
+            body = format_background_early_winners(results, days=days)
+        else:
+            body = format_early_winners(results, days=days)
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i+1900])
             await asyncio.sleep(0.3)

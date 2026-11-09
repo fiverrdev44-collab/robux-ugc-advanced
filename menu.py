@@ -73,7 +73,7 @@ MANUAL_SECTIONS = {
         "**🚀 FIRE — Launch New Item**\n`!chain <concept>` → full launch kit\n"
         "**⭐ STRIKE — Variant of Winner**\n`!chain variant <id> <theme>` → clone a winner\n"
         "**🔧 INSPECT — Check Live Item**\n`!verdict <id>` → maturity-aware survival states\n"
-        "**📡 SCAN — Find Trending Niche**\n`!converge <family>` e.g. `emotes`, `hair`, `face`, `tops`\n"
+        "**📡 SCAN — Find Trending Niche**\n`!converge <family>` e.g. `emotes`, `hair`, `face`, `backgrounds`\n"
         "**🖼️ RECON — Analyze Idea**\n`!brainstorm <description>` (image vision is not enabled)\n"
         "**🏷️ LOAD — Generate Tags**\n`!tags <item name>` → 45 tags\n"
         "**🐋 WHALE — Studio Radar**\n`!whales [studio]` → top studios' drops\n"

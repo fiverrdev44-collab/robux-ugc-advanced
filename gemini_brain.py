@@ -51,6 +51,7 @@ ITEM_TYPE_WORDS = {
     "pants","jacket","shoes","wing","wings","tail","ears","horn","horns",
     "glasses","necklace","chain","backpack","sword","pet","bag","scarf",
     "bandana","beret","visor","lens","head","snapback","bonnet","balaclava",
+    "background","backdrop",
 }
 
 
@@ -322,7 +323,7 @@ _EXTRACT_PROMPT = """You are an elite keyword extraction engine for Roblox UGC.
 Extract structured intent for a DB search. Return ONLY JSON:
 
 {{
-  "item_type":    "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
+  "item_type":    "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|background|unknown>",
   "primary":      ["..."],
   "synonyms":     ["..."],
   "style":        ["..."],
@@ -1028,7 +1029,7 @@ _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
   "visual_colors": ["..."],
   "visual_style": ["..."],
   "visual_mood": ["..."],
-  "item_type_visual": "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|unknown>",
+  "item_type_visual": "<emote|hair|hat|face|neck|shoulder|front|back|waist|shirt|pants|jacket|shoes|3d_clothing|bundle|gear|background|unknown>",
   "distinctive_features": ["..."],
   "search_description": "one sentence",
   "title_color_match": "<YES|NO|PARTIAL>",
