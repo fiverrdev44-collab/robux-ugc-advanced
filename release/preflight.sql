@@ -33,7 +33,17 @@ WHERE table_schema = current_schema()
 ORDER BY table_name, column_name;
 
 -- 3. UTC duplicate snapshot days (must return zero rows before migration).
-SELECT item_id, (snapshot_at AT TIME ZONE 'UTC')::date AS utc_day,
+-- The expression is type-aware and independent of the session TimeZone:
+--   * TIMESTAMP (legacy UTC wall time): double AT TIME ZONE yields a UTC date.
+--   * TIMESTAMPTZ (absolute instant): single AT TIME ZONE yields a UTC date.
+SELECT item_id,
+       CASE
+           WHEN pg_typeof(snapshot_at) =
+                'timestamp without time zone'::regtype
+               THEN (((snapshot_at AT TIME ZONE 'UTC')
+                      AT TIME ZONE 'UTC')::date)
+           ELSE ((snapshot_at AT TIME ZONE 'UTC')::date)
+       END AS utc_day,
        count(*) AS rows
 FROM item_history
 GROUP BY 1, 2

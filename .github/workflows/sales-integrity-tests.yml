@@ -5,6 +5,7 @@ on:
     branches:
       - fix/sales-integrity-repair
       - release/vanta73-final-certification-rc
+      - release/vanta73-unified-final-rc
   pull_request:
     branches:
       - main

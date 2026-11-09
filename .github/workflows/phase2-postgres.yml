@@ -16,6 +16,7 @@ on:
       - fix/f10-timestamp-integrity
       - fix/f18-sales-source-authentication
       - release/vanta73-final-certification-rc
+      - release/vanta73-unified-final-rc
       - feat/backgrounds-92-rc-integration
   pull_request:
     branches:
@@ -109,6 +110,18 @@ jobs:
           if [ "$status" -ne 0 ]; then
             tail -n 160 release-manifest-pg.log | while IFS= read -r line; do
               echo "::error title=Release migration manifest failure::$line"
+            done
+          fi
+          exit "$status"
+      - name: Run operational gate preflight PostgreSQL checks
+        shell: bash
+        run: |
+          set +e
+          python test_operational_gate_preflight_pg.py 2>&1 | tee operational-preflight-pg.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            tail -n 160 operational-preflight-pg.log | while IFS= read -r line; do
+              echo "::error title=Operational preflight failure::$line"
             done
           fi
           exit "$status"
