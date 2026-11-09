@@ -105,6 +105,9 @@ the Phase 2 integration suite.
 - Read-only preflight: `release/preflight.sql` (row counts/date ranges,
   timestamp types, UTC duplicate days, identity ambiguity, ORACLE cohort
   duplicates, sales duplicates, migration-readiness markers).
+- Operational-gate correction: the UTC duplicate-day preflight expression is
+  type-aware for both legacy `TIMESTAMP` and `TIMESTAMPTZ` and is tested under
+  non-UTC PostgreSQL sessions (`test_operational_gate_preflight_pg.py`).
 - Backup required before migration.
 - Expected locks: F-10 type changes and F-07 primary-key replacement take
   `ACCESS EXCLUSIVE` locks; schedule a maintenance window.
