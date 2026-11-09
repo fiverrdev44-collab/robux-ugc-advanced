@@ -204,7 +204,7 @@ def _term_match_count(term):
         return 0
 
 
-_VOCAB_TYPE_TO_ASSET_ID = {"emote": 61}
+_VOCAB_TYPE_TO_ASSET_ID = {"emote": 61, "backgrounds": 92}
 
 _EMOTE_BRIDGE_SEEDS = [
     "emote", "dance", "animation", "gesture", "expression", "reaction",

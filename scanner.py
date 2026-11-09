@@ -172,6 +172,16 @@ def is_valid_asset_id(iid):
     return MIN_VALID_ID <= n <= MAX_VALID_ID
 
 
+def accepts_catalog_item(item, expected_asset_type):
+    """Fail closed on unknown catalog type when a typed discovery is requested."""
+    if not is_asset_item(item):
+        return False
+    actual = item.get("assetType")
+    if actual is None:
+        actual = item.get("assetTypeId")
+    return str(actual) == str(expected_asset_type)
+
+
 def is_asset_item(item):
     """
     Accept items the API marks as Asset.
@@ -215,11 +225,14 @@ def try_api(api_url, params):
     found = set()
     cursor = ""
     pages = 0
+    filter_asset_type = params.get("_asset_type_filter")
+    if filter_asset_type is not None:
+        filter_asset_type = int(filter_asset_type)
 
     while pages < MAX_PAGES_PER_QUERY:
         if shared_circuit_open("catalog_search"):
             return found, len(found) > 0
-        p = params.copy()
+        p = {k: v for k, v in params.items() if k != "_asset_type_filter"}
         p["cursor"] = cursor
         try:
             resp = safe_get(
@@ -232,8 +245,15 @@ def try_api(api_url, params):
 
             data = resp.json() or {}
             for item in data.get("data", []):
-                if is_asset_item(item):
-                    found.add(int(item["id"]))
+                if not is_asset_item(item):
+                    continue
+                if filter_asset_type is not None:
+                    actual_type = item.get("assetType")
+                    if actual_type is None:
+                        actual_type = item.get("assetTypeId")
+                    if str(actual_type) != str(filter_asset_type):
+                        continue
+                found.add(int(item["id"]))
 
             cursor = data.get("nextPageCursor")
             if not cursor:
@@ -257,6 +277,14 @@ def scan_query(params):
 def build_all_queries():
     log("🔨 Building query list...")
     queries = []
+
+    # Dedicated background discovery, bounded to one query.
+    # Private hint is removed before HTTP; results require assetType 92.
+    queries.append({
+        "keyword": "avatar background",
+        "sortType": 3, "limit": 30,
+        "_asset_type_filter": 92,
+    })
 
     # ---- General category sweeps ----
     for cat in CATEGORIES:

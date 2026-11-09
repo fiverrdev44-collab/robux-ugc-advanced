@@ -58,6 +58,8 @@ CATEGORY_SPECS = {
              "kind": "accessory"},
     "waist": {"label": "Waist Accessory", "asset_type_ids": [47],
               "kind": "accessory"},
+    "backgrounds": {"label": "Avatar Background", "asset_type_ids": [92],
+                    "kind": "background"},
 }
 
 CATEGORY_ALIASES = {
@@ -76,10 +78,14 @@ CATEGORY_ALIASES = {
     "back": "back", "wings": "back", "wing": "back",
     "backpack": "back", "tail": "back",
     "waist": "waist", "belt": "waist", "belts": "waist",
+    "background": "backgrounds", "backgrounds": "backgrounds",
+    "avatarbackground": "backgrounds", "avatar_background": "backgrounds",
+    "avatar backgrounds": "backgrounds",
 }
 
 SUPPORTED_CATEGORY_TEXT = (
-    "emotes, headwear, hair, face, neck, shoulder, front, back, waist")
+    "emotes, headwear, hair, face, neck, shoulder, front, back, waist, "
+    "backgrounds")
 
 PROTECTED_TERMS = {
     "sonic", "mario", "luigi", "pokemon", "pikachu", "naruto", "sasuke",
@@ -123,6 +129,7 @@ STOPWORDS = {
     "from", "into", "make", "made", "create", "original", "concept",
     "emote", "emotes", "dance", "hat", "hair", "face", "neck", "shoulder",
     "front", "back", "waist", "accessory", "item", "ugc",
+    "background", "backgrounds", "scene", "environment",
 }
 
 REQUEST_SYNONYMS = (
@@ -153,6 +160,13 @@ ACCESSORY_SPEC_KEYS = (
     "materials", "color_palette", "distinctive_features",
     "avatar_compatibility", "modeling_complexity", "clipping_concerns",
     "studio_considerations", "title_options",
+)
+
+BACKGROUND_SPEC_KEYS = (
+    "environment_theme", "scene_composition", "lighting", "colour_palette",
+    "atmosphere", "avatar_placement", "ground_horizon",
+    "mobile_readability", "desktop_readability", "title_options",
+    "description_options",
 )
 
 GENERIC_CONCEPT_WORDS = {
@@ -530,6 +544,20 @@ def _validate_accessory_spec(spec):
     return reasons
 
 
+def _validate_background_spec(spec):
+    if not isinstance(spec, dict):
+        return ["missing background_specification"]
+    reasons = []
+    for key in BACKGROUND_SPEC_KEYS:
+        value = spec.get(key)
+        if isinstance(value, (list, tuple)):
+            if not value:
+                reasons.append(f"background_specification.{key} missing")
+        elif not str(value or "").strip():
+            reasons.append(f"background_specification.{key} missing")
+    return reasons
+
+
 def _validate_required_text(concept):
     reasons = []
     required = (
@@ -575,6 +603,9 @@ def _validate_concept(raw, category, request, evidence, seen, allowed_ids,
     spec = CATEGORY_SPECS[category]
     if spec["kind"] == "emote":
         reasons.extend(_validate_emote_spec(raw.get("emote_specification")))
+    elif spec["kind"] == "background":
+        reasons.extend(_validate_background_spec(
+            raw.get("background_specification")))
     else:
         reasons.extend(_validate_accessory_spec(
             raw.get("accessory_specification")))
@@ -583,7 +614,8 @@ def _validate_concept(raw, category, request, evidence, seen, allowed_ids,
 
     name = str(raw.get("concept_name") or "").strip()
     spec_payload = (raw.get("emote_specification")
-                    or raw.get("accessory_specification") or {})
+                    or raw.get("accessory_specification")
+                    or raw.get("background_specification") or {})
     spec_text_parts = []
     if isinstance(spec_payload, dict):
         for value in spec_payload.values():
@@ -679,6 +711,8 @@ def _validate_concept(raw, category, request, evidence, seen, allowed_ids,
     }
     if spec["kind"] == "emote":
         concept["emote_specification"] = raw["emote_specification"]
+    elif spec["kind"] == "background":
+        concept["background_specification"] = raw["background_specification"]
     else:
         concept["accessory_specification"] = raw["accessory_specification"]
     if raw.get("creative_rationale"):
@@ -959,6 +993,9 @@ def _output_schema(category):
     if spec["kind"] == "emote":
         concept["emote_specification"] = {
             key: "string" for key in EMOTE_SPEC_KEYS}
+    elif spec["kind"] == "background":
+        concept["background_specification"] = {
+            key: "string or string list" for key in BACKGROUND_SPEC_KEYS}
     else:
         concept["accessory_specification"] = {
             key: "string or string list" for key in ACCESSORY_SPEC_KEYS}
@@ -1003,6 +1040,16 @@ def _build_prompt(category, request, evidence, constraints=None,
             "looping behavior, ending pose, personality, R15 considerations, "
             "and animation difficulties. Do not reproduce a competitor's "
             "choreography.")
+    elif spec["kind"] == "background":
+        spec_instruction = (
+            "Provide a scene-design specification for an Avatar Background: "
+            "environment_theme, scene_composition, lighting, colour_palette, "
+            "atmosphere, avatar_placement, ground_horizon, "
+            "mobile_readability, desktop_readability, title_options, and "
+            "description_options. Do not add movement requirements, wearable "
+            "shape rules, alpha-fade instructions, sales claims, or "
+            "conversion claims. Preserve the user's original product identity "
+            "in the title options.")
     else:
         spec_instruction = (
             "Provide a feasible accessory specification with silhouette, "
@@ -1190,6 +1237,29 @@ def _format_accessory_spec(spec):
         f"Title options: {value('title_options')}")
 
 
+def _format_background_spec(spec):
+    if not isinstance(spec, dict):
+        return "unavailable"
+
+    def value(key):
+        item = spec.get(key)
+        if isinstance(item, (list, tuple)):
+            return ", ".join(str(x) for x in item)
+        return str(item or "unavailable")
+
+    return (
+        f"Environment: {value('environment_theme')}\n"
+        f"Composition: {value('scene_composition')}\n"
+        f"Lighting: {value('lighting')} · palette: {value('colour_palette')}\n"
+        f"Atmosphere: {value('atmosphere')}\n"
+        f"Avatar placement: {value('avatar_placement')}\n"
+        f"Ground/horizon: {value('ground_horizon')}\n"
+        f"Mobile readability: {value('mobile_readability')}\n"
+        f"Desktop readability: {value('desktop_readability')}\n"
+        f"Title options: {value('title_options')}\n"
+        f"Description options: {value('description_options')}")
+
+
 def format_concept_report(result):
     if result.get("error"):
         return f"⚠️ M4 concept generation unavailable: {result['error']}"
@@ -1219,6 +1289,9 @@ def format_concept_report(result):
         if CATEGORY_SPECS[category]["kind"] == "emote":
             lines.append("Movement:\n" + _format_emote_spec(
                 concept.get("emote_specification")))
+        elif CATEGORY_SPECS[category]["kind"] == "background":
+            lines.append("Scene:\n" + _format_background_spec(
+                concept.get("background_specification")))
         else:
             lines.append("Design:\n" + _format_accessory_spec(
                 concept.get("accessory_specification")))

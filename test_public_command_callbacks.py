@@ -497,6 +497,48 @@ def test_xray_early_patterns_failures_callbacks():
     print("PASS xray/early/patterns/failures callbacks")
 
 
+def test_early_backgrounds_callback_filters_by_category():
+    import commands_xray as cx
+    import inspect
+    cmd = BOT.get_command("early")
+    assert "family" in inspect.signature(cmd.callback).parameters
+    assert cmd.ignore_extra is False, "extra args must not silently disappear"
+
+    with mock.patch.object(
+            cx, "find_background_early_winners",
+            return_value={"status": "insufficient_history",
+                          "candidate_window": 0, "usable_history": 0,
+                          "coverage_pct": 0.0}) as background_find, \
+            mock.patch.object(
+                cx, "format_background_early_winners",
+                return_value="BG EARLY") as background_format, \
+            mock.patch.object(cx, "find_early_winners") as legacy_find, \
+            mock.patch.object(cx, "format_early_winners") as legacy_format:
+        ctx = FakeCtx("early")
+        with _db(_callback("early"), _rows_handler):
+            ctx = _run("early", ctx, days=7, family="backgrounds")
+    background_find.assert_called_once()
+    background_format.assert_called_once()
+    legacy_find.assert_not_called()
+    legacy_format.assert_not_called()
+    assert "BG EARLY" in ctx.text()
+    print("PASS early backgrounds callback isolates type 92")
+
+
+def test_early_rejects_non_background_category_filter():
+    import commands_xray as cx
+
+    with mock.patch.object(cx, "find_early_winners") as legacy_find, \
+            mock.patch.object(cx, "find_background_early_winners") as bg_find:
+        ctx = FakeCtx("early")
+        with _db(_callback("early"), _rows_handler):
+            ctx = _run("early", ctx, days=7, family="hats")
+    legacy_find.assert_not_called()
+    bg_find.assert_not_called()
+    assert "supports `backgrounds` only" in ctx.text()
+    print("PASS early rejects unsupported category filters")
+
+
 def test_whales_callback():
     _assert_public("whales")
     rows = [(1, "Item", "Studio", 10, 100, NOW)]

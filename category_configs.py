@@ -385,6 +385,50 @@ CATEGORY_FAMILIES = {
         },
     },
 
+    "backgrounds": {
+        "label": "Avatar Background",
+        "asset_type_ids": [92],
+        "aliases": ["background", "backgrounds", "avatarbackground",
+                    "avatar_background", "avatar backgrounds"],
+        "type_words": ["background", "backgrounds", "scene"],
+        "shape": "scene",
+        "shape_rule": (
+            "Every concept MUST describe a complete scene or environment for "
+            "an avatar background. Specify setting, composition, lighting, "
+            "colour palette, atmosphere, avatar placement, ground/horizon, "
+            "and mobile/desktop readability. REJECT wearable, emote-movement, "
+            "decal, image, profile-frame, and app-theme concepts."
+        ),
+        "buckets": [
+            {"name": "NATURE",  "vibe": "forest, shrine, garden, mountain, ocean"},
+            {"name": "URBAN",   "vibe": "city, neon, rain, street, rooftop"},
+            {"name": "FANTASY", "vibe": "celestial, palace, cloud, enchanted, dream"},
+            {"name": "COZY",    "vibe": "library, cafe, cabin, warm, soft"},
+        ],
+        "title_archetypes": [
+            "THEME + BACKGROUND:       \"Moonlit Shrine Avatar Background\"",
+            "SCENE + BACKGROUND:       \"Neon Rain City Background\"",
+            "MOOD + SCENE + BACKGROUND:\"Cozy Library Background\"",
+        ],
+        "filler_block": {
+            "background","backgrounds","avatar","scene","the","and","for",
+            "with","your","you","a","an","of","in","on","to","my","is","it",
+            "as","at","by","roblox","tiktok","viral","new","best",
+        },
+        "concept_vocab": {
+            "moonlit","moon","shrine","neon","rain","city","cozy","library",
+            "celestial","cloud","palace","enchanted","forest","garden",
+            "mountain","ocean","beach","sunset","sunrise","night","starry",
+            "sky","aurora","crystal","cave","ruins","temple","castle",
+            "cottage","cabin","cafe","rooftop","street","alley","station",
+            "cyberpunk","vaporwave","dream","mist","fog","snow","autumn",
+            "spring","summer","winter","glow","lantern","candle","firefly",
+            "waterfall","river","lake","island","floating","space","nebula",
+            "galaxy","portal","magical","minimal","pastel","dark","warm",
+            "cool","soft","vibrant",
+        },
+    },
+
     "generic": {
         "label": "UGC Item",
         "asset_type_ids": [],
@@ -433,6 +477,11 @@ _CONVERGENCE_TO_CATEGORY = {
     "classic":  "clothing",
     "gear":     "gear",
     "bundle":   "bundle",
+    "backgrounds": "backgrounds",
+    "background": "backgrounds",
+    "avatarbackground": "backgrounds",
+    "avatar_background": "backgrounds",
+    "avatar backgrounds": "backgrounds",
 }
 
 _CATEGORY_TO_CONVERGENCE = {
@@ -443,8 +492,30 @@ _CATEGORY_TO_CONVERGENCE = {
     "accessory": "neck",       # primary; other 4 sub-ids share "neck"
     "clothing":  "clothing",
     "gear":      "gear",
+    "backgrounds": "backgrounds",
+    "background": "backgrounds",
+    "avatarbackground": "backgrounds",
+    "avatar_background": "backgrounds",
+    "avatar backgrounds": "backgrounds",
     # bundle has no convergence_engine equivalent
 }
+
+
+def resolve_family_name(value):
+    """Resolve a category name or alias to a canonical family key.
+
+    Returns ``None`` for unknown values so callers can fail closed instead of
+    silently falling back to the default category.
+    """
+    if not value:
+        return None
+    key = str(value).lower().strip()
+    if key in CATEGORY_FAMILIES:
+        return key
+    for fam_key, cfg in CATEGORY_FAMILIES.items():
+        if key in cfg.get("aliases", []):
+            return fam_key
+    return _CONVERGENCE_TO_CATEGORY.get(key)
 
 
 def to_convergence_family(cat_family):
