@@ -499,6 +499,10 @@ def test_xray_early_patterns_failures_callbacks():
 
 def test_early_backgrounds_callback_filters_by_category():
     import commands_xray as cx
+    import inspect
+    cmd = BOT.get_command("early")
+    assert "family" in inspect.signature(cmd.callback).parameters
+    assert cmd.ignore_extra is False, "extra args must not silently disappear"
 
     with mock.patch.object(
             cx, "find_background_early_winners",

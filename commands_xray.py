@@ -65,7 +65,7 @@ def register_xray_commands(bot, get_db):
             await ctx.send(body[i:i+1900])
             await asyncio.sleep(0.3)
 
-    @bot.command(name="early")
+    @bot.command(name="early", ignore_extra=False)
     async def early_cmd(ctx, days: int = 14, family: str = None):
         """Show early winners. Use `!early 7 backgrounds` for backgrounds."""
         days = max(3, min(int(days), 30))
