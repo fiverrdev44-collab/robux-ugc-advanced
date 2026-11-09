@@ -199,6 +199,7 @@ def test_approved_listener_marks_and_persists():
     assert result is True
     assert [sale["embed_index"] for sale in calls] == [0, 1]
     assert all(sale["_source_validated"] is True for sale in calls)
+    assert all(sl._sale_is_validated(sale) for sale in calls)
     assert all(sale["_source_kind"] == "webhook" for sale in calls)
     print("PASS approved listener persists all embeds with original indexes")
 
@@ -255,6 +256,37 @@ def test_ingestion_helpers_refuse_unvalidated_sales():
         assert sl._save_sales_batch([dict(sale)]) == (0, 1)
         assert sl._insert_sale(object(), dict(sale)) is False
     print("PASS direct persistence helpers refuse unvalidated sales")
+
+
+def test_boolean_marker_cannot_bypass_validation():
+    sale = {"item_name": "x", "_source_validated": True,
+            "source_event_id": "txn:x:1"}
+    with mock.patch.object(sl, "get_db",
+                           side_effect=AssertionError("DB touched")):
+        assert sl._save_sale_single(dict(sale)) is False
+        assert sl._save_sales_batch([dict(sale)]) == (0, 1)
+        assert sl._insert_sale(object(), dict(sale)) is False
+    print("PASS boolean-only marker cannot bypass source validation")
+
+
+def test_listener_logs_do_not_include_parsed_fields():
+    buf = io.StringIO()
+    embed = Embed(fields=[
+        Field("Item", "SECRET_ITEM_NAME"),
+        Field("Amount", "R$ 999"),
+        Field("Buyer", "buyer@example.com"),
+    ])
+    msg = Message(webhook_id=WEBHOOK, embeds=[embed])
+    with _set_env(_env("enforce")), \
+            mock.patch.object(sl, "_save_sale_single", return_value=True), \
+            contextlib.redirect_stdout(buf):
+        asyncio.run(sl.handle_sale_message(msg))
+    output = buf.getvalue()
+    assert "SECRET_ITEM_NAME" not in output
+    assert "buyer@example.com" not in output
+    assert "999" not in output
+    assert "accepted sale" in output
+    print("PASS listener logs omit parsed item/buyer/amount data")
 
 
 def test_logging_contains_no_message_content_or_secrets():
