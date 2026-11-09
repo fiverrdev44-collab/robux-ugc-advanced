@@ -25,6 +25,7 @@ on:
       - fix/f09-oracle-rate-limit-recovery
       - fix/f10-timestamp-integrity
       - fix/f18-sales-source-authentication
+      - release/vanta73-final-certification-rc
   pull_request:
     branches:
       - main

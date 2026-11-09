@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/sales-integrity-repair
+      - release/vanta73-final-certification-rc
   pull_request:
     branches:
       - main
