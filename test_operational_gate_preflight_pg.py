@@ -128,10 +128,11 @@ class PreflightUtcDayTests(unittest.TestCase):
                         "INSERT INTO my_sales (source_event_id) "
                         "VALUES ('event-a'), ('event-b')"
                     )
+                results = []
                 for statement in statements:
                     self.cur.execute(statement)
-                    self.cur.fetchall()
-                self.assertEqual(self.cur.rowcount, 0)
+                    results.append(self.cur.fetchall())
+                self.assertEqual(len(results[2]), 1 if transaction_column else 0)
             finally:
                 self.cur.execute("SET search_path TO public")
                 self.cur.execute(f'DROP SCHEMA "{schema}" CASCADE')
