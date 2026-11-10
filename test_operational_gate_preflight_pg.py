@@ -102,6 +102,41 @@ class PreflightUtcDayTests(unittest.TestCase):
             self.cur.execute(f'DROP SCHEMA "{schema}" CASCADE')
         print("PASS TIMESTAMPTZ UTC-day check is session-independent")
 
+    def test_sales_preflight_supports_legacy_and_migrated_tables(self):
+        start = PREFLIGHT.index("-- 7. Sales identity/duplicate inventory.")
+        end = PREFLIGHT.index("-- 8. Migration-readiness markers.")
+        statements = [s.strip() for s in PREFLIGHT[start:end].split(";") if s.strip()]
+        self.assertEqual(len(statements), 3)
+        for transaction_column in (False, True):
+            schema = "preflight_sales_" + uuid.uuid4().hex[:10]
+            self.cur.execute(f'CREATE SCHEMA "{schema}"')
+            try:
+                self.cur.execute(f'SET search_path TO "{schema}"')
+                extra_column = ", transaction_id TEXT" if transaction_column else ""
+                self.cur.execute(
+                    "CREATE TABLE my_sales ("
+                    "source_event_id TEXT, sale_time TIMESTAMPTZ"
+                    + extra_column + ")"
+                )
+                if transaction_column:
+                    self.cur.execute(
+                        "INSERT INTO my_sales (source_event_id, transaction_id) "
+                        "VALUES ('event-a', 'txn-a'), ('event-b', 'txn-a')"
+                    )
+                else:
+                    self.cur.execute(
+                        "INSERT INTO my_sales (source_event_id) "
+                        "VALUES ('event-a'), ('event-b')"
+                    )
+                for statement in statements:
+                    self.cur.execute(statement)
+                    self.cur.fetchall()
+                self.assertEqual(self.cur.rowcount, 0)
+            finally:
+                self.cur.execute("SET search_path TO public")
+                self.cur.execute(f'DROP SCHEMA "{schema}" CASCADE')
+        print("PASS sales preflight supports missing and present transaction_id")
+
     def test_preflight_remains_read_only(self):
         stripped = PREFLIGHT.upper()
         for keyword in ("INSERT ", "UPDATE ", "DELETE ", "ALTER ",
