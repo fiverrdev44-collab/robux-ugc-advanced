@@ -83,7 +83,7 @@ ORDER BY 3 DESC, 1, 2;
 -- 7. Sales identity/duplicate inventory.
 SELECT count(*) AS rows,
        count(*) FILTER (WHERE source_event_id IS NULL) AS missing_event_id,
-       count(*) FILTER (WHERE transaction_id IS NULL) AS missing_txn_id,
+       count(*) FILTER (WHERE (to_jsonb(my_sales)->>'transaction_id') IS NULL) AS missing_txn_id,
        min(sale_time) AS oldest_sale,
        max(sale_time) AS newest_sale
 FROM my_sales;
@@ -96,9 +96,9 @@ HAVING count(*) > 1
 ORDER BY 2 DESC, 1
 LIMIT 50;
 
-SELECT transaction_id, count(*) AS rows
-FROM my_sales
-WHERE transaction_id IS NOT NULL
+SELECT to_jsonb(s)->>'transaction_id' AS transaction_id, count(*) AS rows
+FROM my_sales AS s
+WHERE (to_jsonb(s)->>'transaction_id') IS NOT NULL
 GROUP BY 1
 HAVING count(*) > 1
 ORDER BY 2 DESC, 1
