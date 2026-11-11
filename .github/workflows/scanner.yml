@@ -1,8 +1,8 @@
 name: Daily Scanner
 
 on:
-  schedule:
-    - cron: '0 2 * * *'
+  # Scheduled runs paused for VANTA 73 production migration.
+  # Restore schedule after production validation.
   workflow_dispatch:
 
 concurrency:

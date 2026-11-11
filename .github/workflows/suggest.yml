@@ -1,8 +1,8 @@
 name: Suggest Scraper
 
 on:
-  schedule:
-    - cron: '30 4,10,16,22 * * *'
+  # Scheduled runs paused for VANTA 73 production migration.
+  # Restore schedule after production validation.
   workflow_dispatch:
 
 concurrency:
