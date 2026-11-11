@@ -1,8 +1,8 @@
 name: Keyword Discovery
 
 on:
-  schedule:
-    - cron: '30 5 * * *'
+  # Scheduled runs paused for VANTA 73 production migration.
+  # Restore schedule after production validation.
   workflow_dispatch:
 
 concurrency:
