@@ -14,7 +14,7 @@ from matched_experiments import (did_estimate, distance, select_controls,
 from intel_common import pick_pivot_from_data
 from opportunity_score import lane_priority
 from search_visibility import normalize_query, _fetch_query
-from sales_listener import _insert_sale
+from sales_listener import _insert_sale, _mark_source_validated
 
 
 class _FakeResponse:
@@ -215,6 +215,7 @@ def test_db_transaction():
             "amount_robux": 10, "status": "Complete",
             "source_event_id": "__writer_event__", "source": "test",
         }
+        _mark_source_validated(sale, "test")
         assert _insert_sale(cur, sale) is True
         assert _insert_sale(cur, dict(sale)) is False
         other = dict(sale); other["source_event_id"] = "__writer_event_2__"

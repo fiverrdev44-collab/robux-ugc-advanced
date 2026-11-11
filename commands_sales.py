@@ -7,6 +7,8 @@ import asyncio
 import os
 import discord
 
+from safe_roblox import get as safe_get, post as safe_post
+
 
 def register_sales_commands(bot, get_db):
 
@@ -259,7 +261,8 @@ def register_sales_commands(bot, get_db):
             out = []
             for label, url, params in urls:
                 try:
-                    r = requests.get(url, params=params, headers=headers, timeout=10)
+                    r = safe_get("sales_probe", url, params=params,
+                                 headers=headers, timeout=10)
                     body = r.text[:240].replace("\n", " ")
                     out.append((label, r.status_code, body))
                 except Exception as e:
@@ -333,7 +336,7 @@ def register_sales_commands(bot, get_db):
 
         def _get_csrf():
             try:
-                r = requests.post(
+                r = safe_post(
                     "https://auth.roblox.com/v2/logout",
                     headers=headers,
                     timeout=10,
@@ -346,7 +349,7 @@ def register_sales_commands(bot, get_db):
                 return None
 
         def _post():
-            r = requests.post(url, json=payload, headers=headers, timeout=15)
+            r = safe_post(url, json=payload, headers=headers, timeout=15)
             if r.status_code == 403 and "xsrf" in r.text.lower():
                 token = (
                     r.headers.get("x-csrf-token")
@@ -356,7 +359,7 @@ def register_sales_commands(bot, get_db):
                 if token:
                     h2 = dict(headers)
                     h2["X-CSRF-TOKEN"] = token
-                    r = requests.post(url, json=payload, headers=h2, timeout=15)
+                    r = safe_post(url, json=payload, headers=h2, timeout=15)
             return r.status_code, r.text
 
         status, text = await asyncio.to_thread(_post)
@@ -445,7 +448,8 @@ def register_sales_commands(bot, get_db):
         }
 
         def _check():
-            r = requests.get(
+            r = safe_get(
+                "users",
                 "https://users.roblox.com/v1/users/authenticated",
                 headers=headers,
                 timeout=10,
@@ -476,7 +480,8 @@ def register_sales_commands(bot, get_db):
         # Best-effort group membership check.
         try:
             def _groups():
-                r = requests.get(
+                r = safe_get(
+                    "groups",
                     f"https://groups.roblox.com/v1/users/{uid}/groups",
                     headers=headers,
                     timeout=10,

@@ -33,6 +33,23 @@ import asyncio
 from datetime import datetime, timezone
 
 from bot_core import get_db
+from sales_source_validation import (
+    check_message,
+    diagnostics_snapshot,
+)
+
+_SOURCE_VALIDATED = object()
+
+
+def _mark_source_validated(sale, source_kind):
+    """Internal trust boundary: only validated listener paths call this."""
+    sale["_source_validated"] = True
+    sale["_source_validation_token"] = _SOURCE_VALIDATED
+    sale["_source_kind"] = source_kind
+
+
+def _sale_is_validated(sale):
+    return sale.get("_source_validation_token") is _SOURCE_VALIDATED
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -263,7 +280,9 @@ def _extract_sale_from_embed(embed, message, embed_index=0):
     )
     is_sale = any(m in tl or m in dl for m in sale_markers)
     if not is_sale:
-        print(f"[sales_listener] not a sale — title={title[:60]!r}", flush=True)
+        print(f"[sales_listener] ignored non-sale embed "
+              f"message_id={getattr(message, 'id', '-')} idx={embed_index}",
+              flush=True)
         return None
 
     item_name = ""
@@ -306,9 +325,8 @@ def _extract_sale_from_embed(embed, message, embed_index=0):
             item_name = _strip_emoji(raw_item_name)
 
     if not item_name:
-        print(f"[sales_listener] SKIP — no item name found. "
-              f"title={title[:60]!r} fields="
-              f"{[(f.name, f.value[:30]) for f in (embed.fields or [])]}",
+        print(f"[sales_listener] skipped embed with no item field "
+              f"message_id={getattr(message, 'id', '-')} idx={embed_index}",
               flush=True)
         return None
 
@@ -374,7 +392,8 @@ def extract_sales_from_message(message):
             sale = _extract_sale_from_embed(embed, message, embed_index=index)
         except Exception as e:
             print(f"[sales_listener] embed parse failed: "
-                  f"{type(e).__name__}: {e}", flush=True)
+                  f"{type(e).__name__} message_id="
+                  f"{getattr(message, 'id', '-')} idx={index}", flush=True)
             continue
         if sale:
             sales.append(sale)
@@ -577,6 +596,8 @@ def _do_insert(cur, sale, columns):
 
 def _insert_sale_result(cur, sale, columns=None):
     """Insert if not already present. Returns (inserted: bool, reason: str)."""
+    if not _sale_is_validated(sale):
+        return False, "unvalidated_source"
     columns = columns or _sales_columns(cur)
     existing = _conflict_rows(cur, sale, columns)
     reason = duplicate_reason(sale, existing)
@@ -587,7 +608,7 @@ def _insert_sale_result(cur, sale, columns=None):
 
 
 def _insert_sale(cur, sale):
-    """Backwards-compatible single-sale insert. Returns True if inserted."""
+    """Legacy internal insert; requires the private validation token."""
     inserted, _ = _insert_sale_result(cur, sale)
     return inserted
 
@@ -597,30 +618,39 @@ def _insert_sale(cur, sale):
 # ════════════════════════════════════════════════════════════════════
 
 def _save_sales_batch(sales_list):
-    """Insert many sales with ONE connection. Returns (inserted, skipped)."""
+    """Insert many validated sales with ONE connection. Returns (inserted, skipped)."""
     if not sales_list:
         return 0, 0
 
-    print(f"[sales_listener] batch starting — {len(sales_list)} rows",
+    valid_sales = [s for s in sales_list if _sale_is_validated(s)]
+    unvalidated = len(sales_list) - len(valid_sales)
+    if unvalidated:
+        print(f"[sales_listener] skipped {unvalidated} unvalidated sale(s)",
+              flush=True)
+    if not valid_sales:
+        return 0, unvalidated
+
+    print(f"[sales_listener] batch starting — {len(valid_sales)} rows",
           flush=True)
 
     conn = None
     cur = None
     inserted = 0
-    skipped = 0
+    skipped = unvalidated
     try:
         conn = get_db()
         cur = conn.cursor()
         columns = _sales_columns(cur)
-        for sale in sales_list:
+        for sale in valid_sales:
             try:
                 cur.execute("SAVEPOINT sp_sale")
                 ok, reason = _insert_sale_result(cur, sale, columns)
                 if ok:
                     inserted += 1
                 else:
-                    print(f"[sales_listener] skip ({reason}): "
-                          f"{sale.get('item_name', '?')[:40]}", flush=True)
+                    print(f"[sales_listener] skip reason={reason} "
+                          f"message_id={sale.get('message_id', '-')} "
+                          f"idx={sale.get('embed_index', '-')}", flush=True)
                     skipped += 1
                 cur.execute("RELEASE SAVEPOINT sp_sale")
             except Exception as e:
@@ -628,16 +658,16 @@ def _save_sales_batch(sales_list):
                     cur.execute("ROLLBACK TO SAVEPOINT sp_sale")
                 except Exception:
                     pass
-                print(f"[sales_listener] row failed for "
-                      f"'{sale.get('item_name', '?')[:40]}': "
-                      f"{type(e).__name__}: {e}", flush=True)
+                print(f"[sales_listener] row failed error={type(e).__name__} "
+                      f"message_id={sale.get('message_id', '-')} "
+                      f"idx={sale.get('embed_index', '-')}", flush=True)
                 skipped += 1
         conn.commit()
         print(f"[sales_listener] batch done — inserted {inserted} · "
               f"skipped {skipped}", flush=True)
     except Exception as e:
-        print(f"[sales_listener] batch COMMIT failed: "
-              f"{type(e).__name__}: {e}", flush=True)
+        print(f"[sales_listener] batch COMMIT failed error="
+              f"{type(e).__name__}", flush=True)
         try:
             if conn:
                 conn.rollback()
@@ -659,6 +689,10 @@ def _save_sale_single(sale):
     """Single-sale save (used by live listener). Runs in thread."""
     if not sale:
         return False
+    if not _sale_is_validated(sale):
+        print("[sales_listener] refused unvalidated sale before DB access",
+              flush=True)
+        return False
     conn = None
     cur = None
     try:
@@ -668,13 +702,14 @@ def _save_sale_single(sale):
         conn.commit()
         if not ok:
             label = "ambiguous" if reason == "ambiguous_buyer" else "dup"
-            print(f"[sales_listener] {label} ({reason}): "
-                  f"{sale.get('item_name', '?')[:40]}", flush=True)
+            print(f"[sales_listener] {label} reason={reason} "
+                  f"message_id={sale.get('message_id', '-')} "
+                  f"idx={sale.get('embed_index', '-')}", flush=True)
         return ok
     except Exception as e:
-        print(f"[sales_listener] save failed for "
-              f"'{sale.get('item_name', '?')[:40]}': "
-              f"{type(e).__name__}: {e}", flush=True)
+        print(f"[sales_listener] save failed error={type(e).__name__} "
+              f"message_id={sale.get('message_id', '-')} "
+              f"idx={sale.get('embed_index', '-')}", flush=True)
         try:
             if conn:
                 conn.rollback()
@@ -697,18 +732,22 @@ def _save_sale_single(sale):
 # ════════════════════════════════════════════════════════════════════
 
 async def handle_sale_message(message):
-    """Called from on_message — runs DB writes off the event loop."""
+    """Called from on_message — validates source before parsing/DB writes."""
+    decision = check_message(message)
+    if not decision.allowed:
+        return False
     if not message.embeds:
         return False
     saved_any = False
     for sale in extract_sales_from_message(message):
+        _mark_source_validated(sale, decision.source_kind)
         is_new = await asyncio.to_thread(_save_sale_single, sale)
         if is_new:
             print(
-                f"[sales_listener] OK {sale['item_name'][:40]} "
-                f"R${sale['amount_robux']} "
-                f"({sale.get('group_name', '?')}) "
-                f"idx={sale['embed_index']}",
+                f"[sales_listener] accepted sale source="
+                f"{sale.get('_source_kind', 'unknown')} "
+                f"message_id={sale.get('message_id', '-')} "
+                f"idx={sale.get('embed_index', '-')}",
                 flush=True,
             )
             saved_any = True
@@ -728,23 +767,33 @@ async def backfill_channel(bot, channel_id, limit=200):
         if not ch:
             print(f"[backfill] channel {channel_id} not found", flush=True)
             return 0, 0
-        print(f"[backfill] found channel #{ch.name}", flush=True)
+        print(f"[backfill] found channel id={channel_id}", flush=True)
     except Exception as e:
-        print(f"[backfill] channel lookup failed: {e}", flush=True)
+        print(f"[backfill] channel lookup failed error={type(e).__name__}",
+              flush=True)
         return 0, 0
 
     scanned = 0
     sales_batch = []
+    rejected = 0
     try:
         async for msg in ch.history(limit=limit):
             scanned += 1
-            sales_batch.extend(extract_sales_from_message(msg))
+            decision = check_message(msg)
+            if not decision.allowed:
+                rejected += 1
+                continue
+            for sale in extract_sales_from_message(msg):
+                _mark_source_validated(sale, decision.source_kind)
+                sales_batch.append(sale)
     except Exception as e:
-        print(f"[backfill] history read failed: {e}", flush=True)
+        print(f"[backfill] history read failed error={type(e).__name__}",
+              flush=True)
         return scanned, 0
 
     print(f"[backfill] scanned {scanned} messages · "
-          f"found {len(sales_batch)} sales", flush=True)
+          f"found {len(sales_batch)} sales · rejected {rejected} · "
+          f"source diagnostics={diagnostics_snapshot()}", flush=True)
 
     if not sales_batch:
         return scanned, 0
@@ -770,7 +819,7 @@ async def auto_backfill(bot, limit=500):
         print(f"[auto-backfill] scanned {scanned} · imported {saved}", flush=True)
         return scanned, saved
     except Exception as e:
-        print(f"[auto-backfill] failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[auto-backfill] failed error={type(e).__name__}", flush=True)
         return 0, 0
 
 

@@ -11,6 +11,8 @@ import json
 import re
 from collections import Counter, defaultdict
 
+from creator_identity import has_creator_type
+
 STOP = {
     "the", "and", "for", "with", "your", "you", "this", "that", "from",
     "roblox", "ugc", "item", "items", "new", "best", "cute", "hot",
@@ -33,19 +35,31 @@ def _median(values):
     return (vals[n // 2 - 1] + vals[n // 2]) / 2.0
 
 
-def build_cohort(cur, min_items=5, top_n=50, verified_only=False):
-    """Creators with a real track record, ranked by median favorites."""
-    verified_clause = " AND creator_verified IS TRUE" if verified_only else ""
+def build_cohort(cur, min_items=5, top_n=50, verified_only=False,
+                 has_type=None):
+    """Typed creators with a real track record, ranked by median favorites.
+
+    Identity is ``(creator_type, creator_id)``. Unresolved historical rows are
+    excluded rather than merged by display name or guessed as User.
+    """
+    if has_type is None:
+        has_type = has_creator_type(cur)
+    if not has_type:
+        return []
+    verified_clause = " AND i.creator_verified IS TRUE" if verified_only else ""
     cur.execute(f"""
-        SELECT lower(creator_name),
+        SELECT i.creator_type, i.creator_id,
+               max(i.creator_name) AS display_name,
                count(*) AS n,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY favorite_count) AS med,
-               max(favorite_count) AS top
-        FROM items
-        WHERE creator_name IS NOT NULL AND creator_name <> ''
-          AND favorite_count > 0
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY i.favorite_count) AS med,
+               max(i.favorite_count) AS top
+        FROM items i
+        WHERE i.creator_id IS NOT NULL
+          AND i.creator_type IN ('User', 'Group')
+          AND i.favorite_count > 0
           {verified_clause}
-        GROUP BY 1
+        GROUP BY i.creator_type, i.creator_id
         HAVING count(*) >= %s
         ORDER BY med DESC NULLS LAST
         LIMIT %s
@@ -53,30 +67,37 @@ def build_cohort(cur, min_items=5, top_n=50, verified_only=False):
     return cur.fetchall()
 
 
-def build_comparison_cohorts(cur, min_items=3):
-    """Representative creator segments, including nonverified/average creators.
+def build_comparison_cohorts(cur, min_items=3, has_type=None):
+    """Representative typed-creator segments, including nonverified/average.
 
     Not a success-only cohort: established vs emerging, verified vs
     nonverified, and top/average/underperformers by median favorites.
     Segments can overlap (e.g. a verified established creator).
     """
+    if has_type is None:
+        has_type = has_creator_type(cur)
+    if not has_type:
+        return None
     cur.execute("""
-        SELECT lower(creator_name),
+        SELECT i.creator_type, i.creator_id,
+               max(i.creator_name) AS display_name,
                count(*) AS n,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY favorite_count) AS med,
-               bool_or(coalesce(creator_verified, false)) AS verified
-        FROM items
-        WHERE creator_name IS NOT NULL AND creator_name <> ''
-          AND favorite_count IS NOT NULL
-        GROUP BY 1
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY i.favorite_count) AS med,
+               bool_or(coalesce(i.creator_verified, false)) AS verified
+        FROM items i
+        WHERE i.creator_id IS NOT NULL
+          AND i.creator_type IN ('User', 'Group')
+          AND i.favorite_count IS NOT NULL
+        GROUP BY i.creator_type, i.creator_id
         HAVING count(*) >= %s
     """, (min_items,))
-    rows = [(r[0], int(r[1] or 0), float(r[2] or 0), bool(r[3]))
+    rows = [(r[0], r[1], r[2], int(r[3] or 0), float(r[4] or 0), bool(r[5]))
             for r in (cur.fetchall() or [])]
     if not rows:
         return None
 
-    ordered = sorted(rows, key=lambda r: r[2])
+    ordered = sorted(rows, key=lambda r: r[4])
     n = len(ordered)
     if n < 3:
         bottom, middle, top = [], ordered, []
@@ -87,29 +108,37 @@ def build_comparison_cohorts(cur, min_items=3):
         middle = ordered[third:n - third]
 
     segments = {
-        "established": [r for r in rows if r[1] >= 5],
-        "emerging": [r for r in rows if r[1] < 5],
-        "verified": [r for r in rows if r[3]],
-        "nonverified": [r for r in rows if not r[3]],
+        "established": [r for r in rows if r[3] >= 5],
+        "emerging": [r for r in rows if r[3] < 5],
+        "verified": [r for r in rows if r[5]],
+        "nonverified": [r for r in rows if not r[5]],
         "top_performers": top,
         "average_performers": middle,
         "underperformers": bottom,
     }
 
     def summarize(rs):
-        return {"creators": len(rs), "items": sum(r[1] for r in rs),
-                "median_of_medians": round(_median([r[2] for r in rs]), 1)
+        return {"creators": len(rs), "items": sum(r[3] for r in rs),
+                "median_of_medians": round(_median([r[4] for r in rs]), 1)
                 if rs else 0}
 
     return {
         "creators": n,
         "segments": {k: summarize(v) for k, v in segments.items()},
         "sampled_creators": {
-            k: [r[0] for r in sorted(v, key=lambda x: -x[2])[:5]]
+            k: [r[2] for r in sorted(v, key=lambda x: -x[4])[:5]]
+            for k, v in segments.items() if v},
+        "sampled_identities": {
+            k: [{"creator_type": r[0], "creator_id": r[1],
+                 "display_name": r[2]}
+                for r in sorted(v, key=lambda x: -x[4])[:5]]
             for k, v in segments.items() if v},
         "selection": {
-            "population": (f"all creators with >= {min_items} items and "
+            "population": (f"typed creators with >= {min_items} items and "
                            "non-null favorites"),
+            "identity_key": "(creator_type, creator_id)",
+            "unresolved": ("items with missing/unknown creator_type are "
+                           "excluded from identity-specific segments"),
             "segments": ("established/emerging by item count; verified by "
                          "badge; top/average/underperformer by median-favorite "
                          "terciles"),
@@ -118,32 +147,73 @@ def build_comparison_cohorts(cur, min_items=3):
     }
 
 
-def learn(cur, min_items=5, top_n=50, verified_only=False):
-    """Measure the cohort and return a findings dict."""
-    cohort = build_cohort(cur, min_items, top_n, verified_only=verified_only)
+def identity_coverage(cur, min_favorites=0):
+    """Count typed vs unresolved creator identities for disclosure."""
+    try:
+        cur.execute("""
+            SELECT count(*) FILTER (WHERE creator_id IS NULL) AS missing_id,
+                   count(*) FILTER (
+                       WHERE creator_id IS NOT NULL
+                         AND creator_type IN ('User', 'Group')) AS typed,
+                   count(*) FILTER (
+                       WHERE creator_id IS NOT NULL
+                         AND (creator_type IS NULL
+                              OR creator_type NOT IN ('User', 'Group')))
+                       AS unresolved_type,
+                   count(*) AS total
+            FROM items
+            WHERE favorite_count > %s
+        """, (min_favorites,))
+        row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    missing, typed, unresolved_type, total = (
+        int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0))
+    unresolved = missing + unresolved_type
+    return {
+        "total_items": total,
+        "typed_items": typed,
+        "unresolved_items": unresolved,
+        "missing_creator_id": missing,
+        "unresolved_creator_type": unresolved_type,
+        "typed_coverage_pct": round(
+            100.0 * typed / max(total, 1), 1),
+    }
+
+
+def learn(cur, min_items=5, top_n=50, verified_only=False, has_type=None):
+    """Measure typed creator cohorts and return a findings dict."""
+    if has_type is None:
+        has_type = has_creator_type(cur)
+    cohort = build_cohort(cur, min_items, top_n, verified_only=verified_only,
+                          has_type=has_type)
     if not cohort:
         return None
 
-    names = [c[0] for c in cohort]
-    verified_clause = " AND creator_verified IS TRUE" if verified_only else ""
+    creator_types = [c[0] for c in cohort]
+    creator_ids = [c[1] for c in cohort]
+    verified_clause = " AND i.creator_verified IS TRUE" if verified_only else ""
     cur.execute(f"""
-        SELECT lower(creator_name), lower(name), favorite_count,
-               COALESCE(price, 0),
-               EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0 AS age_days
-        FROM items
-        WHERE lower(creator_name) = ANY(%s)
-          AND favorite_count > 0
-          AND created_at IS NOT NULL
+        SELECT lower(i.name), i.favorite_count, COALESCE(i.price, 0),
+               EXTRACT(EPOCH FROM (NOW() - i.created_at)) / 86400.0 AS age_days
+        FROM items i
+        WHERE (i.creator_type, i.creator_id) IN (
+            SELECT * FROM unnest(%s::text[], %s::bigint[])
+        )
+          AND i.favorite_count > 0
+          AND i.created_at IS NOT NULL
           {verified_clause}
-    """, (names,))
+    """, (creator_types, creator_ids))
     rows = cur.fetchall()
     if not rows:
         return None
 
-    titles = [r[1] or "" for r in rows]
-    favs = [int(r[2] or 0) for r in rows]
-    prices = [int(r[3] or 0) for r in rows if (r[3] or 0) > 0]
-    ages = [float(r[4] or 0) for r in rows]
+    titles = [r[0] or "" for r in rows]
+    favs = [int(r[1] or 0) for r in rows]
+    prices = [int(r[2] or 0) for r in rows if (r[2] or 0) > 0]
+    ages = [float(r[3] or 0) for r in rows]
 
     word_items = defaultdict(list)      # word -> list of favs
     bigram_items = defaultdict(list)
@@ -170,9 +240,10 @@ def learn(cur, min_items=5, top_n=50, verified_only=False):
     cadence = len(rows) / max(len(cohort) * span_weeks, 1)
 
     try:
-        comparison = build_comparison_cohorts(cur)
+        comparison = build_comparison_cohorts(cur, has_type=has_type)
     except Exception:
         comparison = None
+    coverage = identity_coverage(cur)
 
     return {
         "cohort_size": len(cohort),
@@ -187,16 +258,17 @@ def learn(cur, min_items=5, top_n=50, verified_only=False):
         "comparison": comparison,
         "comparison_selection": (comparison.get("selection")
                                  if comparison else None),
+        "identity_coverage": coverage,
         "cohort_label": ("verified_only_success_cohort" if verified_only
                          else "success_top_median_favorites"),
         "cohort_mode": "success_top_median_favorites",
         "cohort_is_representative": False,
         "cohort_selection": (
-            "verified creators with >= min_items items, ranked by median "
-            "favorites, top_n; not representative"
+            "verified typed creators with >= min_items items, ranked by "
+            "median favorites, top_n; not representative"
             if verified_only else
-            "all creators with >= min_items items, ranked by median favorites, "
-            "top_n; success/survivorship-biased, not representative"),
+            "all typed creators with >= min_items items, ranked by median "
+            "favorites, top_n; success/survivorship-biased, not representative"),
         "causal": False,
     }
 
@@ -223,6 +295,9 @@ def save(cur, findings):
             if findings.get("comparison_selection") else ""),
         "comparison": (json.dumps(findings.get("comparison"))
                        if findings.get("comparison") else ""),
+        "identity_coverage": (
+            json.dumps(findings.get("identity_coverage"))
+            if findings.get("identity_coverage") else ""),
     }
     for k, v in rows.items():
         cur.execute("""
@@ -277,6 +352,7 @@ def load_findings(cur):
         "top_bigrams": _pairs("top_bigrams"),
         "comparison": _json("comparison"),
         "comparison_selection": _json("comparison_selection"),
+        "identity_coverage": _json("identity_coverage"),
         "cohort_label": stored.get(
             "cohort_label", ("success_top_median_favorites", None))[0],
         "cohort_mode": "success_top_median_favorites",
@@ -319,6 +395,15 @@ def format_report(f):
         lines.append(
             "_Comparison summary unavailable in this cached study; do not "
             "read the success cohort as representative._")
+    coverage = f.get("identity_coverage")
+    if coverage:
+        lines.append(
+            f"• Typed creator identity coverage: "
+            f"**{coverage.get('typed_coverage_pct', 0)}%** "
+            f"({coverage.get('typed_items', 0):,}/"
+            f"{coverage.get('total_items', 0):,} items); "
+            f"**{coverage.get('unresolved_items', 0):,}** unresolved items "
+            "were excluded from identity-specific comparisons.")
     if f["top_words"]:
         lines.append("\n**Words in their winners:**")
         for w, n, med in f["top_words"][:10]:

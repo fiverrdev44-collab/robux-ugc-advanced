@@ -19,6 +19,15 @@ on:
       - fix/convergence-budget-integrity
       - feat/phase2-m4-original-ugc
       - fix/m6a-security-authorization
+      - audit/final-vanta73-certification
+      - fix/f05-unified-roblox-api-safety
+      - fix/f07-f08-creator-identity-integrity
+      - fix/f09-oracle-rate-limit-recovery
+      - fix/f10-timestamp-integrity
+      - fix/f18-sales-source-authentication
+      - release/vanta73-final-certification-rc
+      - release/vanta73-unified-final-rc
+      - feat/backgrounds-92-rc-integration
   pull_request:
     branches:
       - main
@@ -78,6 +87,32 @@ jobs:
         run: python test_phase2_milestone3.py
       - name: Run Phase 2 Milestone 4 original concept regressions
         run: python test_phase2_milestone4.py
+      - name: Run final certification regressions
+        run: python test_final_certification.py
+      - name: Run final command contract regressions
+        run: python test_final_command_contracts.py
+      - name: Run public command callback regressions
+        run: python test_public_command_callbacks.py
+      - name: Run restricted command callback regressions
+        run: python test_restricted_command_callbacks.py
+      - name: Run Avatar Backgrounds AssetType 92 regressions
+        run: python test_avatar_backgrounds.py
+      - name: Run Avatar Backgrounds routing regressions
+        run: python test_background_routing_rc.py
+      - name: Run F-18 sales source security regressions
+        run: python test_f18_sales_source_security.py
+      - name: Run F-10 timestamp integrity regressions
+        run: python test_f10_timestamp_integrity.py
+      - name: Run F-09 ORACLE recovery regressions
+        run: python test_f09_oracle_recovery.py
+      - name: Run F-07/F-08 creator identity regressions
+        run: python test_f07_f08_creator_identity.py
+      - name: Run F-05 unified Roblox API safety regressions
+        run: python test_f05_api_safety.py
+      - name: Run safe Roblox API wrapper regressions
+        run: python test_safe_roblox.py
+      - name: Run sales source validation regressions
+        run: python test_sales_source_validation.py
       - name: Run snapshot selection regressions
         run: python test_snapshot_batch.py
       - name: Run Astra and product understanding regressions

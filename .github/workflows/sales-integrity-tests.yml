@@ -1,15 +1,19 @@
 name: Sales Integrity Tests
+# Unified RC: recheck sales integrity without contacting production services.
+# No jobs ran on the previous failed GitHub workflow attempt; re-trigger CI.
 
 on:
   push:
     branches:
       - fix/sales-integrity-repair
+      - release/vanta73-final-certification-rc
+      - release/vanta73-unified-final-rc
   pull_request:
     branches:
       - main
 
 jobs:
-  offline-regression:
+  sales-integrity:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

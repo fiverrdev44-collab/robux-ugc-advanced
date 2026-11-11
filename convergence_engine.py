@@ -14,6 +14,7 @@ import math
 import re
 from collections import Counter
 from datetime import datetime, timezone
+from time_utils import db_utc
 from bot_core import get_db, get_research_db
 
 
@@ -31,6 +32,7 @@ FAMILIES = {
     "classic":   [2, 11, 12],
     "clothing":  [64, 65, 66, 67, 68, 69, 70, 71, 72, 2, 11, 12],
     "gear":      [19],
+    "backgrounds": [92],
 }
 
 ASSET_TO_FAMILY = {}
@@ -378,9 +380,11 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
         stale = False
     else:
         try:
+            last_obs_utc = db_utc(last_obs)
             last_obs_age_days = (
-                (datetime.now(timezone.utc) - last_obs).total_seconds() / 86400.0
-            )
+                (datetime.now(timezone.utc) - last_obs_utc).total_seconds()
+                / 86400.0
+            ) if last_obs_utc is not None else None
         except Exception:
             last_obs_age_days = None
         stale = (last_obs_age_days is not None and last_obs_age_days > 14)

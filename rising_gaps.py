@@ -24,6 +24,9 @@ CATEGORY_MAP = {
     "pants": [12, 66],
     "jacket": [67],
     "gear": [19],
+    "backgrounds": [92],
+    "background": [92],
+    "avatarbackground": [92],
 }
 
 CATEGORY_HINTS = {
@@ -56,6 +59,7 @@ CATEGORY_HINTS = {
     "shirt": ["shirt", "tshirt", "t-shirt", "hoodie", "sweater", "jersey"],
     "pants": ["pants", "jeans", "shorts", "cargo"],
     "jacket": ["jacket", "coat", "blazer"],
+    "backgrounds": ["background", "avatar background", "backdrop"],
 }
 
 

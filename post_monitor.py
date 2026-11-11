@@ -198,7 +198,8 @@ async def send_daily_report(bot, channel_id):
             from sales_listener import auto_backfill
             await auto_backfill(bot, limit=500)
         except Exception as e:
-            print(f"[post_monitor] pre-report backfill failed: {e}", flush=True)
+            print(f"[post_monitor] pre-report backfill failed error="
+                  f"{type(e).__name__}", flush=True)
         data = await asyncio.to_thread(analyze_sales, 7)
         report = format_report(data)
         for i in range(0, len(report), 1900):

@@ -5,6 +5,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from database import get_db_connection, setup_database
+from safe_roblox import get as safe_get
 
 # Try multiple endpoints — Roblox changes these often.
 # The autocomplete-avatar/v2 endpoint is the one the live Marketplace
@@ -83,7 +84,8 @@ def try_endpoint(endpoint, seed):
                 "lang": "en",
             }
             try:
-                resp = requests.get(endpoint, params=params, headers=HEADERS, timeout=8)
+                resp = safe_get("suggest", endpoint, params=params,
+                            headers=HEADERS, timeout=8)
             except Exception:
                 continue
             if resp.status_code != 200:

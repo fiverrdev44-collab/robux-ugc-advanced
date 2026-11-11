@@ -1,10 +1,14 @@
-name: Oracle Auto-Deploy (Render-Style)
+name: Oracle Production Deploy (Manual and Schema-Gated)
 
+# Intentionally no push-to-main trigger: merging release code must NEVER
+# restart the live bot before the production database is migrated.
 on:
-  push:
-    branches:
-      - main
-      - master
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: "After approved production migrations, type DEPLOY_VANTA73"
+        required: true
+        type: string
 
 concurrency:
   group: deploy
@@ -12,28 +16,82 @@ concurrency:
 
 jobs:
   deploy:
-    name: Auto-Deploy to Oracle Server 2
+    name: Manually approved Oracle deployment
+    if: github.event.inputs.confirm_production == 'DEPLOY_VANTA73'
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to Oracle Server 2 via SSH
+      - name: Fail-closed database guard, deploy, and restart via SSH
         uses: appleboy/ssh-action@master
         with:
           host: 129.213.137.177
           username: ubuntu
           key: ${{ secrets.ORACLE_SSH_KEY }}
           script: |
-            echo "🚀 [Auto-Deploy] Syncing latest code into ~/robux-ugc-advanced..."
-            cd ~/robux-ugc-advanced
-            git fetch origin
+            set -eu
+            cd "$HOME/robux-ugc-advanced"
+
+            # The URL stays on Oracle and is not printed in workflow logs.
+            DBURL=$(sed -n 's/^DATABASE_URL=//p' .env | head -n1 | sed "s/^['\"]//;s/['\"]$//")
+            if [ -z "$DBURL" ]; then
+              echo "BLOCKED: Oracle DATABASE_URL unavailable. Code not synced."
+              exit 1
+            fi
+
+            # Check the *live* database before git reset or service restart.
+            # All queries are read-only; missing objects or connection failures
+            # stop the deployment. Historical sales may lack transaction IDs.
+            ready=$(PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=15000 -c TimeZone=UTC' \
+              psql -X -w "$DBURL" -v ON_ERROR_STOP=1 -Atqc "
+                SELECT
+                  current_database() = 'ugc_db'
+                  AND to_regclass('public.creator_registry') IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='items'
+                      AND column_name='creator_type'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='my_sales'
+                      AND column_name='transaction_id'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name='item_history'
+                      AND column_name='snapshot_at'
+                      AND data_type='timestamp with time zone'
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conrelid='public.tracked_creators'::regclass
+                      AND contype='p'
+                      AND pg_get_constraintdef(oid)='PRIMARY KEY (creator_type, creator_id)'
+                  )
+                  AND COALESCE(pg_get_indexdef(to_regclass('public.idx_item_history_daily')),'') LIKE '%AT TIME ZONE%'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM (
+                      SELECT item_id, (snapshot_at AT TIME ZONE 'UTC')::date
+                      FROM public.item_history
+                      GROUP BY 1,2 HAVING count(*) > 1
+                    ) duplicate_days
+                  );
+              ")
+            unset DBURL
+            if [ "$ready" != 't' ]; then
+              echo "BLOCKED: Production schema has not passed the required migration gate. Code not synced."
+              exit 1
+            fi
+
+            echo "PASS: production migration schema gate."
+            echo "Syncing approved code to Oracle..."
+            git fetch origin main
             git reset --hard origin/main
             find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
-            echo "📦 [Auto-Deploy] Checking dependencies..."
-            source ~/ugc_env/bin/activate
-            pip install -q asyncpg aiohttp discord.py google-genai 2>/dev/null || true
+            source "$HOME/ugc_env/bin/activate"
+            pip install -q asyncpg aiohttp discord.py google-genai
+            python -m py_compile database.py bot_core.py discord_ugc_bot.py
 
-            echo "🔄 [Auto-Deploy] Restarting ugc-bot service..."
             sudo systemctl restart ugc-bot
             sudo systemctl status ugc-bot --no-pager
-
-            echo "✅ [Auto-Deploy] Successfully deployed like Render!"
+            echo "Manual Oracle deployment completed."

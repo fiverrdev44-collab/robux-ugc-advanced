@@ -8,6 +8,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
 from creator_identity import has_creator_type
+from safe_roblox import get as safe_get, shared_circuit_open
 
 
 def log(msg):
@@ -96,48 +97,44 @@ _RUN_LOCK = threading.Lock()
 
 
 def fetch_fresh_favs(item_id, deadline=None):
-    # Try authenticated sessions first, then the anonymous session.
-    for session in SESSIONS + [ANON_SESSION]:
-        for attempt in range(MAX_RETRIES):
-            if deadline is not None and time.monotonic() >= deadline:
+    """Fetch one favorite count through the shared catalog-details transport.
+
+    A 429 or open shared circuit returns ``None`` immediately; no cookie
+    rotation or local retry loop is attempted. The anonymous session is used
+    only when the authenticated session is rejected (401/403), not to evade a
+    rate limit.
+    """
+    if shared_circuit_open("catalog_details"):
+        return item_id, None
+    for session in (SESSIONS[0], ANON_SESSION):
+        if deadline is not None and time.monotonic() >= deadline:
+            return item_id, None
+        resp = safe_get(
+            "catalog_details", FAV_URL.format(item_id), session=session,
+            timeout=6)
+        code = resp.status_code or 0
+        if code == 200:
+            data = resp.json() or {}
+            favs = data.get("favoriteCount")
+            if favs is None:
+                _stats["other"] += 1
                 return item_id, None
+            _stats["ok"] += 1
             try:
-                r = session.get(FAV_URL.format(item_id), timeout=6)
-                if r.status_code == 200:
-                    favs = r.json().get("favoriteCount")
-                    if favs is not None:
-                        _stats["ok"] += 1
-                        return item_id, int(favs)
-                    else:
-                        _stats["other"] += 1
-                        return item_id, None
-                elif r.status_code == 429:
-                    _stats["429"] += 1
-                    # Roblox sometimes sends Retry-After: 60+; never sleep
-                    # that long inside a single item — the run deadline wins.
-                    try:
-                        wait = int(r.headers.get("Retry-After", 3))
-                    except (TypeError, ValueError):
-                        wait = 3
-                    wait = max(1, min(wait, 30))
-                    if deadline is not None and time.monotonic() + wait >= deadline:
-                        return item_id, None
-                    time.sleep(wait + attempt * 2)
-                    continue
-                elif r.status_code in (401, 403):
-                    # Bad/expired cookie — move on to the next session
-                    # (the anonymous session is the last resort).
-                    _stats["403"] += 1
-                    break
-                elif r.status_code == 404:
-                    _stats["404"] += 1
-                    return item_id, None
-                else:
-                    _stats["other"] += 1
-                    return item_id, None
-            except Exception:
-                _stats["exc"] += 1
-                time.sleep(1)
+                return item_id, int(favs)
+            except (TypeError, ValueError):
+                return item_id, None
+        if code == 429:
+            _stats["429"] += 1
+            return item_id, None
+        if code in (401, 403):
+            _stats["403"] += 1
+            continue  # authenticated session rejected; try anonymous once
+        if code == 404:
+            _stats["404"] += 1
+            return item_id, None
+        _stats["other"] += 1
+        return item_id, None
     return item_id, None
 
 

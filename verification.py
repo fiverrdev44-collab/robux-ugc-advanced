@@ -22,7 +22,7 @@ ITEM_TYPE_WORDS = {
     "shirt", "pants", "jacket", "shoes", "wing", "wings", "tail", "ears",
     "horn", "horns", "glasses", "necklace", "chain", "backpack", "sword",
     "pet", "bag", "scarf", "bandana", "beret", "visor", "lens", "head",
-    "snapback", "bonnet", "balaclava",
+    "snapback", "bonnet", "balaclava", "background", "backdrop",
 }
 TITLE_FIELDS = (
     "titles_safe", "titles_differentiated", "titles_longtail", "titles_viral",

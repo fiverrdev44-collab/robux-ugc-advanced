@@ -29,12 +29,14 @@ def record_observation(cur, scan_run_id, item, observed_at=None,
                             else item.get("favorite_data_status") or "unknown")
     cur.execute("""
         insert into trend_item_observations
-          (item_id, creator_id, observed_at, scan_run_id, favorites, title,
-           description, price, created_at, favorite_data_status)
-        values (%s, %s, coalesce(%s, now()), %s, %s, %s, %s, %s, %s, %s)
+          (item_id, creator_id, creator_type, observed_at, scan_run_id,
+           favorites, title, description, price, created_at,
+           favorite_data_status)
+        values (%s, %s, %s, coalesce(%s, now()), %s, %s, %s, %s, %s, %s, %s)
         on conflict (scan_run_id, item_id) do nothing
     """, (item.get("id"), item.get("creator_id"),
-          _as_utc(observed_at), scan_run_id, favorites,
+          item.get("creator_type"), _as_utc(observed_at), scan_run_id,
+          favorites,
           (item.get("name") or "")[:500],
           (item.get("description") or "")[:5000],
           item.get("price"), _as_utc(item.get("created_at")),
@@ -50,6 +52,8 @@ def observation_from(discovery, batch=None, scan_run_id=0, observed_at=None):
     return {
         "id": discovery.get("id"),
         "creator_id": discovery.get("creator_id") or batch.get("creator_id"),
+        "creator_type": (discovery.get("creator_type")
+                         or batch.get("creator_type")),
         "name": batch.get("name") or discovery.get("name"),
         "description": batch.get("description") or discovery.get("description"),
         "price": batch.get("price") if batch.get("price") is not None

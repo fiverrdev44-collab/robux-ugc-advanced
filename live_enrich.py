@@ -15,6 +15,11 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import get_db_connection
 from creator_identity import economy_identity, has_creator_type
+from safe_roblox import (
+    get as safe_get,
+    shared_circuit_open,
+    trip_shared_circuit,
+)
 
 
 def log(msg):
@@ -49,6 +54,8 @@ def _wait_for_slot():
 
 
 def _circuit_allows():
+    if shared_circuit_open("catalog_search"):
+        return False
     with _circuit_lock:
         if time.time() < _circuit_until:
             return False
@@ -62,6 +69,7 @@ def _circuit_fail():
         if _circuit_fails >= _CIRCUIT_THRESHOLD:
             _circuit_until = time.time() + _CIRCUIT_BACKOFF_S
             log(f"circuit OPEN — pausing enrich for {_CIRCUIT_BACKOFF_S}s")
+            trip_shared_circuit()
 
 
 def _circuit_success():
@@ -163,6 +171,9 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
                 cat_params["subcategory"] = mapping["subcategory"]
 
     while pages < max_pages:
+        if not _circuit_allows():
+            log(f"circuit open — skip search '{keyword}'")
+            break
         params = {
             "keyword": keyword,
             "limit": 30,
@@ -171,9 +182,11 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
         }
         params.update(cat_params)
 
-        session = SESSIONS[pages % len(SESSIONS)]
+        session = SESSIONS[0] if SESSIONS else requests.Session()
         try:
-            r = session.get(CATALOG_SEARCH, params=params, timeout=10)
+            r = safe_get(
+                "catalog_search", CATALOG_SEARCH, params=params,
+                session=session, timeout=10)
 
             if r.status_code == 429:
                 log(f"search HTTP 429 for '{keyword}'")
@@ -185,7 +198,7 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
                 break
 
             _circuit_success()
-            data = r.json()
+            data = r.json() or {}
             for item in data.get("data", []):
                 if item.get("id"):
                     ids.add(int(item["id"]))
@@ -193,9 +206,8 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
             if not cursor:
                 break
             pages += 1
-            time.sleep(1.0)   # was 0.4 — increased to prevent burst
         except Exception as e:
-            log(f"search error for '{keyword}': {e}")
+            log(f"search error for '{keyword}': {type(e).__name__}")
             break
 
     return list(ids)[:limit]
@@ -205,63 +217,74 @@ def _search_keyword(keyword, category_ids=None, limit=100, sort=2):
 # DETAILS
 # ─────────────────────────────────────────────────────────────
 def _fetch_item_details(item_id):
-    """Fetch details with exponential backoff on 429."""
-    for session in SESSIONS:
-        for attempt in range(2):
+    """Fetch one item via the shared catalog-details transport.
+
+    A 429 trips the shared circuit and returns None; no session rotation or
+    local retry loop is used. A missing favorites value stays None so it is
+    never misreported as zero.
+    """
+    if not _circuit_allows():
+        return None
+    _wait_for_slot()
+    session = SESSIONS[0] if SESSIONS else requests.Session()
+    try:
+        r = safe_get(
+            "catalog_details", DETAILS_URL.format(item_id),
+            session=session, timeout=10)
+        if r.status_code == 429:
+            _circuit_fail()
+            return None
+        if r.status_code != 200:
+            return None
+
+        d = r.json() or {}
+
+        favs = None
+        try:
+            _wait_for_slot()
+            r2 = safe_get(
+                "catalog_details", FAV_URL.format(item_id),
+                session=session, timeout=10)
+            if r2.status_code == 200:
+                favs = (r2.json() or {}).get("favoriteCount")
+                if favs is not None:
+                    favs = int(favs)
+            elif r2.status_code == 429:
+                _circuit_fail()
+        except Exception:
+            favs = None
+
+        creator_obj = d.get("Creator") or {}
+        creator = (creator_obj.get("Name")
+                   if isinstance(creator_obj, dict) else None)
+        identity = economy_identity(d)
+
+        created_raw = d.get("Created")
+        created_dt = None
+        if created_raw and isinstance(created_raw, str):
             try:
-                r = session.get(DETAILS_URL.format(item_id), timeout=10)
-
-                if r.status_code == 429:
-                    if attempt == 0:
-                        time.sleep(2.0)
-                        continue
-                    return None
-
-                if r.status_code != 200:
-                    break
-
-                d = r.json()
-
-                favs = 0
-                try:
-                    _wait_for_slot()   # throttle the follow-up call too
-                    r2 = session.get(FAV_URL.format(item_id), timeout=10)
-                    if r2.status_code == 200:
-                        favs = r2.json().get("favoriteCount") or 0
-                except Exception:
-                    pass
-
-                creator_obj = d.get("Creator") or {}
-                creator = creator_obj.get("Name") if isinstance(creator_obj, dict) else None
-                identity = economy_identity(d)
-
-                created_raw = d.get("Created")
-                created_dt = None
-                if created_raw and isinstance(created_raw, str):
-                    try:
-                        created_dt = datetime.fromisoformat(
-                            created_raw.replace("Z", "").split(".")[0]
-                        )
-                    except Exception:
-                        pass
-
-                return {
-                    "id": item_id,
-                    "name": (d.get("Name") or "")[:500],
-                    "description": (d.get("Description") or "")[:5000],
-                    "price": d.get("PriceInRobux") or 0,
-                    "favorite_count": favs,
-                    "total_sales": d.get("Sales") or 0,
-                    "creator_name": (creator or "")[:200],
-                    "creator_id": identity["creator_id"],
-                    "creator_type": identity["creator_type"],
-                    "creator_verified": identity["creator_verified"],
-                    "asset_type_id": d.get("AssetTypeId") or 0,
-                    "created_at": created_dt,
-                }
+                created_dt = datetime.fromisoformat(
+                    created_raw.replace("Z", "").split(".")[0]
+                )
             except Exception:
-                continue
-    return None
+                pass
+
+        return {
+            "id": item_id,
+            "name": (d.get("Name") or "")[:500],
+            "description": (d.get("Description") or "")[:5000],
+            "price": d.get("PriceInRobux") or 0,
+            "favorite_count": favs,
+            "total_sales": d.get("Sales") or 0,
+            "creator_name": (creator or "")[:200],
+            "creator_id": identity["creator_id"],
+            "creator_type": identity["creator_type"],
+            "creator_verified": identity["creator_verified"],
+            "asset_type_id": d.get("AssetTypeId") or 0,
+            "created_at": created_dt,
+        }
+    except Exception:
+        return None
 
 
 _UPSERT_WITH_TYPE = """

@@ -10,6 +10,8 @@ import time
 
 import requests
 
+from safe_roblox import get as safe_get, shared_circuit_open
+
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -66,6 +68,10 @@ def _fetch_query(session, query, max_pages=MAX_PAGES):
     error = None
     status = "completed"
     while pages < max_pages:
+        if shared_circuit_open("catalog_search"):
+            status = "deferred"
+            error = "circuit open"
+            break
         params = {
             "Keyword": query,
             "Limit": PAGE_LIMIT,
@@ -73,41 +79,49 @@ def _fetch_query(session, query, max_pages=MAX_PAGES):
         }
         if cursor:
             params["Cursor"] = cursor
-        response = None
-        for attempt in range(3):
+        response = safe_get(
+            "catalog_search", SEARCH_URL, params=params, headers=HEADERS,
+            session=session, timeout=15)
+        code = response.status_code or 0
+        if code == 200:
             try:
-                response = session.get(SEARCH_URL, params=params,
-                                       headers=HEADERS, timeout=15)
-            except Exception as e:
-                error = f"{type(e).__name__}"
-                response = None
-            if response is not None and response.status_code == 200:
+                data = response.json() or {}
+            except Exception:
+                error = "bad JSON"
+                status = "failed" if not rows else "partial"
                 break
-            if response is not None and response.status_code == 429:
-                time.sleep(2 ** attempt)
-                continue
-            if response is not None:
-                error = f"HTTP {response.status_code}"
+            for item in data.get("data") or []:
+                rows.append((pages + 1, item))
+            pages += 1
+            cursor = data.get("nextPageCursor")
+            if not cursor:
                 break
-            time.sleep(2 ** attempt)
-        if response is not None and response.status_code == 429:
+            time.sleep(DELAY)
+            continue
+
+        if code == 429:
+            status = "partial" if rows else "rate_limited"
             error = "HTTP 429 rate limited"
-        if response is None or response.status_code != 200:
-            status = "failed" if not rows else "partial"
             break
-        try:
-            data = response.json()
-        except Exception:
-            error = "bad JSON"
-            status = "failed" if not rows else "partial"
+        if 500 <= code < 600:
+            status = "unavailable" if not rows else "partial"
+            error = f"HTTP {code}"
             break
-        for item in data.get("data") or []:
-            rows.append((pages + 1, item))
-        pages += 1
-        cursor = data.get("nextPageCursor")
-        if not cursor:
+        if code == 0:
+            detail = (response.error or "request failed")
+            if "circuit" in detail.lower():
+                status = "deferred"
+            elif "timeout" in detail.lower():
+                status = "timed_out"
+            else:
+                status = "unavailable"
+            if rows:
+                status = "partial"
+            error = detail
             break
-        time.sleep(DELAY)
+        status = "failed" if not rows else "partial"
+        error = f"HTTP {code}"
+        break
     return rows, pages, status, error
 
 

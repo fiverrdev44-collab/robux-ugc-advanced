@@ -1,5 +1,8 @@
 """Pure tests for the conversational router. No Discord connection required."""
 import asyncio
+from unittest import mock
+
+import command_security as cs
 import vanta_conversation as vc
 from vanta_conversation import (
     ConversationState, ConversationStore, classify_intent, clean_concept,
@@ -244,7 +247,8 @@ def test_registry_execution_and_context():
     state = ConversationState(user_id=1)
     route = {"intent": "inspect_item", "item_id": 121930221694467,
              "concept": None, "family": None}
-    asyncio.run(_run_registry(bot, message, route, state))
+    with mock.patch.object(cs, "_owner_ids", return_value={1}):
+        asyncio.run(_run_registry(bot, message, route, state))
     assert bot.cmd.called == {"item_id": 121930221694467}
     assert 121930221694467 in state.results
     assert state.last_intent == "inspect_item"

@@ -12,6 +12,8 @@ import os
 import re
 from collections import Counter
 
+from safe_roblox import get as safe_get
+
 from category_configs import (
     get_category_config,
     detect_family_from_asset_type,
@@ -207,7 +209,7 @@ def _live_verify_batch(candidates, cookie):
         try:
             url = ("https://catalog.roblox.com/v1/search/items/details"
                    f"?Category=12&Keyword={requests.utils.quote(w)}&Limit=30")
-            r = requests.get(url, headers=headers, timeout=8)
+            r = safe_get("catalog_search", url, headers=headers, timeout=8)
             if r.status_code != 200:
                 continue
             data = r.json()

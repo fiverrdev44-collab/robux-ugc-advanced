@@ -522,9 +522,15 @@ def register_guide_commands(bot):
                                 value=" · ".join(f"`{w}`" for w in graph["level_1"][:10]),
                                 inline=False)
             if roi:
-                combo.add_field(name="📈 Expected Favs", value=f"**~{roi['expected_favs']:,}**", inline=True)
-                combo.add_field(name="💸 Expected Sales", value=f"**~{roi['expected_sales']:,}**", inline=True)
-                combo.add_field(name="💎 Expected Revenue", value=f"**~{roi['expected_revenue']:,} R$**\n({roi['confidence']})", inline=True)
+                combo.add_field(
+                    name="📈 Expected Favs (heuristic)",
+                    value=f"**~{roi['expected_favs']:,}**",
+                    inline=True)
+                combo.add_field(
+                    name="💸 Sales Evidence",
+                    value="Attributable sales unavailable; no sales/revenue "
+                          "estimate is produced.",
+                    inline=True)
             if pricing:
                 combo.add_field(name="💵 Pricing Options",
                                 value="\n".join(f"{p['name']} — **{p['price']} R$** · *{p['pro']}*" for p in pricing),

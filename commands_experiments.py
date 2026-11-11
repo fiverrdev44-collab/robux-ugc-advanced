@@ -60,6 +60,8 @@ def register_experiment_commands(bot, get_db):
     @bot.command(name="experiments", aliases=["labs", "results"])
     async def experiments_cmd(ctx, limit: int = 10):
         """Show recommendation outcomes and measure anything due."""
+        from command_security import is_owner
+        owner = is_owner(ctx.author.id)
         limit = max(1, min(limit, 25))
 
         def _do():
@@ -68,10 +70,12 @@ def register_experiment_commands(bot, get_db):
                 from experiments import (auto_apply_changes, measure_due,
                                          summary, format_summary)
                 from matched_experiments import evaluate_due, recent_lines
-                auto_applied = auto_apply_changes(cur)
-                measured = measure_due(cur)
-                did_done = evaluate_due(cur)
-                conn.commit()
+                auto_applied = measured = did_done = 0
+                if owner:
+                    auto_applied = auto_apply_changes(cur)
+                    measured = measure_due(cur)
+                    did_done = evaluate_due(cur)
+                    conn.commit()
                 data = summary(cur, limit=limit)
                 body = format_summary(data)
                 extra = recent_lines(cur)

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from psycopg2.extras import execute_values
 from database import get_db_connection, setup_database
 from creator_identity import catalog_identity, has_creator_type
+from safe_roblox import get as safe_get, shared_circuit_open
 
 
 def log(msg):
@@ -17,9 +18,8 @@ def log(msg):
 # ------------------------------------------------------------
 # Reads ROBLOSECURITY_COOKIE_1 .. _5 (falls back to single
 # ROBLOSECURITY_COOKIE if numbered ones aren't set).
-# Each cookie gets its own requests.Session with its own
-# cookie jar, so requests spread across accounts and avoid
-# per-account rate limits.
+# Only the first configured cookie is used. The scanner does not
+# rotate accounts or sessions to evade per-account/IP rate limits.
 # ============================================================
 COOKIES = []
 for i in range(1, 6):
@@ -56,17 +56,17 @@ SORT_TYPES = [0, 1, 2, 3, 4, 5]
 # ============================================================
 # THROUGHPUT
 # ------------------------------------------------------------
-# WORKERS scales with cookie count — each cookie gets its own
-# dedicated workers, so throughput is roughly N_cookies × 3.
-# With 2 cookies = 6 workers = ~2x the old single-cookie speed.
+# One primary authenticated session; the shared scheduler enforces the
+# endpoint budget and concurrency. Workers are deliberately capped and do not
+# scale with the number of configured cookies.
 # ============================================================
 WORKERS_PER_COOKIE = 3
-WORKERS = WORKERS_PER_COOKIE * len(COOKIES)
+WORKERS = WORKERS_PER_COOKIE
 
-DELAY = 0.4                # seconds between requests per worker
+DELAY = 0.4                # legacy value; shared scheduler owns pacing
 MAX_PAGES_PER_QUERY = 6
 HTTP_TIMEOUT = 10
-MAX_429_RETRIES = 3
+MAX_429_RETRIES = 0        # 429s are deferred to the shared circuit
 QUERY_TIMEOUT = 60
 
 # Roblox catalog constants
@@ -91,8 +91,8 @@ MAX_VALID_ID = 100_000_000_000_000_000   # 10^17
 # ============================================================
 # SESSIONS
 # ------------------------------------------------------------
-# One requests.Session per cookie. Round-robin selected per
-# request so load spreads evenly across accounts.
+# One primary authenticated session. Configured cookie pools are retained for
+# compatibility, but the scanner never rotates accounts to evade a 429.
 # ============================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -110,15 +110,9 @@ for cookie in COOKIES:
     s.headers.update(HEADERS)
     SESSIONS.append(s)
 
-_session_idx = 0
-
-
 def get_session():
-    """Round-robin session selection."""
-    global _session_idx
-    s = SESSIONS[_session_idx % len(SESSIONS)]
-    _session_idx += 1
-    return s
+    """Return the single primary authenticated session (never rotates)."""
+    return SESSIONS[0]
 
 
 UGC_KEYWORDS = [
@@ -178,6 +172,16 @@ def is_valid_asset_id(iid):
     return MIN_VALID_ID <= n <= MAX_VALID_ID
 
 
+def accepts_catalog_item(item, expected_asset_type):
+    """Fail closed on unknown catalog type when a typed discovery is requested."""
+    if not is_asset_item(item):
+        return False
+    actual = item.get("assetType")
+    if actual is None:
+        actual = item.get("assetTypeId")
+    return str(actual) == str(expected_asset_type)
+
+
 def is_asset_item(item):
     """
     Accept items the API marks as Asset.
@@ -212,36 +216,44 @@ def get_dynamic_keywords():
 def try_api(api_url, params):
     """
     Fetch one query's worth of results across pagination.
-    Uses a round-robin session from the cookie pool.
+
+    All physical requests go through the shared safe_roblox transport. A 429
+    or an already-open shared circuit returns partial results instead of
+    rotating cookies or issuing a local retry storm.
     """
     session = get_session()
     found = set()
     cursor = ""
     pages = 0
-    retries_429 = 0
+    filter_asset_type = params.get("_asset_type_filter")
+    if filter_asset_type is not None:
+        filter_asset_type = int(filter_asset_type)
 
     while pages < MAX_PAGES_PER_QUERY:
-        p = params.copy()
+        if shared_circuit_open("catalog_search"):
+            return found, len(found) > 0
+        p = {k: v for k, v in params.items() if k != "_asset_type_filter"}
         p["cursor"] = cursor
         try:
-            resp = session.get(api_url, params=p, timeout=HTTP_TIMEOUT)
+            resp = safe_get(
+                "catalog_search", api_url, params=p, session=session,
+                timeout=HTTP_TIMEOUT)
             if resp.status_code == 429:
-                retries_429 += 1
-                if retries_429 > MAX_429_RETRIES:
-                    return found, len(found) > 0
-                retry_after = int(resp.headers.get("Retry-After", 2))
-                time.sleep(retry_after)
-                # Rotate to a different cookie on 429
-                session = get_session()
-                continue
-
+                return found, len(found) > 0
             if resp.status_code != 200:
                 return found, len(found) > 0
 
-            data = resp.json()
+            data = resp.json() or {}
             for item in data.get("data", []):
-                if is_asset_item(item):
-                    found.add(int(item["id"]))
+                if not is_asset_item(item):
+                    continue
+                if filter_asset_type is not None:
+                    actual_type = item.get("assetType")
+                    if actual_type is None:
+                        actual_type = item.get("assetTypeId")
+                    if str(actual_type) != str(filter_asset_type):
+                        continue
+                found.add(int(item["id"]))
 
             cursor = data.get("nextPageCursor")
             if not cursor:
@@ -250,8 +262,6 @@ def try_api(api_url, params):
             pages += 1
         except Exception:
             return found, len(found) > 0
-
-        time.sleep(DELAY)
 
     return found, True
 
@@ -267,6 +277,14 @@ def scan_query(params):
 def build_all_queries():
     log("🔨 Building query list...")
     queries = []
+
+    # Dedicated background discovery, bounded to one query.
+    # Private hint is removed before HTTP; results require assetType 92.
+    queries.append({
+        "keyword": "avatar background",
+        "sortType": 3, "limit": 30,
+        "_asset_type_filter": 92,
+    })
 
     # ---- General category sweeps ----
     for cat in CATEGORIES:
@@ -461,11 +479,12 @@ def run_scanner():
     setup_database()
     log("📦 DB setup done.")
 
-    log(f"🔐 Loaded {len(SESSIONS)} cookie session(s) for scanning.")
+    log(f"🔐 Using primary session; {len(SESSIONS)} configured session(s) "
+        f"(no rotation on 429).")
 
     queries = build_all_queries()
     log(f"🚀 Running {len(queries)} queries with {WORKERS} workers "
-        f"({WORKERS_PER_COOKIE} per cookie × {len(SESSIONS)} cookies)...")
+        f"(shared endpoint budget/concurrency)...")
     start = time.time()
 
     all_ids = set()

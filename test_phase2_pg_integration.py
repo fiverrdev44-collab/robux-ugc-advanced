@@ -111,7 +111,8 @@ _BASE_SCHEMA_SQL = """
         buyer TEXT,
         amount_robux INTEGER,
         status TEXT,
-        asset_id BIGINT
+        asset_id BIGINT,
+        source_event_id TEXT
     );
 """
 
@@ -819,6 +820,34 @@ class Phase2PostgresTests(unittest.TestCase):
             self.conn.autocommit = True
             self.cur.execute("SELECT set_config('search_path', %s, false)",
                              (self.schema,))
+
+    def test_sales_dedupe_preserves_distinct_event_ids(self):
+        import database
+        now = datetime.now(timezone.utc)
+        self.cur.execute("""
+            INSERT INTO my_sales
+                (sale_time, item_name, buyer, amount_robux, source_event_id)
+            VALUES (%s, 'Same Item', 'Buyer', 50, 'event-a'),
+                   (%s, 'Same Item', 'Buyer', 50, 'event-b')
+        """, (now, now))
+        self.cur.execute(database.MY_SALES_DEDUPE_SQL)
+        self.cur.execute("""
+            SELECT count(*), array_agg(source_event_id ORDER BY source_event_id)
+            FROM my_sales
+        """)
+        assert self.cur.fetchone() == (2, ["event-a", "event-b"])
+
+        self.cur.execute("""
+            INSERT INTO my_sales
+                (sale_time, item_name, buyer, amount_robux, source_event_id)
+            VALUES (%s, 'Duplicate', 'Buyer', 50, 'event-dup'),
+                   (%s, 'Duplicate', 'Buyer', 50, 'event-dup')
+        """, (now, now))
+        self.cur.execute(database.MY_SALES_DEDUPE_SQL)
+        self.cur.execute("""
+            SELECT count(*) FROM my_sales WHERE source_event_id = 'event-dup'
+        """)
+        assert self.cur.fetchone()[0] == 1
 
     def test_m4_market_evidence_exact_category_and_read_only(self):
         import original_concept_engine as m4

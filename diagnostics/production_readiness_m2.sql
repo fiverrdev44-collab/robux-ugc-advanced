@@ -356,7 +356,7 @@ FROM recent r
 LEFT JOIN snap s ON s.item_id = r.id;
 
 \echo '--- 8b. Observed snapshot cadence by date (last 14 days) ---'
-SELECT snapshot_at::date AS snapshot_date,
+SELECT (snapshot_at AT TIME ZONE 'UTC')::date AS snapshot_date,
        count(*) AS snapshot_rows,
        count(DISTINCT item_id) AS items,
        min(snapshot_at) AS first_at,
@@ -369,7 +369,7 @@ ORDER BY 1 DESC;
 \echo '--- 8c. Duplicate item/date snapshots in stored data (last 14 days) ---'
 SELECT count(*) AS item_date_groups_with_duplicates
 FROM (
-    SELECT item_id, snapshot_at::date AS snapshot_date, count(*) AS n
+    SELECT item_id, (snapshot_at AT TIME ZONE 'UTC')::date AS snapshot_date, count(*) AS n
     FROM item_history
     WHERE snapshot_at >= now() - interval '14 days'
     GROUP BY 1, 2

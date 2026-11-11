@@ -12,6 +12,7 @@ CATEGORY_NAMES = {
     61: "Emote", 64: "3D T-Shirt", 65: "3D Shirt", 66: "3D Pants",
     67: "3D Jacket", 68: "3D Sweater", 69: "3D Shorts",
     70: "3D Shoe L", 71: "3D Shoe R", 72: "3D Dress",
+    92: "Avatar Background",
 }
 
 

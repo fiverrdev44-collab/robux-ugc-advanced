@@ -20,6 +20,7 @@ from category_configs import (
     get_concept_vocab,
 )
 from early_winners import find_early_winners, _is_noise, PLATFORM_CREATORS
+from avatar_backgrounds import analyze_market, format_market_report
 
 
 # Garbage tokens in search_suggestions that are NOT real niches
@@ -450,11 +451,17 @@ def hidden_gems(cur, days=30, min_rate=15, max_supply=30, limit=8):
 
 
 def build_xray(cur):
+    try:
+        backgrounds = analyze_market(cur)
+    except Exception as exc:
+        print(f"[xray] backgrounds: {exc}", flush=True)
+        backgrounds = None
     return {
         "health": catalog_health(cur),
         "early": find_early_winners(cur, days=14, min_rate=15.0,
                                     max_supply=50, min_favs=20, limit=10),
         "categories": category_breakdown(cur),
+        "backgrounds": backgrounds,
         "hottest": hottest_niches(cur),
         "coldest": coldest_niches(cur),
         "whitespace": whitespace_count(cur),
@@ -514,6 +521,11 @@ def format_xray(x):
                 f"• **{c['label']}** — {c['count']:,} items · "
                 f"median {c['median_favs']:,} favs · {c['winners']:,} winners (1k+)"
             )
+        lines.append("")
+
+    backgrounds = x.get("backgrounds")
+    if backgrounds:
+        lines.extend(format_market_report(backgrounds).splitlines())
         lines.append("")
 
     hot = x.get("hottest") or []

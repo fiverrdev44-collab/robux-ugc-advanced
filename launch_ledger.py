@@ -7,7 +7,8 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
+from time_utils import db_utc, utc_now
 
 import psycopg2
 
@@ -210,12 +211,10 @@ def _fill_ledger_once(cur, item_id):
         iid,
     ))
 
-    launched_cmp = launched
-    if launched_cmp is not None and launched_cmp.tzinfo is None:
-        launched_cmp = launched_cmp.replace(tzinfo=timezone.utc)
+    launched_cmp = db_utc(launched)
     if (favs_d30 is not None and units_d30 is not None
             and launched_cmp is not None
-            and launched_cmp <= datetime.now(timezone.utc) - timedelta(days=30)):
+            and launched_cmp <= utc_now() - timedelta(days=30)):
         try:
             from convergence_engine import resolve_family_ids
             ids = resolve_family_ids(family)

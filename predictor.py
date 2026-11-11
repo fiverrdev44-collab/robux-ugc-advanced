@@ -1,5 +1,8 @@
 """
-predictor.py — Success probability scoring before you build.
+predictor.py — Heuristic opportunity scoring before you build.
+
+The score is a rank signal assembled from observed marketplace factors. It is
+not a calibrated probability of success and must not be presented as one.
 """
 import re
 
@@ -26,8 +29,10 @@ def predict_success(cur, idea_terms):
     rows = cur.fetchall()
 
     if not rows:
-        return {"probability": 0, "verdict": "NO DATA",
-                "reason": "No items match.", "factors": {}}
+        return {"heuristic_score": 0, "probability": 0,
+                "score_label": "insufficient evidence",
+                "verdict": "NO DATA", "reason": "No items match.",
+                "factors": {}}
 
     comp = len(rows)
     f1 = 25 if comp < 30 else 22 if comp < 100 else 15 if comp < 300 else 8 if comp < 1000 else 2
@@ -81,7 +86,10 @@ def predict_success(cur, idea_terms):
                "🟡 VIABLE" if total >= 50 else "🟠 RISKY" if total >= 35 else "🔴 AVOID")
 
     return {
-        "probability": total, "verdict": verdict,
+        "heuristic_score": total,
+        "probability": total,  # backward-compatible key; not a probability
+        "score_label": "heuristic rank score; not a calibrated probability",
+        "verdict": verdict,
         "factors": {
             "competition_density":  {"score": f1, "max": 25, "raw": comp},
             "demand_signal":        {"score": f2, "max": 20, "raw": f"{winner_favs:,} favs"},
@@ -94,19 +102,28 @@ def predict_success(cur, idea_terms):
 
 
 def format_prediction(pred, idea):
-    if not pred: return "❌ Could not predict."
-    lines = [f"# 🔮 SUCCESS PREDICTOR — `{idea}`", "",
-             f"## {pred['verdict']} — **{pred['probability']}% probability**", "",
+    if not pred: return "❌ Could not compute a heuristic score."
+    score = pred.get("heuristic_score", pred.get("probability", 0))
+    lines = [f"# 🔮 HEURISTIC OPPORTUNITY SCORE — `{idea}`", "",
+             f"## {pred['verdict']} — **{score}/100 heuristic score**", "",
+             "_Heuristic rank signal, not a calibrated probability of success._", "",
              "### Factor Breakdown"]
     for name, f in pred["factors"].items():
         bar_len = int(f["score"] / f["max"] * 20)
         bar = "█" * bar_len + "░" * (20 - bar_len)
         lines.append(f"**{name.replace('_',' ').title()}** — `{f['score']:>2}/{f['max']:<2}` {bar}  _raw: {f['raw']}_")
     lines.append("")
-    p = pred["probability"]
-    if p >= 80: lines.append("**VERDICT:** Attack immediately.")
-    elif p >= 65: lines.append("**VERDICT:** Strong. Launch within 7 days.")
-    elif p >= 50: lines.append("**VERDICT:** Viable but needs differentiation.")
-    elif p >= 35: lines.append("**VERDICT:** Risky. Only if you differentiate hard.")
-    else: lines.append("**VERDICT:** Skip.")
+    if score >= 80:
+        lines.append("**NEXT STEP:** Strong heuristic signal. Validate with a "
+                     "bounded experiment; this is not a success guarantee.")
+    elif score >= 65:
+        lines.append("**NEXT STEP:** Promising heuristic signal. Gather "
+                     "additional evidence before committing.")
+    elif score >= 50:
+        lines.append("**NEXT STEP:** Mixed signal. Investigate differentiation "
+                     "and demand.")
+    elif score >= 35:
+        lines.append("**NEXT STEP:** Weak signal. Do not treat this as demand.")
+    else:
+        lines.append("**NEXT STEP:** Insufficient or negative signal.")
     return "\n".join(lines)
