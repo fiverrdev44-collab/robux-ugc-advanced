@@ -18,6 +18,17 @@ import discord
 from command_security import allow_planner_ai, is_owner
 from vanta_dialogue import classify_social, social_reply
 
+
+def _v2_enabled(user_id):
+    """Owner-only by default; off/all require an explicit config choice."""
+    mode = os.getenv("VANTA_CONVERSATION_V2_ROLLOUT", "owner").strip().lower()
+    if mode == "all":
+        return True
+    if mode == "owner":
+        return is_owner(user_id)
+    return False
+
+
 THREAD_RE = re.compile(r"^vanta-(\d+)-([a-f0-9]{12})$", re.I)
 URL_ID_RE = re.compile(
     r"(?:catalog|marketplace|library|item)[^\d]{0,20}(\d{6,20})", re.I
@@ -171,7 +182,9 @@ def _load_state(channel_id, user_id):
         import memory
         conn = get_db(); cur = conn.cursor()
         try:
-            return memory.load(cur, channel_id, user_id)
+            days = 168 if _v2_enabled(user_id) else 24
+            return memory.load(cur, channel_id, user_id,
+                               max_age_hours=days)
         finally:
             cur.close(); conn.close()
     except Exception as e:
@@ -1314,7 +1327,8 @@ def _rename_concept(text):
 async def plan_message(text, has_attachment, state, bot=None):
     # Recognize casual/privacy turns before filler removal or AI planning.
     # Full-match semantics prevent "hi, analyze this item" from becoming small talk.
-    social = classify_social(text, state=state) if not has_attachment else None
+    social = (classify_social(text, state=state)
+              if not has_attachment and _v2_enabled(state.user_id) else None)
     if social:
         return _intent(social, confidence="high")
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
@@ -1463,8 +1477,9 @@ async def handle_message(bot, message, state):
         return
     # Don't retain privacy-control messages or content when opted out.
     privacy_request = (
-        classify_social(text, state) or ""
-    ).startswith("privacy_") if not has_attachment else False
+        (classify_social(text, state) or "").startswith("privacy_")
+        if not has_attachment and _v2_enabled(state.user_id) else False
+    )
     if state.memory_enabled and not privacy_request:
         state.messages.append(text[:400])
         state.messages = state.messages[-12:]
