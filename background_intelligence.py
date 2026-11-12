@@ -110,7 +110,7 @@ def grounded_concept(vision, notes=""):
     return ". ".join(parts)[:580].strip(" .")
 
 
-def candidate_titles(vision, notes="", limit=6):
+def candidate_titles(vision, notes="", limit=6, live=None):
     """Grounded candidate names; no CTR or uniqueness scoring fabricated."""
     o = observations(vision)
     seed = scene_phrase(vision, notes)
@@ -133,12 +133,16 @@ def candidate_titles(vision, notes="", limit=6):
         prefix = " ".join(words[:2]).title()
         if prefix.lower() not in seed.lower() and len(prefix.split()) <= 2:
             candidates.append(f"{prefix} {seed_words} Background")
+    # Avoid recommending an exact copy of a verified sampled listing.
+    # This is NOT a marketplace-wide uniqueness check.
+    known_titles = {row["name"].casefold()
+                    for row in verified_background_competitors(live)}
     seen, out = set(), []
     for title in candidates:
         if len(title.split()) > 7 or len(title) > 65:
             continue
         key = title.casefold()
-        if key in seen:
+        if key in seen or key in known_titles:
             continue
         ok, _ = validate_title(notes, title, family="backgrounds")
         if not ok:
@@ -173,6 +177,63 @@ def listing_description(vision, notes=""):
     if details:
         sentence += " Featuring " + " and ".join(details) + "."
     return sentence[:310]
+
+
+def verified_background_competitors(live, limit=3):
+    """Only trust category-explicit AssetType 92 results from a successful sample.
+
+    Names are bounded because external catalog text is untrusted. Empty/missing
+    metric values are UNKNOWN rather than fabricated zeros.
+    """
+    if not isinstance(live, dict) or live.get("ok") is not True:
+        return []
+    out, seen = [], set()
+    for raw in (live.get("top_competitors") or [])[:10]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            asset_type = int(raw.get("asset_type_id"))
+        except (TypeError, ValueError):
+            continue
+        if asset_type != 92:
+            continue
+        name = _short_text(raw.get("name"), 80)
+        if not name or _is_untrusted_instruction(name):
+            continue
+        if name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        row = {"name": name}
+        for field in ("favorites", "price"):
+            try:
+                value = int(raw.get(field))
+            except (TypeError, ValueError):
+                value = None
+            row[field] = value if value is not None and 0 < value < 10**10 else None
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def title_sample_overlap(title, competitors):
+    """Return descriptive token overlap, NEVER visual similarity or CTR."""
+    def terms(value):
+        return {t for t in re.findall(r"[a-z0-9]+", value.lower())
+                if t not in _FILLER and t not in _BAD_SCENE_PARTS}
+    desired = terms(title or "")
+    best = {"ratio": 0.0, "name": None, "exact": False}
+    for row in competitors or []:
+        name = row.get("name") or ""
+        comp = terms(name)
+        if not desired or not comp:
+            continue
+        ratio = len(desired & comp) / len(desired | comp)
+        exact = name.casefold().strip() == (title or "").casefold().strip()
+        if exact or ratio > best["ratio"]:
+            best = {"ratio": round(ratio, 2), "name": name,
+                    "exact": exact}
+    return best
 
 
 def format_background_dossier(vision, notes="", image_quality=None,
@@ -221,12 +282,31 @@ def format_background_dossier(vision, notes="", image_quality=None,
     parts.append("• Preview with a centered avatar on mobile and desktop; "
                  "an image alone cannot verify final Roblox crop.")
     if include_titles:
-        titles = candidate_titles(vision, notes)
-        parts.append("**Title experiments (not CTR predictions)**")
+        titles = candidate_titles(vision, notes, live=live)
+        competitors = verified_background_competitors(live)
+        parts.append("**Naming decision — titles to test, not sales predictions**")
         if titles:
-            parts.extend("• " + t for t in titles[:6])
+            parts.append("• First candidate: " + titles[0] +
+                         " (scene-led, descriptive; validate the actual artwork).")
+            for title in titles[1:5]:
+                parts.append("• Alternative: " + title)
+            overlap = title_sample_overlap(titles[0], competitors)
+            if overlap["name"] and overlap["ratio"] >= 0.65:
+                parts.append(
+                    "• Similar sampled TITLE keywords: " + overlap["name"] +
+                    " (overlap " + str(round(overlap["ratio"] * 100)) +
+                    "%). Differentiate with a genuinely visible feature.")
+            elif competitors:
+                parts.append("• No close title-word overlap in these sampled "
+                             "competitors; broader uniqueness is unknown.")
+            else:
+                parts.append("• Exact-title and similarity checks unavailable "
+                             "without verified competitor names.")
+            parts.append("• Choose a recognizable scene noun and truthful visual "
+                         "hook; never insert unverified animation or 3D claims.")
         else:
-            parts.append("• No defensible title without a clearly identified scene.")
+            parts.append("• No defensible unique title from the supplied scene "
+                         "and sampled competitors; adjust the concept details.")
     description = listing_description(vision, notes)
     parts.append("**Draft listing description (verify every detail)**")
     parts.append(description or "• Not enough verified visual detail to draft copy.")
@@ -244,16 +324,46 @@ def format_background_dossier(vision, notes="", image_quality=None,
                      f"{sampled} sampled search results.")
         parts.append("• Sampled competitor counts do not prove full-category "
                      "absence, demand, sales, or title CTR.")
-        for row in (live.get("top_competitors") or [])[:3]:
-            parts.append("• " + _short_text(row.get("name"), 85) +
-                         " (verified background listing)")
+        verified = verified_background_competitors(live)
+        for row in verified:
+            fav = (str(row["favorites"]) + " favorites"
+                   if row["favorites"] is not None else "favorites unavailable")
+            price = ("R$" + str(row["price"])
+                     if row["price"] is not None else "price unavailable")
+            parts.append("• " + row["name"] + " — " + fav + " · " + price +
+                         " (AssetType 92, sampled listing)")
+        positive_prices = sorted(row["price"] for row in verified
+                                 if row["price"] is not None)
+        if positive_prices:
+            from statistics import median
+            parts.append(
+                "• Sampled price reference: R$" + str(positive_prices[0]) +
+                "–R$" + str(positive_prices[-1]) +
+                " (median R$" + str(round(median(positive_prices))) +
+                " from " + str(len(positive_prices)) +
+                " listings with known positive prices). Not an optimal price.")
+        else:
+            parts.append("• No usable sampled price reference; do not guess a price.")
+        parts.append("• Similar TITLE words do not prove copied artwork, and "
+                     "sampled prices/favorites do not establish sales.")
     ip_warning = o["ip_reference_warning"]
     if ip_warning and ip_warning.upper() != "NONE":
         parts.append("**IP/trademark caution:** " + ip_warning +
                      " — avoid protected names without authorization.")
-    parts.append("**Launch measurement:** compare clear, truthful titles; "
-                 "record favorites at D1/D7/D14, and sales from your own ledger. "
-                 "Only calculate CTR if you have real impressions and clicks.")
+    parts.append("**Pre-publish checklist**")
+    parts.append("• Preview real avatar positioning and mobile crop; check "
+                 "scene focal point, ground, horizon, contrast and edge fade.")
+    parts.append("• Confirm you own or have rights to the artwork and named IP. "
+                 "A familiar game/character name can create licensing risk.")
+    parts.append("• Verify the final uploaded file and listing appearance on "
+                 "Roblox. A PNG cannot become an animated GIF.")
+    parts.append("**Launch measurement and next actions**")
+    parts.append("• Compare title and thumbnail variants one change at a time. "
+                 "Record favorites D1/D7/D14/D30 and real units D7/D30.")
+    parts.append("• After publishing, use !launch <item_id>, !ledger_sync "
+                 "and !verdict. Compare with other backgrounds, not a lone hit.")
+    parts.append("• Only calculate CTR if actual impressions and clicks exist; "
+                 "no wording can guarantee additional sales.")
     return "\n".join(parts)
 
 
