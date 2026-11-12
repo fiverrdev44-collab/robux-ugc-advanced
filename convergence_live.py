@@ -184,11 +184,19 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
                 "attempted": False, "skipped": True, "status": "deferred"}
 
     expected = _expected_asset_types(family)
+    is_background = expected == [92]
+    # Search with category context because the catalog endpoint's keyword
+    # search does not provide a reliably supported AssetType 92 server filter.
+    # Exact post-filtering below remains mandatory.
+    search_keyword = (
+        keyword if not is_background or "background" in keyword.lower()
+        else f"{keyword} background"
+    )
     rows, pages, cursor = [], 0, None
     rate_limit_meta = None
     try:
         while pages < max_pages:
-            params = {"Keyword": keyword, "Limit": limit,
+            params = {"Keyword": search_keyword, "Limit": limit,
                       "SortType": "Relevance"}
             if cursor:
                 params["Cursor"] = cursor
@@ -253,18 +261,26 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     kw_low = keyword.lower()
     q_tokens = set(_tokens(keyword))
 
-    # Only correct-category results count as competitors / evidence.
+    # Only unambiguous correct-category results count as competitors.
+    # API responses can contain assetType or assetTypeId; missing types
+    # must NEVER be counted as genuine category matches.
+    def _item_asset_type(item):
+        try:
+            return int(item.get("assetType") or item.get("assetTypeId") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     category_rows = rows
     if expected is not None:
         category_rows = [x for x in rows
-                         if (x.get("assetType") or 0) in expected]
+                         if _item_asset_type(x) in expected]
     correct = len(category_rows)
 
     exact = 0
     conceptual = 0
     competitors = []
     for x in category_rows:
-        atype = x.get("assetType")
+        atype = _item_asset_type(x)
         name = (x.get("name") or "").strip()
         if name.lower() == kw_low:
             exact += 1
@@ -287,6 +303,7 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         "cached": False,
         "keyword": keyword,
         "family": family or "all",
+        "search_keyword": search_keyword,
         "sampled_results": len(rows),
         "pages": pages,
         "capped": capped,
@@ -396,6 +413,7 @@ def verify_shortlist(keywords, family=None, max_workers=3, timeout=12,
 # ────────────────────────────────────────────────────────────────────
 
 _FAMILY_LABEL = {"emotes": "Emotes", "hair": "Hair", "headwear": "Headwear",
+                 "backgrounds": "Avatar Backgrounds",
                  "face": "Face", "neck": "Neck Accessories",
                  "shoulder": "Shoulder Accessories", "front": "Front",
                  "back": "Back", "waist": "Waist", "tops": "Tops",
@@ -466,6 +484,9 @@ def format_recommendation(candidate, live=None):
                          f"{observed})")
         else:
             freshness = f"verified {observed}"
+        if live.get("search_keyword") and live.get("search_keyword") != kw:
+            lines.append(f"• **Marketplace search:** `{live['search_keyword']}` "
+                         "(category-context query; result types filtered locally)")
         lines.append(
             f"• **Live evidence:** {live['sampled_results']} sampled results · "
             f"{live['category_correct']} correct-category · "
