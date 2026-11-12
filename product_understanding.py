@@ -163,6 +163,10 @@ def merge(user_text, api_family=None, vision=None, image_kind="attachment"):
     if api_family and u["family"] == "unknown":
         u["family"] = api_family
         u["family_source"] = SOURCE_API
+        u["unknowns"] = [
+            item for item in u["unknowns"]
+            if item != "product family not stated"
+        ]
     if u["family"] in STATIC_FAMILIES:
         # Static accessories never carry motion requirements.
         u["motion"] = []
