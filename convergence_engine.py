@@ -638,11 +638,31 @@ def scan_convergence_detailed(family=None, limit=15, shortlist=8):
                     continue
                 if r["keyword"] not in {s["keyword"] for s in scored}:
                     scored.append(r)
-            if len(scored) >= shortlist:
+            # A large set of scored-but-gated phrases is not a usable
+            # shortlist. Continue to the next tier until actual qualifying
+            # candidates fill the requested shortlist.
+            passing_at_tier, _gated_at_tier = qualifies_all(scored)
+            if len(passing_at_tier) >= shortlist:
                 break
 
         qualified, gated = qualifies_all(scored)
         qualified.sort(key=lambda x: x["score"], reverse=True)
+        early_activity = None
+        if not qualified and resolve_family_ids(family) == [92]:
+            # The niche test can be empty in a young, sparse category even
+            # when individual items have measured growth. Show those as
+            # explicitly UNVALIDATED research leads, reusing !early's proven
+            # read-only bounded snapshot logic. No extra Roblox API requests.
+            try:
+                from avatar_backgrounds import find_background_early_winners
+                early_activity = find_background_early_winners(
+                    cur, days=7, limit=min(shortlist, 5),
+                    candidate_limit=500)
+            except Exception as exc:
+                print("[convergence] background early activity unavailable: "
+                      + type(exc).__name__, flush=True)
+                early_activity = {"status": "unavailable", "ranked": [],
+                                  "error": "snapshot read failed"}
         return {
             "family": family or "all",
             "candidates": qualified[:limit],
@@ -651,6 +671,9 @@ def scan_convergence_detailed(family=None, limit=15, shortlist=8):
             "shortlist_limit": shortlist,
             "gated": gated,
             "scanned": len(keywords),
+            "scored": len(scored),
+            "qualified_count": len(qualified),
+            "background_early_activity": early_activity,
         }
     finally:
         cur.close(); conn.close()
