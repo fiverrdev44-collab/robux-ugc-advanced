@@ -933,7 +933,8 @@ async def _run_registry(bot, message, route, state):
         name = intent
         if not await _authorized_target(name):
             return
-        kwargs = {}
+        kwargs = ({"notes": (message.content or "")[:400]}
+                  if intent == "background_analyze" else {})
     elif intent == "help":
         await message.channel.send(
             "I can inspect items, diagnose failures, find niches, generate "
@@ -1019,6 +1020,7 @@ async def _run_registry(bot, message, route, state):
         "check_visibility": "Reading visibility coverage",
         "data_audit": "Running the data audit",
         "analyze_image": "Analyzing the image",
+        "background_analyze": "Reading your Avatar Background artwork",
     }.get(intent, "Working")
     await message.channel.send(f"_{label}…_")
 
