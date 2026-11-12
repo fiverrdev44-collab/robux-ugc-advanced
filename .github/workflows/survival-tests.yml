@@ -27,6 +27,7 @@ on:
       - fix/f18-sales-source-authentication
       - release/vanta73-final-certification-rc
       - feat/vanta-conversation-v2
+      - fix/backgrounds-scene-marketplace-evidence
       - fix/vanta-v2-precise-sales-and-capabilities
       - release/vanta73-unified-final-rc
       - feat/backgrounds-92-rc-integration
@@ -103,6 +104,8 @@ jobs:
         run: python test_restricted_command_callbacks.py
       - name: Run Avatar Backgrounds AssetType 92 regressions
         run: python test_avatar_backgrounds.py
+      - name: Verify background scenes and live marketplace category isolation
+        run: python test_background_market_quality.py
       - name: Run Avatar Backgrounds routing regressions
         run: python test_background_routing_rc.py
       - name: Run F-18 sales source security regressions
