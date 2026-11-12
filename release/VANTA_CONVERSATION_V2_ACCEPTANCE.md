@@ -2,6 +2,8 @@
 
 This is an **isolated feature branch**. Changes are not deployed to Oracle by this PR alone.
 
+**Rollout gate:** `VANTA_CONVERSATION_V2_ROLLOUT` defaults to `owner`. In this mode only the configured owner sees V2 behavior. `off` disables V2 for everyone; `all` requires a separate intentional rollout. Existing non-owner conversations retain the legacy 24-hour memory policy. This flag does not automatically grant permissions or bypass the existing command allowlist.
+
 ## New user experience
 
 - Casual requests such as `hi i need smth` now receive an open-ended reply, without wasting an AI planner call or invoking an arbitrary command.
@@ -15,7 +17,7 @@ This is an **isolated feature branch**. Changes are not deployed to Oracle by th
 - Existing authorized allow-list command dispatch is unchanged.
 - Natural-language social intents are handled before the LLM planner and are never interpreted as shell or database actions.
 - Model-generated privacy or social actions are rejected, so destructive memory controls require exact user input.
-- Test suite `test_vanta_conversation_v2.py` evaluates **500 unique three-turn dialogue cases**, divided into 400 development cases and 100 held-out paraphrase combinations, plus privacy, context, task-precedence, and unauthorized-action regressions.
+- Test suite `test_vanta_conversation_v2.py` evaluates **500 distinct deterministic three-turn combinations** (not an independently sampled model-language benchmark), plus privacy, context, task-precedence, and unauthorized-action regressions.
 - The 500-case suite is deterministic. It **does not** establish LLM response quality, 100% user understanding, live Discord behavior, or a measured CTR/sales increase.
 
 ## Deployment gate
