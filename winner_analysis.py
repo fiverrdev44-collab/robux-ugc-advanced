@@ -13,21 +13,27 @@ def _tokens(text):
             if len(t) >= 3 and t not in STOP]
 
 
-def analyze_winners(cur, terms, top_n=40, min_favs=50):
+def analyze_winners(cur, terms, top_n=40, min_favs=50,
+                    asset_type_ids=None):
     if not terms:
         return {}
     patterns = [f"%{t}%" for t in terms if len(t) >= 3]
     if not patterns:
         return {}
 
-    cur.execute("""
+    category_clause = " AND asset_type_id = ANY(%s)" if asset_type_ids else ""
+    params = (min_favs, patterns, patterns)
+    if asset_type_ids:
+        params += (list(asset_type_ids),)
+    cur.execute(f"""
         SELECT id, LOWER(name), COALESCE(LOWER(description), ''),
                favorite_count, price, creator_name, asset_type_id,
                EXTRACT(EPOCH FROM (NOW() - created_at))/86400 AS age_days
         FROM items WHERE favorite_count > %s
           AND (LOWER(name) LIKE ANY(%s) OR LOWER(description) LIKE ANY(%s))
+          {category_clause}
         LIMIT 3000
-    """, (min_favs, patterns, patterns))
+    """, params)
     rows = cur.fetchall()
     if len(rows) < 10:
         return {"error": "not enough data"}
