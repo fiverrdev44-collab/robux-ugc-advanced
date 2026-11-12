@@ -203,7 +203,10 @@ def _gather_keywords(cur, family=None):
                     if not name:
                         continue
                     words = [
-                        w for w in re.findall(r"[a-z]{4,}", name.lower())
+                        w for w in re.findall(
+                            r"[a-z]{3,}" if is_background else r"[a-z]{4,}",
+                            name.lower()
+                        )
                         if w not in _GENERIC_BLOCK
                         and (not is_background or w not in CATEGORY_WORDS)
                     ]
