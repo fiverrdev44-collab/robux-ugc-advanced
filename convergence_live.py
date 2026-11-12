@@ -585,6 +585,22 @@ def format_report(detailed, verified, family="all"):
                  "are not sales._\n")
 
     if not candidates:
+        if str(family).lower() == "backgrounds":
+            scanned = (detailed or {}).get("scanned")
+            scored = (detailed or {}).get("scored")
+            if scanned is not None or scored is not None:
+                lines.append(
+                    f"**Niche scan diagnostics:** {int(scanned or 0)} "
+                    f"candidate phrases mined · {int(scored or 0)} "
+                    "passed initial scoring · 0 passed the full niche gate."
+                )
+                if not scanned:
+                    lines.append("No suitable repeated scene phrases were mined "
+                                 "from the stored background titles.")
+                elif not scored:
+                    lines.append("Scene phrases exist, but none passed the "
+                                 "stored supply, favorites and autocomplete "
+                                 "requirements. Autocomplete is not sales evidence.")
         lines.append("## No qualifying opportunities")
         lines.append("No candidate met the minimum evidence standard "
                      "(measured velocity or fresh supply, non-generic).")
@@ -594,6 +610,44 @@ def format_report(detailed, verified, family="all"):
                 lines.append(f"• `{g['keyword']}` — {g['reason']}")
         lines.append("")
         if str(family).lower() == "backgrounds":
+            early = (detailed or {}).get("background_early_activity") or {}
+            rows = early.get("ranked") or []
+            if rows:
+                lines.append("## Measured early activity — research leads, NOT verified niches")
+                lines.append(
+                    "Independent item-level favorites growth, sampled from "
+                    "AssetType 92. This does not establish a repeatable scene "
+                    "niche, verified demand, sales, or CTR. No live catalog "
+                    "request was made for these fallback leads."
+                )
+                coverage = early.get("coverage_pct")
+                if coverage is not None:
+                    lines.append(
+                        f"• Snapshot coverage: {coverage}% "
+                        f"({early.get('usable_history', 0)} of "
+                        f"{early.get('candidate_window', 0)} recent items)"
+                    )
+                for item in rows[:min(display_limit, 5)]:
+                    title = str(item.get("name") or "unnamed").replace("`", "'")[:75]
+                    velocity = item.get("measured_favs_per_day")
+                    gain = item.get("measured_favorites_gained")
+                    obs = item.get("observations")
+                    conf = (item.get("confidence") or "low").upper()
+                    item_id = item.get("id")
+                    lines.append(
+                        f"• `{title}` — +{gain} favorites over "
+                        f"{obs} observations · {velocity}/day · "
+                        f"confidence {conf}"
+                        + (f" · Roblox catalog ID `{int(item_id)}`" if item_id else "")
+                    )
+                lines.append(
+                    "_Use `!early 7 backgrounds` for the full measured "
+                    "ranking. These are examples to investigate, not copied "
+                    "concepts or confirmed competitive opportunities._"
+                )
+            elif early.get("status") == "unavailable":
+                lines.append("Early-item history is unavailable; no fallback "
+                             "signal was fabricated.")
             lines.append(
                 "Background niches need both recurring scene-keyword evidence "
                 "and sufficient marketplace data. Individual early winners "
