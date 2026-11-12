@@ -167,8 +167,15 @@ def test_no_shell_or_unregistered_command():
 
 
 if __name__ == "__main__":
-    test_500_dialogues()
-    test_privacy_and_casual_intents()
-    test_memory_clear_and_opt_out()
-    test_no_shell_or_unregistered_command()
+    # Exercise opt-in canary behaviour regardless of the CI host owner ID.
+    with mock.patch.object(vc, "_v2_enabled", return_value=True):
+        test_500_dialogues()
+        test_privacy_and_casual_intents()
+        test_memory_clear_and_opt_out()
+        test_no_shell_or_unregistered_command()
+    # Release defaults to owner-only, not general-public behaviour.
+    with mock.patch.object(vc, "is_owner", return_value=False):
+        assert not vc._v2_enabled(123)
+    with mock.patch.object(vc, "is_owner", return_value=True):
+        assert vc._v2_enabled(123)
     print("ALL VANTA CONVERSATION V2 EVALUATIONS PASSED")
