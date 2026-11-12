@@ -19,7 +19,10 @@ def _owner_context():
 
 
 def test_every_registered_command_is_classified():
-    assert len(cs.ALL_COMMANDS) == 90
+    assert len(cs.ALL_COMMANDS) == 91
+    assert "background_analyze" in cs.ALL_COMMANDS
+    assert "background_analyze" in cs.OWNER_ONLY
+    assert "background_analyze" in cs.AI_COST
     assert not (cs.OWNER_ONLY & cs.PUBLIC_READ_ONLY)
     assert not (cs.OWNER_ONLY & cs.PUBLIC_RATE_LIMITED)
     assert not (cs.PUBLIC_READ_ONLY & cs.PUBLIC_RATE_LIMITED)
