@@ -485,7 +485,14 @@ def _build_allow_list(intent, max_keywords=60, gap_words=None, family=None):
                     if expanded_terms:
                         p2 = [f"%{t}%" for t in expanded_terms if len(t) >= 2]
                         if p2:
-                            for r in _db_search(p2):
+                            # Never expand a category-filtered comparison into
+                            # a global marketplace sample. This previously
+                            # contaminated background stats with unrelated UGC.
+                            expanded_rows = (
+                                _db_search_by_category(p2, asset_ids)
+                                if asset_ids else _db_search(p2)
+                            )
+                            for r in expanded_rows:
                                 rows_by_id[r[0]] = r
         except Exception as e:
             print(f"[bridge] failed: {e}", flush=True)

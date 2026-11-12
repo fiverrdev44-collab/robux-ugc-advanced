@@ -593,6 +593,15 @@ def format_report(detailed, verified, family="all"):
             for g in gated[:display_limit]:
                 lines.append(f"• `{g['keyword']}` — {g['reason']}")
         lines.append("")
+        if str(family).lower() == "backgrounds":
+            lines.append(
+                "Background niches need both recurring scene-keyword evidence "
+                "and sufficient marketplace data. Individual early winners "
+                "can exist even when no niche passes this stricter gate. "
+                "Try `!early 7 backgrounds` to inspect measured item-level "
+                "favorite growth, or `!xray` for category-wide DB coverage. "
+                "Do not infer CTR, sales or a validated niche from favorites."
+            )
         lines.append("_Honest insufficient-evidence result; no recommendations "
                      "were forced._")
         return "\n".join(lines)

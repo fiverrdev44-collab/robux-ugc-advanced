@@ -29,6 +29,8 @@ def build_analyst_report(result, live=None, understanding=None):
                        "not evidence of movement")
     elif motion:
         motion_line = ", ".join(motion)
+    elif family == "backgrounds":
+        motion_line = "static scene; animation/effects not verified"
     else:
         motion_line = "none (static accessory)"
     A = ["## A. PRODUCT UNDERSTANDING",
@@ -44,18 +46,23 @@ def build_analyst_report(result, live=None, understanding=None):
     exact = live.get("exact")
     live_status = "ok" if live.get("ok") else (
         "unavailable" if live else "not run")
+    family_note = (" (AssetType 92-filtered sample)"
+                   if family == "backgrounds" else " (sample)")
+    price = stats.get("price_avg") or 0
     B = ["## B. MARKET EVIDENCE",
-         f"- DB sample: {stats.get('count', 0):,} matches · "
+         f"- DB matches{family_note}: {stats.get('count', 0):,} · "
          f"avg favorites {stats.get('avg_favs', 0):,} · "
          f"median {stats.get('median_favs', 0):,}",
-         f"- Winner bar (top 10%): {stats.get('winner_favs', 0):,} favorites · "
-         f"avg price R${stats.get('price_avg', 0)}",
-         f"- Live check: {live_status}"
+         f"- Sample top-decile favorites: {stats.get('winner_favs', 0):,} · "
+         + (f"sample median price R${price}" if price else "sample price unavailable"),
+         f"- Live search: {live_status}"
          + (f" · {checked} results over {pages} page(s) · exact {exact}"
-            if live else ""),
-         f"- Observed at: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"]
+            if live.get("ok") and checked is not None and pages is not None else ""),
+         f"- Report generated at: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}"]
     if live and not live.get("ok"):
-        B.append("- Live search failed; market claims below rely on DB evidence only.")
+        B.append("- Live search failed; no marketplace competitor verification was completed.")
+    if family == "backgrounds":
+        B.append("- Favorites are not sales or demand. CTR and conversion are unmeasured.")
 
     C = ["## C. POSITIONING ANGLES"]
     angle_names = ["Safe", "Differentiated", "Long-tail", "Viral", "Backup"]
@@ -63,10 +70,14 @@ def build_analyst_report(result, live=None, understanding=None):
         opp = sc.get("opportunity") or {}
         breakdown = sc.get("breakdown") or []
         why = ", ".join(b.get("word", "") for b in breakdown[:2]) or "n/a"
-        uncertainty = (
-            f"{sc.get('exact_matches', opp.get('exact', 0))} exact matches"
-            if sc.get("exact_matches") is not None else
-            f"lane {opp.get('verdict', 'unknown')}")
+        if not live.get("ok"):
+            uncertainty = (f"database title overlap {sc['exact_matches']}; "
+                           "live overlap unverified"
+                           if sc.get("exact_matches") is not None
+                           else "exact-title overlap unavailable")
+        else:
+            uncertainty = (f"database title overlaps {sc.get('exact_matches', 0)}; "
+                           "live competitors checked separately")
         C.append(f"- **{sc.get('title')}** — {angle_names[min(i, 4)]} angle\n"
                  f"  Buyer: {family} shoppers using style + feature words.\n"
                  f"  Why it fits: {why}.\n"
@@ -79,10 +90,13 @@ def build_analyst_report(result, live=None, understanding=None):
         champ = scored[0]
         opp = champ.get("opportunity") or {}
         D.append(f"- **Title:** {champ.get('title')}")
-        D.append(f"- **Tradeoff:** lane {opp.get('verdict', 'unknown')} · "
-                 f"demand {opp.get('demand_volume', 0):,} · "
-                 f"supply {opp.get('supply', 0)} · "
-                 f"exact {opp.get('exact', 0)}.")
+        D.append(f"- **Tradeoff (heuristic):** lane {opp.get('verdict', 'unknown')} · "
+                 f"autocomplete volume proxy {opp.get('demand_volume', 0):,} "
+                 f"(not verified sales or CTR) · "
+                 f"database supply proxy {opp.get('supply', 0)} · "
+                 f"database title overlap {opp.get('exact', 0)}.")
+        if not live.get("ok"):
+            D.append("- Live validation unavailable; this is not a verified high-CTR title.")
         D.append("- This is a ranked option, not an instruction; you decide.")
     else:
         D.append("- No recommendation: titles did not pass verification.")
@@ -94,11 +108,19 @@ def build_analyst_report(result, live=None, understanding=None):
         showcase = ("Use the creator's animation preview (not the Roblox thumbnail): "
                     "show the full loop, then a front-facing hook frame. "
                     "Do not infer motion from a static image.")
+        second = "Do not claim unverified movement."
+    elif family == "backgrounds":
+        showcase = ("Preview the complete 2560×1440 scene with a centered Roblox "
+                    "avatar. Check ground, horizon and avatar silhouette at desktop "
+                    "and mobile crop sizes; ensure the scene does not hide the avatar.")
+        second = ("Compare scene readability, lighting and focal point against "
+                  "confirmed background listings. Never claim animated or 3D "
+                  "effects without evidence from the actual asset.")
     else:
         showcase = ("Static accessory: show front, 3/4, and back in neutral light; "
                     "no motion claims. Keep scale true to the avatar.")
-    F = ["## F. PREVIEW BRIEF", f"- {showcase}",
-         "- One lighting setup, one background; avoid invented effects."]
+        second = "One lighting setup, one background; avoid invented effects."
+    F = ["## F. PREVIEW BRIEF", f"- {showcase}", f"- {second}"]
 
     G = ["## G. MEASUREMENT PLAN",
          "- Record favorites at D1/D7/D14/D30 and units at D7/D30.",
