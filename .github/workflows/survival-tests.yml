@@ -27,6 +27,7 @@ on:
       - fix/f18-sales-source-authentication
       - release/vanta73-final-certification-rc
       - feat/vanta-conversation-v2
+      - fix/vanta-v2-precise-sales-and-capabilities
       - release/vanta73-unified-final-rc
       - feat/backgrounds-92-rc-integration
   pull_request:
@@ -72,6 +73,8 @@ jobs:
         run: python test_vanta_conversation.py
       - name: Evaluate VANTA Conversation 2.0 (500 dialogues)
         run: python test_vanta_conversation_v2.py
+      - name: Verify exact natural-language sales/capability intents
+        run: python test_vanta_exact_intents.py
       - name: Run emote title engine regressions
         run: python test_emote_title.py
       - name: Run emote quality evaluation set
