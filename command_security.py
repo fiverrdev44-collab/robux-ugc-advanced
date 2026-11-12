@@ -15,7 +15,7 @@ from discord.ext import commands
 
 
 ALL_COMMANDS = {
-    "ai_debug", "ai_status", "analyze", "analyze_image", "applied", "autopsy",
+    "ai_debug", "ai_status", "analyze", "analyze_image", "background_analyze", "applied", "autopsy",
     "bot_update", "brainstorm", "chain", "classic", "concept", "converge",
     "converge_debug", "cookie_check", "creative", "creative_raw",
     "creator_brain", "data_audit", "dbtest", "desc_analyze", "desc_forge",
@@ -35,7 +35,7 @@ ALL_COMMANDS = {
 }
 
 OWNER_ONLY = {
-    "ai_debug", "analyze_image", "applied", "autopsy", "bot_update",
+    "ai_debug", "analyze_image", "background_analyze", "applied", "autopsy", "bot_update",
     "brainstorm", "chain", "concept", "converge_debug", "cookie_check",
     "creative", "creative_raw", "data_audit", "dbtest", "desc_analyze",
     "desc_forge", "enrich_run", "group_metrics", "ignored", "launch",
@@ -54,7 +54,7 @@ USER_SCOPED_WRITE = {"guide"}
 OWNER_GATED_MUTATION = {"experiments"}
 
 AI_COST = {
-    "ai_debug", "analyze_image", "autopsy", "brainstorm", "chain", "concept",
+    "ai_debug", "analyze_image", "background_analyze", "autopsy", "brainstorm", "chain", "concept",
     "creative", "creative_raw", "desc_analyze", "desc_forge", "emote_title",
     "meta_sniper", "path", "playbook", "rescue", "revive", "revsim",
     "sales_keywords", "stealth", "tags",
