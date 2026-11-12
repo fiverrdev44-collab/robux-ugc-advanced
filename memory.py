@@ -41,7 +41,7 @@ def save(cur, channel_id, user_id, state_dict):
     """, (int(channel_id), int(user_id), json.dumps(state_dict, default=str)))
 
 
-def load(cur, channel_id, user_id, max_age_hours=24):
+def load(cur, channel_id, user_id, max_age_hours=168):
     # A minimal opt-out marker must not expire. Conversation context still
     # expires after the requested number of hours.
     cur.execute("""
