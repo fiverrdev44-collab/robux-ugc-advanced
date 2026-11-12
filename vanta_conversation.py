@@ -995,7 +995,7 @@ async def _run_registry(bot, message, route, state):
     bot_text = " ".join(t for t in captured if t).strip()
     if bot_text:
         state.bot_messages.append(bot_text[:500])
-        state.bot_messages = state.bot_messages[-3:]
+        state.bot_messages = state.bot_messages[-6:]
     if ids:
         state.results = list(dict.fromkeys(ids))[:8]
     state.last_intent = intent
@@ -1005,7 +1005,7 @@ async def _run_registry(bot, message, route, state):
     state.pending_intent = None
     state.history.append({"intent": intent, "item_id": item_id,
                           "concept": concept, "at": time.time()})
-    state.history = state.history[-8:]
+    state.history = state.history[-20:]
     state.touch()
     print(f"[vanta-router] intent={intent} cmd={name} "
           f"elapsed={time.time()-started:.2f}s", flush=True)
@@ -1059,8 +1059,8 @@ def _planner_prompt(text, has_attachment, state, bot=None):
         {"id": i, "name": state.item_titles.get(i, "")}
         for i in (state.results or [])[:6]
     ]
-    recent = [m for m in state.messages[-6:] if m]
-    recent_bot = [m for m in state.bot_messages[-3:] if m]
+    recent = [m for m in state.messages[-12:] if m]
+    recent_bot = [m for m in state.bot_messages[-6:] if m]
     tools_json = json.dumps(build_tool_registry(bot), separators=(",", ":"))
     pending = json.dumps(state.pending_action or {}, default=str)
     return f"""You are VANTA, an elite, witty, brutally honest UGC strategy AI.
@@ -1161,6 +1161,9 @@ def _validate_plan(plan, state, has_attachment):
         question = str(plan.get("clarify") or "").strip()
         return _intent("clarify", confidence="ai",
                        question=(question or "Can you tell me a bit more?")[:200])
+    # Only exact user text may request privacy changes; model plans cannot.
+    if action.startswith(("privacy_", "conversation_")):
+        return None
     if action not in INTENTS:
         return None
     item_id = plan.get("item_id")
@@ -1464,7 +1467,7 @@ async def handle_message(bot, message, state):
     ).startswith("privacy_") if not has_attachment else False
     if state.memory_enabled and not privacy_request:
         state.messages.append(text[:400])
-        state.messages = state.messages[-6:]
+        state.messages = state.messages[-12:]
     route = await plan_message(text, has_attachment, state, bot=bot)
     if route["intent"] == "clarify":
         names = [t for t in list(state.item_titles.values())[:2] if t]
