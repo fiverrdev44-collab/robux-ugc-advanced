@@ -12,7 +12,8 @@ def test_runtime_inventory_matches_authorization_policy():
     import discord_ugc_bot as bot_module
     runtime = {c.name for c in bot_module.bot.commands}
     assert runtime == cs.ALL_COMMANDS
-    assert len(runtime) == 90
+    assert len(runtime) == 91
+    assert "background_analyze" in runtime
     assert "scheduler" not in sys.modules
     print("PASS runtime inventory matches authorization policy; no scheduler on import")
 

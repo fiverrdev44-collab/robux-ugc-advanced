@@ -59,6 +59,7 @@ INTENTS = {
     "diagnose_item": "Diagnose why an item is underperforming, with recovery titles",
     "revive_item": "Full revival plan for an item",
     "analyze_image": "Analyze an attached image as a UGC concept",
+    "background_analyze": "Analyze attached Avatar Background artwork",
     "find_opportunities": "Find low-competition niches or trending opportunities",
     "create_ideas": "Generate a concept, title, description, and launch direction",
     "improve_metadata": "Improve the title/description/tags for an item",
@@ -444,6 +445,9 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                            confidence="followup")
         return _intent("clarify", question="Which item should I use?", confidence="low")
 
+    if has_attachment and not item_id and family == "backgrounds":
+        return _intent("background_analyze", confidence="high",
+                       family="backgrounds")
     if (has_attachment and not item_id and re.search(
         r"\b(image|photo|picture|pic|look|check|inspect|think|made|design|"
         r"render|thumbnail|title|description|desc|name|rename|listing)\b",
@@ -925,11 +929,12 @@ async def _run_registry(bot, message, route, state):
         await message.channel.send("\n".join(lines)[:1900])
         return
 
-    if intent == "analyze_image":
-        name = "analyze_image"
+    if intent in ("analyze_image", "background_analyze"):
+        name = intent
         if not await _authorized_target(name):
             return
-        kwargs = {}
+        kwargs = ({"notes": (message.content or "")[:400]}
+                  if intent == "background_analyze" else {})
     elif intent == "help":
         await message.channel.send(
             "I can inspect items, diagnose failures, find niches, generate "
@@ -1015,6 +1020,7 @@ async def _run_registry(bot, message, route, state):
         "check_visibility": "Reading visibility coverage",
         "data_audit": "Running the data audit",
         "analyze_image": "Analyzing the image",
+        "background_analyze": "Reading your Avatar Background artwork",
     }.get(intent, "Working")
     await message.channel.send(f"_{label}…_")
 
@@ -1258,7 +1264,7 @@ def _validate_plan(plan, state, has_attachment):
         return _intent("clarify",
                        question="Send the item ID or describe the listing you want improved.",
                        confidence="low")
-    if action == "analyze_image" and not has_attachment:
+    if action in ("analyze_image", "background_analyze") and not has_attachment:
         return _intent("clarify",
                        question="Attach the image you want me to analyze.",
                        confidence="low")
@@ -1398,7 +1404,8 @@ async def plan_message(text, has_attachment, state, bot=None):
         return fast
     if fast["intent"] in ("check_sales", "check_experiments",
                           "check_visibility", "data_audit", "list_my_items",
-                          "improve_metadata", "tags", "analyze_image"):
+                          "improve_metadata", "tags", "analyze_image",
+                           "background_analyze"):
         return fast
     if extract_item_id(text) and re.fullmatch(
         r"(?:https?://\S+|\d{6,20})[.! ]*", (text or "").strip().lower()

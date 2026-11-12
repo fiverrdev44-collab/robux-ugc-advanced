@@ -707,6 +707,100 @@ def _fmt_ai_result(synth, verified_groups, rejected, stats, item_type="unknown",
 
 def register_ai_commands(bot):
 
+    @bot.command(name="background_analyze")
+    async def background_analyze(ctx, *, notes: str = ""):
+        """One bounded visual pass + strict AssetType 92 market comparison.
+
+        Reuses existing model keys, shared API scheduler and command security.
+        Never creates assets, mutates the database, or guarantees CTR.
+        """
+        from background_intelligence import (
+            observations, scene_phrase, grounded_concept,
+            format_background_dossier, discord_chunks,
+        )
+        from avatar_backgrounds import validate_image
+        if not ctx.message.attachments:
+            return await ctx.send(
+                "**Usage:** attach your background PNG/JPG and write "
+                "`!background_analyze <what you designed>`. "
+                "I will check image dimensions and composition, propose grounded "
+                "titles, and compare against sampled Roblox Avatar Backgrounds."
+            )
+        if not is_available():
+            return await ctx.send("AI vision is unavailable. Try `!ai_status`.")
+        attachments = ctx.message.attachments
+        if len(attachments) > 2:
+            await ctx.send("Using the first two images only (one artwork and "
+                           "an optional cropped preview).")
+        allowed_mime = {"image/png", "image/jpeg", "image/bmp"}
+        images = []
+        for att in attachments[:2]:
+            ctype = (getattr(att, "content_type", None) or "").split(";")[0].lower()
+            if ctype not in allowed_mime:
+                continue
+            if getattr(att, "size", 0) and att.size > 8 * 1024 * 1024:
+                await ctx.send("Image larger than 8 MB; please export a smaller "
+                               "RGB PNG/JPG.")
+                continue
+            try:
+                data = await att.read()
+            except Exception:
+                return await ctx.send("The image could not be read. Reattach it.")
+            if not data or len(data) > 8 * 1024 * 1024:
+                continue
+            images.append({"bytes": data, "mime": ctype})
+        if not images:
+            return await ctx.send("Attach a PNG, JPEG or BMP under 8 MB.")
+        quality = await asyncio.to_thread(validate_image, images[0]["bytes"])
+        await ctx.send("🌌 Inspecting your Avatar Background artwork and "
+                       "checking relevant marketplace evidence...")
+        try:
+            image_notes = ("Roblox Avatar Background (AssetType 92). "
+                           + (notes or "")[:400])
+            vision = await asyncio.to_thread(
+                analyze_image_for_ugc, images, image_notes)
+        except Exception as exc:
+            print(f"[background_analyze] vision: {type(exc).__name__}", flush=True)
+            vision = {}
+        if not vision:
+            body = (
+                "⚠️ The image model did not produce a usable result. "
+                "No scene identity or title has been invented.\n"
+                + format_background_dossier(
+                    {}, notes="", image_quality=quality, include_titles=False))
+            for chunk in discord_chunks(body):
+                await ctx.send(chunk)
+            return
+        # The submitted image is a background by user declaration even if
+        # a fallible vision model calls it another category.
+        vision["item_type_visual"] = "background"
+        anchor = scene_phrase(vision, notes)
+        live = None
+        if anchor:
+            try:
+                from convergence_live import verify_niche
+                # One bounded query, one page; don't bypass API pacing.
+                live = await asyncio.to_thread(
+                    verify_niche, anchor, "backgrounds", 30, 1, 12, True)
+            except Exception as exc:
+                live = {"ok": False, "error": type(exc).__name__}
+        dossier = format_background_dossier(
+            vision, notes, image_quality=quality, live=live)
+        for chunk in discord_chunks(dossier):
+            await ctx.send(chunk)
+        if getattr(ctx, "vanta_state", None) is not None:
+            concept = grounded_concept(vision, notes)
+            if concept:
+                ctx.vanta_state.pending_chain = {
+                    "concept": concept[:300],
+                    "family": "backgrounds",
+                }
+                await ctx.send(
+                    "**Want the full background title-generation chain using "
+                    "this image analysis?** Reply `yes` or `no`. "
+                    "Results are candidates, not measured CTR forecasts."
+                )
+
     @bot.command(name="ai_status")
     async def ai_status(ctx):
         """Show which AI providers are configured and reachable."""
