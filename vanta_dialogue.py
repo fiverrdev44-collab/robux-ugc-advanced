@@ -53,6 +53,17 @@ _RULES = (
         r"lol+|lmao+|haha+|hehe+|tell me a joke|how have you been)[.!?]*", re.I)),
 )
 
+# Capability questions are not action requests; never run marketplace scans here.
+_CAPABILITY = re.compile(
+    r"(?:do (?:you|u|ya) (?:do|support|understand|handle|work with)|"
+    r"can (?:you|u) (?:do|support|handle|work with)|"
+    r"are (?:you|u) (?:able to|good at|familiar with)|"
+    r"what (?:can you|can u) do (?:with|for))\s+"
+    r"(?:roblox\s+|ugc\s+|avatar\s+|my\s+)?"
+    r"(backgrounds?|backdrops?|emotes?|dances?|hats?|beanies?|accessories|titles?|descriptions?)"
+    r"(?:\s+(?:ugc|stuff|items?))?[.!?]*", re.I,
+)
+
 _FOCUS = re.compile(
     r"(?:(?:my|a|the|new|some)\s+)?"
     r"(?:backgrounds?|backdrops?|emotes?|dances?|hats?|beanies?|"
@@ -75,6 +86,8 @@ def classify_social(text, state=None):
     core = strip_greeting(text)
     if not core:
         return None
+    if _CAPABILITY.fullmatch(core):
+        return "conversation_capabilities"
     for intent, pattern in _RULES:
         if pattern.fullmatch(core):
             return intent
@@ -90,6 +103,17 @@ def social_reply(kind, state, text=""):
     family = getattr(state, "last_family", None)
     concept = getattr(state, "last_concept", None)
     title = (getattr(state, "item_titles", None) or {}).get(item_id)
+    if kind == "conversation_capabilities":
+        matched = _CAPABILITY.fullmatch(strip_greeting(text))
+        focus = matched.group(1).lower() if matched else "UGC"
+        if focus.startswith(("background", "backdrop")):
+            return ("Yes! I support Roblox Avatar Backgrounds (AssetType 92). "
+                    "I can analyze a design image, help with titles and descriptions, "
+                    "and research background opportunities when you ask. "
+                    "What would you like to do with your background?")
+        return ("Yes, I can help with " + focus[:48] +
+                ": concept ideas, listing improvements, and market research "
+                "where category data is available. What do you need?")
     if kind == "conversation_help":
         return ("Of course. What's on your mind? Tell me in your own words. "
                 "I can help with backgrounds, titles, items, sales or UGC ideas.")
