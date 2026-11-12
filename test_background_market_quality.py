@@ -39,12 +39,14 @@ class TestBackgroundSceneCandidates(unittest.TestCase):
                  + ["Moonlit Shrine Avatar Background"] * 6
                  + ["Neon City Background"] * 5
                  + ["Cozy Library Background"] * 5
+                 + ["Starry Sky Background"] * 4
                  + ["Blue Aura Emote"] * 10)
         cur = FakeMineCursor(names)
         keywords = ce._gather_keywords(cur, family="backgrounds")
         self.assertIn("moonlit shrine", keywords)
         self.assertIn("neon city", keywords)
         self.assertIn("cozy library", keywords)
+        self.assertIn("starry sky", keywords)
         self.assertNotIn("white", keywords)
         self.assertNotIn("plaid", keywords)
         self.assertNotIn("white background", keywords)
