@@ -25,6 +25,12 @@ def ensure_schema(cur, conn=None):
         conn.commit()
 
 
+def clear(cur, channel_id, user_id):
+    """Delete one conversation's persisted state; caller commits transaction."""
+    cur.execute("delete from conversation_memory where channel_id = %s and user_id = %s",
+                (int(channel_id), int(user_id)))
+
+
 def save(cur, channel_id, user_id, state_dict):
     cur.execute("""
         insert into conversation_memory (channel_id, user_id, state, updated_at)
@@ -35,11 +41,14 @@ def save(cur, channel_id, user_id, state_dict):
     """, (int(channel_id), int(user_id), json.dumps(state_dict, default=str)))
 
 
-def load(cur, channel_id, user_id, max_age_hours=24):
+def load(cur, channel_id, user_id, max_age_hours=168):
+    # A minimal opt-out marker must not expire. Conversation context still
+    # expires after the requested number of hours.
     cur.execute("""
         select state from conversation_memory
         where channel_id = %s and user_id = %s
-          and updated_at > now() - make_interval(hours => %s)
+          and (updated_at > now() - make_interval(hours => %s)
+               or state = '{"memory_enabled": false}'::jsonb)
     """, (int(channel_id), int(user_id), int(max_age_hours)))
     row = cur.fetchone()
     if not row:

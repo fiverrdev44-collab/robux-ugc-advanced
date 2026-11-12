@@ -16,6 +16,18 @@ from dataclasses import dataclass, field
 import discord
 
 from command_security import allow_planner_ai, is_owner
+from vanta_dialogue import classify_social, social_reply
+
+
+def _v2_enabled(user_id):
+    """Owner-only by default; off/all require an explicit config choice."""
+    mode = os.getenv("VANTA_CONVERSATION_V2_ROLLOUT", "owner").strip().lower()
+    if mode == "all":
+        return True
+    if mode == "owner":
+        return is_owner(user_id)
+    return False
+
 
 THREAD_RE = re.compile(r"^vanta-(\d+)-([a-f0-9]{12})$", re.I)
 URL_ID_RE = re.compile(
@@ -62,6 +74,15 @@ INTENTS = {
     "list_my_items": "List tracked launch items when no item ID is supplied",
     "tags": "Craft an optimized listing description for an item",
     "clarify": "Ask one short clarifying question",
+    "conversation_help": "Invite an open-ended request",
+    "conversation_focus": "Clarify a casual category follow-up",
+    "conversation_fatigue": "Respond supportively without executing an engine",
+    "conversation_casual": "Reply to small talk",
+    "conversation_recall": "Summarize only known local context",
+    "privacy_clear": "Erase saved context for this conversation",
+    "privacy_off": "Disable persisted conversation context",
+    "privacy_on": "Enable persisted conversation context",
+    "privacy_status": "Explain conversation memory setting",
 }
 
 COMMAND_ARGS = {
@@ -120,6 +141,7 @@ class ConversationState:
     bot_messages: list = field(default_factory=list)
     history: list = field(default_factory=list)
     ai_calls: list = field(default_factory=list)
+    memory_enabled: bool = True
     updated_at: float = field(default_factory=time.time)
 
     def touch(self):
@@ -129,7 +151,7 @@ class ConversationState:
 _PERSIST_FIELDS = (
     "last_intent", "last_item_id", "last_concept", "last_family",
     "pending_intent", "pending_chain", "pending_action", "messages",
-    "bot_messages", "results", "item_titles",
+    "bot_messages", "results", "item_titles", "memory_enabled",
 )
 
 
@@ -160,7 +182,9 @@ def _load_state(channel_id, user_id):
         import memory
         conn = get_db(); cur = conn.cursor()
         try:
-            return memory.load(cur, channel_id, user_id)
+            days = 168 if _v2_enabled(user_id) else 24
+            return memory.load(cur, channel_id, user_id,
+                               max_age_hours=days)
         finally:
             cur.close(); conn.close()
     except Exception as e:
@@ -174,12 +198,41 @@ def _save_state(channel_id, user_id, state):
         import memory
         conn = get_db(); cur = conn.cursor()
         try:
-            memory.save(cur, channel_id, user_id, _state_to_dict(state))
+            payload = (_state_to_dict(state) if state.memory_enabled
+                       else {"memory_enabled": False})
+            memory.save(cur, channel_id, user_id, payload)
             conn.commit()
+            return True
         finally:
             cur.close(); conn.close()
     except Exception as e:
         print(f"[vanta] memory save failed: {e}", flush=True)
+        return False
+
+
+def _clear_persisted_state(channel_id, user_id):
+    from bot_core import get_db
+    import memory
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        try:
+            memory.clear(cur, channel_id, user_id)
+            conn.commit()
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def _reset_conversation_state(state):
+    """Discard volatile context without replacing the identity-bound object."""
+    fresh = ConversationState(user_id=state.user_id)
+    for key in _PERSIST_FIELDS:
+        setattr(state, key, getattr(fresh, key))
+    state.history = []
+    state.ai_calls = []
+    state.touch()
 
 
 class ConversationStore:
@@ -712,6 +765,76 @@ async def _fetch_item_title(item_id):
 
 async def _run_registry(bot, message, route, state):
     intent = route["intent"]
+    if intent.startswith("conversation_"):
+        if intent == "conversation_help":
+            state.pending_action = {"intent": "open_help"}
+        elif intent == "conversation_focus":
+            state.pending_action = None
+        await message.channel.send(social_reply(intent, state, message.content or ""))
+        return
+    if intent.startswith("privacy_"):
+        if intent == "privacy_status":
+            setting = "on" if state.memory_enabled else "off"
+            await message.channel.send(
+                "Conversation context storage for this thread/DM is " + setting +
+                ". I keep only bounded context, not a full permanent chat archive. "
+                "Use 'clear conversation' or 'turn off memory' to change this."
+            )
+        elif intent == "privacy_clear":
+            try:
+                await asyncio.to_thread(
+                    _clear_persisted_state, message.channel.id, state.user_id
+                )
+            except Exception:
+                await message.channel.send(
+                    "I couldn't verify the saved conversation was deleted. "
+                    "Please try again; nothing has been confirmed erased."
+                )
+                return
+            _reset_conversation_state(state)
+            # Do not immediately store the clear request back in memory.
+            state._skip_persist_once = True
+            await message.channel.send(
+                "Cleared this conversation's saved context. "
+                "This does not delete Discord message history."
+            )
+        elif intent == "privacy_off":
+            _reset_conversation_state(state)
+            state.memory_enabled = False
+            saved = await asyncio.to_thread(
+                _save_state, message.channel.id, state.user_id, state
+            )
+            state._skip_persist_once = True
+            if saved:
+                await message.channel.send(
+                    "Conversation memory is off for this thread/DM. "
+                    "I saved only an opt-out marker, not conversation content. "
+                    "Existing Discord messages are unaffected."
+                )
+            else:
+                await message.channel.send(
+                    "I stopped retaining context in this session, but "
+                    "couldn't confirm the database opt-out was saved. "
+                    "Please retry later; prior saved context may still exist."
+                )
+        elif intent == "privacy_on":
+            state.memory_enabled = True
+            saved = await asyncio.to_thread(
+                _save_state, message.channel.id, state.user_id, state
+            )
+            state._skip_persist_once = True
+            if saved:
+                await message.channel.send(
+                    "Conversation memory is on for this thread/DM. "
+                    "I'll save bounded context for follow-up requests."
+                )
+            else:
+                state.memory_enabled = False
+                await message.channel.send(
+                    "I couldn't confirm memory was enabled in the database. "
+                    "It remains off for this session."
+                )
+        return
     item_id = route.get("item_id")
     concept = route.get("concept")
     family = route.get("family")
@@ -909,7 +1032,7 @@ async def _run_registry(bot, message, route, state):
     bot_text = " ".join(t for t in captured if t).strip()
     if bot_text:
         state.bot_messages.append(bot_text[:500])
-        state.bot_messages = state.bot_messages[-3:]
+        state.bot_messages = state.bot_messages[-6:]
     if ids:
         state.results = list(dict.fromkeys(ids))[:8]
     state.last_intent = intent
@@ -919,7 +1042,7 @@ async def _run_registry(bot, message, route, state):
     state.pending_intent = None
     state.history.append({"intent": intent, "item_id": item_id,
                           "concept": concept, "at": time.time()})
-    state.history = state.history[-8:]
+    state.history = state.history[-20:]
     state.touch()
     print(f"[vanta-router] intent={intent} cmd={name} "
           f"elapsed={time.time()-started:.2f}s", flush=True)
@@ -973,8 +1096,8 @@ def _planner_prompt(text, has_attachment, state, bot=None):
         {"id": i, "name": state.item_titles.get(i, "")}
         for i in (state.results or [])[:6]
     ]
-    recent = [m for m in state.messages[-6:] if m]
-    recent_bot = [m for m in state.bot_messages[-3:] if m]
+    recent = [m for m in state.messages[-12:] if m]
+    recent_bot = [m for m in state.bot_messages[-6:] if m]
     tools_json = json.dumps(build_tool_registry(bot), separators=(",", ":"))
     pending = json.dumps(state.pending_action or {}, default=str)
     return f"""You are VANTA, an elite, witty, brutally honest UGC strategy AI.
@@ -1075,6 +1198,9 @@ def _validate_plan(plan, state, has_attachment):
         question = str(plan.get("clarify") or "").strip()
         return _intent("clarify", confidence="ai",
                        question=(question or "Can you tell me a bit more?")[:200])
+    # Only exact user text may request privacy changes; model plans cannot.
+    if action.startswith(("privacy_", "conversation_")):
+        return None
     if action not in INTENTS:
         return None
     item_id = plan.get("item_id")
@@ -1223,6 +1349,12 @@ def _rename_concept(text):
 
 
 async def plan_message(text, has_attachment, state, bot=None):
+    # Recognize casual/privacy turns before filler removal or AI planning.
+    # Full-match semantics prevent "hi, analyze this item" from becoming small talk.
+    social = (classify_social(text, state=state)
+              if not has_attachment and _v2_enabled(state.user_id) else None)
+    if social:
+        return _intent(social, confidence="high")
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
     text = _strip_fillers(text)
     # A pending chain offer from image analysis accepts yes/no.
@@ -1367,8 +1499,14 @@ async def handle_message(bot, message, state):
     if not text and not has_attachment:
         await message.channel.send("Send a message, an item ID, or an image.")
         return
-    state.messages.append(text[:400])
-    state.messages = state.messages[-6:]
+    # Don't retain privacy-control messages or content when opted out.
+    privacy_request = (
+        (classify_social(text, state) or "").startswith("privacy_")
+        if not has_attachment and _v2_enabled(state.user_id) else False
+    )
+    if state.memory_enabled and not privacy_request:
+        state.messages.append(text[:400])
+        state.messages = state.messages[-12:]
     route = await plan_message(text, has_attachment, state, bot=bot)
     if route["intent"] == "clarify":
         names = [t for t in list(state.item_titles.values())[:2] if t]
@@ -1380,16 +1518,25 @@ async def handle_message(bot, message, state):
                 "I didn't catch that. Did you mean one of your tracked items? "
                 "Or type `!guide` for the tool list.")
         await message.channel.send(question)
-        await asyncio.to_thread(_save_state, message.channel.id,
-                                state.user_id, state)
+        if not getattr(state, "_skip_persist_once", False):
+            await asyncio.to_thread(_save_state, message.channel.id,
+                                    state.user_id, state)
+        else:
+            state._skip_persist_once = False
         return
     # Optional short ReAct acknowledgement before the command output.
     ack = (route.get("chat_response") or "").strip()
     if ack and len(ack) <= 200:
         await message.channel.send(ack)
     await _run_registry(bot, message, route, state)
-    await asyncio.to_thread(_save_state, message.channel.id,
-                            state.user_id, state)
+    if not state.memory_enabled:
+        _reset_conversation_state(state)
+        state.memory_enabled = False
+    if not getattr(state, "_skip_persist_once", False):
+        await asyncio.to_thread(_save_state, message.channel.id,
+                                state.user_id, state)
+    else:
+        state._skip_persist_once = False
 
 
 async def maybe_handle(bot, message):
@@ -1481,7 +1628,8 @@ async def start_dm_conversation(interaction, bot):
             "I can't open a DM with you. Check your privacy settings.",
             ephemeral=True,
         )
-    STORE.create(dm.id, interaction.user.id)
+    # Preserve a previously saved opt-out marker across DM re-entry.
+    STORE.get(dm.id, interaction.user.id)
     await dm.send(PRIVATE_INTRO)
     await interaction.response.send_message(
         "🔒 Private conversation opened in your DMs.", ephemeral=True
