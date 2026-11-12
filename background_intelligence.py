@@ -150,6 +150,31 @@ def candidate_titles(vision, notes="", limit=6):
     return out
 
 
+def listing_description(vision, notes=""):
+    """Truthful short listing copy from observed details, not conversion hype."""
+    anchor = scene_phrase(vision, notes)
+    if not anchor:
+        return None
+    obs = observations(vision)
+    details = []
+    for feature in obs["distinctive_features"]:
+        if _is_untrusted_instruction(feature):
+            continue
+        words = re.findall(r"[a-z]+", feature.lower())
+        if any(w in SCENE_ANCHORS or w in ("glowing", "mist", "stars", "stone",
+                                        "lantern", "moonlight", "rain",
+                                        "snow", "neon", "portal", "sakura")
+               for w in words):
+            details.append(feature.lower())
+        if len(details) >= 2:
+            break
+    scene = anchor.title()
+    sentence = f"A {scene.lower()} scene for your Roblox avatar."
+    if details:
+        sentence += " Featuring " + " and ".join(details) + "."
+    return sentence[:310]
+
+
 def format_background_dossier(vision, notes="", image_quality=None,
                               live=None, include_titles=True):
     """A readable audit with unknowns and externally measured facts separated."""
@@ -202,6 +227,9 @@ def format_background_dossier(vision, notes="", image_quality=None,
             parts.extend("• " + t for t in titles[:6])
         else:
             parts.append("• No defensible title without a clearly identified scene.")
+    description = listing_description(vision, notes)
+    parts.append("**Draft listing description (verify every detail)**")
+    parts.append(description or "• Not enough verified visual detail to draft copy.")
     parts.append("**Background-only live marketplace sample**")
     if not live:
         parts.append("• Not checked. No competitor or demand claim.")
