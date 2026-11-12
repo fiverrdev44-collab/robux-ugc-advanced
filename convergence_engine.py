@@ -16,6 +16,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from time_utils import db_utc
 from bot_core import get_db, get_research_db
+from background_niche import scene_phrase, CATEGORY_WORDS
 
 
 FAMILIES = {
@@ -185,6 +186,7 @@ def _gather_keywords(cur, family=None):
 
     # ── Family-specific: tokens + bigrams from that family's item names ──
     if family and family != "all":
+        is_background = resolve_family_ids(family) == [92]
         fam_sql, fam_params = _family_clause(family)
         if fam_sql:
             try:
@@ -201,16 +203,26 @@ def _gather_keywords(cur, family=None):
                     if not name:
                         continue
                     words = [
-                        w for w in re.findall(r"[a-z]{4,}", name.lower())
+                        w for w in re.findall(
+                            r"[a-z]{3,}" if is_background else r"[a-z]{4,}",
+                            name.lower()
+                        )
                         if w not in _GENERIC_BLOCK
+                        and (not is_background or w not in CATEGORY_WORDS)
                     ]
-                    for w in set(words):
-                        if not _is_generic(w):
-                            counter[w] += 1
-                    for i in range(len(words) - 1):
-                        bigram = f"{words[i]} {words[i+1]}"
-                        if not _is_generic(bigram):
-                            counter[bigram] += 1
+                    if not is_background:
+                        for w in set(words):
+                            if not _is_generic(w):
+                                counter[w] += 1
+                    # Backgrounds require an actual descriptive *scene* phrase.
+                    # Hats and emotes retain their original unigram/bigram mining.
+                    phrase_lengths = (2, 3) if is_background else (2,)
+                    for size in phrase_lengths:
+                        for i in range(len(words) - size + 1):
+                            phrase = " ".join(words[i:i + size])
+                            if (not _is_generic(phrase)
+                                    and (not is_background or scene_phrase(phrase))):
+                                counter[phrase] += 1
                 for kw, cnt in counter.most_common(250):
                     if cnt >= 3:
                         keywords.add(kw)
@@ -274,6 +286,8 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
         return _reject("too short")
     if _is_generic(kw_clean):
         return _reject("generic (non-actionable term)")
+    if resolve_family_ids(family) == [92] and not scene_phrase(kw_clean):
+        return _reject("not a descriptive background scene phrase")
     if kw_clean in _GENERIC_BLOCK:
         return _reject("generic stopword")
     if " " in kw_clean:
