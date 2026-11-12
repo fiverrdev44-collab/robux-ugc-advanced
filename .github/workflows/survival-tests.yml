@@ -29,6 +29,7 @@ on:
       - feat/vanta-conversation-v2
       - fix/backgrounds-scene-marketplace-evidence
       - fix/background-chain-report-evidence
+      - fix/background-converge-data-sparse-leads
       - feat/background-visual-intelligence-v1
       - fix/vanta-v2-precise-sales-and-capabilities
       - release/vanta73-unified-final-rc
@@ -108,6 +109,8 @@ jobs:
         run: python test_avatar_backgrounds.py
       - name: Verify background scenes and live marketplace category isolation
         run: python test_background_market_quality.py
+      - name: Verify background convergence sparse-data recovery
+        run: python test_background_converge_recovery.py
       - name: Verify background chain category-scoped evidence and scene report
         run: python test_background_chain_evidence.py
       - name: Verify visual background artwork intelligence
