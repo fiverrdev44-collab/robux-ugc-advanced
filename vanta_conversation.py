@@ -79,6 +79,7 @@ INTENTS = {
     "conversation_fatigue": "Respond supportively without executing an engine",
     "conversation_casual": "Reply to small talk",
     "conversation_recall": "Summarize only known local context",
+    "conversation_capabilities": "Explain support for a particular asset family",
     "privacy_clear": "Erase saved context for this conversation",
     "privacy_off": "Disable persisted conversation context",
     "privacy_on": "Enable persisted conversation context",
@@ -486,7 +487,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
         return _intent("check_sales", confidence="high",
-                       days=parse_sales_window(low))
+                       days=parse_sales_window(low),
+                       day_offset=parse_sales_offset(low))
 
     if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
         return _intent("check_experiments", confidence="high")
@@ -499,7 +501,8 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
     if re.search(r"\b(sales?|revenue|robux|earned|income|how much.*made|made.*money)\b", low):
         return _intent("check_sales", confidence="high",
-                       days=parse_sales_window(low))
+                       days=parse_sales_window(low),
+                       day_offset=parse_sales_offset(low))
 
     if re.search(r"\b(experiment|uplift|did it work|applied|ignored|results)\b", low):
         return _intent("check_experiments", confidence="high")
@@ -599,7 +602,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
 
 
 def _intent(name, item_id=None, concept=None, family=None,
-            confidence="high", question=None, days=None):
+            confidence="high", question=None, days=None, day_offset=0):
     return {
         "intent": name if name in INTENTS else "clarify",
         "item_id": item_id,
@@ -608,7 +611,13 @@ def _intent(name, item_id=None, concept=None, family=None,
         "confidence": confidence,
         "question": question,
         "days": days,
+        "day_offset": day_offset,
     }
+
+
+def parse_sales_offset(text):
+    """Use the last *completed* UTC day when the user says yesterday."""
+    return 1 if re.search(r"\byesterday\b", (text or "").lower()) else 0
 
 
 def parse_sales_window(text):
@@ -617,6 +626,8 @@ def parse_sales_window(text):
     Returns an int number of days, or None when no explicit window is given.
     """
     low = (text or "").lower()
+    if parse_sales_offset(low):
+        return 1
     m = re.search(r"\b(?:last|past|previous)\s+(\d{1,3})\s*days?\b", low)
     if m:
         return max(1, min(int(m.group(1)), 365))
@@ -839,9 +850,15 @@ async def _run_registry(bot, message, route, state):
     concept = route.get("concept")
     family = route.get("family")
     days = route.get("days")
+    day_offset = int(route.get("day_offset") or 0)
     if intent == "check_sales" and not days:
         # Fallback for AI/planner routes: honour "today"/"last 7 days" etc.
         days = parse_sales_window(getattr(message, "content", ""))
+    if intent == "check_sales":
+        day_offset = parse_sales_offset(getattr(message, "content", ""))
+        # A one-day shifted window is *yesterday*, never "today".
+        if day_offset:
+            days = 1
 
     from command_security import (
         CommandNotAuthorized,
@@ -975,6 +992,8 @@ async def _run_registry(bot, message, route, state):
         elif arg_kind == "days":
             if days:
                 kwargs = {"days": int(days)}
+            if day_offset:
+                kwargs = {"days": 1, "day_offset": day_offset}
     else:
         await message.channel.send("I didn't catch that. Try naming the task.")
         return
