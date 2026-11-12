@@ -360,7 +360,13 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         def _run_winner():
             c = get_db(); cu = c.cursor()
             try:
-                return analyze_winners(cu, terms, top_n=40)
+                return analyze_winners(
+                    cu, terms, top_n=40,
+                    asset_type_ids=(
+                        get_category_config(family).get("asset_type_ids")
+                        if family == "backgrounds" else None
+                    ),
+                )
             finally:
                 cu.close(); c.close()
         winner_data = _run_winner()
@@ -392,7 +398,10 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                                     (ORDER BY favorite_count), 0)
                     FROM items
                     WHERE LOWER(name) LIKE %s AND favorite_count > 5
-                """, (f"%{t_clean}%",))
+                      AND (%s::int[] IS NULL OR asset_type_id = ANY(%s))
+                """, (f"%{t_clean}%",
+                      [92] if family == "backgrounds" else None,
+                      [92] if family == "backgrounds" else None))
                 r = cu2.fetchone()
             finally:
                 cu2.close(); c2.close()
