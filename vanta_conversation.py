@@ -1586,7 +1586,8 @@ async def start_dm_conversation(interaction, bot):
             "I can't open a DM with you. Check your privacy settings.",
             ephemeral=True,
         )
-    STORE.create(dm.id, interaction.user.id)
+    # Preserve a previously saved opt-out marker across DM re-entry.
+    STORE.get(dm.id, interaction.user.id)
     await dm.send(PRIVATE_INTRO)
     await interaction.response.send_message(
         "🔒 Private conversation opened in your DMs.", ephemeral=True
