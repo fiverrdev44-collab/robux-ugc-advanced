@@ -913,7 +913,7 @@ def _coverage_note(cov):
     return "; ".join(parts) or "internal integrity complete (not reconciled against an export)"
 
 
-def sales_summary(days=30):
+def sales_summary(days=30, day_offset=0):
     conn = None; cur = None
     try:
         conn = get_db()
@@ -922,7 +922,17 @@ def sales_summary(days=30):
         from reporting import window_bounds, describe_window, AMOUNT_SEMANTICS
         from item_resolver import sales_breakdown
 
+        # A trailing period includes today; yesterday is a different UTC
+        # calendar window, not the last 24 hours and not "days=1".
+        if day_offset not in (0, 1):
+            raise ValueError("Unsupported sales day offset")
+        if day_offset and int(days) != 1:
+            raise ValueError("Yesterday summary must cover exactly one UTC date")
         start, end, anchor = window_bounds(cur, days)
+        if day_offset:
+            from datetime import timedelta
+            start -= timedelta(days=day_offset)
+            end -= timedelta(days=day_offset)
         data = sales_breakdown(cur, start, end)
         totals = data["totals"]
 
