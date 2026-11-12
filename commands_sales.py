@@ -13,16 +13,20 @@ from safe_roblox import get as safe_get, post as safe_post
 def register_sales_commands(bot, get_db):
 
     @bot.command(name="sales_report")
-    async def sales_report_cmd(ctx, days: int = 30):
+    async def sales_report_cmd(ctx, days: int = 30, day_offset: int = 0):
         """Revenue summary: top items, daily trend."""
         from sales_listener import sales_summary
 
         days = max(1, min(days, 365))
-        period = "today" if days == 1 else f"last {days} days"
+        if day_offset not in (0, 1) or (day_offset and days != 1):
+            return await ctx.send("Use `!sales_report 1 1` for yesterday's UTC sales.")
+        period = "yesterday (UTC)" if day_offset else (
+            "today" if days == 1 else f"last {days} days"
+        )
         progress = await ctx.send(f"📊 Building sales report — {period}...")
 
         try:
-            data = await asyncio.to_thread(sales_summary, days)
+            data = await asyncio.to_thread(sales_summary, days, day_offset)
         except Exception as e:
             return await progress.edit(content=f"❌ {e}")
 
@@ -46,7 +50,7 @@ def register_sales_commands(bot, get_db):
         lines = [
             f"# 📊 SALES REPORT — {period}",
             f"**Window:** {win.get('start')} → {win.get('end_exclusive')} "
-            f"(exclusive, UTC; today {'partial' if win.get('today_partial') else 'complete'})",
+            f"(exclusive, UTC; {'today partial' if win.get('today_partial') else 'complete UTC dates'})",
             f"**Sale records:** {data['total_units']:,}  ·  "
             f"**Recorded amount:** R${data['total_robux']:,}",
             f"**Mapped to assets:** {cov.get('mapped_records', 0):,} records · "
