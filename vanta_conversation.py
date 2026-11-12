@@ -202,10 +202,12 @@ def _save_state(channel_id, user_id, state):
                        else {"memory_enabled": False})
             memory.save(cur, channel_id, user_id, payload)
             conn.commit()
+            return True
         finally:
             cur.close(); conn.close()
     except Exception as e:
         print(f"[vanta] memory save failed: {e}", flush=True)
+        return False
 
 
 def _clear_persisted_state(channel_id, user_id):
@@ -799,17 +801,39 @@ async def _run_registry(bot, message, route, state):
         elif intent == "privacy_off":
             _reset_conversation_state(state)
             state.memory_enabled = False
-            await message.channel.send(
-                "Conversation memory is off for this thread/DM. "
-                "I'll keep only a minimal opt-out setting, not chat context. "
-                "Existing Discord messages are unaffected."
+            saved = await asyncio.to_thread(
+                _save_state, message.channel.id, state.user_id, state
             )
+            state._skip_persist_once = True
+            if saved:
+                await message.channel.send(
+                    "Conversation memory is off for this thread/DM. "
+                    "I saved only an opt-out marker, not conversation content. "
+                    "Existing Discord messages are unaffected."
+                )
+            else:
+                await message.channel.send(
+                    "I stopped retaining context in this session, but "
+                    "couldn't confirm the database opt-out was saved. "
+                    "Please retry later; prior saved context may still exist."
+                )
         elif intent == "privacy_on":
             state.memory_enabled = True
-            await message.channel.send(
-                "Conversation memory is on for this thread/DM. "
-                "I'll save bounded context for follow-up requests."
+            saved = await asyncio.to_thread(
+                _save_state, message.channel.id, state.user_id, state
             )
+            state._skip_persist_once = True
+            if saved:
+                await message.channel.send(
+                    "Conversation memory is on for this thread/DM. "
+                    "I'll save bounded context for follow-up requests."
+                )
+            else:
+                state.memory_enabled = False
+                await message.channel.send(
+                    "I couldn't confirm memory was enabled in the database. "
+                    "It remains off for this session."
+                )
         return
     item_id = route.get("item_id")
     concept = route.get("concept")
@@ -1505,6 +1529,9 @@ async def handle_message(bot, message, state):
     if ack and len(ack) <= 200:
         await message.channel.send(ack)
     await _run_registry(bot, message, route, state)
+    if not state.memory_enabled:
+        _reset_conversation_state(state)
+        state.memory_enabled = False
     if not getattr(state, "_skip_persist_once", False):
         await asyncio.to_thread(_save_state, message.channel.id,
                                 state.user_id, state)
