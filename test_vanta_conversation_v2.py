@@ -143,6 +143,7 @@ def test_memory_clear_and_opt_out():
     def _capture(cid, uid, st):
         captured.update(vc._state_to_dict(st) if st.memory_enabled
                         else {"memory_enabled": False})
+        return True
     with mock.patch.object(vc, "_save_state", side_effect=_capture):
         asyncio.run(vc.handle_message(None, message, state))
     assert captured == {"memory_enabled": False}, captured
