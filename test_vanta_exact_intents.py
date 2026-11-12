@@ -112,10 +112,56 @@ def test_sales_period_spans_complete_yesterday():
     assert info["end_exclusive"] == "2026-11-12"
 
 
+def test_real_sales_summary_filters_yesterday_only():
+    import sales_listener
+    import item_resolver
+    class Cursor:
+        def __init__(self):
+            self.params = []
+        def execute(self, sql, params=None):
+            self.params.append((sql, params))
+        def fetchone(self):
+            return (date(2026, 11, 12),)
+        def fetchall(self):
+            return [(date(2026, 11, 11), 17, 331)]
+        def close(self):
+            pass
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+        def cursor(self):
+            return self.cur
+        def close(self):
+            pass
+    conn = Conn()
+    boundaries = []
+    def breakdown(cur, start, end):
+        boundaries.append((start, end))
+        return {
+            "totals": {"records": 17, "robux": 331},
+            "items": [],
+        }
+    with mock.patch.object(sales_listener, "get_db", return_value=conn), \
+         mock.patch.object(item_resolver, "sales_breakdown", side_effect=breakdown), \
+         mock.patch.object(sales_listener, "window_coverage_stats", return_value={
+             "internally_consistent": False, "fallback_fingerprint": 1,
+         }):
+        result = sales_listener.sales_summary(1, day_offset=1)
+    assert boundaries == [(date(2026,11,11),date(2026,11,12))]
+    assert result["window"]["today_partial"] is False
+    assert result["total_units"] == 17 and result["total_robux"] == 331
+    daily_sql = [(query, params) for query, params in conn.cur.params
+                 if "from my_sales" in query.lower()]
+    assert len(daily_sql) == 1
+    assert daily_sql[0][1] == (date(2026,11,11),date(2026,11,12))
+    print("PASS SQL sales summary reads exactly yesterday UTC")
+
+
 if __name__ == "__main__":
     test_yesterday_parser()
     test_yesterday_routes_to_correct_registered_args()
     test_background_capability_is_not_a_market_scan()
     test_real_background_request_still_routes_to_market_intelligence()
     test_sales_period_spans_complete_yesterday()
+    test_real_sales_summary_filters_yesterday_only()
     print("ALL EXACT-INTENT ROUTING REGRESSIONS PASSED")
