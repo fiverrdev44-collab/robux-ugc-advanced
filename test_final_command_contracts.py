@@ -13,7 +13,8 @@ def test_every_registered_command_has_dispatch_and_policy():
     bot = bot_module.bot
     runtime = {c.name: c for c in bot.commands}
     assert set(runtime) == cs.ALL_COMMANDS
-    assert len(runtime) == 90
+    assert len(runtime) == 91
+    assert "background_analyze" in runtime
 
     cs.configure_for_tests(user_limit=100, owner_limit=100,
                            global_limit=1000, window_seconds=60)
@@ -44,7 +45,7 @@ def test_every_registered_command_has_dispatch_and_policy():
         cs.configure_for_tests()
         cs.configure_emote_title_for_tests()
         cs.reset_for_tests()
-    print("PASS all 90 commands dispatch, alias, and authorization contracts")
+    print("PASS all 91 commands dispatch, alias, and authorization contracts")
 
 
 def test_unknown_command_fails_closed():
