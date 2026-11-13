@@ -393,7 +393,10 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         proposal = proposed_title(text)
         if proposal:
             return _intent(
-                "review_title", item_id=(item_id or state.last_item_id),
+                "review_title",
+                item_id=(item_id if item_id else (
+                    None if family and state.last_family
+                    and family != state.last_family else state.last_item_id)),
                 concept=proposal, family=(family or state.last_family),
                 confidence="high")
 
@@ -1441,7 +1444,10 @@ async def plan_message(text, has_attachment, state, bot=None):
     proposal = proposed_title(text) if not has_attachment else None
     if proposal:
         return _intent("review_title",
-                       item_id=(extract_item_id(text) or state.last_item_id),
+                       item_id=(extract_item_id(text) or (
+                           None if detect_family(text) and state.last_family
+                           and detect_family(text) != state.last_family
+                           else state.last_item_id)),
                        concept=proposal,
                        family=(detect_family(text) or state.last_family),
                        confidence="high")
