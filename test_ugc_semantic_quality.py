@@ -122,9 +122,14 @@ def test_reject_foreign_game_description_without_discarding_valid_roblox():
         "Jabba Urban Street Dance for your Roblox avatar.")
 
 
+class _StubCursor:
+    def close(self):
+        pass
+
+
 class _StubConn:
     def __init__(self):
-        self.cur = object()
+        self.cur = _StubCursor()
     def cursor(self):
         return self.cur
     def close(self):
