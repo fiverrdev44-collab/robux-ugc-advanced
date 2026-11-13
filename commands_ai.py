@@ -709,7 +709,7 @@ def register_ai_commands(bot):
 
     @bot.command(name="background_analyze")
     async def background_analyze(ctx, *, notes: str = ""):
-        """One bounded visual pass + strict AssetType 92 market comparison.
+        """Bounded multi-pass visual review + AssetType 92 market comparison.
 
         Reuses existing model keys, shared API scheduler and command security.
         Never creates assets, mutates the database, or guarantees CTR.
@@ -787,6 +787,28 @@ def register_ai_commands(bot):
         dossier = format_background_dossier(
             vision, notes, image_quality=quality, live=live)
         for chunk in discord_chunks(dossier):
+            await ctx.send(chunk)
+
+        # Multi-pass creative director: existing first vision + one independent
+        # vision critique + at most two text-generation passes. No new Roblox
+        # requests and no database mutations. Fail-soft on provider errors.
+        try:
+            from background_review import (
+                build_multi_pass_review, format_multi_pass_review,
+            )
+            from gemini_brain import _generate
+            review = await asyncio.to_thread(
+                build_multi_pass_review, vision, images, notes, live,
+                analyze_image_for_ugc, _generate)
+            review_text = format_multi_pass_review(review)
+        except Exception as exc:
+            print("[background_analyze] creative director: " +
+                  type(exc).__name__, flush=True)
+            review_text = (
+                "## Multi-pass creative review unavailable\n"
+                "The initial image inspection above remains valid as a "
+                "tentative AI interpretation. No extra conclusions invented.")
+        for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
         if getattr(ctx, "vanta_state", None) is not None:
             concept = grounded_concept(vision, notes)
