@@ -82,15 +82,6 @@ def test_failed_market_and_unsupported_claims_are_not_fabricated():
     assert "R$9999" not in report
 
 
-if __name__ == "__main__":
-    test_only_explicit_category_92_competitors_are_used()
-    test_exact_sample_title_is_excluded_without_claiming_global_uniqueness()
-    test_similarity_is_descriptive_not_visual_or_sales_based()
-    test_market_price_and_launch_plan_are_grounded()
-    test_failed_market_and_unsupported_claims_are_not_fabricated()
-    print("PASS background creator essentials")
-
-
 def test_title_dry_run_not_ctr_forecast():
     results = bi.title_dry_run(VISION, live=LIVE)
     assert results and len(results) >= 1
@@ -109,3 +100,14 @@ def test_named_ip_warning_not_mistaken_for_rights_clearance():
     report = bi.format_background_dossier(VISION, notes="Oggy house", live=LIVE)
     assert "Third-party IP warning" in report
     assert "Renaming copied artwork" in report
+
+
+if __name__ == "__main__":
+    test_only_explicit_category_92_competitors_are_used()
+    test_exact_sample_title_is_excluded_without_claiming_global_uniqueness()
+    test_similarity_is_descriptive_not_visual_or_sales_based()
+    test_market_price_and_launch_plan_are_grounded()
+    test_failed_market_and_unsupported_claims_are_not_fabricated()
+    test_title_dry_run_not_ctr_forecast()
+    test_named_ip_warning_not_mistaken_for_rights_clearance()
+    print("PASS background creator essentials (7 tests)")
