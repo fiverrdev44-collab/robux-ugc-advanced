@@ -93,9 +93,15 @@ def title_is_grounded(concept, title, family):
             return False, "missing emote or movement identity"
         # Preserve explicitly named product identity (dance vs pose) unless
         # user deliberately included both. Motion details remain AI claims.
-        if "dance" in source and not candidate.intersection(
-            {"dance", "dancing", "emote", "animation"}):
-            return False, "dance identity replaced"
+        # Keep the creator's actual requested motion noun, not a synonym
+        # chosen only for a marketplace score.
+        for noun, variants in (
+            ("dance", {"dance", "dancing"}),
+            ("pose", {"pose", "posing"}),
+            ("stance", {"stance"}),
+        ):
+            if noun in source and not (candidate & variants):
+                return False, noun + " identity replaced"
     if fam == "backgrounds":
         if not candidate & {"background", "backgrounds", "backdrop", "scene"}:
             return False, "missing avatar-background identity"
