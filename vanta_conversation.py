@@ -943,6 +943,10 @@ async def _run_registry(bot, message, route, state):
             return
         await message.channel.send(report[:1900])
         state.last_intent = "review_title"
+        if item_id and item_id != state.last_item_id:
+            state.last_item_id = item_id
+            state.last_family = family
+            state.results = []
         state.pending_intent = None
         state.pending_action = None
         state.last_concept = title
@@ -1477,6 +1481,103 @@ def _bare_rename_request(text):
     return bool(_BARE_RENAME_RE.fullmatch(_strip_fillers(text).strip()))
 
 
+_RENAME_ACTION_RE = re.compile(
+    r"^(?:re-?name|re-?title|retitle|rebrand|"
+    r"change\s+(?:(?:the|my|its)\s+)?(?:name|title))\b",
+    re.I,
+)
+
+
+def _rename_action_route(text, state):
+    """Route rename intent deterministically, respecting explicit item IDs.
+
+    Deliberately distinguishes explicit asset rename requests from unspecified
+    creative ideas. No Roblox calls or edits, autopsies or AI planning here.
+    """
+    raw = (text or "").strip()
+    cleaned = _strip_fillers(raw)
+    conversational = bool(re.match(
+        r"^(?:(?:can|could|should|would)\s+i\b|what\s+if\s+i\b|"
+        r"i\s+(?:want|wanna|need|would\s+like|plan)\b)",
+        raw, re.I))
+    cleaned = re.sub(
+        r"^(?:(?:can|could|should|would)\s+i\s+|"
+        r"what\s+if\s+i\s+)", "", cleaned, count=1, flags=re.I)
+    verb = _RENAME_ACTION_RE.match(cleaned)
+    if not verb:
+        return None
+
+    explicit_id = extract_item_id(raw)
+    requested_family = detect_family(raw)
+    selected_id = explicit_id or state.last_item_id
+    if (not explicit_id and requested_family and state.last_family
+            and requested_family != state.last_family):
+        selected_id = None
+
+    rest = cleaned[verb.end():].strip()
+    # Only an explicit delimiter constitutes an actual proposed title.
+    # An item ID, asset family or "it" alone is NOT a title.
+    candidate_match = re.search(r"\b(?:to|as|into|like)\s+(.+)$", rest, re.I)
+    candidate = candidate_match.group(1).strip(" \t\r\n,.'\"!?") if candidate_match else None
+    if candidate and (not 3 <= len(candidate) <= 80
+                      or len(candidate.split()) > 12
+                      or not re.search(r"[a-zA-Z]", candidate)
+                      or candidate.casefold() in {"my item", "this", "it", "something"}):
+        candidate = None
+
+    no_title = not candidate and bool(
+        explicit_id or _bare_rename_request(raw)
+        or re.fullmatch(
+            r"\s*(?:(?:my|the|this|an)\s+)?"
+            r"(?:(?:item|background|emote|animation|accessory|"
+            r"clothing|hat|beanie|listing|it))?"
+            r"\s*[?.!]*", rest, re.I)
+    )
+    if not no_title and not (candidate and (explicit_id or conversational)):
+        return None
+
+    if selected_id and explicit_id and state.last_item_id != explicit_id:
+        # Explicit target switches all older item context.
+        state.last_item_id = selected_id
+        state.last_family = requested_family
+        state.last_concept = None
+        state.results = []
+        state.pending_chain = None
+        state.pending_intent = None
+        state.pending_action = None
+    elif selected_id and requested_family:
+        state.last_family = requested_family
+
+    family = requested_family or (state.last_family if selected_id else None)
+    if not selected_id:
+        if re.search(r"\ban item\b", raw, re.I) and not explicit_id:
+            return _intent("list_my_items", confidence="high")
+        return _intent("clarify", question="Which item should I rename? "
+                       "Send its asset ID or catalog URL.", confidence="high")
+
+    if candidate:
+        state.pending_intent = None
+        state.pending_action = None
+        state.touch()
+        return _intent("review_title", item_id=selected_id, family=family,
+                       concept=candidate, confidence="high")
+
+    state.pending_intent = "review_title"
+    state.pending_action = {
+        "intent": "review_title", "item_id": selected_id,
+        "family": family, "created_at": time.time(),
+    }
+    state.touch()
+    return _intent(
+        "clarify", item_id=selected_id, family=family,
+        question=("I selected item " + str(selected_id) +
+                  (" (" + family + ")" if family else "") +
+                  ". What exact new title do you want me to review? "
+                  "I won't change the listing."),
+        confidence="high",
+    )
+
+
 def _pending_title_reply(text, state):
     """Accept a bare candidate only after VANTA asked for a title."""
     action = state.pending_action if isinstance(state.pending_action, dict) else {}
@@ -1491,6 +1592,9 @@ def _pending_title_reply(text, state):
         return None
     if (candidate.startswith("!") or extract_item_id(candidate)
             or re.match(
+                r"^(?:(?:can|could|should|would)\s+i\b|what\s+if\b|"
+                r"i\s+(?:want|wanna|need|would)\b)", low)
+            or re.match(
                 r"^(?:rename|re-?name|retitle|rebrand|"
                 r"change\s+(?:the\s+)?name)\b", low)
             or re.search(r"\b(?:please|can you|could you|check my|show me|"
@@ -1502,6 +1606,12 @@ def _pending_title_reply(text, state):
 
 
 async def plan_message(text, has_attachment, state, bot=None):
+    # Deterministic item/action understanding precedes memory inference,
+    # generic creative routing and the AI planner.
+    if not has_attachment:
+        direct_rename = _rename_action_route(text, state)
+        if direct_rename:
+            return direct_rename
     # An explicit title-selection follow-up must use the item and family
     # previously requested, not a stale autopsy target or unrelated concept.
     if not has_attachment:
@@ -1584,6 +1694,15 @@ async def plan_message(text, has_attachment, state, bot=None):
     # let the AI planner inherit a different remembered item or UGC family.
     if extract_item_id(text) and fast["intent"] in ITEM_ACTIONS:
         return fast
+    if extract_item_id(text) and fast["intent"] in ("create_ideas", "clarify"):
+        # Ambiguous ID-bearing prompts must never launch chain by accident.
+        return _intent(
+            "clarify", item_id=extract_item_id(text),
+            family=detect_family(text),
+            question="I see item " + str(extract_item_id(text)) +
+                     ". Do you want a revival, a diagnosis, or a title "
+                     "review? Tell me the task; I won't launch a chain.",
+            confidence="high")
     if fast["intent"] in ("check_sales", "check_experiments",
                           "check_visibility", "data_audit", "list_my_items",
                           "improve_metadata", "tags", "analyze_image",
