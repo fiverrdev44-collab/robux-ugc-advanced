@@ -1592,6 +1592,9 @@ def _pending_title_reply(text, state):
         return None
     if (candidate.startswith("!") or extract_item_id(candidate)
             or re.match(
+                r"^(?:(?:can|could|should|would)\s+i\b|what\s+if\b|"
+                r"i\s+(?:want|wanna|need|would)\b)", low)
+            or re.match(
                 r"^(?:rename|re-?name|retitle|rebrand|"
                 r"change\s+(?:the\s+)?name)\b", low)
             or re.search(r"\b(?:please|can you|could you|check my|show me|"
