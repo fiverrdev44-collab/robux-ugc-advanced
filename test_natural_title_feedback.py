@@ -118,7 +118,8 @@ def test_stale_emote_context_never_changes_background_category():
     report = tf.review_proposal(
         title, family="backgrounds", item_id=92364796546749,
         db_factory=lambda: WrongItemConn(),
-        model_fn=lambda *args, **kwargs: None)
+        model_fn=lambda *args, **kwargs: None,
+        live_fn=lambda *args: {"ok": False, "error": "test offline"})
     assert "Category: backgrounds" in report
     assert "Context correction" in report
     assert "Fazbear" in report
@@ -136,7 +137,8 @@ def test_model_feedback_no_mutation_and_no_scores():
                 '"alternative":"Creepy Bear Security Office Background"}')
     report = tf.review_proposal("Animatronic Bear Office Background",
                                 family="backgrounds", item_id=44,
-                                db_factory=lambda: conn, model_fn=model)
+                                db_factory=lambda: conn, model_fn=model,
+                                live_fn=lambda *args: {"ok": False, "error": "test offline"})
     assert "Good recognizable scene hook" in report
     assert "Creepy Bear Security Office Background" in report
     assert "Read-only" in report
@@ -149,11 +151,66 @@ def test_optional_item_and_unavailable_data_fail_safely():
     def bad_db():
         raise RuntimeError("db offline")
     report = tf.review_proposal("Moonlit Shrine Background",
-                                db_factory=bad_db, model_fn=lambda *a, **kw: None)
+                                db_factory=bad_db, model_fn=lambda *a, **kw: None,
+                                live_fn=lambda *args: {"ok": False, "error": "test offline"})
     assert "evidence unavailable" in report
     assert "ranking" in report
     assert "No item changed" in report
     assert not tf.proposed_title("what if i call it?")
+
+
+def test_one_live_background_query_with_category_isolation():
+    calls = []
+    def fake_live(keyword, family, limit, pages, timeout, cache):
+        calls.append((keyword, family, limit, pages, timeout, cache))
+        return {
+            "ok": True, "search_keyword": "security office background",
+            "sampled_results": 30, "category_correct": 2,
+            "observed_at": "2026-11-13T10:00:00+00:00",
+            "top_competitors": [
+                {"name": "FNAF Bonnie Security Office Background",
+                 "asset_type_id": 92, "favorites": 5, "price": 200},
+                {"name": "Security Stance Emote", "asset_type_id": 61,
+                 "favorites": 12000, "price": 100},
+            ],
+        }
+    conn = FakeConn()
+    title = "Haunted Security Office Background"
+    report = tf.review_proposal(
+        title, family="backgrounds", db_factory=lambda: conn,
+        model_fn=lambda *args, **kwargs: None, live_fn=fake_live)
+    assert calls == [("security office", "backgrounds", 30, 1, 12, True)], calls
+    assert "Live Roblox Marketplace" in report
+    assert "FNAF Bonnie Security Office Background" in report
+    assert "Security Stance Emote" not in report
+    assert "2 background(s) in 30 sampled results" in report
+    assert "/100" not in report
+
+
+def test_live_unavailable_still_reports_db_without_inventing_market():
+    calls = []
+    def failed(*args):
+        calls.append(args)
+        return {"ok": False, "error": "rate limited", "deferred": True}
+    report = tf.review_proposal(
+        "Blue Security Office Background", family="backgrounds",
+        db_factory=lambda: FakeConn(), model_fn=lambda *args, **kwargs: None,
+        live_fn=failed)
+    assert len(calls) == 1
+    assert "Live Marketplace check unavailable:** rate limited" in report
+    assert "No exact name in sampled results" in report
+    assert "ranking" in report
+
+
+def test_other_categories_do_not_call_background_live_search():
+    def forbidden(*args):
+        raise AssertionError("Non-background should not call live")
+    report = tf.review_proposal(
+        "Smooth Flip Emote", family="emote", item_id=None,
+        db_factory=lambda: FakeConn(), model_fn=lambda *args, **kwargs: None,
+        live_fn=forbidden)
+    assert "Live Roblox Marketplace" not in report
+    assert "Category: emote" in report
 
 
 def test_dispatch_readonly_authorized_and_context():
@@ -186,5 +243,8 @@ if __name__ == "__main__":
     test_stale_emote_context_never_changes_background_category()
     test_model_feedback_no_mutation_and_no_scores()
     test_optional_item_and_unavailable_data_fail_safely()
+    test_one_live_background_query_with_category_isolation()
+    test_live_unavailable_still_reports_db_without_inventing_market()
+    test_other_categories_do_not_call_background_live_search()
     test_dispatch_readonly_authorized_and_context()
     print("PASS VANTA natural-language proposed title reviews")
