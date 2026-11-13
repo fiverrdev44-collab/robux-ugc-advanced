@@ -423,7 +423,9 @@ def test_explicit_background_revive_then_rename_targets_same_item():
     assert route["item_id"] == background, route
     assert route["family"] == "backgrounds", route
     bot = _ReviveBot()
-    msg = _FakeMessage(_FakeChannel())
+    channel = _FakeChannel()
+    channel.id = 8891
+    msg = _FakeMessage(channel)
     msg.content = "revive 125628794109589 Background"
     with mock.patch.object(cs, "require_authorized", return_value=None):
         asyncio.run(_run_registry(bot, msg, route, state))
