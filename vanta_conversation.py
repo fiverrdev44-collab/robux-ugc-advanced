@@ -1517,6 +1517,10 @@ async def plan_message(text, has_attachment, state, bot=None):
                               (" (" + state.last_family + ")" if state.last_family else "") +
                               "? I won't rename or publish it."),
                     confidence="high")
+            # Preserve the useful existing picker for an explicitly
+            # unspecified item; do not guess the previously selected emote.
+            if re.search(r"\ban item\b", text, re.I):
+                return _intent("list_my_items", confidence="high")
             return _intent(
                 "clarify", question="Which item do you want to rename? "
                 "Send its ID or Roblox catalog URL.", confidence="high")
