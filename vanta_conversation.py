@@ -938,7 +938,10 @@ async def _run_registry(bot, message, route, state):
         state.last_concept = title
         if family:
             state.last_family = family
-        if item_id:
+        # A speculative name question does not establish an item identity.
+        # In particular an inherited old emote ID must not become the active
+        # background item merely because it was in previous context.
+        if item_id and not family:
             state.last_item_id = item_id
         state.bot_messages.append(report[:500])
         state.bot_messages = state.bot_messages[-6:]
