@@ -1552,7 +1552,7 @@ def _rename_action_route(text, state):
     if not selected_id:
         if re.search(r"\ban item\b", raw, re.I) and not explicit_id:
             return _intent("list_my_items", confidence="high")
-        return _intent("clarify", question="Which Roblox item should I rename? "
+        return _intent("clarify", question="Which item should I rename? "
                        "Send its asset ID or catalog URL.", confidence="high")
 
     if candidate:
