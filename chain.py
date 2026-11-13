@@ -359,8 +359,20 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     except Exception as e:
         return {"error": f"DB search failed: {e}"}
 
+    allow_list = [
+        word for word in (allow_list or [])
+        if grounded_keyword(word, family, concept, for_alternative=True)
+    ]
+    if isinstance(stats, dict):
+        stats = dict(stats)
+        stats["opportunity_keywords"] = [
+            kw for kw in (stats.get("opportunity_keywords") or [])
+            if grounded_keyword(kw.get("word"), family, concept,
+                                for_alternative=True)
+        ]
     if not allow_list:
-        return {"error": "No DB matches. Try different keywords."}
+        return {"error": "Insufficient product-matching marketplace evidence; "
+                         "no title will be recommended from unrelated keywords."}
 
     # ── Stage 4: Winner analysis ──
     winner_data = {}
@@ -372,8 +384,7 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                 return analyze_winners(
                     cu, terms, top_n=40,
                     asset_type_ids=(
-                        get_category_config(family).get("asset_type_ids")
-                        if family == "backgrounds" else None
+                        get_category_config(family).get("asset_type_ids") or None
                     ),
                 )
             finally:
@@ -409,8 +420,8 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                     WHERE LOWER(name) LIKE %s AND favorite_count > 5
                       AND (%s::int[] IS NULL OR asset_type_id = ANY(%s))
                 """, (f"%{t_clean}%",
-                      [92] if family == "backgrounds" else None,
-                      [92] if family == "backgrounds" else None))
+                      get_category_config(family).get("asset_type_ids") or None,
+                      get_category_config(family).get("asset_type_ids") or None))
                 r = cu2.fetchone()
             finally:
                 cu2.close(); c2.close()
