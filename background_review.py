@@ -218,7 +218,7 @@ def _safe_description(value, vision, notes):
 
 
 def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
-                            background_market=None):
+                            background_market=None, creator_learning=None):
     """Marketplace-first name research: one creative pass, one critical pass.
 
     Images are used only by the command's first vision pass to extract truthful
@@ -232,6 +232,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     market = background_market if isinstance(background_market, dict) else {}
     angles = market.get("angles") if market.get("status") == "ok" else []
     angles = angles if isinstance(angles, list) else []
+    learned = creator_learning if isinstance(creator_learning, dict) else {}
+    observed_patterns = (
+        learned.get("patterns", [])[:6]
+        if learned.get("status") == "observed" else [])
     context = {
         "creator_notes": _safe(notes, 300),
         "scene": first["visual_summary"],
@@ -243,6 +247,18 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             vision.get("visual_verification_notes") or [])[:3],
         "uncertain_details": (vision.get("uncertain_elements") or [])[:3],
         "sampled_asset_type_92_listings": competitors,
+        "creator_pattern_study": {
+            "status": learned.get("status", "unavailable"),
+            "confidence": learned.get("confidence", "unavailable"),
+            "eligible_creators": learned.get("eligible_creators", 0),
+            "top_median_favorites": learned.get("top_median_favorites"),
+            "comparison_median_favorites": learned.get("comparison_median_favorites"),
+            "cross_creator_terms": [
+                {"term": p.get("term"), "creators": p.get("creators"),
+                 "items": p.get("items")}
+                for p in observed_patterns if isinstance(p, dict)
+            ],
+        },
         "stored_background_title_angles": [
             {"phrase": x.get("phrase"), "sample_matches": x.get("sample_matches"),
              "recent_30d": x.get("recent_30d"), "measured_positive": x.get("measured_positive"),
@@ -271,6 +287,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "'Animatronic Face Frame', 'Haunted Metal Panel' or 'Face Security'. "
         "Prioritize the actual setting, recognizable subject, and atmosphere; "
         "incidental wall/locker/computer details are not primary buying hooks. "
+        "Use category-only creator patterns only when multiple independent "
+        "creators show the same term and it actually describes the artwork. "
+        "Never copy a top creator's title, treat popularity as proof of "
+        "algorithmic causation, or force keywords unrelated to the scene. "
         "Preserve a recognizable search noun, then compare "
         "underused truthful feature angles against same-category titles. "
         "An empty sample is NOT demand or a validated keyword gap. "
@@ -302,8 +322,15 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     titles = list(dict.fromkeys(fallback + generated))[:12]
     if not generated and fallback:
         passes["creative"] = "fallback_only"
-    scored = sorted((_fit(s, vision, notes, live) for s in titles),
-                    key=lambda row: (-row["fit"], row["title"].casefold()))
+    from category_creator_learning import title_pattern_bonus
+    scored = sorted(
+        (_fit(name, vision, notes, live) for name in titles),
+        key=lambda row: (
+            -(row["fit"] + title_pattern_bonus(
+                row["title"], vision, learned)),
+            -row["fit"], row["title"].casefold()
+        )
+    )
     if not scored:
         return {"status": "insufficient_evidence", "passes": passes,
                 "competitors": competitors, "opportunity_evidence": market}
@@ -321,7 +348,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "search phrase with a distinctive visible feature. Reject unnatural "
             "naming even if it appears unique; metal panels, face frames and "
             "lockers are not the main buying hook for a horror office. "
-            "Choose a clear human-readable scene name over keyword stacking. "
+            "Use repeated creator title terms only when verified by the "
+            "provided same-category cohort and grounded in the image. Do not "
+            "mistake correlation for causation, or claim a top creator "
+            "guarantees sales. Choose a clear human-readable scene name "
+            "over keyword stacking. "
             "Choose titles "
             "only from ALLOWED TITLES. Write a short factual, searchable "
             "listing description, not keyword stuffing. No visual/artwork "
@@ -365,6 +396,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "description": (_safe_description(reviewer.get("description"), vision, notes)
                         or listing_description(vision, notes)),
         "competitors": competitors, "opportunity_evidence": market,
+        "creator_learning": learned,
         "ip_caution": named_ip_caution(vision, notes),
     }
 
