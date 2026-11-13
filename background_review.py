@@ -236,7 +236,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "'Animatronic Face Frame', 'Haunted Metal Panel' or 'Face Security'. "
         "Prioritize the actual setting, recognizable subject, and atmosphere; "
         "incidental wall/locker/computer details are not primary buying hooks. "
-        "Preserve a recognizable search noun, then compare 
+        "Preserve a recognizable search noun, then compare "
         "underused truthful feature angles against same-category titles. "
         "An empty sample is NOT demand or a validated keyword gap. "
         "Favorites are NOT impressions, purchases, sales or CTR. "
@@ -280,7 +280,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "naming even if it appears unique; metal panels, face frames and "
             "lockers are not the main buying hook for a horror office. "
             "Choose a clear human-readable scene name over keyword stacking. "
-            "Choose titles 
+            "Choose titles "
             "only from ALLOWED TITLES. Write a short factual, searchable "
             "listing description, not keyword stuffing. No visual/artwork "
             "editing, Photoshop/Photopea, crop or lighting recommendations. "
