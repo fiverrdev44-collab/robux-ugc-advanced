@@ -130,10 +130,10 @@ def test_background_command_one_live_request_and_image_reuse():
         asyncio.run(bot.callbacks["background_analyze"](
             ctx, notes="moonlit shrine with portal"))
     assert calls == [("moonlit shrine", "backgrounds", 30, 1, 12, True)], calls
-    assert any("BACKGROUND ARTWORK INTELLIGENCE" in (m or "")
+    assert any("ROBLOX BACKGROUND SEARCH INTELLIGENCE" in (m or "")
                for m in channel.messages)
-    assert state.pending_chain["family"] == "backgrounds"
-    assert "moonlit shrine" in state.pending_chain["concept"].lower()
+    assert not any("Avatar clearance" in (m or "") or
+                   "Photopea" in (m or "") for m in channel.messages)
 
 
 def test_no_visual_or_wrong_format_no_false_claim():
