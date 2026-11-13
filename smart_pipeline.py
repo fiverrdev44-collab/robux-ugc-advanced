@@ -279,7 +279,8 @@ def _alt_worker(word, count, category_asset_ids, db_factory, live_enrich):
 
 
 def find_alternatives_parallel(saturated_seeds, category_asset_ids, db_factory,
-                               limit=10, live_enrich=True):
+                               limit=10, live_enrich=True, family=None,
+                               description=""):
     if not saturated_seeds:
         return []
     conn = db_factory()
@@ -287,6 +288,10 @@ def find_alternatives_parallel(saturated_seeds, category_asset_ids, db_factory,
         cur = conn.cursor()
         try:
             candidates = _find_alt_candidates(cur, saturated_seeds, category_asset_ids)
+            if family:
+                from ugc_semantics import grounded_keyword
+                candidates = [(w, n) for w, n in candidates if grounded_keyword(
+                    w, family, description, for_alternative=True)]
         finally:
             cur.close()
     finally:
@@ -314,10 +319,14 @@ def find_alternatives_parallel(saturated_seeds, category_asset_ids, db_factory,
 
 
 def find_alternatives(cur, saturated_seeds, category_asset_ids=None, limit=10,
-                      live_enrich=True):
+                      live_enrich=True, family=None, description=""):
     if not saturated_seeds:
         return []
     candidates = _find_alt_candidates(cur, saturated_seeds, category_asset_ids)
+    if family:
+        from ugc_semantics import grounded_keyword
+        candidates = [(w, n) for w, n in candidates if grounded_keyword(
+            w, family, description, for_alternative=True)]
     out = []
     for word, count in candidates:
         data = check_competition(cur, word, category_asset_ids, live_enrich=live_enrich)
@@ -346,7 +355,9 @@ def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
         "live_enriched": live_enrich, "parallel": parallel, "report": "",
     }
 
-    seeds = _extract_seeds(description, intent, top_n=12)
+    from ugc_semantics import grounded_keyword
+    seeds = [word for word in _extract_seeds(description, intent, top_n=12)
+             if grounded_keyword(word, item_type, description)]
     result["seeds"] = seeds
     if not seeds:
         return result
@@ -372,11 +383,13 @@ def run_full_pipeline(cur=None, description="", intent=None, item_type="emote",
         if parallel:
             alternatives = find_alternatives_parallel(
                 saturated, category_asset_ids, db_factory,
-                limit=12, live_enrich=live_enrich)
+                limit=12, live_enrich=live_enrich,
+                family=item_type, description=description)
         else:
             alternatives = find_alternatives(
                 cur, saturated, category_asset_ids,
-                limit=12, live_enrich=live_enrich)
+                limit=12, live_enrich=live_enrich,
+                family=item_type, description=description)
     else:
         alternatives = []
     result["alternatives"] = alternatives
@@ -417,7 +430,10 @@ def _format_report(r):
         lines.append("")
 
     if r["saturated_seeds"]:
-        lines.append(f"## 🚨 AUTO-REPLACED: `{'`, `'.join(r['saturated_seeds'])}`\n")
+        lines.append("## ⚠️ HIGH-COMPETITION WORDS (NOT AUTO-REPLACED)")
+        lines.append("Competition does not justify removing a product's core "
+                     "identity or motion words.")
+        lines.append(", ".join(r["saturated_seeds"]) + "\n")
 
     if r["alternatives"]:
         lines.append("## 💎 ALTERNATIVES\n")
