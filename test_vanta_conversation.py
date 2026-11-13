@@ -378,8 +378,10 @@ def test_rename_routing():
         assert route["concept"] == "cute hip sway", route
 
         route = asyncio.run(vc.plan_message("rename it", False, state))
-        assert route["intent"] == "improve_metadata", route
+        assert route["intent"] == "clarify", route
         assert route["item_id"] == 121930221694467, route
+        assert "What exact new title" in route["question"]
+        assert state.pending_intent == "review_title"
         route = asyncio.run(vc.plan_message("Rename viral russian", False, state))
         assert route["intent"] == "create_ideas", route
         assert state.last_concept == "viral russian", state.last_concept
