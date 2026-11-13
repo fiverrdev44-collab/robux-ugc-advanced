@@ -153,5 +153,7 @@ jobs:
         run: |
           python test_astra.py
           python test_product_understanding.py
+      - name: Verify UGC category and identity grounding in chain pipelines
+        run: python test_ugc_semantic_quality.py
       - name: Run recommendation lifecycle regressions
         run: python test_recommendation_lifecycle.py
