@@ -37,9 +37,9 @@ def test_four_passes_and_human_readable_output():
     result = br.build_multi_pass_review(
         VISION, [{"bytes": b"PNG", "mime": "image/png"}],
         "moonlit shrine with portal", LIVE, visual, text)
-    assert len(vision_calls) == 1
+    assert len(vision_calls) == 0  # No second artwork/aesthetic critique
     assert len(text_calls) == 2
-    assert result["passes"]["independent_vision"] == "ok"
+    assert result["passes"]["independent_vision"] == "skipped"
     assert result["passes"]["creative"] == "ok"
     assert result["passes"]["skeptical_critic"] == "ok"
     assert result["winner"] == "Stone Path Shrine Background"
@@ -49,9 +49,10 @@ def test_four_passes_and_human_readable_output():
     assert "Banana Rocket Shrine Background" not in titles
     assert len(result["alternatives"]) == 2
     report = br.format_multi_pass_review(result)
-    assert "Recommended title to test" in report
-    assert "Competitor IMAGES were not available" in report
-    assert "Photopea improvement steps" in report
+    assert "Search-focused title recommendation" in report
+    assert "Same-category competitor titles" in report
+    assert "Photopea" not in report
+    assert "/100" not in report
     assert "CTR" in report
 
 
@@ -62,13 +63,13 @@ def test_unavailable_providers_fail_soft_without_false_evidence():
         raise RuntimeError("provider unavailable")
     out = br.build_multi_pass_review(
         VISION, [], "", {"ok": False, "error": "HTTP 429"}, no_vision, no_text)
-    assert out["passes"]["independent_vision"] == "unavailable"
+    assert out["passes"]["independent_vision"] == "skipped"
     assert out["passes"]["creative"] == "unavailable"
     assert out["passes"]["skeptical_critic"] == "unavailable"
     assert not out["competitors"]
     report = br.format_multi_pass_review(out)
-    assert "Competitor IMAGES were not available" in report
-    assert "No simulated sales" in report
+    assert "Same-category competitor titles" in report
+    assert "Favorites ≠ sales" in report
 
 
 def test_prompt_injection_and_ip_claim_guards():
@@ -88,7 +89,7 @@ def test_prompt_injection_and_ip_claim_guards():
         lambda *a: SECOND, lambda *a, **kw: None)
     assert result["ip_caution"]
     report = br.format_multi_pass_review(result)
-    assert report.count("licensing or official affiliation has not been verified") == 1
+    assert report.count("verify rights") == 1
     assert "Third-party IP caution" not in report
     assert "authorize protected" not in report
 
@@ -117,10 +118,12 @@ def test_discord_command_keeps_one_market_search_and_two_visual_calls():
          mock.patch("gemini_brain._generate", side_effect=text):
         asyncio.run(bot.callbacks["background_analyze"](
             ctx, notes="moonlit shrine with portal"))
-    assert seen == {"market": 1, "vision": 2, "text": 2}, seen
-    assert any("MULTI-PASS BACKGROUND CREATIVE DIRECTOR" in (m or "")
+    assert seen == {"market": 1, "vision": 1, "text": 2}, seen
+    assert any("ROBLOX BACKGROUND SEARCH INTELLIGENCE" in (m or "")
                for m in channel.messages)
-    assert ctx.vanta_state.pending_chain["family"] == "backgrounds"
+    assert not any("Photopea" in (m or "") or
+                   "Avatar clearance" in (m or "") for m in channel.messages)
+    assert not any("/100" in (m or "") for m in channel.messages)
 
 
 if __name__ == "__main__":
