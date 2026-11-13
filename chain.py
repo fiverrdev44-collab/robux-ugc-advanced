@@ -31,7 +31,10 @@ def _astra_filter(titles, concept, family=None):
         from product_understanding import validate_title
     except Exception:
         return list(titles or [])
-    return [t for t in (titles or []) if validate_title(concept, t, family)[0]]
+    from ugc_semantics import title_is_grounded
+    return [t for t in (titles or [])
+            if validate_title(concept, t, family)[0]
+            and title_is_grounded(concept, t, family)[0]]
 
 
 def _sanitize_titles(titles):
@@ -314,7 +317,13 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         print(f"[chain] product understanding skipped: {e}", flush=True)
 
     intent["item_type"] = family
-    terms = all_terms(intent)
+    from ugc_semantics import (
+        filter_intent_for_family, grounded_keyword,
+        sanitize_generated_strategy, is_foreign_platform_description,
+    )
+    intent = filter_intent_for_family(intent, family, concept)
+    terms = [t for t in all_terms(intent)
+             if grounded_keyword(t, family, concept, for_alternative=True)]
 
     type_override = _detect_type_override(concept)
     if parent_name and not type_override:
@@ -469,7 +478,11 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
             if len(seed_kw) >= 3:
                 rows = _fetch_top_descriptions(seed_kw, family=family, limit=10)
                 if rows:
-                    desc_examples = rows[:3]
+                    desc_examples = [
+                        row for row in rows
+                        if len(row) > 1
+                        and not is_foreign_platform_description(row[0], row[1])
+                    ][:3]
     except Exception as e:
         print(f"[chain] desc mining failed: {e}", flush=True)
 
@@ -484,7 +497,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
             3 if x["bucket"] == "VIRGIN" else
             4 if x["bucket"] == "NEUTRAL" else 5
         ))
-        if best_obj.get("demand_live", 0) > 0:
+        if (best_obj.get("demand_live", 0) > 0
+                and grounded_keyword(best_obj.get("keyword"), family, concept,
+                                     for_alternative=True)):
             best_niche_kw = best_obj["keyword"]
             best_niche_bucket = best_obj["bucket"]
         else:
@@ -529,6 +544,8 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         ) or {}
     except Exception as e:
         print(f"[chain] synth failed: {e}", flush=True)
+
+    synth = sanitize_generated_strategy(synth, family, concept)
 
     # Static props (sign/fence/board) must never take wearable nouns.
     if is_static_prop(concept):
@@ -623,6 +640,7 @@ OUTPUT — ONLY JSON:
     except Exception as e:
         print(f"[chain] focused title pass failed: {e}", flush=True)
 
+    synth = sanitize_generated_strategy(synth, family, concept)
     # The focused pass can reintroduce wearable nouns or platform words.
     if is_static_prop(concept):
         for _k in ("titles_safe", "titles_differentiated",
@@ -657,6 +675,7 @@ OUTPUT — ONLY JSON:
                 cur_v.close(); conn_v.close()
 
         synth, verification_audit = _verify()
+        synth = sanitize_generated_strategy(synth, family, concept)
     except Exception as e:
         print(f"[chain] verification failed: {e}", flush=True)
         if not isinstance(synth, dict):
@@ -740,6 +759,14 @@ OUTPUT — ONLY JSON:
         )
     except Exception as e:
         print(f"[chain] opportunity rerank failed: {e}", flush=True)
+
+    # Do not recommend names marked DEAD or SATURATED as winners.
+    # They may still be seen in the internal audit, never the final pick.
+    from opportunity_score import lane_priority as _lane_priority
+    scored_titles = [
+        sc for sc in scored_titles
+        if _lane_priority(sc.get("opportunity")) > 0
+    ]
 
     # ── Stage 12b: 80% confidence intervals ──
     confidence_data = None
@@ -909,6 +936,8 @@ def format_chain(result):
 
     # ── AI STRATEGY ──
     if synth:
+        synth = sanitize_generated_strategy(synth, result["family"],
+                                            result["concept"])
         for key, header in [
             ("search_diagnosis",  "## 🔍 Search Diagnosis"),
             ("positioning",       "## 🎯 Positioning"),
@@ -957,7 +986,7 @@ def format_chain(result):
             ("🟢 SAFE (mirror winners)",         synth.get("titles_safe") or []),
             ("🎯 DIFFERENTIATED (unique angle)", synth.get("titles_differentiated") or []),
             ("🔎 LONG-TAIL SEO (4+ keywords)",   synth.get("titles_longtail") or []),
-            ("🔥 VIRAL (meme/TikTok hook)",      synth.get("titles_viral") or []),
+            ("🎨 CREATIVE (grounded theme)",      synth.get("titles_viral") or []),
         ]
         if any(g for _, g in title_groups):
             lines = ["# 📝 10 TITLES\n"]
@@ -1113,7 +1142,7 @@ def format_chain(result):
     except Exception:
         pass
 
-    final_lines.append("**If you choose it:** overlay the name on one short-form video")
+    final_lines.append("**If you choose it:** test one title change at a time and record real favorites and units.")
     final_lines.append("**Later check:** run `!verdict <new_item_id>` in 14 days")
 
     try:
@@ -1128,7 +1157,7 @@ def format_chain(result):
         astra_titles = [{"title": x["title"], "angle": angles[min(i, 3)]}
                         for i, x in enumerate(scored[:5])]
         brief = {
-            "showcase": "3-second reveal, one rotation, title overlay.",
+            "showcase": "Category-appropriate preview; do not imply animation in a static product.",
             "experiment": "one variant vs control for 7 days; compare favorites and units.",
         }
         final_lines.append("\n" + format_astra(analysis, astra_titles,
