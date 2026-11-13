@@ -85,7 +85,7 @@ class FakeConn:
 
 def test_background_evidence_is_asset_type_scoped():
     conn = FakeConn()
-    data = tf._evidence("Animatronic Bear Office Background", "emote",
+    data = tf._evidence("Animatronic Bear Office Background", "backgrounds",
                         item_id=44, db_factory=lambda: conn)
     assert conn.closed
     assert data["family"] == "backgrounds", data
