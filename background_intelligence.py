@@ -386,11 +386,6 @@ def format_background_dossier(vision, notes="", image_quality=None,
                          "impression or click data was used.")
             parts.append("• Favorites forecast: unavailable. A title alone "
                          "cannot establish expected purchases or favorites.")
-    if named_ip_caution(vision, notes):
-        parts.append("**Third-party IP warning:** Named franchise detected. "
-                     "Do not publish its protected characters, scenes or names "
-                     "without appropriate rights. Renaming copied artwork "
-                     "does not cure infringement.")
     description = listing_description(vision, notes)
     parts.append("**Draft listing description (verify every detail)**")
     parts.append(description or "• Not enough verified visual detail to draft copy.")
@@ -430,15 +425,9 @@ def format_background_dossier(vision, notes="", image_quality=None,
             parts.append("• No usable sampled price reference; do not guess a price.")
         parts.append("• Similar TITLE words do not prove copied artwork, and "
                      "sampled prices/favorites do not establish sales.")
-    ip_warning = o["ip_reference_warning"]
-    if ip_warning and ip_warning.upper() != "NONE":
-        parts.append("**IP/trademark caution:** " + ip_warning +
-                     " — avoid protected names without authorization.")
     parts.append("**Pre-publish checklist**")
     parts.append("• Preview real avatar positioning and mobile crop; check "
                  "scene focal point, ground, horizon, contrast and edge fade.")
-    parts.append("• Confirm you own or have rights to the artwork and named IP. "
-                 "A familiar game/character name can create licensing risk.")
     parts.append("• Verify the final uploaded file and listing appearance on "
                  "Roblox. A PNG cannot become an animated GIF.")
     parts.append("**Launch measurement and next actions**")

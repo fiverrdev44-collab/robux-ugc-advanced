@@ -87,6 +87,10 @@ def test_prompt_injection_and_ip_claim_guards():
         VISION, [], "Oggy background", LIVE,
         lambda *a: SECOND, lambda *a, **kw: None)
     assert result["ip_caution"]
+    report = br.format_multi_pass_review(result)
+    assert report.count("licensing or official affiliation has not been verified") == 1
+    assert "Third-party IP caution" not in report
+    assert "authorize protected" not in report
 
 
 def test_discord_command_keeps_one_market_search_and_two_visual_calls():
