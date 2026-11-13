@@ -103,6 +103,16 @@ def _editorial_bad(title, vision, notes):
             for word in ambiguous_subjects
         ):
             return True
+        if vision.get("visual_scene_disagreement"):
+            creator_scene = (vision.get("visual_creator_scene_anchor") or "")
+            image_scene = (vision.get("visual_scene_anchor") or "")
+            creator_tail = creator_scene.split()[-1:] or []
+            image_tail = image_scene.split()[-1:] or []
+            if creator_tail and creator_tail != image_tail and any(
+                re.search(r"\b" + re.escape(word) + r"\b", low)
+                for word in creator_tail
+            ):
+                return True
     return len(tokens & _LOW_SALIENCE) >= 2
 
 
