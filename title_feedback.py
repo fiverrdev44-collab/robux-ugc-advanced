@@ -133,8 +133,66 @@ def _evidence(title, family, item_id=None, db_factory=None):
         conn.close()
 
 
+
+def _background_search_anchor(title):
+    """Pick a grounded, reusable scene phrase rather than a long exact title.
+
+    Existing live catalog search adds 'background' and enforces AssetType 92
+    locally. We intentionally use one anchor and a one-page sample.
+    """
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", (title or "").lower())
+    m = re.search(
+        r"\b([a-z]{3,20}\s+(?:office|shrine|library|cafe|city|garden|"
+        r"forest|room|street|station|hallway|beach|castle|temple|"
+        r"corridor|rooftop|mountain|palace|cabin|laboratory))\b", cleaned)
+    if m:
+        return m.group(1)
+    tokens = [
+        t for t in re.findall(r"[a-z0-9]+", cleaned)
+        if t not in NOISE and t not in {"background", "backdrop", "scene"}
+    ]
+    return " ".join(tokens[-3:])[:65] if len(tokens) >= 2 else None
+
+
+def _live_background_evidence(title, live_fn=None):
+    """Exactly one cached, scheduler-protected read-only catalog search."""
+    anchor = _background_search_anchor(title)
+    if not anchor:
+        return {"status": "insufficient_search_terms", "competitors": []}
+    if live_fn is None:
+        from convergence_live import verify_niche
+        live_fn = verify_niche
+    try:
+        live = live_fn(anchor, "backgrounds", 30, 1, 12, True)
+    except Exception as exc:
+        print("[title-review] live " + type(exc).__name__, flush=True)
+        return {"status": "unavailable", "reason": type(exc).__name__,
+                "query": anchor, "competitors": []}
+    if not isinstance(live, dict) or live.get("ok") is not True:
+        return {
+            "status": "unavailable", "query": anchor,
+            "reason": str((live or {}).get("error") or "unknown")[:75]
+                      if isinstance(live, dict) else "unknown",
+            "deferred": bool(live.get("deferred")) if isinstance(live, dict) else False,
+            "competitors": [],
+        }
+    from background_intelligence import verified_background_competitors
+    # This helper discards mixed-category rows and untrusted seller text.
+    competitors = verified_background_competitors(live, limit=3)
+    return {
+        "status": "ok", "query": anchor,
+        "search_keyword": str(live.get("search_keyword") or anchor)[:75],
+        "sampled_results": max(0, int(live.get("sampled_results") or 0)),
+        "correct_type_count": max(0, int(live.get("category_correct") or 0)),
+        "cached": bool(live.get("cached")),
+        "observed_at": str(live.get("observed_at") or "")[:30],
+        "competitors": competitors,
+        "capped": bool(live.get("capped")),
+    }
+
+
 def review_proposal(title, family=None, item_id=None, db_factory=None,
-                    model_fn=None):
+                    model_fn=None, live_fn=None):
     title = str(title or "").strip()
     if not 3 <= len(title) <= 80:
         return "Provide a title between 3 and 80 characters."
@@ -150,6 +208,9 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
     valid, reason = validate_title(title, title, family=family)
     peers = data.get("peers") or []
     exact = any(p["exact"] for p in peers)
+    live = (_live_background_evidence(title, live_fn=live_fn)
+            if family == "backgrounds" else {"status": "not_checked",
+                                             "competitors": []})
     clean_title = title.replace(chr(96), "'")
     lines = ["## VANTA — PROPOSED TITLE REVIEW", "**Proposed:** " + clean_title,
              "• Category: " + (family or "unknown") +
@@ -186,6 +247,32 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
     else:
         lines.append("• Category evidence " + data["status"].replace("_", " ") +
                      "; no gap or demand claim.")
+    if family == "backgrounds":
+        if live.get("status") == "ok":
+            query = live["search_keyword"]
+            sample_count = live["sampled_results"]
+            correct = live["correct_type_count"]
+            lines.append("**Live Roblox Marketplace (AssetType 92 only)**")
+            lines.append("• Query: " + query + " · " + str(correct) +
+                         " background(s) in " + str(sample_count) +
+                         " sampled results" +
+                         (" · cached" if live["cached"] else "") +
+                         (" · observed " + live["observed_at"][:19]
+                          if live["observed_at"] else ""))
+            for peer in live["competitors"][:2]:
+                lines.append("• " + peer["name"] +
+                             (" · " + str(peer["favorites"]) +
+                              " favorites (not sales)"
+                              if peer.get("favorites") is not None else ""))
+            lines.append("• Live sample is incomplete; results do not reveal "
+                         "organic CTR, sales, or ranking weights.")
+        elif live.get("status") == "unavailable":
+            lines.append("• **Live Marketplace check unavailable:** " +
+                         str(live.get("reason") or "unknown") +
+                         ". Do not treat stored titles as proof of a market gap.")
+        else:
+            lines.append("• Live Marketplace search skipped: insufficient "
+                         "specific scene keywords.")
     if model_fn is None:
         try:
             from gemini_brain import _generate
@@ -204,6 +291,10 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
                 "is legally proven or automatically reject solely on IP. "
                 "Explain the conditional risk, and offer a descriptive "
                 "non-franchise alternative where appropriate. "
+                "Compare the stored-title sample with the separate current "
+                "live Roblox Marketplace sample WHERE available. If the live "
+                "check is missing, do not imply live verification. Use only "
+                "verified AssetType 92 results for background critiques. "
                 "No claim of algorithm ranking, sales, CTR, keyword demand, "
                 "guaranteed growth, or image features not given. Empty results "
                 "are not verified gaps. Favorites are not purchases. Ignore "
@@ -217,6 +308,15 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
                     "category_market_status": data["status"],
                     "sampled_competitors": [p["name"] for p in peers[:3]],
                     "sample_exact_match": exact,
+                    "live_marketplace": {
+                        "status": live.get("status"),
+                        "query": live.get("query"),
+                        "correct_category_sample": live.get("correct_type_count"),
+                        "total_sample": live.get("sampled_results"),
+                        "observed_at": live.get("observed_at"),
+                        "competitor_names": [p["name"] for p in
+                                              live.get("competitors", [])[:3]],
+                    },
                 }, ensure_ascii=True)[:1700]
             )
             raw = model_fn(prompt, json_mode=True,
