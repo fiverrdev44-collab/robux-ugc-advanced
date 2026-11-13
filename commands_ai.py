@@ -798,6 +798,17 @@ def register_ai_commands(bot):
             print("[background_analyze] opportunities: " +
                   type(exc).__name__, flush=True)
             background_market = {"status": "unavailable", "angles": []}
+        # Recompute category-specific creator lessons from current stored
+        # evidence. No new Roblox HTTP requests, DB writes or model training.
+        try:
+            from category_creator_learning import lookup_creator_learning
+            creator_learning = await asyncio.to_thread(
+                lookup_creator_learning, "backgrounds")
+        except Exception as exc:
+            print("[background_analyze] creator study " +
+                  type(exc).__name__, flush=True)
+            creator_learning = {"status": "unavailable", "family": "backgrounds",
+                                "patterns": [], "leaders": []}
         # Creative search terms + skeptical title comparison, at most two
         # text generations. Image is not passed to a second aesthetic critic.
         review = None
@@ -808,7 +819,8 @@ def register_ai_commands(bot):
             from gemini_brain import _generate
             review = await asyncio.to_thread(
                 build_multi_pass_review, vision, images, notes, live,
-                analyze_image_for_ugc, _generate, background_market)
+                analyze_image_for_ugc, _generate, background_market,
+                creator_learning)
             review_text = format_multi_pass_review(review)
         except Exception as exc:
             print("[background_analyze] creative director: " +
@@ -817,9 +829,12 @@ def register_ai_commands(bot):
                 "## Marketplace naming review unavailable\n"
                 "No fabricated search rankings, algorithm scores, or CTR.")
         from background_opportunities import format_opportunity_evidence
+        from category_creator_learning import format_creator_learning
         for chunk in discord_chunks(format_visual_verification(visual_check)):
             await ctx.send(chunk)
         for chunk in discord_chunks(format_opportunity_evidence(background_market)):
+            await ctx.send(chunk)
+        for chunk in discord_chunks(format_creator_learning(creator_learning)):
             await ctx.send(chunk)
         for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
