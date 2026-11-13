@@ -832,6 +832,7 @@ OUTPUT — ONLY JSON:
     return {
         "concept": concept,
         "parent_name": parent_name,
+        "parent_id": parent_id,
         "is_variant": bool(parent_id),
         "family": family,
         "item_type": item_type,
@@ -859,6 +860,14 @@ def format_chain(result):
     if result.get("error"):
         return [f"❌ {result['error']}"]
 
+    # This formatter runs separately from run_chain(), including during
+    # !revive. Imports and context local to run_chain are NOT in scope here.
+    # Keep reporting deterministic even after a valid generation succeeds.
+    from ugc_semantics import sanitize_generated_strategy
+
+    family = result.get("family") or "unknown"
+    concept = result.get("concept") or ""
+    parent_id = result.get("parent_id")
     chunks = []
     synth = result.get("synth") or {}
     s = result["stats"]
