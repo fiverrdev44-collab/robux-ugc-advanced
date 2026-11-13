@@ -100,7 +100,7 @@ def test_visual_grounding_only_small_tie_breaker():
     assert 2 <= title_pattern_bonus(
         "Moonlit Shrine Background", VISION, finding) <= 6
     assert title_pattern_bonus(
-        "Plain Shrine Background", VISION, finding) == 0
+        "Plain Castle Background", VISION, finding) == 0
     assert title_pattern_bonus(
         "Moonlit Shrine Background", {},
         finding) == 0
