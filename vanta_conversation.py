@@ -389,7 +389,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
     # A proposal is a request for an opinion, NEVER a rename or launch.
     # Preserve the exact title rather than passing it through clean_concept.
     if not has_attachment:
-        from title_feedback import proposed_title
+        from title_feedback import proposed_title, title_review_question
         proposal = proposed_title(text)
         if proposal:
             return _intent(
@@ -399,6 +399,10 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                     and family != state.last_family else state.last_item_id)),
                 concept=proposal, family=(family or state.last_family),
                 confidence="high")
+        if title_review_question(text):
+            return _intent(
+                "clarify", question="What exact title are you considering? "
+                "I can review it without renaming anything.", confidence="high")
 
     # A bare item ID or URL establishes the item immediately.
     if item_id and re.fullmatch(r"(?:https?://\S+|\d{6,20})[.! ]*", low.strip()):
@@ -1227,8 +1231,10 @@ RULES
 - If the action needs an item and none is known, use clarify.
 - If the action needs a concept and none is given or inherited, use clarify.
 - A rename/retitle/rebrand toward a theme is create_ideas with that theme — never diagnose_item for a rename.
-- If asked "what if I call/name it X", "is X a good title", or "review the title X",
-  review_title; preserve exact spelling, don't interpret it as an instruction to rename.
+- If asked "what if I call/name it X", "is X a good title", "can I rename as X",
+  "should I rename it to X", or "review the title X", review_title; preserve
+  exact spelling; do not interpret a rename QUESTION as an instruction to rename.
+- If a rename question has no proposed name, ask for the title; never run chain.
 - "why is it dead / what went wrong / fix it" about an item is diagnose_item, not create_ideas.
 - Tags/SEO/keywords requests are tags; use last_item when the user implies their own item.
 - Small talk ("thanks", "lol", "ok") is ack; capability questions are help. Do not invent work for small talk.
@@ -1242,6 +1248,7 @@ EXAMPLES
 "rename viral russian" -> {{"action":"create_ideas","concept":"viral russian"}}
 "call it russian dance instead" -> {{"action":"create_ideas","concept":"russian dance"}}
 "what if I call it Russian Dance Emote?" -> {{"action":"review_title","concept":"Russian Dance Emote"}}
+"can I rename as Haunted Security Office?" -> {{"action":"review_title","concept":"Haunted Security Office"}}
 "make my listing cuter" -> {{"action":"improve_metadata"}} (last_item)
 "i need a description for it" -> {{"action":"improve_metadata"}} (last_item)
 "why is it flopping" -> {{"action":"diagnose_item"}} (last_item)
@@ -1440,7 +1447,7 @@ async def plan_message(text, has_attachment, state, bot=None):
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
     text = _strip_fillers(text)
     # Title questions must bypass rename heuristics and the AI planner.
-    from title_feedback import proposed_title
+    from title_feedback import proposed_title, title_review_question
     proposal = proposed_title(text) if not has_attachment else None
     if proposal:
         return _intent("review_title",
@@ -1451,6 +1458,10 @@ async def plan_message(text, has_attachment, state, bot=None):
                        concept=proposal,
                        family=(detect_family(text) or state.last_family),
                        confidence="high")
+    if not has_attachment and title_review_question(text):
+        return _intent(
+            "clarify", question="What exact title are you considering? "
+            "I'll critique it without changing your item.", confidence="high")
 
     # A pending chain offer from image analysis accepts yes/no.
     pending_chain = getattr(state, "pending_chain", None)

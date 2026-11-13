@@ -16,12 +16,33 @@ FAMILY_WORDS = {
 }
 
 
+def title_review_question(text):
+    """Is the user ASKING whether to rename, rather than instructing a rename?
+
+    Also true for incomplete first-person questions so the router asks for
+    the exact proposed title instead of running a chain from filler text.
+    """
+    low = str(text or "").strip().lower()
+    return bool(re.search(
+        r"^(?:(?:can|could|should|would)\s+i\s+"
+        r"(?:rename|retitle|rebrand)\b|what\s+if\s+i\s+"
+        r"(?:rename|retitle|rebrand)\b|would\s+it\s+be\s+"
+        r"(?:a\s+)?(?:good|better|smart)\s+(?:idea|choice)\s+"
+        r"to\s+rename\b)", low
+    ))
+
+
 def proposed_title(text):
     """Extract a proposed name without changing the words or capitalization."""
     s = str(text or "").strip()
     if not s or len(s) > 900:
         return None
     patterns = [
+        # First-person rename questions request FEEDBACK, not a launch or
+        # rename action. Keep the exact proposed title (including case).
+        r"\b(?:can|could|should|would)\s+i\s+(?:rename|retitle|rebrand)\s+(?:(?:my|this|the)\s+)?(?:(?:item|background|emote|dance|hat|beanie|listing|it)\s+)?(?:as|to|into|like)\s+(.+)$",
+        r"\bwhat\s+if\s+i\s+(?:rename|retitle|rebrand)\s+(?:(?:my|this|the)\s+)?(?:(?:item|background|emote|dance|hat|beanie|listing|it)\s+)?(?:as|to|into|like)\s+(.+)$",
+        r"\bwould\s+it\s+be\s+(?:a\s+)?(?:good|better|smart)\s+(?:idea|choice)\s+to\s+rename\s+(?:it|this|my\s+(?:item|background|emote))\s+(?:as|to)\s+(.+)$",
         r"\bwhat if i (?:name|call|title) (?:this |my |the )?(?:item|background|emote|dance|hat|it)?\s*(?:as|to|like)?\s+(.+)$",
         r"\b(?:should|could|can|would) i (?:name|call|title) (?:this |my |the )?(?:item|background|emote|dance|hat|it)?\s*(?:as|to)?\s+(.+)$",
         r"\b(?:what do you think (?:of|about)|thoughts on|rate|review|evaluate|analy[sz]e)\s+(?:the )?(?:name|title)\s+(.+)$",
