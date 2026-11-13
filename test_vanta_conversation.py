@@ -388,6 +388,105 @@ def test_rename_routing():
     print("PASS rename routing")
 
 
+def test_explicit_background_revive_then_rename_targets_same_item():
+    """Reported failure: old emote must never replace explicit background."""
+    background = 125628794109589
+    old_emote = 92364796546749
+    state = ConversationState(user_id=1)
+    state.last_item_id = old_emote
+    state.last_family = "emote"
+    state.results = [old_emote]
+    state.item_titles = {old_emote: "Smooth 360 flip Rizz"}
+    state.last_concept = "smooth flip"
+    state.pending_intent = "improve_metadata"
+    state.pending_action = {"intent": "improve_metadata"}
+    class _ReviveCommand:
+        def __init__(self):
+            self.called = None
+        async def callback(self, ctx, **kwargs):
+            self.called = kwargs
+            # In-flight lookups or generated output must not override the ID.
+            assert state.last_item_id == background
+            assert state.last_family == "backgrounds"
+            await ctx.send("Background recovery analysis completed")
+    class _ReviveBot:
+        def __init__(self):
+            self.cmd = _ReviveCommand()
+        def get_command(self, name):
+            return self.cmd if name == "revive" else None
+
+    with mock.patch.object(vc, "_planner_ai",
+                           side_effect=AssertionError("explicit IDs never use planner")):
+        route = asyncio.run(vc.plan_message(
+            "revive 125628794109589 Background", False, state))
+    assert route["intent"] == "revive_item", route
+    assert route["item_id"] == background, route
+    assert route["family"] == "backgrounds", route
+    bot = _ReviveBot()
+    msg = _FakeMessage(_FakeChannel())
+    msg.content = "revive 125628794109589 Background"
+    with mock.patch.object(cs, "require_authorized", return_value=None):
+        asyncio.run(_run_registry(bot, msg, route, state))
+    assert bot.cmd.called == {"item_id": background}
+    assert state.last_item_id == background
+    assert state.last_family == "backgrounds"
+    assert state.results == []
+    assert state.pending_intent is None
+    assert state.last_concept is None
+
+    with mock.patch.object(vc, "_planner_ai",
+                           side_effect=AssertionError("bare rename never uses planner")):
+        pending = asyncio.run(vc.plan_message("I want to rename", False, state))
+    assert pending["intent"] == "clarify", pending
+    assert str(background) in pending["question"]
+    assert "backgrounds" in pending["question"]
+    assert state.pending_intent == "review_title"
+    assert state.pending_action["item_id"] == background
+    assert state.pending_action["family"] == "backgrounds"
+    # Incomplete rename questions should never invoke autopsy on the old emote.
+    msg.content = "I want to rename"
+    with mock.patch("vanta_conversation._save_state", return_value=True):
+        asyncio.run(vc.handle_message(bot, msg, state))
+    assert any("What exact new title" in x for x in msg.channel.messages)
+    assert not any("Rebuilding the listing" in x for x in msg.channel.messages)
+
+    proposed = "Haunted Pizzeria Security Office Background"
+    with mock.patch.object(vc, "_planner_ai",
+                           side_effect=AssertionError("pending title must bypass planner")):
+        review = asyncio.run(vc.plan_message(proposed, False, state))
+    assert review["intent"] == "review_title", review
+    assert review["concept"] == proposed
+    assert review["item_id"] == background
+    assert review["family"] == "backgrounds"
+    with mock.patch.object(cs, "require_authorized", return_value=None), \
+         mock.patch("title_feedback.review_proposal",
+                    return_value="Background-only title feedback") as mocked:
+        msg.content = proposed
+        asyncio.run(_run_registry(bot, msg, review, state))
+    mocked.assert_called_once()
+    args, kwargs = mocked.call_args
+    assert args[0] == proposed
+    assert kwargs["item_id"] == background
+    assert kwargs["family"] == "backgrounds"
+    assert state.pending_intent is None
+    assert state.pending_action is None
+    assert state.last_item_id == background
+    assert "Background-only title feedback" in msg.channel.messages
+    assert bot.cmd.called == {"item_id": background}
+
+
+def test_bare_rename_without_selected_item_prompts_for_id():
+    state = ConversationState(user_id=1)
+    for phrase in ("I want to rename", "rename it", "I wanna rename",
+                   "please rename", "rename my background"):
+        with mock.patch.object(vc, "_planner_ai",
+                               side_effect=AssertionError("no planner")):
+            route = asyncio.run(vc.plan_message(phrase, False, state))
+        assert route["intent"] == "clarify", (phrase, route)
+        assert "Which item" in route["question"]
+        assert state.pending_intent is None
+
+
 def test_planner_context_inheritance():
     state = ConversationState(user_id=1)
     state.last_concept = "viral russian"
@@ -590,6 +689,8 @@ if __name__ == "__main__":
     test_find_opportunities_family_normalization_end_to_end()
     test_ai_planner_validation()
     test_selection_skips_ai()
+    test_explicit_background_revive_then_rename_targets_same_item()
+    test_bare_rename_without_selected_item_prompts_for_id()
     test_rename_routing()
     test_planner_context_inheritance()
     test_casual_leadins()
