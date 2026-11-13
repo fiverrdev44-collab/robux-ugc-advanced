@@ -113,6 +113,26 @@ def clean_creator_text_field(value, family, concept):
     return value
 
 
+def filter_intent_for_family(intent, family, concept):
+    """Remove AI-expanded terms outside the stated product identity.
+
+    Keep the user's own text intact; filter only fields inferred by AI.
+    """
+    if not isinstance(intent, dict):
+        return intent
+    out = dict(intent)
+    for key in ("primary", "synonyms", "style", "vibe", "colors", "references",
+                "specific_moves", "title_verbs", "search_terms"):
+        value = out.get(key)
+        if isinstance(value, list):
+            out[key] = [
+                entry for entry in value
+                if isinstance(entry, str) and grounded_keyword(
+                    entry, family, concept, for_alternative=True)
+            ]
+    return out
+
+
 def sanitize_generated_strategy(synth, family, concept):
     """Final categorical editorial check on *all* AI suggestions, not only
     titles. Mutates only a local dict, never DB or user's existing listing."""
