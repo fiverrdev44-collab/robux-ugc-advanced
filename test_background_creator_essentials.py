@@ -89,3 +89,23 @@ if __name__ == "__main__":
     test_market_price_and_launch_plan_are_grounded()
     test_failed_market_and_unsupported_claims_are_not_fabricated()
     print("PASS background creator essentials")
+
+
+def test_title_dry_run_not_ctr_forecast():
+    results = bi.title_dry_run(VISION, live=LIVE)
+    assert results and len(results) >= 1
+    assert results == sorted(results, key=lambda x: (-x["fit_score"], x["title"].casefold()))
+    assert all(0 <= row["fit_score"] <= 100 for row in results)
+    assert all("not predicted CTR" in row["score_type"] for row in results)
+    assert all("Moonlit Shrine Background" != row["title"] for row in results)
+    report = bi.format_background_dossier(VISION, live=LIVE)
+    assert "Title dry run" in report
+    assert "Favorites forecast: unavailable" in report
+
+
+def test_named_ip_warning_not_mistaken_for_rights_clearance():
+    assert bi.named_ip_caution(VISION, "Oggy and the Cockroaches background")
+    assert not bi.named_ip_caution(VISION, "an original moonlit shrine")
+    report = bi.format_background_dossier(VISION, notes="Oggy house", live=LIVE)
+    assert "Third-party IP warning" in report
+    assert "Renaming copied artwork" in report
