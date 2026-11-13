@@ -870,6 +870,7 @@ async def _run_registry(bot, message, route, state):
                 )
         return
     item_id = route.get("item_id")
+    switched_item = False
     concept = route.get("concept")
     family = route.get("family")
     days = route.get("days")
@@ -942,6 +943,8 @@ async def _run_registry(bot, message, route, state):
             return
         await message.channel.send(report[:1900])
         state.last_intent = "review_title"
+        state.pending_intent = None
+        state.pending_action = None
         state.last_concept = title
         if family:
             state.last_family = family
@@ -1018,6 +1021,23 @@ async def _run_registry(bot, message, route, state):
                 await message.channel.send("Send the item ID or Roblox URL first.")
                 return
             kwargs = {"item_id": item_id}
+            # Establish active context BEFORE awaiting a long revive/autopsy
+            # callback; follow-up turns must not accidentally target an old
+            # item. Only do this after command authorization succeeds.
+            if intent in ITEM_ACTIONS and state.last_item_id != item_id:
+                switched_item = True
+                state.last_item_id = item_id
+                state.results = []
+                state.last_concept = None
+                state.pending_intent = None
+                state.pending_action = None
+                if family:
+                    state.last_family = family
+                else:
+                    state.last_family = None
+                state.touch()
+            elif family:
+                state.last_family = family
         elif arg_kind == "concept":
             if not concept:
                 await message.channel.send("Describe the concept in a few words.")
@@ -1116,7 +1136,10 @@ async def _run_registry(bot, message, route, state):
         state.results = list(dict.fromkeys(ids))[:8]
     state.last_intent = intent
     state.last_item_id = item_id or (state.results[0] if state.results else None)
-    state.last_concept = concept or state.last_concept
+    # A prior emote's concept must never be reattached after successfully
+    # selecting an entirely different background item, even when the route
+    # carried an inherited concept before the callback ran.
+    state.last_concept = None if switched_item else (concept or state.last_concept)
     state.last_family = family or state.last_family
     state.pending_intent = None
     state.history.append({"intent": intent, "item_id": item_id,
@@ -1437,7 +1460,81 @@ def _rename_concept(text):
     return rest or None
 
 
+_BARE_RENAME_RE = re.compile(
+    r"^(?:re-?name|re-?title|retitle)"
+    r"(?:\s+(?:it|this|that|an item|my item|my background|the background|"
+    r"my emote|the emote|the item))?"
+    r"(?:\s+(?:to|as|into))?\s*[.?!]*$", re.I
+)
+
+
+def _bare_rename_request(text):
+    """A rename request with NO proposed name must not call autopsy/chain.
+
+    Works on casual phrases after stripping conversational filler, while
+    leaving explicit imperative rename-to-X legacy behavior unchanged.
+    """
+    return bool(_BARE_RENAME_RE.fullmatch(_strip_fillers(text).strip()))
+
+
+def _pending_title_reply(text, state):
+    """Accept a bare candidate only after VANTA asked for a title."""
+    action = state.pending_action if isinstance(state.pending_action, dict) else {}
+    if state.pending_intent != "review_title" or action.get("intent") != "review_title":
+        return None
+    candidate = (text or "").strip().strip(" \t\r\n\"'“”‘’")
+    if not 3 <= len(candidate) <= 80 or len(candidate.split()) > 12:
+        return None
+    low = candidate.lower().strip(" .!?")
+    if low in {"yes", "no", "ok", "cancel", "stop", "never mind", "skip",
+               "rename", "rename it", "help", "thanks"}:
+        return None
+    if (candidate.startswith("!") or extract_item_id(candidate)
+            or re.match(
+                r"^(?:rename|re-?name|retitle|rebrand|"
+                r"change\s+(?:the\s+)?name)\b", low)
+            or re.search(r"\b(?:please|can you|could you|check my|show me|"
+                         r"find me|revive|autopsy|sales|report)\b", low)):
+        return None
+    if not re.search(r"[a-zA-Z]", candidate):
+        return None
+    return candidate
+
+
 async def plan_message(text, has_attachment, state, bot=None):
+    # An explicit title-selection follow-up must use the item and family
+    # previously requested, not a stale autopsy target or unrelated concept.
+    if not has_attachment:
+        if _bare_rename_request(text):
+            target = extract_item_id(text) or state.last_item_id
+            if target:
+                state.pending_intent = "review_title"
+                state.pending_action = {
+                    "intent": "review_title", "item_id": target,
+                    "family": state.last_family, "created_at": time.time(),
+                }
+                return _intent(
+                    "clarify", item_id=target, family=state.last_family,
+                    question=("What exact new title should I review for item `" +
+                              str(target) + "`" +
+                              (" (" + state.last_family + ")" if state.last_family else "") +
+                              "? I won't rename or publish it."),
+                    confidence="high")
+            # Preserve the useful existing picker for an explicitly
+            # unspecified item; do not guess the previously selected emote.
+            if re.search(r"\ban item\b", text, re.I):
+                return _intent("list_my_items", confidence="high")
+            return _intent(
+                "clarify", question="Which item do you want to rename? "
+                "Send its ID or Roblox catalog URL.", confidence="high")
+        reply = _pending_title_reply(text, state)
+        if reply:
+            action = state.pending_action
+            return _intent(
+                "review_title", concept=reply,
+                item_id=action.get("item_id"),
+                family=action.get("family"),
+                confidence="high")
     # Recognize casual/privacy turns before filler removal or AI planning.
     # Full-match semantics prevent "hi, analyze this item" from becoming small talk.
     social = (classify_social(text, state=state)
@@ -1482,6 +1579,10 @@ async def plan_message(text, has_attachment, state, bot=None):
     fast = classify_intent(text, has_attachment=has_attachment, state=state,
                           use_ai=False)
     if fast["intent"] in ("greeting", "presence", "ack", "cancel", "help"):
+        return fast
+    # Explicit user-supplied IDs are authoritative for item actions. Never
+    # let the AI planner inherit a different remembered item or UGC family.
+    if extract_item_id(text) and fast["intent"] in ITEM_ACTIONS:
         return fast
     if fast["intent"] in ("check_sales", "check_experiments",
                           "check_visibility", "data_audit", "list_my_items",
@@ -1617,13 +1718,14 @@ async def handle_message(bot, message, state):
     route = await plan_message(text, has_attachment, state, bot=bot)
     if route["intent"] == "clarify":
         names = [t for t in list(state.item_titles.values())[:2] if t]
-        if len(names) == 2:
+        if route.get("question"):
+            question = route["question"]
+        elif len(names) == 2:
             question = (f"I didn't catch that. Did you mean **{names[0]}** or "
                         f"**{names[1]}**? Or type `!guide` for the tool list.")
         else:
-            question = route.get("question") or (
-                "I didn't catch that. Did you mean one of your tracked items? "
-                "Or type `!guide` for the tool list.")
+            question = ("I didn't catch that. Did you mean one of your "
+                        "tracked items? Or type `!guide` for the tool list.")
         await message.channel.send(question)
         if not getattr(state, "_skip_persist_once", False):
             await asyncio.to_thread(_save_state, message.channel.id,
