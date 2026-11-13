@@ -1490,6 +1490,9 @@ def _pending_title_reply(text, state):
                "rename", "rename it", "help", "thanks"}:
         return None
     if (candidate.startswith("!") or extract_item_id(candidate)
+            or re.match(
+                r"^(?:rename|re-?name|retitle|rebrand|"
+                r"change\s+(?:the\s+)?name)\b", low)
             or re.search(r"\b(?:please|can you|could you|check my|show me|"
                          r"find me|revive|autopsy|sales|report)\b", low)):
         return None
