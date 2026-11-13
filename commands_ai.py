@@ -709,22 +709,19 @@ def register_ai_commands(bot):
 
     @bot.command(name="background_analyze")
     async def background_analyze(ctx, *, notes: str = ""):
-        """Bounded multi-pass visual review + AssetType 92 market comparison.
+        """Avatar Marketplace search/title intelligence, category 92 only.
 
-        Reuses existing model keys, shared API scheduler and command security.
-        Never creates assets, mutates the database, or guarantees CTR.
+        Artwork is inspected for factual scene terms, NOT for design advice.
+        No extra Roblox API requests or unverified algorithm predictions.
         """
-        from background_intelligence import (
-            observations, scene_phrase, grounded_concept,
-            format_background_dossier, discord_chunks,
-        )
-        from avatar_backgrounds import validate_image
+        from background_intelligence import scene_phrase, discord_chunks
         if not ctx.message.attachments:
             return await ctx.send(
                 "**Usage:** attach your background PNG/JPG and write "
                 "`!background_analyze <what you designed>`. "
-                "I will check image dimensions and composition, propose grounded "
-                "titles, and compare against sampled Roblox Avatar Backgrounds."
+                "I will research category 92 Marketplace title competition, "
+                "search-term relevance and grounded naming opportunities. "
+                "No artwork-editing recommendations."
             )
         if not is_available():
             return await ctx.send("AI vision is unavailable. Try `!ai_status`.")
@@ -751,9 +748,8 @@ def register_ai_commands(bot):
             images.append({"bytes": data, "mime": ctype})
         if not images:
             return await ctx.send("Attach a PNG, JPEG or BMP under 8 MB.")
-        quality = await asyncio.to_thread(validate_image, images[0]["bytes"])
-        await ctx.send("🌌 Inspecting your Avatar Background artwork and "
-                       "checking relevant marketplace evidence...")
+        await ctx.send("🔎 Identifying scene search terms and checking "
+                       "Roblox Avatar Background Marketplace evidence...")
         try:
             image_notes = ("Roblox Avatar Background (AssetType 92). "
                            + (notes or "")[:400])
@@ -763,13 +759,9 @@ def register_ai_commands(bot):
             print(f"[background_analyze] vision: {type(exc).__name__}", flush=True)
             vision = {}
         if not vision:
-            body = (
-                "⚠️ The image model did not produce a usable result. "
-                "No scene identity or title has been invented.\n"
-                + format_background_dossier(
-                    {}, notes="", image_quality=quality, include_titles=False))
-            for chunk in discord_chunks(body):
-                await ctx.send(chunk)
+            await ctx.send(
+                "⚠️ Could not identify grounded search terms from the image. "
+                "No algorithm score, competitor gap or title has been invented.")
             return
         # The submitted image is a background by user declaration even if
         # a fallible vision model calls it another category.
@@ -794,9 +786,8 @@ def register_ai_commands(bot):
             print("[background_analyze] opportunities: " +
                   type(exc).__name__, flush=True)
             background_market = {"status": "unavailable", "angles": []}
-        # Multi-pass creative director: existing first vision + one independent
-        # vision critique + at most two text-generation passes. No new Roblox
-        # requests and no database mutations. Fail-soft on provider errors.
+        # Creative search terms + skeptical title comparison, at most two
+        # text generations. Image is not passed to a second aesthetic critic.
         review = None
         try:
             from background_review import (
@@ -811,37 +802,13 @@ def register_ai_commands(bot):
             print("[background_analyze] creative director: " +
                   type(exc).__name__, flush=True)
             review_text = (
-                "## Multi-pass creative review unavailable\n"
-                "The initial image inspection above remains valid as a "
-                "tentative AI interpretation. No extra conclusions invented.")
-        # Show a single final naming decision. The preliminary dossier still
-        # reports visual/export evidence, but omits its provisional title
-        # experiments when the richer review returned a grounded winner.
-        show_provisional_titles = (
-            not isinstance(review, dict) or review.get("status") != "ok"
-        )
-        dossier = format_background_dossier(
-            vision, notes, image_quality=quality, live=live,
-            include_titles=show_provisional_titles)
-        for chunk in discord_chunks(dossier):
-            await ctx.send(chunk)
+                "## Marketplace naming review unavailable\n"
+                "No fabricated search rankings, algorithm scores, or CTR.")
         from background_opportunities import format_opportunity_evidence
         for chunk in discord_chunks(format_opportunity_evidence(background_market)):
             await ctx.send(chunk)
         for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
-        if getattr(ctx, "vanta_state", None) is not None:
-            concept = grounded_concept(vision, notes)
-            if concept:
-                ctx.vanta_state.pending_chain = {
-                    "concept": concept[:300],
-                    "family": "backgrounds",
-                }
-                await ctx.send(
-                    "**Want the full background title-generation chain using "
-                    "this image analysis?** Reply `yes` or `no`. "
-                    "Results are candidates, not measured CTR forecasts."
-                )
 
     @bot.command(name="ai_status")
     async def ai_status(ctx):

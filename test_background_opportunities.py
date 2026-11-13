@@ -136,8 +136,8 @@ def test_creative_pass_receives_market_context_without_extra_calls():
     assert output["status"] == "ok"
     assert output["winner"] == "Animatronic Bear Security Office Background"
     summary = format_multi_pass_review(output)
-    assert "Title-angle evidence" in summary
-    assert "Not an estimated CTR" in summary
+    assert "Matching stored phrase" in summary
+    assert "organic Marketplace impressions, CTR" in summary
     assert len(output["alternatives"]) == 2 or len(output["alternatives"]) == 1
 
 
