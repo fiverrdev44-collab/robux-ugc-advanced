@@ -55,8 +55,8 @@ def scene_angles(vision, notes="", max_angles=6):
                 seeds.append(" ".join(words[:2]))
     creator = str(notes or "")[:320].lower()
     # A franchise is a creator-identified search angle, not permission to use IP.
-    if re.search(r"\bfnaf\b|five nights at freddy", creator) and anchor:
-        seeds.append("fnaf " + anchor)
+    if re.search(r"\bfnaf\b|five nights at freddy", creator) and (location or anchor):
+        seeds.append("fnaf " + (location or anchor))
     if len(seeds) < 2 and o["search_description"]:
         words = _tokens(o["search_description"])
         if len(words) >= 2:
