@@ -784,6 +784,16 @@ def register_ai_commands(bot):
                     verify_niche, anchor, "backgrounds", 30, 1, 12, True)
             except Exception as exc:
                 live = {"ok": False, "error": type(exc).__name__}
+        # Reuse stored AssetType 92 listings as an optional, bounded category
+        # research pass. No new Roblox calls, writes or speculative CTR.
+        try:
+            from background_opportunities import lookup_background_opportunities
+            background_market = await asyncio.to_thread(
+                lookup_background_opportunities, vision, notes)
+        except Exception as exc:
+            print("[background_analyze] opportunities: " +
+                  type(exc).__name__, flush=True)
+            background_market = {"status": "unavailable", "angles": []}
         # Multi-pass creative director: existing first vision + one independent
         # vision critique + at most two text-generation passes. No new Roblox
         # requests and no database mutations. Fail-soft on provider errors.
@@ -795,7 +805,7 @@ def register_ai_commands(bot):
             from gemini_brain import _generate
             review = await asyncio.to_thread(
                 build_multi_pass_review, vision, images, notes, live,
-                analyze_image_for_ugc, _generate)
+                analyze_image_for_ugc, _generate, background_market)
             review_text = format_multi_pass_review(review)
         except Exception as exc:
             print("[background_analyze] creative director: " +
@@ -814,6 +824,9 @@ def register_ai_commands(bot):
             vision, notes, image_quality=quality, live=live,
             include_titles=show_provisional_titles)
         for chunk in discord_chunks(dossier):
+            await ctx.send(chunk)
+        from background_opportunities import format_opportunity_evidence
+        for chunk in discord_chunks(format_opportunity_evidence(background_market)):
             await ctx.send(chunk)
         for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
