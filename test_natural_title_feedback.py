@@ -18,12 +18,26 @@ def test_literal_proposals_and_no_false_rename():
         "is Glowing Blue Office Background a good title?":
             "Glowing Blue Office Background",
         "what about 'Moonlit Shrine Background'?": "Moonlit Shrine Background",
+        "Can i rename as FNAF Pizzeria Security Haunted Office":
+            "FNAF Pizzeria Security Haunted Office",
+        "Can I rename this background to Haunted Security Office Background?":
+            "Haunted Security Office Background",
+        "Should I rename it to Animatronic Bear Security Office Background?":
+            "Animatronic Bear Security Office Background",
+        "What if I rename my emote as Smooth Side Step Emote?":
+            "Smooth Side Step Emote",
     }
     for phrase, expected in phrases.items():
         assert tf.proposed_title(phrase) == expected, (phrase, tf.proposed_title(phrase))
     for phrase in ("rename viral russian", "change title of my old item",
                    "make a better name", "what if i call it?", "check item 123456789"):
         assert tf.proposed_title(phrase) is None, phrase
+    for phrase in ("Can I rename it?", "Could I rename as?", "Should I rename?",
+                   "Would it be a good idea to rename it?"):
+        assert tf.proposed_title(phrase) is None, phrase
+        assert tf.title_review_question(phrase), phrase
+    assert not tf.title_review_question("rename it to Haunted Security Office")
+    assert not tf.title_review_question("Rename viral russian")
 
 
 def test_user_context_router_prevents_wrong_command():
@@ -81,6 +95,38 @@ class FakeConn:
         return self.cursor_instance
     def close(self):
         self.closed = True
+
+
+def test_rename_questions_never_launch_chain():
+    state = vc.ConversationState(user_id=1)
+    state.last_family = "backgrounds"
+    state.last_item_id = 131939733454232
+    questions = (
+        "Can i rename as FNAF Pizzeria Security Haunted Office",
+        "Can I rename this background to Haunted Security Office Background?",
+        "Should I rename it to Creepy Animatronic Security Office Background?",
+        "What if I rename my background as Security Office Night Background?",
+    )
+    with mock.patch.object(vc, "_planner_ai",
+                           side_effect=AssertionError("AI planner must not run")):
+        for question in questions:
+            route = vc.classify_intent(question, state=state, use_ai=False)
+            assert route["intent"] == "review_title", (question, route)
+            assert route["family"] == "backgrounds"
+            planned = asyncio.run(vc.plan_message(question, False, state))
+            assert planned["intent"] == "review_title", (question, planned)
+            assert planned["intent"] != "create_ideas"
+            assert planned["concept"] == tf.proposed_title(question)
+        for incomplete in ("Can I rename it?", "Should I rename?",
+                           "Can I rename as?"):
+            route = vc.classify_intent(incomplete, state=state, use_ai=False)
+            assert route["intent"] == "clarify", (incomplete, route)
+            planned = asyncio.run(vc.plan_message(incomplete, False, state))
+            assert planned["intent"] == "clarify", (incomplete, planned)
+    # An explicit instruction should still use the old intentional workflow.
+    instruction = asyncio.run(vc.plan_message(
+        "rename it to viral russian", False, state))
+    assert instruction["intent"] == "create_ideas", instruction
 
 
 def test_background_evidence_is_asset_type_scoped():
@@ -239,6 +285,7 @@ def test_dispatch_readonly_authorized_and_context():
 if __name__ == "__main__":
     test_literal_proposals_and_no_false_rename()
     test_user_context_router_prevents_wrong_command()
+    test_rename_questions_never_launch_chain()
     test_background_evidence_is_asset_type_scoped()
     test_stale_emote_context_never_changes_background_category()
     test_model_feedback_no_mutation_and_no_scores()
