@@ -787,6 +787,7 @@ def register_ai_commands(bot):
         # Multi-pass creative director: existing first vision + one independent
         # vision critique + at most two text-generation passes. No new Roblox
         # requests and no database mutations. Fail-soft on provider errors.
+        review = None
         try:
             from background_review import (
                 build_multi_pass_review, format_multi_pass_review,
@@ -808,7 +809,7 @@ def register_ai_commands(bot):
         # experiments when the richer review returned a grounded winner.
         show_provisional_titles = (
             not isinstance(review, dict) or review.get("status") != "ok"
-        ) if "review" in locals() else True
+        )
         dossier = format_background_dossier(
             vision, notes, image_quality=quality, live=live,
             include_titles=show_provisional_titles)
