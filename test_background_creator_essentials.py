@@ -98,8 +98,9 @@ def test_named_ip_warning_not_mistaken_for_rights_clearance():
     assert bi.named_ip_caution(VISION, "Oggy and the Cockroaches background")
     assert not bi.named_ip_caution(VISION, "an original moonlit shrine")
     report = bi.format_background_dossier(VISION, notes="Oggy house", live=LIVE)
-    assert "Third-party IP warning" in report
-    assert "Renaming copied artwork" in report
+    assert "Third-party IP warning" not in report
+    assert "IP/trademark caution" not in report
+    assert "Renaming copied artwork" not in report
 
 
 if __name__ == "__main__":
