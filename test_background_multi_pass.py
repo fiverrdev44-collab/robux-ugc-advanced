@@ -56,6 +56,54 @@ def test_four_passes_and_human_readable_output():
     assert "CTR" in report
 
 
+def test_horror_office_titles_reject_awkward_detail_stacking():
+    horror_vision = {
+        "visual_summary": "Haunted security office with animatronic bear peeking through a window",
+        "search_description": "Security Office Background",
+        "distinctive_features": [
+            "animatronic bear peeking at the office window",
+            "glowing computer on metal desk",
+            "yellow lockers against metal walls",
+        ],
+    }
+    notes = "FNAF Freddy Fazbear haunted security office background"
+    live = {"ok": True, "category_correct": 1,
+            "top_competitors": [
+                {"name": "FNAF Sister Location Office Background",
+                 "asset_type_id": 92, "favorites": 15, "price": 200}]}
+    rejected = [
+        "Animatronic Face Frame Security Office Background",
+        "Animatronic Face Security Office Background",
+        "Haunted Metal Panel Security Office Background",
+    ]
+    assert br._valid_titles(rejected, horror_vision, notes, live) == []
+    approved = br._valid_titles([
+        "Animatronic Bear Security Office Background",
+        "Haunted Security Office Background",
+    ], horror_vision, notes, live)
+    assert "Animatronic Bear Security Office Background" in approved
+    prompts = []
+    def model(prompt, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return '{"titles":["Animatronic Face Frame Security Office Background", "Haunted Metal Panel Security Office Background", "Animatronic Bear Security Office Background"]}'
+        return ('{"winner":"Animatronic Face Frame Security Office Background",'
+                '"alternatives":["Animatronic Bear Security Office Background"],'
+                '"challenge":"Some competitor titles overlap on security office.",'
+                '"why_winner":"Readable recognizable setting and scary character.",'
+                '"description":"A haunted office where an animatronic bear peeks through the window."}')
+    result = br.build_multi_pass_review(
+        horror_vision, [], notes, live, lambda *a: {}, model)
+    assert result["status"] == "ok", result
+    assert result["winner"] not in rejected
+    assert all(row["title"] not in rejected for row in result["scored"])
+    assert "Animatronic Bear Security Office Background" in [
+        row["title"] for row in result["scored"]]
+    assert len(prompts) == 2
+    assert "NATURAL Roblox product names" in prompts[0]
+    assert "Reject unnatural" in prompts[1]
+
+
 def test_unavailable_providers_fail_soft_without_false_evidence():
     def no_vision(*args):
         raise RuntimeError("rate limited")
@@ -128,6 +176,7 @@ def test_discord_command_keeps_one_market_search_and_two_visual_calls():
 
 if __name__ == "__main__":
     test_four_passes_and_human_readable_output()
+    test_horror_office_titles_reject_awkward_detail_stacking()
     test_unavailable_providers_fail_soft_without_false_evidence()
     test_prompt_injection_and_ip_claim_guards()
     test_discord_command_keeps_one_market_search_and_two_visual_calls()

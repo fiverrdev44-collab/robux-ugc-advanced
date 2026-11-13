@@ -21,6 +21,16 @@ _CLAIMS = ("guaranteed", "viral", "trending", "best seller", "top seller",
 _CREATIVE_MODIFIERS = {"cozy", "dreamy", "mystical", "mystic",
                        "serene", "quiet", "cinematic", "moody", "ethereal",
                        "peaceful", "whimsical", "atmospheric"}
+# These are visually possible but poor PRIMARY buying hooks for a horror office.
+# A title should identify the recognizable setting/character, not an incidental
+# prop or a technical phrase assembled from arbitrary image attributes.
+_LOW_SALIENCE = {"face", "frame", "panel", "metal", "locker", "lockers",
+                 "wall", "walls", "computer", "monitor", "desk", "floor"}
+_SEARCH_HOOKS = ("animatronic bear", "animatronic", "haunted", "creepy",
+                 "horror", "bear", "ghost", "nightmare", "moonlit",
+                 "glowing portal", "portal", "neon", "rain", "cozy")
+_AWKWARD_PHRASES = ("face frame", "metal panel", "animatronic face",
+                    "panel security", "frame security", "computer security")
 
 
 def _safe(value, limit=180):
@@ -66,6 +76,45 @@ def _source_words(vision, notes):
     return out
 
 
+def _editorial_bad(title, vision, notes):
+    """Reject machine-assembled names instead of rewarding any scene detail."""
+    low = " ".join(re.findall(r"[a-z0-9]+", title.lower()))
+    if any(phrase in low for phrase in _AWKWARD_PHRASES):
+        return True
+    anchor = scene_phrase(vision, notes)
+    # Security office is a concrete searchable place, not two unrelated nouns.
+    if anchor and "security office" in anchor.lower() and "security office" not in low:
+        return True
+    tokens = _words(title)
+    # Several weak incidental-object tokens usually produce unnatural titles.
+    return len(tokens & _LOW_SALIENCE) >= 2
+
+
+def _editorial_candidates(vision, notes):
+    """Deterministic natural alternatives grounded in notes/vision only."""
+    anchor = scene_phrase(vision, notes)
+    if not anchor:
+        return []
+    source = _source_words(vision, notes)
+    base = anchor.title()
+    out = []
+    for phrase in _SEARCH_HOOKS:
+        hook_tokens = _words(phrase)
+        if hook_tokens and hook_tokens.issubset(source) and not hook_tokens.issubset(_words(base)):
+            out.append(f"{phrase.title()} {base} Background")
+    out.append(f"{base} Background")
+    return out[:10]
+
+
+def _complete_comment(value, limit=170):
+    """Never cut critique/reasoning in the middle of an unfinished word."""
+    safe = _safe(value, limit + 100)
+    if len(safe) <= limit:
+        return safe
+    clipped = safe[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return clipped + "…" if clipped else ""
+
+
 def _valid_titles(raw_titles, vision, notes, live):
     if not isinstance(raw_titles, list):
         return []
@@ -79,6 +128,8 @@ def _valid_titles(raw_titles, vision, notes, live):
             continue
         words = re.findall(r"[a-z0-9]+", title.lower())
         if not 3 <= len(words) <= 8 or set(words) & _UNSUPPORTED:
+            continue
+        if _editorial_bad(title, vision, notes):
             continue
         meaningful = _words(title)
         if not meaningful or not source or not meaningful & source:
@@ -107,14 +158,25 @@ def _fit(title, vision, notes, live):
     details = set()
     for item in o["distinctive_features"]:
         details.update(_words(item))
-    detail_score = 20 if title_tokens & details else 8
+    # Do not give a background full credit for incidental props such as metal
+    # panels or locker doors. Prefer meaningful scene/character hooks.
+    salient = details - _LOW_SALIENCE
+    detail_score = (20 if title_tokens & salient else
+                    7 if title_tokens & details else 8)
+    source = _source_words(vision, notes)
+    hook_bonus = (12 if any(
+        _words(phrase).issubset(title_tokens) and
+        _words(phrase).issubset(source)
+        for phrase in _SEARCH_HOOKS) else 0)
+    weak_penalty = 7 * len(title_tokens & _LOW_SALIENCE)
     length = len(title.split())
     readability = 15 if 3 <= length <= 6 else 8 if length <= 8 else 0
     overlap = title_sample_overlap(title, verified_background_competitors(live))
     distinction = (0 if overlap["exact"] else 5 if overlap["ratio"] >= .70
                    else 10 if overlap["ratio"] >= .45 else 15)
-    return {"title": title, "fit": min(100, identity + detail_score +
-            readability + 10 + distinction), "overlap": overlap}
+    return {"title": title, "fit": max(0, min(100, identity + detail_score +
+            readability + 10 + distinction + hook_bonus - weak_penalty)),
+            "overlap": overlap}
 
 
 def _safe_description(value, vision, notes):
@@ -169,7 +231,12 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "the Roblox experience/game recommendation algorithm. Return ONLY "
         "JSON {\"titles\": [\"...\"]}: 8-12 creative, SEARCH-RELEVANT "
         "names ending in Background, 3-8 words, based on real visible "
-        "scene details. Preserve a recognizable search noun, then compare "
+        "scene details. They must sound like NATURAL Roblox product names, "
+        "not concatenated image-recognition tags. Never use phrases like "
+        "'Animatronic Face Frame', 'Haunted Metal Panel' or 'Face Security'. "
+        "Prioritize the actual setting, recognizable subject, and atmosphere; "
+        "incidental wall/locker/computer details are not primary buying hooks. "
+        "Preserve a recognizable search noun, then compare "
         "underused truthful feature angles against same-category titles. "
         "An empty sample is NOT demand or a validated keyword gap. "
         "Favorites are NOT impressions, purchases, sales or CTR. "
@@ -189,9 +256,12 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     generated = _valid_titles(creative.get("titles"), vision, notes, live)
     if generated:
         passes["creative"] = "ok"
-    fallback = _valid_titles(candidate_titles(
-        vision, notes, limit=8, live=live), vision, notes, live)
-    titles = list(dict.fromkeys(generated + fallback))[:12]
+    fallback = _valid_titles(_editorial_candidates(vision, notes) +
+        candidate_titles(vision, notes, limit=8, live=live),
+        vision, notes, live)
+    # Prefer editorially grounded phrases. The model must not force a
+    # distinctive-looking but awkward combination of incidental detail tokens.
+    titles = list(dict.fromkeys(fallback + generated))[:12]
     scored = sorted((_fit(s, vision, notes, live) for s in titles),
                     key=lambda row: (-row["fit"], row["title"].casefold()))
     if not scored:
@@ -206,7 +276,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "(two other allowed titles), challenge, why_winner, and description. "
             "Challenge search-term relevance, existing sampled title overlap, "
             "and unsupported market-gap claims. Compare the top recognizable "
-            "search phrase with a distinctive visible feature. Choose titles "
+            "search phrase with a distinctive visible feature. Reject unnatural "
+            "naming even if it appears unique; metal panels, face frames and "
+            "lockers are not the main buying hook for a horror office. "
+            "Choose a clear human-readable scene name over keyword stacking. "
+            "Choose titles "
             "only from ALLOWED TITLES. Write a short factual, searchable "
             "listing description, not keyword stuffing. No visual/artwork "
             "editing, Photoshop/Photopea, crop or lighting recommendations. "
@@ -244,8 +318,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     return {
         "status": "ok", "passes": passes, "scored": scored,
         "winner": winner, "alternatives": alternatives,
-        "challenge": _safe(reviewer.get("challenge"), 210),
-        "why_winner": _safe(reviewer.get("why_winner"), 210),
+        "challenge": _complete_comment(reviewer.get("challenge"), 165),
+        "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
         "description": (_safe_description(reviewer.get("description"), vision, notes)
                         or listing_description(vision, notes)),
         "competitors": competitors, "opportunity_evidence": market,
