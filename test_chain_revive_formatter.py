@@ -89,7 +89,7 @@ def test_format_chain_non_variant_is_independent_of_prior_context():
          mock.patch("creator_memory.record_run") as saved:
         chunks = chain.format_chain(_result())
     body = "\n".join(chunks)
-    assert "CHAIN — \`Jabba No Chill Hip Hop Street Dance\`" in body
+    assert "CHAIN — `Jabba No Chill Hip Hop Street Dance`" in body
     assert "ASSESSMENT & OPTIONS" in body
     saved.assert_called_once()
     assert saved.call_args.kwargs["item_id"] is None
