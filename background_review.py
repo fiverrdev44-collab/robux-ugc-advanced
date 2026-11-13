@@ -87,6 +87,22 @@ def _editorial_bad(title, vision, notes):
         return True
     tokens = _words(title)
     # Several weak incidental-object tokens usually produce unnatural titles.
+    if isinstance(vision, dict):
+        # Avoid definitive subject-placement names after image cross-check
+        # disagreed or could not independently verify a relationship.
+        uncertain_rels = vision.get("visual_conflicting_placements") or []
+        if uncertain_rels and any(
+            re.search(r"\b" + re.escape(word) + r"\b", low)
+            for word in ("window", "poster", "portrait", "painting", "screen",
+                         "doorway", "wall", "monitor", "picture")
+        ):
+            return True
+        ambiguous_subjects = vision.get("visual_conflicting_subjects") or []
+        if ambiguous_subjects and any(
+            re.search(r"\b" + re.escape(word) + r"\b", low)
+            for word in ambiguous_subjects
+        ):
+            return True
     return len(tokens & _LOW_SALIENCE) >= 2
 
 
@@ -102,7 +118,8 @@ def _editorial_candidates(vision, notes):
         hook_tokens = _words(phrase)
         if hook_tokens and hook_tokens.issubset(source) and not hook_tokens.issubset(_words(base)):
             out.append(f"{phrase.title()} {base} Background")
-    out.append(f"{base} Background")
+    out.append(f"{base} Background" if len(base.split()) >= 2
+               else f"{base} Scene Background")
     return out[:10]
 
 
@@ -210,6 +227,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "scene": first["visual_summary"],
         "search_phrase": scene_phrase(vision, notes),
         "visible_features": first["distinctive_features"],
+        "independent_visual_check": (
+            vision.get("visual_verification", "not checked")),
+        "visual_claim_disagreements": (
+            vision.get("visual_verification_notes") or [])[:3],
+        "uncertain_details": (vision.get("uncertain_elements") or [])[:3],
         "sampled_asset_type_92_listings": competitors,
         "stored_background_title_angles": [
             {"phrase": x.get("phrase"), "sample_matches": x.get("sample_matches"),
@@ -232,7 +254,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "JSON {\"titles\": [\"...\"]}: 8-12 creative, SEARCH-RELEVANT "
         "names ending in Background, 3-8 words, based on real visible "
         "scene details. They must sound like NATURAL Roblox product names, "
-        "not concatenated image-recognition tags. Never use phrases like "
+        "not concatenated image-recognition tags. If independent visual "
+        "observations disagree about an object or its placement, never "
+        "build a name around that uncertain detail. "
+        "Never use phrases like "
         "'Animatronic Face Frame', 'Haunted Metal Panel' or 'Face Security'. "
         "Prioritize the actual setting, recognizable subject, and atmosphere; "
         "incidental wall/locker/computer details are not primary buying hooks. "
@@ -256,12 +281,17 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     generated = _valid_titles(creative.get("titles"), vision, notes, live)
     if generated:
         passes["creative"] = "ok"
+    else:
+        passes["creative"] = ("no_accepted_titles" if creative
+                              else "provider_or_parse_unavailable")
     fallback = _valid_titles(_editorial_candidates(vision, notes) +
         candidate_titles(vision, notes, limit=8, live=live),
         vision, notes, live)
     # Prefer editorially grounded phrases. The model must not force a
     # distinctive-looking but awkward combination of incidental detail tokens.
     titles = list(dict.fromkeys(fallback + generated))[:12]
+    if not generated and fallback:
+        passes["creative"] = "fallback_only"
     scored = sorted((_fit(s, vision, notes, live) for s in titles),
                     key=lambda row: (-row["fit"], row["title"].casefold()))
     if not scored:
@@ -275,7 +305,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "Return only JSON with winner (one allowed title), alternatives "
             "(two other allowed titles), challenge, why_winner, and description. "
             "Challenge search-term relevance, existing sampled title overlap, "
-            "and unsupported market-gap claims. Compare the top recognizable "
+            "and unsupported market-gap claims. Challenge uncertain image "
+            "claims, never upgrade an inferred object to a verified fact. "
+            "Compare the top recognizable "
             "search phrase with a distinctive visible feature. Reject unnatural "
             "naming even if it appears unique; metal panels, face frames and "
             "lockers are not the main buying hook for a horror office. "
