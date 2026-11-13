@@ -114,7 +114,7 @@ def test_unavailable_providers_fail_soft_without_false_evidence():
     out = br.build_multi_pass_review(
         VISION, [], "", {"ok": False, "error": "HTTP 429"}, no_vision, no_text)
     assert out["passes"]["independent_vision"] == "skipped"
-    assert out["passes"]["creative"] == "unavailable"
+    assert out["passes"]["creative"] == "fallback_only"
     assert out["passes"]["skeptical_critic"] == "unavailable"
     assert not out["competitors"]
     report = br.format_multi_pass_review(out)
