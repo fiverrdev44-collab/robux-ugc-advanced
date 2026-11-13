@@ -65,6 +65,13 @@ def observations(vision):
 def scene_phrase(vision, notes=""):
     """A conservative two- or three-word phrase, NOT a demand prediction."""
     o = observations(vision)
+    # A verified contradiction takes precedence over the creator's proposed
+    # keywords. We do not keep searching for a scene that the image passes
+    # consistently contradicted.
+    if isinstance(vision, dict) and vision.get("visual_scene_disagreement"):
+        anchor = _short_text(vision.get("visual_scene_anchor"), 70)
+        if anchor and not _is_untrusted_instruction(anchor):
+            return anchor
     # Prefer creator notes, then visual description, and never guess a place
     # that neither the creator nor the vision provider mentioned.
     candidates = [_short_text(notes, 300), o["search_description"],
