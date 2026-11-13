@@ -30,7 +30,24 @@ def scene_angles(vision, notes="", max_angles=6):
     """Use the creator's identified scene plus observed features; never invent."""
     o = observations(vision)
     anchor = scene_phrase(vision, notes)
-    seeds = [anchor] if anchor else []
+    # Prefer an explicit descriptive location pair (e.g., security office),
+    # rather than a fragment such as "blue security" from creator notes.
+    sources = [str(notes or "")[:320], o["search_description"],
+               o["visual_summary"]]
+    location = None
+    for source in sources:
+        if _is_untrusted_instruction(source):
+            continue
+        match = re.search(
+            r"\b([a-z]{3,20}\s+(?:office|room|hallway|corridor|forest|"
+            r"street|garden|beach|shrine|castle|station))\b",
+            source.lower())
+        if match:
+            location = match.group(1)
+            break
+    seeds = [location] if location else []
+    if anchor and anchor != location:
+        seeds.append(anchor)
     for detail in o["distinctive_features"][:4]:
         if detail and not _is_untrusted_instruction(detail):
             words = _tokens(detail)
