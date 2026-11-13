@@ -18,6 +18,9 @@ _UNSUPPORTED = {"animated", "animation", "moving", "interactive", "reactive",
                 "parallax", "gif", "video", "dynamic", "3d", "4d", "live"}
 _CLAIMS = ("guaranteed", "viral", "trending", "best seller", "top seller",
            "click-through rate", "ctr", "sales", "profit")
+_CREATIVE_MODIFIERS = {"cozy", "dreamy", "mystical", "mystic",
+                       "serene", "quiet", "cinematic", "moody", "ethereal",
+                       "peaceful", "whimsical", "atmospheric"}
 
 
 def _safe(value, limit=180):
@@ -80,7 +83,9 @@ def _valid_titles(raw_titles, vision, notes, live):
         meaningful = _words(title)
         if not meaningful or not source or not meaningful & source:
             continue
-        if len(meaningful & source) / len(meaningful) < 0.5:
+        # Adjectival creativity is fine; new unobserved objects, characters
+        # and locations are not. Keep unsupported scene nouns out.
+        if meaningful - source - _CREATIVE_MODIFIERS:
             continue
         ok, _ = validate_title(notes, title, family="backgrounds")
         if not ok or title.casefold() in existing or title.casefold() in seen:
