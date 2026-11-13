@@ -63,6 +63,7 @@ INTENTS = {
     "find_opportunities": "Find low-competition niches or trending opportunities",
     "create_ideas": "Generate a concept, title, description, and launch direction",
     "improve_metadata": "Improve the title/description/tags for an item",
+    "review_title": "Give read-only feedback on a proposed item title",
     "check_sales": "Read recorded sales and revenue",
     "check_experiments": "Show experiment results and matched-control evidence",
     "check_visibility": "Show search-visibility coverage and freshness",
@@ -384,6 +385,17 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
         return _intent("ack", confidence="high")
     if re.match(r"^(cancel|never ?mind|nvm|stop|forget it)\b", low):
         return _intent("cancel", confidence="high")
+
+    # A proposal is a request for an opinion, NEVER a rename or launch.
+    # Preserve the exact title rather than passing it through clean_concept.
+    if not has_attachment:
+        from title_feedback import proposed_title
+        proposal = proposed_title(text)
+        if proposal:
+            return _intent(
+                "review_title", item_id=(item_id or state.last_item_id),
+                concept=proposal, family=(family or state.last_family),
+                confidence="high")
 
     # A bare item ID or URL establishes the item immediately.
     if item_id and re.fullmatch(r"(?:https?://\S+|\d{6,20})[.! ]*", low.strip()):
@@ -900,6 +912,38 @@ async def _run_registry(bot, message, route, state):
         state.results = []
         await message.channel.send("Stopped. Tell me the next thing you want to do.")
         return
+    if intent == "review_title":
+        if not await _authorized_target("autopsy"):
+            return
+        title = (concept or "").strip()
+        if not title:
+            await message.channel.send("Tell me the exact proposed title.")
+            return
+        from title_feedback import review_proposal
+        try:
+            report = await asyncio.wait_for(asyncio.to_thread(
+                review_proposal, title, family=family or state.last_family,
+                item_id=item_id), timeout=75)
+        except asyncio.TimeoutError:
+            await message.channel.send(
+                "Title review timed out. No listing was modified.")
+            return
+        except Exception as exc:
+            print("[vanta-router] review_title " + type(exc).__name__, flush=True)
+            await message.channel.send(
+                "The title reviewer is unavailable. No listing was modified.")
+            return
+        await message.channel.send(report[:1900])
+        state.last_intent = "review_title"
+        state.last_concept = title
+        if family:
+            state.last_family = family
+        if item_id:
+            state.last_item_id = item_id
+        state.bot_messages.append(report[:500])
+        state.bot_messages = state.bot_messages[-6:]
+        state.touch()
+        return
     if intent == "list_my_items":
         rows = await _fetch_my_items()
         if not rows:
@@ -1139,6 +1183,7 @@ ALLOWED ACTIONS
 - find_opportunities: niches, trends, gaps, what to create next
 - create_ideas: new concept, title ideas, brainstorm for a new item
 - improve_metadata: change/improve title, description, or listing of an item
+- review_title: critique the exact title suggested by the user without changing it
 - tags: craft an optimized description (no tag lists; Roblox removed tags)
 - analyze_image: attached image critique
 - check_sales: recorded sales/revenue
@@ -1154,6 +1199,7 @@ command name as the action)
 - diagnose_item -> autopsy: why it failed, what to change
 - revive_item -> full relaunch plan for a dead item
 - improve_metadata -> rebuild an existing listing's title/description
+- review_title -> read-only critique of a specific candidate name; no rename
 - create_ideas -> chain/brainstorm: new concept, verified titles, launch plan
 - find_opportunities -> niches, gaps, rising keywords, what to make next
 - tags -> keyword ideas for a name/item
@@ -1175,6 +1221,8 @@ RULES
 - If the action needs an item and none is known, use clarify.
 - If the action needs a concept and none is given or inherited, use clarify.
 - A rename/retitle/rebrand toward a theme is create_ideas with that theme — never diagnose_item for a rename.
+- If asked "what if I call/name it X", "is X a good title", or "review the title X",
+  review_title; preserve exact spelling, don't interpret it as an instruction to rename.
 - "why is it dead / what went wrong / fix it" about an item is diagnose_item, not create_ideas.
 - Tags/SEO/keywords requests are tags; use last_item when the user implies their own item.
 - Small talk ("thanks", "lol", "ok") is ack; capability questions are help. Do not invent work for small talk.
@@ -1187,6 +1235,7 @@ RULES
 EXAMPLES
 "rename viral russian" -> {{"action":"create_ideas","concept":"viral russian"}}
 "call it russian dance instead" -> {{"action":"create_ideas","concept":"russian dance"}}
+"what if I call it Russian Dance Emote?" -> {{"action":"review_title","concept":"Russian Dance Emote"}}
 "make my listing cuter" -> {{"action":"improve_metadata"}} (last_item)
 "i need a description for it" -> {{"action":"improve_metadata"}} (last_item)
 "why is it flopping" -> {{"action":"diagnose_item"}} (last_item)
@@ -1226,7 +1275,9 @@ def _validate_plan(plan, state, has_attachment):
     # Only exact user text may request privacy changes; model plans cannot.
     if action.startswith(("privacy_", "conversation_")):
         return None
-    if action not in INTENTS:
+    if action not in INTENTS or action == "review_title":
+        # Title reviews are extracted from literal user text by a deterministic
+        # parser so that AI planning cannot invent or alter the proposed name.
         return None
     item_id = plan.get("item_id")
     try:
@@ -1382,6 +1433,16 @@ async def plan_message(text, has_attachment, state, bot=None):
         return _intent(social, confidence="high")
     # Drop conversational lead-ins ("alr", "i wanna", "can you") first.
     text = _strip_fillers(text)
+    # Title questions must bypass rename heuristics and the AI planner.
+    from title_feedback import proposed_title
+    proposal = proposed_title(text) if not has_attachment else None
+    if proposal:
+        return _intent("review_title",
+                       item_id=(extract_item_id(text) or state.last_item_id),
+                       concept=proposal,
+                       family=(detect_family(text) or state.last_family),
+                       confidence="high")
+
     # A pending chain offer from image analysis accepts yes/no.
     pending_chain = getattr(state, "pending_chain", None)
     if pending_chain and not has_attachment:
