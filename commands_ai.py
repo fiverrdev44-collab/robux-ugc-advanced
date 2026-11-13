@@ -763,9 +763,21 @@ def register_ai_commands(bot):
                 "⚠️ Could not identify grounded search terms from the image. "
                 "No algorithm score, competitor gap or title has been invented.")
             return
-        # The submitted image is a background by user declaration even if
-        # a fallible vision model calls it another category.
-        vision["item_type_visual"] = "background"
+        # Verify the important visible subjects independently with an image-
+        # only prompt. It is deliberately not conditioned on creator claims
+        # or the first model's interpretation. Fail soft on provider errors.
+        second_vision = {}
+        try:
+            second_vision = await asyncio.to_thread(
+                analyze_image_for_ugc, images, "", subject_check=True)
+        except Exception as exc:
+            print("[background_analyze] image cross-check: " +
+                  type(exc).__name__, flush=True)
+        from background_grounding import (
+            reconcile_background_vision, format_visual_verification)
+        visual_check = reconcile_background_vision(
+            vision, second_vision, creator_notes=notes)
+        vision = visual_check["vision"]
         anchor = scene_phrase(vision, notes)
         live = None
         if anchor:
@@ -805,6 +817,8 @@ def register_ai_commands(bot):
                 "## Marketplace naming review unavailable\n"
                 "No fabricated search rankings, algorithm scores, or CTR.")
         from background_opportunities import format_opportunity_evidence
+        for chunk in discord_chunks(format_visual_verification(visual_check)):
+            await ctx.send(chunk)
         for chunk in discord_chunks(format_opportunity_evidence(background_market)):
             await ctx.send(chunk)
         for chunk in discord_chunks(review_text):

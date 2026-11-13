@@ -12,7 +12,9 @@ LIVE = {"ok": True, "category_correct": 2, "sampled_results": 3,
              "favorites": 20, "price": 200},
             {"name": "Blue Hat", "asset_type_id": 8,
              "favorites": 9999, "price": 1}]}
-SECOND = {"mobile_readability_notes": "Portal may vanish in thumbnail",
+SECOND = {"visual_summary": "Moonlit shrine scene with portal",
+          "primary_subject": "portal", "subject_relation": "unknown",
+          "mobile_readability_notes": "Portal may vanish in thumbnail",
           "avatar_clearance_notes": "The portal overlaps avatar center",
           "lighting_notes": "Bright moon against dark background"}
 
@@ -112,7 +114,7 @@ def test_unavailable_providers_fail_soft_without_false_evidence():
     out = br.build_multi_pass_review(
         VISION, [], "", {"ok": False, "error": "HTTP 429"}, no_vision, no_text)
     assert out["passes"]["independent_vision"] == "skipped"
-    assert out["passes"]["creative"] == "unavailable"
+    assert out["passes"]["creative"] == "fallback_only"
     assert out["passes"]["skeptical_critic"] == "unavailable"
     assert not out["competitors"]
     report = br.format_multi_pass_review(out)
@@ -151,8 +153,11 @@ def test_discord_command_keeps_one_market_search_and_two_visual_calls():
         channel=channel, send=channel.send,
         vanta_state=SimpleNamespace(pending_chain=None))
     seen = {"market": 0, "vision": 0, "text": 0}
-    def vision(*args):
+    def vision(*args, **kwargs):
         seen["vision"] += 1
+        if seen["vision"] == 2:
+            assert kwargs.get("subject_check") is True
+            assert args[1] == ""
         return dict(VISION) if seen["vision"] == 1 else dict(SECOND)
     def market(*args):
         seen["market"] += 1
@@ -166,7 +171,9 @@ def test_discord_command_keeps_one_market_search_and_two_visual_calls():
          mock.patch("gemini_brain._generate", side_effect=text):
         asyncio.run(bot.callbacks["background_analyze"](
             ctx, notes="moonlit shrine with portal"))
-    assert seen == {"market": 1, "vision": 1, "text": 2}, seen
+    assert seen == {"market": 1, "vision": 2, "text": 2}, seen
+    assert any("Image evidence check" in (m or "")
+               for m in channel.messages)
     assert any("ROBLOX BACKGROUND SEARCH INTELLIGENCE" in (m or "")
                for m in channel.messages)
     assert not any("Photopea" in (m or "") or
