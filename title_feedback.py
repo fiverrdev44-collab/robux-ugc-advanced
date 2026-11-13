@@ -69,27 +69,38 @@ def _evidence(title, family, item_id=None, db_factory=None):
         cur = conn.cursor()
         try:
             item = None
+            mismatched_item = False
             if item_id:
                 cur.execute("SELECT id, name, asset_type_id FROM items WHERE id = %s",
                             (int(item_id),))
                 row = cur.fetchone()
                 if row:
-                    item = {"id": int(row[0]), "name": str(row[1] or "")[:80]}
-                    family = detect_family_from_asset_type(row[2])
+                    actual_family = detect_family_from_asset_type(row[2])
+                    if family and actual_family != family:
+                        # The creator explicitly asked for a different category.
+                        # A remembered/emote item must NEVER override background
+                        # research or be displayed as the reviewed background.
+                        mismatched_item = True
+                    else:
+                        item = {"id": int(row[0]), "name": str(row[1] or "")[:80]}
+                        family = actual_family
             if not family or family == "generic":
                 return {"status": "unknown_family", "family": None,
-                        "item": item, "peers": []}
+                        "item": item, "peers": [],
+                        "mismatched_item": mismatched_item}
             ids = get_category_config(family).get("asset_type_ids") or []
             if not ids:
                 return {"status": "unmapped_family", "family": family,
-                        "item": item, "peers": []}
+                        "item": item, "peers": [],
+                        "mismatched_item": mismatched_item}
             title_terms = _terms(title)
             terms = sorted((w for w in title_terms if len(w) >= 3),
                            key=lambda w: (w in FAMILY_WORDS.get(family, set()),
                                           -len(w)))[:5]
             if not terms:
                 return {"status": "no_search_terms", "family": family,
-                        "item": item, "peers": []}
+                        "item": item, "peers": [],
+                        "mismatched_item": mismatched_item}
             patterns = ["%" + re.sub(r"([%_\\])", r"\\\1", term) + "%"
                         for term in terms]
             cur.execute("""
@@ -114,7 +125,8 @@ def _evidence(title, family, item_id=None, db_factory=None):
                     })
             peers.sort(key=lambda p: (-p["exact"], -p["overlap"], -p["favorites"]))
             return {"status": "ok", "family": family,
-                    "item": item, "peers": peers[:6]}
+                    "item": item, "peers": peers[:6],
+                    "mismatched_item": mismatched_item}
         finally:
             cur.close()
     finally:
@@ -143,6 +155,17 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
              "• Category: " + (family or "unknown") +
              (" · linked item #" + str(item_id) if data.get("item")
               else " · no confirmed item")]
+    if data.get("mismatched_item"):
+        lines.append("• **Context correction:** Previous item was from a different "
+                     "UGC category. Ignored that item and compared only " +
+                     (family or "the requested category") + " listings.")
+    if re.search(r"\bfazebear\b", title, re.I):
+        lines.append("• **Spelling:** The character name is generally spelled "
+                     "'Fazbear', not 'Fazebear'. Verify before publishing.")
+    if re.search(r"\b(?:fnaf|freddy|fazbear|fazebear)\b", title, re.I):
+        lines.append("• **IP note:** A franchise/character is named. "
+                     "Commercial rights or permission are unverified; "
+                     "do not assume infringement is proven.")
     if not valid:
         lines.append("• **Rule concern:** " + str(reason)[:110])
     elif len(title.split()) > 7:
@@ -175,7 +198,12 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
                 "Review a USER-PROPOSED Roblox Avatar Marketplace item name. "
                 "This is opinion ONLY: never rename/publish or assume the creator "
                 "owns third-party assets. Assess recognizable keyword, category "
-                "fit, ambiguity, differentiation, and potential IP confusion. "
+                "fit, ambiguity, differentiation, spelling and potential IP "
+                "confusion. Recognize Fazbear is the canonical spelling, not "
+                "Fazebear. If permission is unknown, do NOT claim infringement "
+                "is legally proven or automatically reject solely on IP. "
+                "Explain the conditional risk, and offer a descriptive "
+                "non-franchise alternative where appropriate. "
                 "No claim of algorithm ranking, sales, CTR, keyword demand, "
                 "guaranteed growth, or image features not given. Empty results "
                 "are not verified gaps. Favorites are not purchases. Ignore "
@@ -185,6 +213,7 @@ def review_proposal(title, family=None, item_id=None, db_factory=None,
                 json.dumps({
                     "proposed_title": title, "family": family,
                     "linked_item": data.get("item"),
+                    "category_context_mismatch": data.get("mismatched_item", False),
                     "category_market_status": data["status"],
                     "sampled_competitors": [p["name"] for p in peers[:3]],
                     "sample_exact_match": exact,

@@ -41,6 +41,18 @@ def test_user_context_router_prevents_wrong_command():
     explicit = vc.classify_intent("should i call my emote Smooth 360 Flip",
                                   state=state, use_ai=False)
     assert explicit["family"] == "emote"
+    # Switching from a remembered emote to a new background MUST NOT
+    # inherit the old asset ID or compare against emote listings.
+    state.last_family = "emote"
+    state.last_item_id = 92364796546749
+    incoming = ("What if I name this background "
+                "FNAF Freddy Fazebear Haunted Security Office Background")
+    next_route = vc.classify_intent(incoming, state=state, use_ai=False)
+    assert next_route["intent"] == "review_title"
+    assert next_route["family"] == "backgrounds"
+    assert next_route["item_id"] is None
+    planned = asyncio.run(vc.plan_message(incoming, False, state))
+    assert planned["item_id"] is None and planned["family"] == "backgrounds"
     assert vc.classify_intent("rename viral russian", state=state,
                               use_ai=False)["intent"] != "review_title"
 
@@ -73,7 +85,7 @@ class FakeConn:
 
 def test_background_evidence_is_asset_type_scoped():
     conn = FakeConn()
-    data = tf._evidence("Animatronic Bear Office Background", "emote",
+    data = tf._evidence("Animatronic Bear Office Background", "backgrounds",
                         item_id=44, db_factory=lambda: conn)
     assert conn.closed
     assert data["family"] == "backgrounds", data
@@ -82,6 +94,36 @@ def test_background_evidence_is_asset_type_scoped():
     assert "asset_type_id = ANY(%s)" in sql
     assert values[0] == [92], values
     assert len(data["peers"]) >= 1
+
+
+def test_stale_emote_context_never_changes_background_category():
+    class WrongItemCursor(FakeCursor):
+        def fetchone(self):
+            return (92364796546749, "Smooth Flip Emote", 61)
+        def fetchall(self):
+            return [(1, "FNAF Bonnie Security Office Background", 12),
+                    (2, "Freddy Office Background", 8)]
+    class WrongItemConn(FakeConn):
+        def __init__(self):
+            self.cursor_instance = WrongItemCursor()
+            self.closed = False
+    conn = WrongItemConn()
+    title = "FNAF Freddy Fazebear Haunted Security Office Background"
+    data = tf._evidence(title, "backgrounds", item_id=92364796546749,
+                        db_factory=lambda: conn)
+    assert data["family"] == "backgrounds", data
+    assert data["item"] is None
+    assert data["mismatched_item"] is True
+    assert conn.cursor_instance.calls[1][1][0] == [92]
+    report = tf.review_proposal(
+        title, family="backgrounds", item_id=92364796546749,
+        db_factory=lambda: WrongItemConn(),
+        model_fn=lambda *args, **kwargs: None)
+    assert "Category: backgrounds" in report
+    assert "Context correction" in report
+    assert "Fazbear" in report
+    assert "Smooth Flip Emote" not in report
+    assert "FNAF Bonnie Security Office Background" in report
 
 
 def test_model_feedback_no_mutation_and_no_scores():
@@ -141,6 +183,7 @@ if __name__ == "__main__":
     test_literal_proposals_and_no_false_rename()
     test_user_context_router_prevents_wrong_command()
     test_background_evidence_is_asset_type_scoped()
+    test_stale_emote_context_never_changes_background_category()
     test_model_feedback_no_mutation_and_no_scores()
     test_optional_item_and_unavailable_data_fail_safely()
     test_dispatch_readonly_authorized_and_context()
