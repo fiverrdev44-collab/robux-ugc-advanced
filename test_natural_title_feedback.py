@@ -51,6 +51,8 @@ class FakeCursor:
     def execute(self, sql, values):
         self.calls.append((sql, values))
         assert not any(w in sql.upper() for w in ("INSERT ", "UPDATE ", "DELETE "))
+    def close(self):
+        pass
     def fetchone(self):
         return (44, "Old Background", 92)
     def fetchall(self):
