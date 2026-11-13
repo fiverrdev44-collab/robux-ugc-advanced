@@ -870,6 +870,7 @@ async def _run_registry(bot, message, route, state):
                 )
         return
     item_id = route.get("item_id")
+    switched_item = False
     concept = route.get("concept")
     family = route.get("family")
     days = route.get("days")
@@ -1024,6 +1025,7 @@ async def _run_registry(bot, message, route, state):
             # callback; follow-up turns must not accidentally target an old
             # item. Only do this after command authorization succeeds.
             if intent in ITEM_ACTIONS and state.last_item_id != item_id:
+                switched_item = True
                 state.last_item_id = item_id
                 state.results = []
                 state.last_concept = None
@@ -1134,7 +1136,10 @@ async def _run_registry(bot, message, route, state):
         state.results = list(dict.fromkeys(ids))[:8]
     state.last_intent = intent
     state.last_item_id = item_id or (state.results[0] if state.results else None)
-    state.last_concept = concept or state.last_concept
+    # A prior emote's concept must never be reattached after successfully
+    # selecting an entirely different background item, even when the route
+    # carried an inherited concept before the callback ran.
+    state.last_concept = None if switched_item else (concept or state.last_concept)
     state.last_family = family or state.last_family
     state.pending_intent = None
     state.history.append({"intent": intent, "item_id": item_id,
