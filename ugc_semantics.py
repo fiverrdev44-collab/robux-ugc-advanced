@@ -16,7 +16,7 @@ _APPAREL = {
 }
 _MOTION = {
     "dance", "dancing", "emote", "emotes", "animation", "animations",
-    "pose", "posing", "idle", "sway", "step", "steps", "spin", "flip",
+    "pose", "posing", "stance", "idle", "sway", "step", "steps", "spin", "flip",
     "jump", "bounce", "kick", "wave", "walk", "run", "clap",
     "twirl", "slide", "shuffle", "groove", "hiphop", "hip",
     "hop", "freestyle", "stomp", "robot", "pump", "rhythm",
