@@ -121,6 +121,8 @@ jobs:
         run: python test_background_creator_essentials.py
       - name: Verify multi-pass background creative director
         run: python test_background_multi_pass.py
+      - name: Verify background opportunity evidence and grounded naming
+        run: python test_background_opportunities.py
       - name: Run Avatar Backgrounds routing regressions
         run: python test_background_routing_rc.py
       - name: Run F-18 sales source security regressions
