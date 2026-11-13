@@ -82,10 +82,12 @@ def reconcile_background_vision(first, second, creator_notes=""):
         return {"status": "unavailable", "vision": {}, "notes": []}
     first = dict(first)
     second = second if isinstance(second, dict) else {}
+    primary = _clean(second.get("primary_subject")).lower()
+    summary = _clean(second.get("visual_summary")).lower()
     independent = bool(second and (
-        _clean(second.get("primary_subject")) or
-        _clean(second.get("visual_summary")) or
-        _safe_features(second)))
+        (primary and primary not in {"unknown", "unclear", "not sure", "none"})
+        or (summary and summary not in {"unknown", "unclear", "not sure", "none"})
+        or _safe_features(second)))
     verified = bool(independent)
     creator = _clean(creator_notes, 380)
     subject_a, relation_a = _subject_context(first)
@@ -189,6 +191,7 @@ def reconcile_background_vision(first, second, creator_notes=""):
             # Do not use user-only scene keywords as verified visual evidence.
             # The corrected search anchor will be chosen from the image view.
             out["visual_scene_anchor"] = first_anchor
+            out["visual_creator_scene_anchor"] = creator_anchor
     out["uncertain_elements"] = [
         _clean(x, 140) for x in (second.get("uncertain_elements") or [])[:4]
         if isinstance(x, str) and _clean(x, 140)
