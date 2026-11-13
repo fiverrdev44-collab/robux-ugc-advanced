@@ -784,11 +784,6 @@ def register_ai_commands(bot):
                     verify_niche, anchor, "backgrounds", 30, 1, 12, True)
             except Exception as exc:
                 live = {"ok": False, "error": type(exc).__name__}
-        dossier = format_background_dossier(
-            vision, notes, image_quality=quality, live=live)
-        for chunk in discord_chunks(dossier):
-            await ctx.send(chunk)
-
         # Multi-pass creative director: existing first vision + one independent
         # vision critique + at most two text-generation passes. No new Roblox
         # requests and no database mutations. Fail-soft on provider errors.
@@ -808,6 +803,17 @@ def register_ai_commands(bot):
                 "## Multi-pass creative review unavailable\n"
                 "The initial image inspection above remains valid as a "
                 "tentative AI interpretation. No extra conclusions invented.")
+        # Show a single final naming decision. The preliminary dossier still
+        # reports visual/export evidence, but omits its provisional title
+        # experiments when the richer review returned a grounded winner.
+        show_provisional_titles = (
+            not isinstance(review, dict) or review.get("status") != "ok"
+        ) if "review" in locals() else True
+        dossier = format_background_dossier(
+            vision, notes, image_quality=quality, live=live,
+            include_titles=show_provisional_titles)
+        for chunk in discord_chunks(dossier):
+            await ctx.send(chunk)
         for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
         if getattr(ctx, "vanta_state", None) is not None:
