@@ -236,6 +236,67 @@ def title_sample_overlap(title, competitors):
     return best
 
 
+def title_dry_run(vision, notes="", live=None):
+    """Rank descriptive TITLE FIT only, never forecast CTR or favorites.
+
+    A weighted, auditable copy checklist: scene identity (40 points),
+    visible feature (20), readability (15), type clarity (10), and
+    overlap with the *sampled* live competitors (15). Scores are
+    editorial heuristics, not a fitted model or simulated purchase data.
+    """
+    titles = candidate_titles(vision, notes, live=live)
+    anchor = scene_phrase(vision, notes)
+    core = set(re.findall(r"[a-z]+", anchor or ""))
+    features = observations(vision)["distinctive_features"]
+    feature_words = set()
+    for item in features:
+        if not _is_untrusted_instruction(item):
+            feature_words.update(
+                w for w in re.findall(r"[a-z]+", item.lower())
+                if w not in _FILLER and w not in _BAD_SCENE_PARTS)
+    competitors = verified_background_competitors(live)
+    ranked = []
+    for title in titles:
+        tokens = re.findall(r"[a-z]+", title.lower())
+        searchable = set(tokens)
+        covered = len(searchable & core)
+        identity = (40 if core and covered == len(core)
+                    else 20 if covered else 0)
+        details = 20 if feature_words & searchable else 8
+        readability = (15 if 3 <= len(tokens) <= 6
+                       else 8 if 2 <= len(tokens) <= 7 else 0)
+        type_score = 10 if title.lower().endswith(" background") else 0
+        overlap = title_sample_overlap(title, competitors)
+        distinct = (0 if overlap["exact"] else
+                    5 if overlap["ratio"] >= .70 else
+                    10 if overlap["ratio"] >= .45 else 15)
+        total = identity + details + readability + type_score + distinct
+        ranked.append({
+            "title": title, "fit_score": total,
+            "score_type": "editorial title-fit heuristic, not predicted CTR",
+            "sample_overlap": overlap,
+            "scene_anchor_preserved": identity == 40,
+            "visible_feature_word": details == 20,
+        })
+    ranked.sort(key=lambda x: (-x["fit_score"], x["title"].casefold()))
+    return ranked
+
+
+_NAMED_IP_CUES = (
+    "oggy", "fnaf", "five nights at freddy", "team fortress", "tf2",
+    "bioshock", "spongebob", "simpsons", "pokemon",
+)
+
+
+def named_ip_caution(vision, notes=""):
+    """Simple warning cue; not a complete trademark or legal determination."""
+    obs = observations(vision)
+    text = (str(notes or "")[:300] + " " + obs["visual_summary"] +
+            " " + obs["ip_reference_warning"]).lower()
+    return any(re.search(r"\b" + re.escape(term) + r"\b", text)
+               for term in _NAMED_IP_CUES)
+
+
 def format_background_dossier(vision, notes="", image_quality=None,
                               live=None, include_titles=True):
     """A readable audit with unknowns and externally measured facts separated."""
@@ -307,6 +368,29 @@ def format_background_dossier(vision, notes="", image_quality=None,
         else:
             parts.append("• No defensible unique title from the supplied scene "
                          "and sampled competitors; adjust the concept details.")
+    if include_titles:
+        ranked = title_dry_run(vision, notes, live)
+        if ranked:
+            parts.append("**Title dry run — editorial fit, NOT CTR/favorite predictions**")
+            for option in ranked[:4]:
+                overlap = option["sample_overlap"]
+                overlap_note = (
+                    " · sampled title overlap " +
+                    str(round(overlap["ratio"] * 100)) + "%"
+                    if overlap["name"] else " · overlap unavailable")
+                parts.append(
+                    "• " + option["title"] + " — fit " +
+                    str(option["fit_score"]) + "/100" + overlap_note)
+            parts.append("• Fit scores check scene words, visible details, "
+                         "readability and sampled names. No marketplace "
+                         "impression or click data was used.")
+            parts.append("• Favorites forecast: unavailable. A title alone "
+                         "cannot establish expected purchases or favorites.")
+    if named_ip_caution(vision, notes):
+        parts.append("**Third-party IP warning:** Named franchise detected. "
+                     "Do not publish its protected characters, scenes or names "
+                     "without appropriate rights. Renaming copied artwork "
+                     "does not cure infringement.")
     description = listing_description(vision, notes)
     parts.append("**Draft listing description (verify every detail)**")
     parts.append(description or "• Not enough verified visual detail to draft copy.")
