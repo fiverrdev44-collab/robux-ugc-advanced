@@ -41,6 +41,18 @@ def test_user_context_router_prevents_wrong_command():
     explicit = vc.classify_intent("should i call my emote Smooth 360 Flip",
                                   state=state, use_ai=False)
     assert explicit["family"] == "emote"
+    # Switching from a remembered emote to a new background MUST NOT
+    # inherit the old asset ID or compare against emote listings.
+    state.last_family = "emote"
+    state.last_item_id = 92364796546749
+    incoming = ("What if I name this background "
+                "FNAF Freddy Fazebear Haunted Security Office Background")
+    next_route = vc.classify_intent(incoming, state=state, use_ai=False)
+    assert next_route["intent"] == "review_title"
+    assert next_route["family"] == "backgrounds"
+    assert next_route["item_id"] is None
+    planned = asyncio.run(vc.plan_message(incoming, False, state))
+    assert planned["item_id"] is None and planned["family"] == "backgrounds"
     assert vc.classify_intent("rename viral russian", state=state,
                               use_ai=False)["intent"] != "review_title"
 
