@@ -6,7 +6,9 @@ guessing; no unrelated asset, platform metrics or image-edit advice.
 """
 import re
 
-from background_intelligence import observations, _short_text, _is_untrusted_instruction
+from background_intelligence import (
+    observations, scene_phrase, _short_text, _is_untrusted_instruction,
+)
 
 _LOCATIONS = {
     "window": ("window", "glass pane", "windowpane"),
@@ -96,6 +98,18 @@ def reconcile_background_vision(first, second, creator_notes=""):
     creator_conflict = bool(creator_relation and relation_a and creator_relation != relation_a)
     if relation_b and creator_relation and creator_relation != relation_b:
         creator_conflict = True
+    # Detect an explicit setting mismatch, rather than forcing the model's
+    # selected niche to match the creator's keywords.
+    creator_anchor = scene_phrase({}, creator)
+    first_anchor = scene_phrase(first, "")
+    second_anchor = scene_phrase(second, "") if independent else None
+    def core(anchor):
+        tokens = re.findall(r"[a-z]+", anchor or "")
+        return tokens[-1] if tokens else None
+    scene_conflict = bool(
+        creator_anchor and first_anchor and second_anchor
+        and core(first_anchor) == core(second_anchor)
+        and core(creator_anchor) != core(first_anchor))
 
     notes = []
     if not independent:
@@ -108,6 +122,9 @@ def reconcile_background_vision(first, second, creator_notes=""):
     if creator_conflict:
         notes.append("Creator description and visual interpretation disagree on "
                      "window/poster/screen or placement; no location is verified.")
+    if scene_conflict:
+        notes.append("Both image interpretations indicate a different setting "
+                     "than the creator description; verify scene identity.")
     if not (subject_conflict or relation_conflict or creator_conflict) and verified:
         notes.append("Independent image-only subject check completed; "
                      "agreeing interpretations are still fallible.")
@@ -115,15 +132,22 @@ def reconcile_background_vision(first, second, creator_notes=""):
     out = dict(first)
     out["item_type_visual"] = "background"
     out["visual_verification"] = (
-        "conflict" if (subject_conflict or relation_conflict or creator_conflict)
+        "conflict" if (subject_conflict or relation_conflict or
+                       creator_conflict or scene_conflict)
         else "cross_checked" if verified else "unverified"
     )
+    out["visual_conflicting_placements"] = sorted(
+        {x for x in (relation_a, relation_b, creator_relation) if x}
+    ) if (relation_conflict or creator_conflict) else []
+    out["visual_conflicting_subjects"] = sorted(groups_a | groups_b) if subject_conflict else []
+    out["visual_scene_disagreement"] = scene_conflict
     out["visual_verification_notes"] = notes
-    if subject_conflict or relation_conflict or creator_conflict:
+    if subject_conflict or relation_conflict or creator_conflict or scene_conflict:
         # Some details may be correct but a plausible relation can be wrong.
         # Strip *placement-dependent* features, avoid simply replacing poster
         # with window or injecting the creator description as observed fact.
-        bad_rels = {k for k in (relation_a, relation_b, creator_relation) if k}
+        bad_rels = ({k for k in (relation_a, relation_b, creator_relation) if k}
+                    if (relation_conflict or creator_conflict) else set())
         out["distinctive_features"] = [
             x for x in _safe_features(first)
             if not any(re.search(r"\b" + re.escape(term) + r"\b", x.lower())
@@ -142,8 +166,13 @@ def reconcile_background_vision(first, second, creator_notes=""):
                 if not any(word in f.lower() for word in _STRIP_WORDS)
             ]
             out["distinctive_features"].insert(0, common_label)
-        out["search_description"] = _clean(
+        description = _clean(
             first.get("search_description") or "Avatar Background", 130)
+        for rel in bad_rels:
+            for term in _LOCATIONS[rel]:
+                description = re.sub(r"\b" + re.escape(term) + r"\b",
+                                     "", description, flags=re.I)
+        out["search_description"] = " ".join(description.split()).strip(" .,")
         # Do not reuse an unsupported placement claim in the model context.
         summary = _clean(first.get("visual_summary"), 220)
         for rel in bad_rels:
@@ -151,6 +180,15 @@ def reconcile_background_vision(first, second, creator_notes=""):
                 summary = re.sub(r"\b" + re.escape(term) + r"\b",
                                  "", summary, flags=re.I)
         out["visual_summary"] = " ".join(summary.split()).strip(" .,")
+        if subject_conflict:
+            out["distinctive_features"] = [
+                feature for feature in out["distinctive_features"]
+                if not (_subject_groups(feature) & set(out["visual_conflicting_subjects"]))
+            ]
+        if scene_conflict:
+            # Do not use user-only scene keywords as verified visual evidence.
+            # The corrected search anchor will be chosen from the image view.
+            out["visual_scene_anchor"] = first_anchor
     out["uncertain_elements"] = [
         _clean(x, 140) for x in (second.get("uncertain_elements") or [])[:4]
         if isinstance(x, str) and _clean(x, 140)
@@ -160,6 +198,7 @@ def reconcile_background_vision(first, second, creator_notes=""):
         "independent_checked": verified, "relation_conflict": relation_conflict,
         "subject_conflict": subject_conflict,
         "creator_conflict": creator_conflict,
+        "scene_conflict": scene_conflict,
     }
 
 
