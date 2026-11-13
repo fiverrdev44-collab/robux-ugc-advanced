@@ -197,7 +197,7 @@ def test_live_unavailable_still_reports_db_without_inventing_market():
         db_factory=lambda: FakeConn(), model_fn=lambda *args, **kwargs: None,
         live_fn=failed)
     assert len(calls) == 1
-    assert "Live Marketplace check unavailable: rate limited" in report
+    assert "Live Marketplace check unavailable:** rate limited" in report
     assert "No exact name in sampled results" in report
     assert "ranking" in report
 
