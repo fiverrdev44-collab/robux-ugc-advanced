@@ -680,26 +680,32 @@ def forge_description(keyword, family=None):
     rows, cohort_evidence = _fetch_description_cohorts(
         keyword, family=family, limit=20
     )
-    if not rows:
-        return {
-            "error": f"No items with clean descriptions found for `{keyword}`. "
-                     f"Roblox live search also returned nothing usable."
-        }
-
+    # No comparable listings is an evidence limitation, not a reason to
+    # refuse to write about a creator-supplied item. Do not present this output
+    # as marketplace-optimized or claim that competitors were verified.
+    evidence_status = "observed" if rows else "creator_details_only"
     pattern = _analyze_patterns(rows)
+    if not pattern:
+        pattern = {"sample_size": 0, "avg_lines": None, "avg_emojis": None,
+                   "avg_chars": None, "pct_emoji_first_line": None,
+                   "top_first_words": [], "top_bigrams": []}
     try:
         description = _generate_description(
             keyword, family or "all", rows, pattern,
             cohort_evidence=cohort_evidence,
         )
     except Exception as e:
-        return {"error": f"AI generation failed: {e}",
-                "pattern": pattern, "rows": rows}
+        # Still return a factual draft when the model is unavailable.
+        from description_quality import fallback_description
+        print("[desc_forge] generation fallback " + type(e).__name__, flush=True)
+        description = fallback_description(keyword, family, title="")
+        evidence_status = "creator_details_only" if not rows else "model_fallback"
 
     return {
         "keyword": keyword,
         "family": family or "all",
         "pattern": pattern,
+        "evidence_status": evidence_status,
         "cohort_evidence": cohort_evidence,
         "description": description,
         "examples": rows[:8],
@@ -723,21 +729,26 @@ def format_forge(result):
 
     header = [
         f"# 🔨 DESC FORGE — `{kw}`",
-        f"_Mined {p.get('sample_size', 0)} clean descriptions in this niche_",
+        (f"_Studied {p.get('sample_size', 0)} clean descriptions in this niche_"
+         if rows else "_No verified matching seller descriptions. "
+                      "Copy is based on creator-supplied item details only._"),
         "_Favorites and listing styles do not establish description CTR or conversion._",
         f"• Established sample: **{evidence.get('established_candidates', 0)}**"
         f" · measured rising: **{evidence.get('measured_rising_candidates', 0)}**"
         f" · growth evidence: **{evidence.get('rising_status', 'unknown')}**",
         "_Rising means positive favorite change between distinct snapshots (minimum 6 hours), not sales._",
         "",
+    ]
+    if rows:
+        header.extend([
         "## 📊 Patterns from sampled popular and rising listings",
         f"• Lines: **{p.get('avg_lines')}** avg",
         f"• Emojis: **{p.get('avg_emojis')}** avg",
         f"• Length: **{p.get('avg_chars')}** chars",
         f"• Emoji on line 1: **{p.get('pct_emoji_first_line')}%**",
         f"• Common first words: `{', '.join(p.get('top_first_words') or [])}`",
-        f"• Common phrases: `{', '.join(p.get('top_bigrams')[:8])}`",
-    ]
+        f"• Common phrases: `{', '.join((p.get('top_bigrams') or [])[:8])}`",
+        ])
     chunks.append("\n".join(header))
 
     if result.get("description"):
