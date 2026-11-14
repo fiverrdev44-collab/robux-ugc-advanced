@@ -144,6 +144,85 @@ def test_prompt_injection_and_ip_claim_guards():
     assert "authorize protected" not in report
 
 
+def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
+    vision = {
+        "visual_summary": "Colorful sunny cartoon house with purple roof and garden",
+        "search_description": "Cartoon house beside a green garden",
+        "distinctive_features": [
+            "bright purple roof", "green mailbox", "colorful striped awnings",
+        ],
+    }
+    notes = ("Oggy and the Cockroaches-inspired sunny cartoon house. "
+             "Purple roof, colorful awnings, green mailbox and bright garden.")
+    from background_intelligence import (
+        creator_named_subject, combine_background_live_checks,
+    )
+    assert creator_named_subject(notes) == "oggy"
+    assert creator_named_subject("A sunny cartoon house") is None
+    titles = br._valid_titles(
+        br._editorial_candidates(vision, notes), vision, notes, None)
+    assert "Oggy's Sunny Cartoon House Background" in titles, titles
+    assert "Oggy Cartoon House Background" in titles, titles
+    prompts = []
+    def model(prompt, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return '{"titles":["Oggys Sunny Cartoon House Background",'
+                   '"Sunny Cartoon House Background",'
+                   '"Colorful Cartoon House Background"]}'
+        return '{"winner":"Oggy Cartoon House Background",'
+               '"alternatives":["Oggys Sunny Cartoon House Background",'
+               '"Sunny Cartoon House Background"],'
+               '"challenge":"A named identity is creator-supplied, not visually proven.",'
+               '"why_winner":"Recognizable named scene and concise words.",'
+               '"description":"A cheerful cartoon house surrounded by a bright garden."}'
+    live = combine_background_live_checks([
+        {"ok": True, "keyword": "cartoon house",
+         "search_keyword": "cartoon house background",
+         "category_correct": 2, "sampled_results": 30, "pages": 1,
+         "top_competitors": [
+             {"name": "Cartoon City Background", "asset_type_id": 92,
+              "favorites": 40}]},
+        {"ok": True, "keyword": "oggy", "search_keyword": "oggy background",
+         "category_correct": 1, "sampled_results": 30, "pages": 1,
+         "top_competitors": [
+             {"name": "Oggy Cartoon Garden Background", "asset_type_id": 92,
+              "favorites": 12},
+             {"name": "Oggy Hat", "asset_type_id": 8, "favorites": 9999}]}
+    ])
+    review = br.build_multi_pass_review(
+        vision, [], notes, live, lambda *_: {}, model)
+    assert review["status"] == "ok", review
+    assert "Oggy" in review["winner"], review
+    assert "Oggy's Sunny Cartoon House Background" in [
+        row["title"] for row in review["scored"]], review
+    assert "Oggy Hat" not in [x["name"] for x in review["competitors"]]
+    assert len(prompts) == 2
+    assert "creator_named_subject" in prompts[0]
+    report = br.format_multi_pass_review(review)
+    assert "cartoon house background" in report
+    assert "oggy background" in report
+    assert "correct-category" in report
+    assert "verify rights" in report
+    assert "Oggy's Sunny Cartoon House Background" in report
+
+
+def test_failing_named_live_search_never_claims_zero_competitors():
+    from background_intelligence import combine_background_live_checks
+    merged = combine_background_live_checks([
+        {"ok": False, "keyword": "oggy",
+         "error": "rate limited (429)"},
+        {"ok": True, "keyword": "cartoon house",
+         "category_correct": 0, "sampled_results": 7, "pages": 1,
+         "top_competitors": []},
+    ])
+    assert merged["ok"] is True
+    assert merged["search_checks"][0]["status"] == "unavailable"
+    assert merged["search_checks"][0]["asset_type_92_matches"] is None
+    assert merged["search_checks"][1]["asset_type_92_matches"] == 0
+    assert merged["top_competitors"] == []
+
+
 def test_discord_command_keeps_one_market_search_and_two_visual_calls():
     bot = FakeBot()
     commands_ai.register_ai_commands(bot)
@@ -186,5 +265,7 @@ if __name__ == "__main__":
     test_horror_office_titles_reject_awkward_detail_stacking()
     test_unavailable_providers_fail_soft_without_false_evidence()
     test_prompt_injection_and_ip_claim_guards()
+    test_explicit_oggy_name_is_a_real_candidate_not_blocked()
+    test_failing_named_live_search_never_claims_zero_competitors()
     test_discord_command_keeps_one_market_search_and_two_visual_calls()
     print("PASS background multi-pass creative director")
