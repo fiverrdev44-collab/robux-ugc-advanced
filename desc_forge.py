@@ -300,6 +300,10 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
                     continue
                 if favs < 50:
                     continue
+                # Avatar Backgrounds must be confirmed AssetType 92, not
+                # unknown-type search results from a general catalog query.
+                if conv_family == "backgrounds" and atype != 92:
+                    continue
 
                 # Accessory umbrella — match any sub-type
                 if conv_family == "accessory" and atype not in ACCESSORY_IDS:
@@ -349,33 +353,49 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
 _KEYWORD_STOP = {
     "the", "a", "an", "for", "with", "and", "of", "to", "my", "our",
     "new", "best", "item", "items", "ugc", "roblox", "edition",
+    "inspired", "inspiration", "based", "create", "description", "title",
+    "premium", "search", "marketplace", "viral", "great", "very",
+    "beautiful", "background", "backgrounds", "avatar", "avatars",
 }
 
 
 def _candidate_keywords(keyword):
-    """Progressively simpler mining keywords so a full item title like
-    'Cute Kitty Fluffy Beanie' still finds top sellers."""
-    words = re.findall(r"[a-z0-9]+", (keyword or "").lower())
-    toks = [w for w in words if w not in _KEYWORD_STOP and len(w) >= 3]
-    candidates = []
-    if (keyword or "").strip():
-        candidates.append(keyword.strip())
-    if len(toks) >= 2:
-        candidates.append(" ".join(toks[-2:]))
-    if toks:
-        candidates.append(toks[-1])
-    if len(toks) >= 2:
-        candidates.append(" ".join(toks[:-1]))
-    for tok in reversed(toks):
-        candidates.append(tok)
-    seen, out = set(), []
-    for c in candidates:
-        c = c.strip().lower()
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    """Prioritize item-shape and feature phrases, not tail-word guesses.
 
+    Creator inputs may be full detailed concepts, not catalog item titles.
+    For 'Oggy-inspired sunny cartoon house with purple roof, ... walkway',
+    search 'cartoon house', 'purple roof', etc., rather than the full
+    sentence or irrelevant 'walkway'. Bounded to avoid API/DB request storms.
+    """
+    source = str(keyword or "").strip()
+    if not source:
+        return []
+    clauses = re.split(r"[,;.]|\bwith\b|\band\b", source, flags=re.I)
+    out = []
+    def append(value):
+        value = " ".join(str(value or "").lower().split()).strip()
+        if value and value not in out and len(out) < 8:
+            out.append(value)
+    if len(source) <= 65 and len(source.split()) <= 7:
+        append(source)
+    primary = re.findall(r"[a-z0-9]+", clauses[0].lower())
+    primary = [t for t in primary if t not in _KEYWORD_STOP and len(t) >= 3]
+    # Main item identity should rank before incidental props.
+    if len(primary) >= 2:
+        append(" ".join(primary[-2:]))
+    if len(primary) >= 3:
+        append(" ".join(primary[-3:]))
+    for clause in clauses[1:]:
+        words = re.findall(r"[a-z0-9]+", clause.lower())
+        words = [w for w in words if w not in _KEYWORD_STOP and len(w) >= 3]
+        if len(words) >= 2:
+            append(" ".join(words[-2:]))
+    if primary:
+        append(primary[-1])
+        if len(primary) > 1:
+            append(primary[-2])
+    # Other single words are lower-confidence and never replace the core item.
+    return out[:8]
 
 def _query_family_fallback(family, limit):
     """Last resort: top items in the family with clean descriptions."""
@@ -432,7 +452,8 @@ def _fetch_top_descriptions(keyword, family=None, limit=20):
     clean = best
     if len(clean) < MIN_DB_RESULTS:
         print(f"[desc_forge] DB thin ({len(clean)} clean) → live fallback", flush=True)
-        live_kw = (_candidate_keywords(keyword) or [keyword])[-1]
+        # Search the main item identity, not a trailing incidental prop.
+        live_kw = (_candidate_keywords(keyword) or [keyword])[0]
         live_rows = _fetch_live_descriptions(live_kw, family, limit)
         live_clean = _filter_clean(live_rows, limit)
 
