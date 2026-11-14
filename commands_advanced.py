@@ -470,7 +470,7 @@ def register_advanced_commands(bot, get_db):
             return await ctx.send(
                 "**Usage:** `!desc_forge <keyword>` or `!desc_forge <family>:<keyword>`\n"
                 "Families: `emote`, `emotes`, `hair`, `headwear`, `hat`, "
-                "`face`, `accessory`, `clothing`, `gear`"
+                "`face`, `accessory`, `clothing`, `gear`, `backgrounds`"
             )
 
         from desc_forge import forge_description, format_forge
