@@ -125,6 +125,8 @@ jobs:
         run: python test_background_visual_intelligence.py
       - name: Verify background competitor and listing essentials
         run: python test_background_creator_essentials.py
+      - name: Verify background evidence provenance and optional CHAIN handoff
+        run: python test_background_evidence_chain_v2.py
       - name: Verify multi-pass background creative director
         run: python test_background_multi_pass.py
       - name: Verify background opportunity evidence and grounded naming
