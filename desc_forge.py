@@ -494,7 +494,21 @@ def _fetch_description_cohorts(keyword, family=None, limit=20):
         if not _is_promo_spam(entry["row"][1], name=entry["row"][0])
     ]
     rows = combine_cohorts(established, rising, limit=limit)
+    rising_style = _analyze_patterns([entry["row"] for entry in rising])
+    established_style = _analyze_patterns(established)
     evidence = {
+        "rising_style": {
+            "sample_size": rising_style.get("sample_size", 0),
+            "avg_lines": rising_style.get("avg_lines"),
+            "avg_chars": rising_style.get("avg_chars"),
+            "avg_emojis": rising_style.get("avg_emojis"),
+        },
+        "established_style": {
+            "sample_size": established_style.get("sample_size", 0),
+            "avg_lines": established_style.get("avg_lines"),
+            "avg_chars": established_style.get("avg_chars"),
+            "avg_emojis": established_style.get("avg_emojis"),
+        },
         "established_candidates": len(established),
         "measured_rising_candidates": len(rising),
         "rising_status": rising_info.get("status", "unavailable"),
@@ -695,7 +709,7 @@ def format_forge(result):
         f" · growth evidence: **{evidence.get('rising_status', 'unknown')}**",
         "_Rising means positive favorite change between distinct snapshots (minimum 6 hours), not sales._",
         "",
-        "## 📊 Pattern from top sellers",
+        "## 📊 Patterns from sampled popular and rising listings",
         f"• Lines: **{p.get('avg_lines')}** avg",
         f"• Emojis: **{p.get('avg_emojis')}** avg",
         f"• Length: **{p.get('avg_chars')}** chars",
@@ -712,7 +726,7 @@ def format_forge(result):
         )
 
     if rows:
-        examples_lines = ["## 🔍 Top examples it studied"]
+        examples_lines = ["## 🔍 Observed listing examples (not verified sales leaders)"]
         for name, desc, favs, price in rows[:5]:
             d = (desc or "").strip().replace("\n", " ")
             examples_lines.append(
@@ -739,6 +753,10 @@ def pattern_prompt_block(keyword, family=None, max_examples=5):
             f"Established listing candidates: {cohort.get('established_candidates', 0)}",
             f"Measured-rising listing candidates: {cohort.get('measured_rising_candidates', 0)}",
             f"Rising evidence: {cohort.get('rising_status', 'unavailable')}",
+            f"Established avg lines: {(cohort.get('established_style') or {}).get('avg_lines')}",
+            f"Measured-rising avg lines: {(cohort.get('rising_style') or {}).get('avg_lines')}",
+            f"Established avg characters: {(cohort.get('established_style') or {}).get('avg_chars')}",
+            f"Measured-rising avg characters: {(cohort.get('rising_style') or {}).get('avg_chars')}",
             f"Average lines: {pattern.get('avg_lines')}",
             f"Average characters: {pattern.get('avg_chars')}",
             f"Average emojis: {pattern.get('avg_emojis')}",
