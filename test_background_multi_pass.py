@@ -167,15 +167,15 @@ def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
     def model(prompt, **kwargs):
         prompts.append(prompt)
         if len(prompts) == 1:
-            return '{"titles":["Oggys Sunny Cartoon House Background",'
-                   '"Sunny Cartoon House Background",'
-                   '"Colorful Cartoon House Background"]}'
-        return '{"winner":"Oggy Cartoon House Background",'
-               '"alternatives":["Oggys Sunny Cartoon House Background",'
-               '"Sunny Cartoon House Background"],'
-               '"challenge":"A named identity is creator-supplied, not visually proven.",'
-               '"why_winner":"Recognizable named scene and concise words.",'
-               '"description":"A cheerful cartoon house surrounded by a bright garden."}'
+            return ('{"titles":["Oggys Sunny Cartoon House Background",'
+                    '"Sunny Cartoon House Background",'
+                    '"Colorful Cartoon House Background"]}')
+        return ('{"winner":"Oggy Cartoon House Background",'
+                '"alternatives":["Oggys Sunny Cartoon House Background",'
+                '"Sunny Cartoon House Background"],'
+                '"challenge":"A named identity is creator-supplied, not visually proven.",'
+                '"why_winner":"Recognizable named scene and concise words.",'
+                '"description":"A cheerful cartoon house surrounded by a bright garden."}')
     live = combine_background_live_checks([
         {"ok": True, "keyword": "cartoon house",
          "search_keyword": "cartoon house background",
