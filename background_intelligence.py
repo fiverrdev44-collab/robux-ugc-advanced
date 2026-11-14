@@ -211,6 +211,20 @@ def verified_background_competitors(live, limit=3):
             continue
         seen.add(name.casefold())
         row = {"name": name}
+        # Retain only positive, explicitly sourced asset and creator IDs.
+        for key in ("asset_id", "creator_id"):
+            try:
+                number = int(raw.get(key))
+                row[key] = number if number > 0 else None
+            except (ValueError, TypeError):
+                row[key] = None
+        row["creator"] = _short_text(raw.get("creator"), 50)
+        row["creator_type"] = (
+            raw.get("creator_type") if raw.get("creator_type") in ("User", "Group")
+            else None
+        )
+        row["favorites_known"] = bool(raw.get("favorites_known", raw.get("favorites") is not None))
+        row["price_known"] = bool(raw.get("price_known", raw.get("price") is not None))
         for field in ("favorites", "price"):
             try:
                 value = int(raw.get(field))
@@ -361,9 +375,14 @@ def combine_background_live_checks(checks):
                 continue
             item = group[position]
             name = _short_text(item.get("name"), 80)
-            if name.casefold() in seen:
+            try:
+                item_id = int(item.get("asset_id"))
+                item_key = ("id", item_id) if item_id > 0 else ("name", name.casefold())
+            except (TypeError, ValueError):
+                item_key = ("name", name.casefold())
+            if item_key in seen:
                 continue
-            seen.add(name.casefold())
+            seen.add(item_key)
             found.append(item)
     return {
         "ok": any(x["status"] == "ok" for x in report),

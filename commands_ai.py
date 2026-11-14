@@ -851,6 +851,21 @@ def register_ai_commands(bot):
             await ctx.send(chunk)
         for chunk in discord_chunks(review_text):
             await ctx.send(chunk)
+        # A background review needs an explicit user-approved handoff; do not
+        # silently spend a second AI quota or start a new chain run.
+        state = getattr(ctx, "vanta_state", None)
+        if state is not None and isinstance(review, dict) and review.get("status") == "ok":
+            from background_intelligence import grounded_concept
+            concept = grounded_concept(vision, notes)
+            if concept:
+                state.pending_chain = {
+                    "family": "backgrounds",
+                    "concept": concept[:580],
+                }
+                await ctx.send(
+                    "**Run !chain backgrounds: using this artwork's scene observations?** "
+                    "Reply `yes` or `no`. This is a separate AI-quota action."
+                )
 
     @bot.command(name="ai_status")
     async def ai_status(ctx):
