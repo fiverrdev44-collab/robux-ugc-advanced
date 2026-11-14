@@ -235,13 +235,13 @@ def _safe_description(value, vision, notes):
     return desc
 
 
-def _polish_background_copy(draft, vision, notes, title):
-    """Keep observable scene details without generic avatar-marketing filler."""
-    from description_quality import polish_description
+def _polish_background_copy(draft, vision, notes, title, text_fn=None):
+    """Apply the grounded gate without exceeding the analyzer's two model passes."""
+    from description_quality import finalize_description
     from background_intelligence import grounded_concept
-    return polish_description(
+    return finalize_description(
         draft, grounded_concept(vision, notes), "backgrounds", title=title
-    )
+    )["text"]
 
 
 def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
@@ -377,6 +377,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "Act as a skeptical Roblox Avatar Marketplace SEARCH researcher. "
             "Return only JSON with winner (one allowed title), alternatives "
             "(two other allowed titles), challenge, why_winner, and description. "
+            "The description must sound like an individual creator talking "
+            "naturally, not a catalog data dump. Use one specific opening "
+            "sentence and one vivid but truthful scene-detail sentence. "
+            "No 'features a', bland 'scene for your avatar', keyword lists, "
+            "forced vibe endings, or unverified properties. "
             "Challenge search-term relevance, existing sampled title overlap, "
             "and unsupported market-gap claims. Challenge uncertain image "
             "claims, never upgrade an inferred object to a verified fact. "

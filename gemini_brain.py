@@ -122,13 +122,13 @@ def _strip_promo_from_description(desc):
 def _apply_promo_filter_to_synth(synth, concept="", family=None):
     if not isinstance(synth, dict):
         return synth
-    from description_quality import polish_description
+    # Keep the raw, promo-sanitized candidate for the final description editor.
+    # Early factual fallback previously erased evidence of generic wording,
+    # preventing CHAIN from knowing it needed a targeted rewrite.
     for key in ("seo_description", "description_seo", "description_hype",
                 "description_short", "new_description"):
         if synth.get(key):
-            safe = _strip_promo_from_description(synth[key])
-            synth[key] = (polish_description(safe, concept, family)
-                          if concept else safe)
+            synth[key] = _strip_promo_from_description(synth[key])
     return synth
 # ──────────────────────────────────────────────────────────────────────
 

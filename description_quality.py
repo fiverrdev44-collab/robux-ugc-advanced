@@ -9,6 +9,9 @@ GENERIC = (
     "you'll love", "must-have", "high-converting", "best selling",
     "aesthetic vibes", "matches every outfit", "matches any outfit",
     "chillin with friends", "experience this", "unlock your style",
+    "scene for your avatar", "background for your avatar",
+    "vibrant cartoon scene", "vibrant scene for", "perfect for cheerful",
+    "made for every avatar", "complete your look", "looks great with any",
 )
 PROMO = ("join our", "join the group", "check out our", "shop now",
          "follow us", "subscribe", "more ugc", "visit our", "discord.gg")
@@ -109,6 +112,15 @@ def rejection_reason(description, concept, family, title=""):
         return "promo"
     if re.search(r"(?i)\b(?:guaranteed|top[\s-]ranked|best[\s-]seller|high[\s-]ctr|proven sales)\b", text):
         return "unverified_performance"
+    # Data coverage alone cannot distinguish a natural sentence from a feature
+    # inventory. Stop accepting 'Features a ...' as a fresh sentence or
+    # lowercase, mechanically assembled catalogue fragments.
+    if re.search(r"(?im)(?:^|[.!?]\s+)(?:features?|includes?|contains?)\s+(?:an?\s+)?", text):
+        return "feature_inventory"
+    if re.search(r"(?m)^\s*[a-z]", text):
+        return "uncapitalized_sentence"
+    if re.search(r"(?m)[.!?]\s+[a-z]", text):
+        return "uncapitalized_sentence"
     allowed = words(fact_source(concept) + " " + title)
     used = words(text)
     if str(family or "").lower() not in ("emote", "emotes"):
@@ -142,7 +154,62 @@ def fallback_description(concept, family, title=""):
     return heading
 
 def polish_description(draft, concept, family, title=""):
-    """Use genuine item details; replace generic/unsupported AI copy."""
+    """Use grounded item details; reject generic or unsupported generated copy."""
     normalized = _normalize(draft)
     return (normalized if rejection_reason(normalized, concept, family, title) is None
             else fallback_description(concept, family, title))
+
+
+def rewrite_prompt(draft, concept, family, title=""):
+    """One optional *editorial* rewrite, never a live market-performance claim."""
+    return (
+        "You are writing a Roblox item description as an individual creator.\n"
+        "Rewrite the draft into genuinely natural, engaging, specific listing copy.\n"
+        "Do not polish the SAME template; find the distinctive hook in the facts.\n"
+        "Use two natural sentences or two short lines; no required emoji.\n"
+        "An everyday, slightly playful voice is welcome where it fits, but "
+        "avoid marketer clichés and robotic feature inventories.\n"
+        "Start with a strong subject/scene detail rather than 'Features a'.\n"
+        "Do NOT end with 'for your avatar', a generic mood/vibe sentence, "
+        "a CTA or claims of ranking, sales, CTR or popularity.\n"
+        "No invented motion, special effects, materials, characters or props.\n"
+        "Do not reuse descriptions from competitor listings.\n"
+        "Keep only facts supported by CREATOR DETAILS. If something is "
+        "unspecified, leave it out.\n"
+        + style_guidance(family) + "\n"
+        + "CATEGORY: " + str(family or "unknown") + "\n"
+        + "ITEM TITLE (descriptive, not evidence of popularity): "
+        + str(title or "")[:90] + "\n"
+        + "CREATOR DETAILS: " + fact_source(concept) + "\n"
+        + "WEAK DRAFT (rewrite, do not copy the phrasing): "
+        + _normalize(draft)[:280] + "\n"
+        + "Return only your final listing description."
+    )
+
+
+def finalize_description(draft, concept, family, title="", rewrite_fn=None):
+    """One bounded model rewrite only when necessary, then a factual fallback.
+
+    The model callback (if supplied) is invoked at most once. It is not an
+    autonomous retry loop and returns no marketplace performance inference.
+    """
+    initial = rejection_reason(draft, concept, family, title)
+    if initial is None:
+        return {"text": _normalize(draft), "quality_status": "accepted",
+                "initial_rejection": None, "rewrite_attempted": False}
+    attempted = False
+    if callable(rewrite_fn):
+        attempted = True
+        try:
+            proposed = rewrite_fn(rewrite_prompt(draft, concept, family, title))
+            if isinstance(proposed, str) and (
+                rejection_reason(proposed, concept, family, title) is None
+            ):
+                return {"text": _normalize(proposed), "quality_status": "rewritten",
+                        "initial_rejection": initial, "rewrite_attempted": True}
+        except Exception:
+            # The model and API can fail. This must remain a safe local fallback.
+            pass
+    return {"text": fallback_description(concept, family, title),
+            "quality_status": "factual_fallback",
+            "initial_rejection": initial, "rewrite_attempted": attempted}
