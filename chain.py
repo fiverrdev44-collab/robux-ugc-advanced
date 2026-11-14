@@ -470,8 +470,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
 
     # ── Stage 8: Description mining ──
     desc_examples = []
+    desc_cohort_evidence = {}
     try:
-        from desc_forge import _fetch_top_descriptions
+        from desc_forge import _fetch_description_cohorts
         seed_kw = None
         if concept:
             parts = str(concept).strip().split()
@@ -487,7 +488,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         if seed_kw:
             seed_kw = str(seed_kw).strip().split()[0]
             if len(seed_kw) >= 3:
-                rows = _fetch_top_descriptions(seed_kw, family=family, limit=10)
+                rows, desc_cohort_evidence = _fetch_description_cohorts(
+                    seed_kw, family=family, limit=10
+                )
                 if rows:
                     desc_examples = [
                         row for row in rows
@@ -862,6 +865,7 @@ OUTPUT — ONLY JSON:
         "top_items": top_items[:5],
         "allow_list": allow_list[:20],
         "desc_examples": desc_examples,
+        "desc_cohort_evidence": desc_cohort_evidence,
         "synth": synth,
         "pipeline_report": pipeline_report,
         "niche_intel": niche_intel,
@@ -965,7 +969,13 @@ def format_chain(result):
 
     # ── REAL DESCRIPTIONS ──
     if result["desc_examples"]:
-        lines = ["## 📝 Real descriptions from winners"]
+        lines = ["## 📝 Description research examples (favorites ≠ sales)"]
+        cohort = result.get("desc_cohort_evidence") or {}
+        lines.append(
+            f"Established candidates: {cohort.get('established_candidates', 0)} · "
+            f"measured rising candidates: {cohort.get('measured_rising_candidates', 0)} · "
+            f"growth status: {cohort.get('rising_status', 'unavailable')}"
+        )
         for name, desc, favs, price in result["desc_examples"]:
             d = (desc or "").strip().replace("\n", " ")[:150]
             lines.append(f"**{name[:50]}** — {favs:,}♥\n_{d}_")
