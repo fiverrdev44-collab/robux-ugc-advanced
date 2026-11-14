@@ -119,13 +119,16 @@ def _strip_promo_from_description(desc):
     return "\n".join(kept_lines).strip()
 
 
-def _apply_promo_filter_to_synth(synth):
+def _apply_promo_filter_to_synth(synth, concept="", family=None):
     if not isinstance(synth, dict):
         return synth
+    from description_quality import polish_description
     for key in ("seo_description", "description_seo", "description_hype",
                 "description_short", "new_description"):
         if synth.get(key):
-            synth[key] = _strip_promo_from_description(synth[key])
+            safe = _strip_promo_from_description(synth[key])
+            synth[key] = (polish_description(safe, concept, family)
+                          if concept else safe)
     return synth
 # ──────────────────────────────────────────────────────────────────────
 
@@ -841,7 +844,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     if not isinstance(synth, dict):
         return {}
 
-    synth = _apply_promo_filter_to_synth(synth)
+    synth = _apply_promo_filter_to_synth(synth, casual_description, item_type)
     return synth
 
 
