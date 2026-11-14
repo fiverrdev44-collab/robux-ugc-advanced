@@ -236,17 +236,11 @@ def _safe_description(value, vision, notes):
 
 
 def _polish_background_copy(draft, vision, notes, title, text_fn=None):
-    """Rewrite a weak description once, using only observed scene details."""
+    """Apply the grounded gate without exceeding the analyzer's two model passes."""
     from description_quality import finalize_description
     from background_intelligence import grounded_concept
-    concept = grounded_concept(vision, notes)
-    writer = None
-    if text_fn is not None:
-        writer = lambda prompt: text_fn(
-            prompt, json_mode=False, temperature=0.65, max_tokens=260
-        )
     return finalize_description(
-        draft, concept, "backgrounds", title=title, rewrite_fn=writer
+        draft, grounded_concept(vision, notes), "backgrounds", title=title
     )["text"]
 
 
@@ -383,6 +377,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "Act as a skeptical Roblox Avatar Marketplace SEARCH researcher. "
             "Return only JSON with winner (one allowed title), alternatives "
             "(two other allowed titles), challenge, why_winner, and description. "
+            "The description must sound like an individual creator talking "
+            "naturally, not a catalog data dump. Use one specific opening "
+            "sentence and one vivid but truthful scene-detail sentence. "
+            "No 'features a', bland 'scene for your avatar', keyword lists, "
+            "forced vibe endings, or unverified properties. "
             "Challenge search-term relevance, existing sampled title overlap, "
             "and unsupported market-gap claims. Challenge uncertain image "
             "claims, never upgrade an inferred object to a verified fact. "
@@ -439,8 +438,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
         "description": _polish_background_copy(
             _safe_description(reviewer.get("description"), vision, notes)
-            or listing_description(vision, notes), vision, notes, winner,
-            text_fn=text_fn
+            or listing_description(vision, notes), vision, notes, winner
         ),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
