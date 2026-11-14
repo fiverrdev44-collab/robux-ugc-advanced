@@ -88,11 +88,13 @@ jobs:
       - name: Verify exact natural-language sales/capability intents
         run: python test_vanta_exact_intents.py
       - name: Compile shared description quality modules
-        run: python -m py_compile description_quality.py chain.py desc_forge.py background_review.py gemini_brain.py
+        run: python -m py_compile description_quality.py description_learning.py chain.py desc_forge.py background_review.py gemini_brain.py
       - name: Verify human descriptions across UGC families
         run: python test_description_quality_v1.py
       - name: Verify actual generic-output description regressions
         run: python test_description_quality_v2.py
+      - name: Verify measured description cohort learning
+        run: python test_description_learning_v1.py
       - name: Run emote title engine regressions
         run: python test_emote_title.py
       - name: Run emote quality evaluation set
