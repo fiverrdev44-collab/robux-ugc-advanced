@@ -643,34 +643,23 @@ def format_forge(result):
 
 
 def pattern_prompt_block(keyword, family=None, max_examples=5):
+    """Read-only style statistics; no competitor text in an AI generation prompt."""
     try:
         rows = _fetch_top_descriptions(keyword, family=family, limit=15)
         if not rows:
             return ""
         pattern = _analyze_patterns(rows)
-
-        lines = [
-            "",
-            "=== REAL TOP DESCRIPTIONS IN THIS NICHE (style-match these) ===",
-            f"Pattern: {pattern.get('avg_lines')} lines avg · "
-            f"{pattern.get('avg_emojis')} emojis avg · "
-            f"{pattern.get('avg_chars')} chars avg · "
-            f"{pattern.get('pct_emoji_first_line')}% have emoji on line 1",
-            f"Common first words: {', '.join(pattern.get('top_first_words') or [])}",
-            f"Common bigrams: {', '.join((pattern.get('top_bigrams') or [])[:8])}",
-            "",
-            "Real examples to copy the STYLE of (not the text):",
-        ]
-        for name, desc, favs, price in rows[:max_examples]:
-            d = (desc or "").strip()[:300]
-            if not d:
-                continue
-            lines.append(f"[{favs:,}♥] {name[:45]}")
-            lines.append(d)
-            lines.append("---")
-        lines.append("")
-
-        return "\n".join(lines)
+        from description_quality import style_guidance
+        return "\n".join([
+            "=== CATEGORY-MATCHED LISTING STYLE OBSERVATIONS ===",
+            f"Sampled descriptions: {pattern.get('sample_size', 0)}",
+            f"Average lines: {pattern.get('avg_lines')}",
+            f"Average characters: {pattern.get('avg_chars')}",
+            f"Average emojis: {pattern.get('avg_emojis')}",
+            "Favorites are NOT clicks, CTR, conversion or evidence of copy quality.",
+            "No verbatim competitor examples are supplied; do not imitate wording.",
+            style_guidance(family),
+        ])
     except Exception as e:
         print(f"[desc_forge] pattern_prompt_block failed: {e}", flush=True)
         return ""
