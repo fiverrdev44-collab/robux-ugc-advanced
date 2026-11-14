@@ -813,7 +813,20 @@ OUTPUT — ONLY JSON:
         if not merged_description:
             merged_description = _fallback_description(concept, family)
 
+        # A title's marketplace evidence is not evidence of description CTR.
+        # Refuse generic AI copy and statements unsupported by creator facts.
+        from description_quality import polish_description, rejection_reason
+        pre_quality_reason = rejection_reason(
+            merged_description, concept, family,
+            title=(scored_titles[0]["title"] if scored_titles else ""),
+        )
+        merged_description = polish_description(
+            merged_description, concept, family,
+            title=(scored_titles[0]["title"] if scored_titles else ""),
+        )
+
         description_audit = {
+            "quality_fallback_reason": pre_quality_reason,
             "primary_keyword": (
                 scored_titles[0]["breakdown"][0]["word"]
                 if scored_titles and scored_titles[0].get("breakdown")
