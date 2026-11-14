@@ -204,7 +204,7 @@ def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
     assert "oggy background" in report
     assert "correct-category" in report
     assert "verify rights" in report
-    assert "Oggy's Sunny Cartoon House Background" in report
+    assert "Oggy Cartoon House Background" in report
 
 
 def test_failing_named_live_search_never_claims_zero_competitors():
