@@ -477,15 +477,15 @@ def format_multi_pass_review(data):
             query = _safe(check.get("query"), 75) or "(unknown)"
             if check.get("status") == "ok":
                 observation = _safe(check.get("observed_at"), 48)
-            lines.append("• " + query + ": " +
-                             str(check.get("asset_type_92_matches")) +
-                             " correct-category / " +
-                             str(check.get("sampled_results")) +
-                             " returned · " + str(check.get("pages")) +
-                             " page(s) · " +
-                             ("cached" if check.get("cached") else "live") +
-                             ((" · observed " + observation) if observation else
-                              " · observation time not supplied"))
+                lines.append("• " + query + ": " +
+                                 str(check.get("asset_type_92_matches")) +
+                                 " correct-category / " +
+                                 str(check.get("sampled_results")) +
+                                 " returned · " + str(check.get("pages")) +
+                                 " page(s) · " +
+                                 ("cached" if check.get("cached") else "live") +
+                                 ((" · observed " + observation) if observation else
+                                  " · observation time not supplied"))
             else:
                 lines.append("• " + query + ": unavailable (" +
                              (_safe(check.get("error"), 75) or "no response") + ")")
