@@ -18,9 +18,12 @@ UNSUPPORTED = {
     "exclusive", "rare", "guaranteed", "viral", "trending",
 }
 MOTION = {
-    "spin", "spinning", "flip", "flipping", "kick", "kicking", "dance",
-    "dancing", "sway", "swaying", "run", "running", "walk", "walking",
-    "jump", "jumping", "wave", "waving", "bounce", "bouncing",
+    "move", "moves", "moving", "spin", "spins", "spinning",
+    "flip", "flips", "flipping", "kick", "kicks", "kicking",
+    "dance", "dances", "dancing", "sway", "sways", "swaying",
+    "run", "runs", "running", "walk", "walks", "walking",
+    "jump", "jumps", "jumping", "wave", "waves", "waving",
+    "bounce", "bounces", "bouncing",
 }
 STOP = {
     "a", "an", "the", "and", "or", "for", "to", "from", "with", "of",
