@@ -458,6 +458,67 @@ def _fetch_top_descriptions(keyword, family=None, limit=20):
     return clean
 
 
+
+def _fetch_description_cohorts(keyword, family=None, limit=20):
+    """Blend category-matched established and measured rising descriptions.
+
+    Existing live fallback remains untouched. Recent favorite change comes
+    ONLY from item_history snapshots, never lifetime favorites divided by age.
+    """
+    from description_learning import query_rising_descriptions, combine_cohorts
+    established = _fetch_top_descriptions(keyword, family=family, limit=limit)
+    rising_info = {
+        "status": "unavailable", "reason": "not_checked",
+        "rising": [], "sampled": 0,
+    }
+    try:
+        conn = get_db()
+        try:
+            cur = conn.cursor()
+            try:
+                rising_info = query_rising_descriptions(
+                    cur, _candidate_keywords(keyword), family, limit=limit,
+                )
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+    except Exception as e:
+        rising_info = {
+            "status": "unavailable", "reason": type(e).__name__,
+            "rising": [], "sampled": 0,
+        }
+    # A rising item's description must pass the SAME seller-spam controls.
+    rising = [
+        entry for entry in rising_info.get("rising", [])
+        if not _is_promo_spam(entry["row"][1], name=entry["row"][0])
+    ]
+    rows = combine_cohorts(established, rising, limit=limit)
+    evidence = {
+        "established_candidates": len(established),
+        "measured_rising_candidates": len(rising),
+        "rising_status": rising_info.get("status", "unavailable"),
+        "rising_reason": rising_info.get("reason"),
+        "rising_sampled": rising_info.get("sampled", 0),
+        "observation_window_days": rising_info.get("window_days", 14),
+        "minimum_observation_hours": rising_info.get("minimum_observation_hours", 6),
+        "featured_rising": [
+            {
+                "item_id": x["item_id"],
+                "delta_favorites": x["delta_favorites"],
+                "observation_days": x["observation_days"],
+                "favorites_per_day": x["favorites_per_day"],
+            } for x in rising[:min(5, limit)]
+        ],
+        "note": (
+            "Favorite growth is measured between timestamps, NOT sales or CTR. "
+            "Descriptions belong to observed items; text quality is not a "
+            "proven cause of growth."
+        ),
+    }
+    return rows, evidence
+
+
 # ─────────────────────────────────────────────────────────────────────
 # PATTERN ANALYSIS
 # ─────────────────────────────────────────────────────────────────────
@@ -536,7 +597,8 @@ def _analyze_patterns(rows):
 # AI GENERATION
 # ─────────────────────────────────────────────────────────────────────
 
-def _generate_description(keyword, family, rows, pattern):
+def _generate_description(keyword, family, rows, pattern,
+                          cohort_evidence=None):
     from gemini_brain import _generate
 
     from description_quality import finalize_description, style_guidance
@@ -555,6 +617,8 @@ FAMILY: {family}
 CREATOR'S ITEM DESCRIPTION/TITLE (only known item facts): {keyword}
 OBSERVED SAME-FAMILY SELLER STYLE (NOT a conversion study):
 {json.dumps(structural_evidence)}
+MEASURED BREAKOUT AND ESTABLISHED COHORT COUNTS (observational only):
+{json.dumps(cohort_evidence or {}, ensure_ascii=True)[:1600]}
 
 {style_guidance(family)}
 
@@ -578,7 +642,9 @@ Return ONLY the actual listing text, no preface or labels."""
 # ─────────────────────────────────────────────────────────────────────
 
 def forge_description(keyword, family=None):
-    rows = _fetch_top_descriptions(keyword, family=family, limit=20)
+    rows, cohort_evidence = _fetch_description_cohorts(
+        keyword, family=family, limit=20
+    )
     if not rows:
         return {
             "error": f"No items with clean descriptions found for `{keyword}`. "
@@ -587,7 +653,10 @@ def forge_description(keyword, family=None):
 
     pattern = _analyze_patterns(rows)
     try:
-        description = _generate_description(keyword, family or "all", rows, pattern)
+        description = _generate_description(
+            keyword, family or "all", rows, pattern,
+            cohort_evidence=cohort_evidence,
+        )
     except Exception as e:
         return {"error": f"AI generation failed: {e}",
                 "pattern": pattern, "rows": rows}
@@ -596,6 +665,7 @@ def forge_description(keyword, family=None):
         "keyword": keyword,
         "family": family or "all",
         "pattern": pattern,
+        "cohort_evidence": cohort_evidence,
         "description": description,
         "examples": rows[:8],
         "evidence_note": (
@@ -611,6 +681,7 @@ def format_forge(result):
 
     p = result["pattern"]
     rows = result.get("examples", [])
+    evidence = result.get("cohort_evidence") or {}
     kw = result["keyword"]
 
     chunks = []
@@ -619,6 +690,10 @@ def format_forge(result):
         f"# 🔨 DESC FORGE — `{kw}`",
         f"_Mined {p.get('sample_size', 0)} clean descriptions in this niche_",
         "_Favorites and listing styles do not establish description CTR or conversion._",
+        f"• Established sample: **{evidence.get('established_candidates', 0)}**"
+        f" · measured rising: **{evidence.get('measured_rising_candidates', 0)}**"
+        f" · growth evidence: **{evidence.get('rising_status', 'unknown')}**",
+        "_Rising means positive favorite change between distinct snapshots (minimum 6 hours), not sales._",
         "",
         "## 📊 Pattern from top sellers",
         f"• Lines: **{p.get('avg_lines')}** avg",
@@ -649,23 +724,32 @@ def format_forge(result):
 
 
 def pattern_prompt_block(keyword, family=None, max_examples=5):
-    """Read-only style statistics; no competitor text in an AI generation prompt."""
+    """Pure observed style summaries from established and measured rising peers."""
     try:
-        rows = _fetch_top_descriptions(keyword, family=family, limit=15)
+        rows, cohort = _fetch_description_cohorts(
+            keyword, family=family, limit=15
+        )
         if not rows:
             return ""
         pattern = _analyze_patterns(rows)
         from description_quality import style_guidance
-        return "\n".join([
+        lines = [
             "=== CATEGORY-MATCHED LISTING STYLE OBSERVATIONS ===",
             f"Sampled descriptions: {pattern.get('sample_size', 0)}",
+            f"Established listing candidates: {cohort.get('established_candidates', 0)}",
+            f"Measured-rising listing candidates: {cohort.get('measured_rising_candidates', 0)}",
+            f"Rising evidence: {cohort.get('rising_status', 'unavailable')}",
             f"Average lines: {pattern.get('avg_lines')}",
             f"Average characters: {pattern.get('avg_chars')}",
             f"Average emojis: {pattern.get('avg_emojis')}",
-            "Favorites are NOT clicks, CTR, conversion or evidence of copy quality.",
-            "No verbatim competitor examples are supplied; do not imitate wording.",
+            "Rising means favorites gained between snapshots 6+ hours apart, "
+            "not lifetime favorites divided by age.",
+            "Favorites are NOT sales, clicks, CTR, conversion or evidence "
+            "that a description caused item growth.",
+            "No competitor prose is given to the model; never copy descriptions.",
             style_guidance(family),
-        ])
+        ]
+        return "\n".join(lines)
     except Exception as e:
         print(f"[desc_forge] pattern_prompt_block failed: {e}", flush=True)
         return ""
