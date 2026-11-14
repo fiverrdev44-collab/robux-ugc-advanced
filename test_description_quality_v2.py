@@ -38,7 +38,7 @@ def test_rewrite_is_conditional_and_bounded():
     assert result["text"] == GOOD
     assert result["rewrite_attempted"] is True
     assert len(calls) == 1
-    assert "high CTR" not in calls[0]
+    assert "Create a premium Roblox" not in calls[0]
 
     untouched = finalize_description(GOOD, CONCEPT, "backgrounds",
                                      "Sunny Cartoon House Background", writer)
