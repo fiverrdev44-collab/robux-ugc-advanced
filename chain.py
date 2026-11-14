@@ -815,18 +815,22 @@ OUTPUT — ONLY JSON:
 
         # A title's marketplace evidence is not evidence of description CTR.
         # Refuse generic AI copy and statements unsupported by creator facts.
-        from description_quality import polish_description, rejection_reason
-        pre_quality_reason = rejection_reason(
+        from description_quality import finalize_description
+        # A weak AI draft gets at most one bounded editorial rewrite, then a
+        # factual local fallback; never use marketplace metrics as copy claims.
+        quality = finalize_description(
             merged_description, concept, family,
             title=(scored_titles[0]["title"] if scored_titles else ""),
+            rewrite_fn=lambda prompt: _generate(
+                prompt, json_mode=False, temperature=0.65, max_tokens=260
+            ),
         )
-        merged_description = polish_description(
-            merged_description, concept, family,
-            title=(scored_titles[0]["title"] if scored_titles else ""),
-        )
+        merged_description = quality["text"]
 
         description_audit = {
-            "quality_fallback_reason": pre_quality_reason,
+            "quality_status": quality["quality_status"],
+            "quality_fallback_reason": quality["initial_rejection"],
+            "rewrite_attempted": quality["rewrite_attempted"],
             "primary_keyword": (
                 scored_titles[0]["breakdown"][0]["word"]
                 if scored_titles and scored_titles[0].get("breakdown")
