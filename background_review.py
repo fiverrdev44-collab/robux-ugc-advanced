@@ -235,6 +235,15 @@ def _safe_description(value, vision, notes):
     return desc
 
 
+def _polish_background_copy(draft, vision, notes, title):
+    """Keep observable scene details without generic avatar-marketing filler."""
+    from description_quality import polish_description
+    from background_intelligence import grounded_concept
+    return polish_description(
+        draft, grounded_concept(vision, notes), "backgrounds", title=title
+    )
+
+
 def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
                             background_market=None, creator_learning=None):
     """Marketplace-first name research: one creative pass, one critical pass.
@@ -422,8 +431,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "winner": winner, "alternatives": alternatives,
         "challenge": _complete_comment(reviewer.get("challenge"), 165),
         "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
-        "description": (_safe_description(reviewer.get("description"), vision, notes)
-                        or listing_description(vision, notes)),
+        "description": _polish_background_copy(
+            _safe_description(reviewer.get("description"), vision, notes)
+            or listing_description(vision, notes), vision, notes, winner
+        ),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
         "creator_named_subject": creator_named_subject(notes),
