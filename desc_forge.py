@@ -539,7 +539,7 @@ def _analyze_patterns(rows):
 def _generate_description(keyword, family, rows, pattern):
     from gemini_brain import _generate
 
-    from description_quality import polish_description, style_guidance
+    from description_quality import finalize_description, style_guidance
     # Study observed structures, not entire seller copy; favor deduplication
     # over paraphrased plagiarism or a forced template for every category.
     structural_evidence = {
@@ -564,7 +564,13 @@ or conversion rate of seller copy. Do not use their phrasing.
 No links, promotional requests, invented popularity or keyword stuffing.
 Return ONLY the actual listing text, no preface or labels."""
     raw = _generate(prompt, json_mode=False, temperature=0.6, max_tokens=400)
-    return polish_description(raw, keyword, family, title=keyword)
+    reviewed = finalize_description(
+        raw, keyword, family, title=keyword,
+        rewrite_fn=lambda instructions: _generate(
+            instructions, json_mode=False, temperature=0.65, max_tokens=260
+        ),
+    )
+    return reviewed["text"]
 
 
 # ─────────────────────────────────────────────────────────────────────
