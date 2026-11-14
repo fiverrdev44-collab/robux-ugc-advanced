@@ -144,6 +144,130 @@ def test_prompt_injection_and_ip_claim_guards():
     assert "authorize protected" not in report
 
 
+def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
+    vision = {
+        "visual_summary": "Colorful sunny cartoon house with purple roof and garden",
+        "search_description": "Cartoon house beside a green garden",
+        "distinctive_features": [
+            "bright purple roof", "green mailbox", "colorful striped awnings",
+        ],
+    }
+    notes = ("Oggy and the Cockroaches-inspired sunny cartoon house. "
+             "Purple roof, colorful awnings, green mailbox and bright garden.")
+    from background_intelligence import (
+        creator_named_subject, combine_background_live_checks,
+    )
+    assert creator_named_subject(notes) == "oggy"
+    assert creator_named_subject("A sunny cartoon house") is None
+    titles = br._valid_titles(
+        br._editorial_candidates(vision, notes), vision, notes, None)
+    assert "Oggy's Sunny Cartoon House Background" in titles, titles
+    assert "Oggy Cartoon House Background" in titles, titles
+    prompts = []
+    def model(prompt, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return ('{"titles":["Oggys Sunny Cartoon House Background",'
+                    '"Sunny Cartoon House Background",'
+                    '"Colorful Cartoon House Background"]}')
+        return ('{"winner":"Oggy Cartoon House Background",'
+                '"alternatives":["Oggys Sunny Cartoon House Background",'
+                '"Sunny Cartoon House Background"],'
+                '"challenge":"A named identity is creator-supplied, not visually proven.",'
+                '"why_winner":"Recognizable named scene and concise words.",'
+                '"description":"A cheerful cartoon house surrounded by a bright garden."}')
+    live = combine_background_live_checks([
+        {"ok": True, "keyword": "cartoon house",
+         "search_keyword": "cartoon house background",
+         "category_correct": 2, "sampled_results": 30, "pages": 1,
+         "top_competitors": [
+             {"name": "Cartoon City Background", "asset_type_id": 92,
+              "favorites": 40}]},
+        {"ok": True, "keyword": "oggy", "search_keyword": "oggy background",
+         "category_correct": 1, "sampled_results": 30, "pages": 1,
+         "top_competitors": [
+             {"name": "Oggy Cartoon Garden Background", "asset_type_id": 92,
+              "favorites": 12},
+             {"name": "Oggy Hat", "asset_type_id": 8, "favorites": 9999}]}
+    ])
+    review = br.build_multi_pass_review(
+        vision, [], notes, live, lambda *_: {}, model)
+    assert review["status"] == "ok", review
+    assert "Oggy" in review["winner"], review
+    assert "Oggy's Sunny Cartoon House Background" in [
+        row["title"] for row in review["scored"]], review
+    assert "Oggy Hat" not in [x["name"] for x in review["competitors"]]
+    assert len(prompts) == 2
+    assert "creator_named_subject" in prompts[0]
+    report = br.format_multi_pass_review(review)
+    assert "cartoon house background" in report
+    assert "oggy background" in report
+    assert "correct-category" in report
+    assert "verify rights" in report
+    assert "Oggy Cartoon House Background" in report
+
+
+def test_failing_named_live_search_never_claims_zero_competitors():
+    from background_intelligence import combine_background_live_checks
+    merged = combine_background_live_checks([
+        {"ok": False, "keyword": "oggy",
+         "error": "rate limited (429)"},
+        {"ok": True, "keyword": "cartoon house",
+         "category_correct": 0, "sampled_results": 7, "pages": 1,
+         "top_competitors": []},
+    ])
+    assert merged["ok"] is True
+    assert merged["search_checks"][0]["status"] == "unavailable"
+    assert merged["search_checks"][0]["asset_type_92_matches"] is None
+    assert merged["search_checks"][1]["asset_type_92_matches"] == 0
+    assert merged["top_competitors"] == []
+
+
+def test_discord_command_checks_scene_and_explicit_oggy_search():
+    bot = FakeBot()
+    commands_ai.register_ai_commands(bot)
+    channel = Channel()
+    ctx = SimpleNamespace(
+        message=SimpleNamespace(attachments=[Attachment()]),
+        channel=channel, send=channel.send,
+        vanta_state=SimpleNamespace(pending_chain=None))
+    requested = []
+    def vision(*args, **kwargs):
+        return {
+            "visual_summary": "Sunny cartoon house with purple roof",
+            "search_description": "Cartoon house with bright garden",
+            "distinctive_features": ["purple roof", "colorful awnings"],
+            "primary_subject": "house", "subject_relation": "unknown",
+        }
+    def market(keyword, family, limit, max_pages, timeout, cache):
+        requested.append((keyword, family, limit, max_pages, cache))
+        return {
+            "ok": True, "keyword": keyword,
+            "search_keyword": keyword + " background",
+            "pages": 1, "category_correct": 1, "sampled_results": 8,
+            "top_competitors": [
+                {"name": keyword.title() + " Background",
+                 "asset_type_id": 92, "favorites": 5}]
+        }
+    with mock.patch.object(commands_ai, "is_available", return_value=True), \
+         mock.patch.object(commands_ai, "analyze_image_for_ugc",
+                           side_effect=vision), \
+         mock.patch("convergence_live.verify_niche", side_effect=market), \
+         mock.patch("gemini_brain._generate", return_value=None):
+        asyncio.run(bot.callbacks["background_analyze"](
+            ctx, notes="Oggy sunny cartoon house and purple roof"))
+    assert len(requested) == 2, requested
+    assert requested[0][0] != requested[1][0]
+    assert requested[1] == ("oggy", "backgrounds", 30, 1, True)
+    assert all(call[1:] == ("backgrounds", 30, 1, True)
+               for call in requested)
+    body = "\n".join(channel.messages)
+    assert "Live AssetType 92 marketplace checks" in body
+    assert "oggy background" in body
+    assert "correct-category" in body
+    assert "Oggy" in body
+
+
 def test_discord_command_keeps_one_market_search_and_two_visual_calls():
     bot = FakeBot()
     commands_ai.register_ai_commands(bot)
@@ -186,5 +310,8 @@ if __name__ == "__main__":
     test_horror_office_titles_reject_awkward_detail_stacking()
     test_unavailable_providers_fail_soft_without_false_evidence()
     test_prompt_injection_and_ip_claim_guards()
+    test_explicit_oggy_name_is_a_real_candidate_not_blocked()
+    test_failing_named_live_search_never_claims_zero_competitors()
+    test_discord_command_checks_scene_and_explicit_oggy_search()
     test_discord_command_keeps_one_market_search_and_two_visual_calls()
     print("PASS background multi-pass creative director")

@@ -295,6 +295,83 @@ _NAMED_IP_CUES = (
 )
 
 
+def creator_named_subject(notes=""):
+    """Explicit creator-provided franchise, NOT an AI-verified visual detail.
+
+    Use only bounded known names. No external title, model text or live
+    competitor name is allowed to insert a franchise identity.
+    """
+    user = _short_text(notes, 300).lower()
+    if _is_untrusted_instruction(user):
+        return None
+    for term in sorted(_NAMED_IP_CUES, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(term) + r"\b", user):
+            return term
+    return None
+
+
+def combine_background_live_checks(checks):
+    """Collate 1-2 independently bounded AssetType 92 searches without
+    inventing coverage or converting a failed request to zero competition.
+    """
+    report = []
+    groups = []
+    for raw in list(checks or [])[:2]:
+        data = raw if isinstance(raw, dict) else {}
+        ok = data.get("ok") is True
+        label = _short_text(
+            data.get("search_keyword") or data.get("keyword"), 80)
+        check = {
+            "query": label,
+            "status": "ok" if ok else "unavailable",
+            "cached": bool(data.get("cached")) if ok else None,
+            "sampled_results": data.get("sampled_results") if ok else None,
+            "asset_type_92_matches": data.get("category_correct") if ok else None,
+            "pages": data.get("pages") if ok else None,
+            "observed_at": _short_text(
+                data.get("observed_at") or data.get("verification_timestamp"), 48)
+                if ok else None,
+            "error": _short_text(data.get("error"), 100) if not ok else None,
+        }
+        report.append(check)
+        if not ok:
+            groups.append([])
+            continue
+        valid = []
+        for item in (data.get("top_competitors") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if int(item.get("asset_type_id") or 0) != 92:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            name = _short_text(item.get("name"), 80)
+            if not name or _is_untrusted_instruction(name):
+                continue
+            valid.append(item)
+        groups.append(valid)
+    # Interleave rather than letting a broad scene query consume all three
+    # display slots before the creator-named query gets represented.
+    found = []
+    seen = set()
+    for position in range(3):
+        for group in groups:
+            if position >= len(group):
+                continue
+            item = group[position]
+            name = _short_text(item.get("name"), 80)
+            if name.casefold() in seen:
+                continue
+            seen.add(name.casefold())
+            found.append(item)
+    return {
+        "ok": any(x["status"] == "ok" for x in report),
+        "search_checks": report,
+        "top_competitors": found[:6],
+    }
+
+
 def named_ip_caution(vision, notes=""):
     """Simple warning cue; not a complete trademark or legal determination."""
     obs = observations(vision)

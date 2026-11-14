@@ -9,7 +9,7 @@ import re
 from background_intelligence import (
     observations, scene_phrase, candidate_titles, listing_description,
     verified_background_competitors, title_sample_overlap, named_ip_caution,
-    _short_text, _is_untrusted_instruction,
+    creator_named_subject, _short_text, _is_untrusted_instruction,
 )
 from product_understanding import validate_title
 
@@ -61,7 +61,10 @@ def _json(raw):
 
 
 def _words(text):
-    return set(re.findall(r"[a-z0-9]+", str(text or "").lower())) - _TYPES
+    # A creator's proper-name possessive (Oggy's) is still one identity
+    # token (oggy), not an unsupported new "s" keyword.
+    value = re.sub(r"[’']s\b", "", str(text or "").lower())
+    return set(re.findall(r"[a-z0-9]+", value)) - _TYPES
 
 
 def _source_words(vision, notes):
@@ -124,6 +127,17 @@ def _editorial_candidates(vision, notes):
     source = _source_words(vision, notes)
     base = anchor.title()
     out = []
+    # An explicitly named franchise is a naming candidate, not a verified
+    # visual fact or proof of permission to publish protected artwork.
+    named = creator_named_subject(notes)
+    if named:
+        possessive = named.title() + ("'" if named.endswith("s") else "'s")
+        descriptor = "Sunny" if "sunny" in source else (
+            "Colorful" if "colorful" in source else "")
+        for prefix in (f"{possessive} {descriptor}".strip(),
+                       f"{named.title()}"):
+            if not _words(prefix).issubset(_words(base)):
+                out.append(f"{prefix} {base} Background")
     for phrase in _SEARCH_HOOKS:
         hook_tokens = _words(phrase)
         if hook_tokens and hook_tokens.issubset(source) and not hook_tokens.issubset(_words(base)):
@@ -195,6 +209,9 @@ def _fit(title, vision, notes, live):
         _words(phrase).issubset(title_tokens) and
         _words(phrase).issubset(source)
         for phrase in _SEARCH_HOOKS) else 0)
+    creator_named_bonus = (
+        12 if creator_named_subject(notes) in title_tokens else 0
+    )
     weak_penalty = 7 * len(title_tokens & _LOW_SALIENCE)
     length = len(title.split())
     readability = 15 if 3 <= length <= 6 else 8 if length <= 8 else 0
@@ -202,7 +219,8 @@ def _fit(title, vision, notes, live):
     distinction = (0 if overlap["exact"] else 5 if overlap["ratio"] >= .70
                    else 10 if overlap["ratio"] >= .45 else 15)
     return {"title": title, "fit": max(0, min(100, identity + detail_score +
-            readability + 10 + distinction + hook_bonus - weak_penalty)),
+            readability + 10 + distinction + hook_bonus + creator_named_bonus
+            - weak_penalty)),
             "overlap": overlap}
 
 
@@ -238,6 +256,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         if learned.get("status") == "observed" else [])
     context = {
         "creator_notes": _safe(notes, 300),
+        "creator_named_subject": creator_named_subject(notes),
+        "named_subject_provenance": (
+            "creator-provided naming preference, not independently identified "
+            "from the image, and not a license verification"
+        ),
         "scene": first["visual_summary"],
         "search_phrase": scene_phrase(vision, notes),
         "visible_features": first["distinctive_features"],
@@ -291,6 +314,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "creators show the same term and it actually describes the artwork. "
         "Never copy a top creator's title, treat popularity as proof of "
         "algorithmic causation, or force keywords unrelated to the scene. "
+        "If the CREATOR explicitly named a cartoon/game/franchise, "
+        "include at least two natural candidates featuring that named "
+        "identity alongside scene keywords, and two unbranded options. "
+        "The creator's named identity is not visual proof or IP clearance. "
         "Preserve a recognizable search noun, then compare "
         "underused truthful feature angles against same-category titles. "
         "An empty sample is NOT demand or a validated keyword gap. "
@@ -353,7 +380,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "mistake correlation for causation, or claim a top creator "
             "guarantees sales. Choose a clear human-readable scene name "
             "over keyword stacking. "
-            "Choose titles "
+            "When a creator explicitly names a franchise, consider a "
+            "named candidate alongside descriptive ones, without claiming "
+            "authorization or concealing the IP caution. Choose titles "
             "only from ALLOWED TITLES. Write a short factual, searchable "
             "listing description, not keyword stuffing. No visual/artwork "
             "editing, Photoshop/Photopea, crop or lighting recommendations. "
@@ -397,6 +426,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
                         or listing_description(vision, notes)),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
+        "creator_named_subject": creator_named_subject(notes),
+        "live_checks": (live or {}).get("search_checks") or [],
         "ip_caution": named_ip_caution(vision, notes),
     }
 
@@ -439,6 +470,24 @@ def format_multi_pass_review(data):
         else:
             lines.append("• No exact sampled phrase match for the chosen name; "
                          "search demand unverified.")
+    live_checks = data.get("live_checks") or []
+    lines.append("**Live AssetType 92 marketplace checks**")
+    if live_checks:
+        for check in live_checks[:2]:
+            query = _safe(check.get("query"), 75) or "(unknown)"
+            if check.get("status") == "ok":
+                lines.append("• " + query + ": " +
+                             str(check.get("asset_type_92_matches")) +
+                             " correct-category / " +
+                             str(check.get("sampled_results")) +
+                             " returned · " + str(check.get("pages")) +
+                             " page(s) · " +
+                             ("cached" if check.get("cached") else "live"))
+            else:
+                lines.append("• " + query + ": unavailable (" +
+                             (_safe(check.get("error"), 75) or "no response") + ")")
+    else:
+        lines.append("• No verified live search evidence supplied.")
     competitors = data.get("competitors") or []
     lines.append("**Same-category competitor titles**")
     if competitors:

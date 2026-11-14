@@ -779,15 +779,28 @@ def register_ai_commands(bot):
             vision, second_vision, creator_notes=notes)
         vision = visual_check["vision"]
         anchor = scene_phrase(vision, notes)
-        live = None
-        if anchor:
-            try:
-                from convergence_live import verify_niche
-                # One bounded query, one page; don't bypass API pacing.
-                live = await asyncio.to_thread(
-                    verify_niche, anchor, "backgrounds", 30, 1, 12, True)
-            except Exception as exc:
-                live = {"ok": False, "error": type(exc).__name__}
+        # Run at most two bounded live searches: the visual scene anchor
+        # and the creator's explicitly named subject. Each call remains one
+        # page with category 92 post-filtering and the shared API scheduler.
+        from background_intelligence import (
+            creator_named_subject, combine_background_live_checks)
+        named = creator_named_subject(notes)
+        live_queries = []
+        for query in (anchor, named):
+            if query and query.casefold() not in {x.casefold() for x in live_queries}:
+                live_queries.append(query)
+        live_checks = []
+        if live_queries:
+            from convergence_live import verify_niche
+            for query in live_queries[:2]:
+                try:
+                    checked = await asyncio.to_thread(
+                        verify_niche, query, "backgrounds", 30, 1, 12, True)
+                except Exception as exc:
+                    checked = {"ok": False, "keyword": query,
+                               "error": type(exc).__name__}
+                live_checks.append(checked)
+        live = combine_background_live_checks(live_checks)
         # Reuse stored AssetType 92 listings as an optional, bounded category
         # research pass. No new Roblox calls, writes or speculative CTR.
         try:
