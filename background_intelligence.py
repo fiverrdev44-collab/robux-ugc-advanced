@@ -315,8 +315,7 @@ def combine_background_live_checks(checks):
     inventing coverage or converting a failed request to zero competition.
     """
     report = []
-    found = []
-    seen = set()
+    groups = []
     for raw in list(checks or [])[:2]:
         data = raw if isinstance(raw, dict) else {}
         ok = data.get("ok") is True
@@ -336,7 +335,9 @@ def combine_background_live_checks(checks):
         }
         report.append(check)
         if not ok:
+            groups.append([])
             continue
+        valid = []
         for item in (data.get("top_competitors") or [])[:3]:
             if not isinstance(item, dict):
                 continue
@@ -346,7 +347,21 @@ def combine_background_live_checks(checks):
             except (TypeError, ValueError):
                 continue
             name = _short_text(item.get("name"), 80)
-            if not name or name.casefold() in seen or _is_untrusted_instruction(name):
+            if not name or _is_untrusted_instruction(name):
+                continue
+            valid.append(item)
+        groups.append(valid)
+    # Interleave rather than letting a broad scene query consume all three
+    # display slots before the creator-named query gets represented.
+    found = []
+    seen = set()
+    for position in range(3):
+        for group in groups:
+            if position >= len(group):
+                continue
+            item = group[position]
+            name = _short_text(item.get("name"), 80)
+            if name.casefold() in seen:
                 continue
             seen.add(name.casefold())
             found.append(item)
