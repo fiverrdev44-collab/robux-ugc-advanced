@@ -121,6 +121,8 @@ jobs:
         run: python test_background_converge_recovery.py
       - name: Verify background chain category-scoped evidence and scene report
         run: python test_background_chain_evidence.py
+      - name: Compile background analysis modules
+        run: python -m py_compile background_review.py background_intelligence.py commands_ai.py convergence_live.py
       - name: Verify visual background artwork intelligence
         run: python test_background_visual_intelligence.py
       - name: Verify background competitor and listing essentials
