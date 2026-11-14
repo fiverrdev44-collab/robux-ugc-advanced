@@ -108,12 +108,12 @@ def rejection_reason(description, concept, family, title=""):
         return "unverified_performance"
     allowed = words(fact_source(concept) + " " + title)
     used = words(text)
-    for claim in UNSUPPORTED:
-        if claim in used and claim not in allowed:
-            return "unverified_feature:" + claim
     if str(family or "").lower() not in ("emote", "emotes"):
         if (used & MOTION) - allowed:
             return "unsupported_motion"
+    for claim in UNSUPPORTED:
+        if claim in used and claim not in allowed:
+            return "unverified_feature:" + claim
     if len(text.split()) > 85:
         return "overlong"
     facts = words(fact_source(concept)) - STOP
