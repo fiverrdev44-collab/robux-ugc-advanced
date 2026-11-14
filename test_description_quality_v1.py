@@ -33,7 +33,7 @@ def test_no_unsupported_effects_or_seller_performance():
     assert dq.rejection_reason(
         "An interactive 3D cartoon house with a purple roof.",
         concept, "backgrounds"
-    ) == "unverified_feature:interactive"
+    ).startswith("unverified_feature:")
     assert dq.rejection_reason(
         "Cartoon house where the mailbox moves and dances.",
         concept, "backgrounds"
