@@ -119,13 +119,16 @@ def _strip_promo_from_description(desc):
     return "\n".join(kept_lines).strip()
 
 
-def _apply_promo_filter_to_synth(synth):
+def _apply_promo_filter_to_synth(synth, concept="", family=None):
     if not isinstance(synth, dict):
         return synth
+    from description_quality import polish_description
     for key in ("seo_description", "description_seo", "description_hype",
                 "description_short", "new_description"):
         if synth.get(key):
-            synth[key] = _strip_promo_from_description(synth[key])
+            safe = _strip_promo_from_description(synth[key])
+            synth[key] = (polish_description(safe, concept, family)
+                          if concept else safe)
     return synth
 # ──────────────────────────────────────────────────────────────────────
 
@@ -631,36 +634,20 @@ SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 {competitor_titles}
 {portfolio_block}
 === DESCRIPTION STYLE GUIDE (NON-NEGOTIABLE) ===
-Real Roblox sellers write descriptions like this:
-
-GOOD ✅:
-Smooth hip sway dance emote for your Roblox avatar 🎀
-Cute motion animation with lively steps and bouncy energy.
-Perfect for chillin with friends, party fits, or trending.
-
-GOOD ✅:
-✨ kawaii pastel bow 🎀 cute accessory for any avatar
-Matches cottagecore and coquette outfits perfectly.
-
-BAD ❌:
-Enhance your avatar performance with this smooth animation.
-Designed for seamless catalog integration, this movement
-elevates your Roblox experience.
-
-Rules:
-- 2-3 lines. Never 4+.
-- One emoji max per line.
-- First sentence = top keyword + type word. That's it.
-- Keywords appear naturally, not stuffed.
-- FORBIDDEN WORDS (never use): enhance, elevate, seamless, integration,
-  designed for, experience, ultimate, compound, leverage,
-  aligns, optimize, robust, comprehensive, join, group, community,
-  follow, subscribe, check out, visit, shop, our store, our catalog,
-  more items, want more, exclusive, add to your, collection
-- NEVER include group/community promo. NEVER say "Join the group" or 
-  "more items" or "check out". The description ONLY describes the ITEM.
-- If a sentence sounds like a LinkedIn post OR a promo pitch, rewrite it.
-- End the description with a mood, use case, or vibe line. NOT a CTA.
+Write short, specific, relaxed human Roblox listing copy, not AI promotional prose.
+- Two or three natural lines; emojis are optional, never forced.
+- First identify the actual item or setting and one specific stated detail.
+- Only creator-confirmed features: do not borrow traits from competitors.
+- Background: actual scene/landmarks, no animation or interactive claims.
+- Emote: only described/preview-confirmed moves, not guessed movements.
+- Accessories: only stated colors, shape, materials and styling details.
+- No generic endings, "perfect for your next avatar look", "elevate",
+  "enhance", "chillin with friends", "designed for", "ultimate", or hype.
+- Never imply high CTR, search rank, popularity, sales or conversion.
+- Search phrases should appear only if they truly describe the item.
+- Learn from competitor description LENGTH and STYLE patterns only, never
+  lift their sentences or assume that favorites prove copy performance.
+- No promotional call to action or phrase-list padding.
 
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
@@ -857,7 +844,7 @@ def synthesize_hybrid(casual_description, allow_list, top_items, market_stats,
     if not isinstance(synth, dict):
         return {}
 
-    synth = _apply_promo_filter_to_synth(synth)
+    synth = _apply_promo_filter_to_synth(synth, casual_description, item_type)
     return synth
 
 

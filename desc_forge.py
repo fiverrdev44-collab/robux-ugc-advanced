@@ -539,46 +539,32 @@ def _analyze_patterns(rows):
 def _generate_description(keyword, family, rows, pattern):
     from gemini_brain import _generate
 
-    examples = []
-    for name, desc, favs, price in rows[:12]:
-        d = (desc or "").strip()
-        if not d:
-            continue
-        examples.append(f"[{favs:,}♥] {name[:50]}\n{d[:400]}\n---")
+    from description_quality import polish_description, style_guidance
+    # Study observed structures, not entire seller copy; favor deduplication
+    # over paraphrased plagiarism or a forced template for every category.
+    structural_evidence = {
+        "sample_size": pattern.get("sample_size", 0),
+        "avg_lines": pattern.get("avg_lines"),
+        "avg_chars": pattern.get("avg_chars"),
+        "avg_emojis": pattern.get("avg_emojis"),
+    }
+    import json
+    prompt = f"""Write ONE Roblox Marketplace listing description.
 
-    examples_block = "\n".join(examples) or "(no examples)"
+FAMILY: {family}
+CREATOR'S ITEM DESCRIPTION/TITLE (only known item facts): {keyword}
+OBSERVED SAME-FAMILY SELLER STYLE (NOT a conversion study):
+{json.dumps(structural_evidence)}
 
-    avg_chars = pattern.get("avg_chars", 0)
-    phrases = pattern.get("top_bigrams") or []
-    first_words = pattern.get("top_first_words") or []
-    target_chars = max(320, int((avg_chars or 200) * 1.4))
+{style_guidance(family)}
 
-    prompt = f"""You write high-converting Roblox UGC descriptions. Write ONE powerful
-description for a {family} item about: {keyword}.
-
-Real top-seller descriptions in this niche (tone and structure only):
-{examples_block}
-
-=== STRUCTURE (4-6 short lines) ===
-1. Hook line: the keyword + one type word + ONE emoji.
-2. 1-3 feature/benefit lines: how it looks, moves, or sits, and why people want it.
-3. One fit/aesthetic line: which outfits or vibes it matches.
-4. Weave these high-value phrases naturally into the body — do NOT write "tags:",
-   do NOT list them, do NOT stuff commas: {', '.join(phrases[:8])}
-
-=== RULES (non-negotiable) ===
-- No URLs, group links, "join", credits, or creator names.
-- No corporate filler: enhance, elevate, seamless, ultimate, leverage, optimize, experience.
-- No invented numbers or claims.
-- Casual human creator voice. Aim for about {target_chars} characters.
-- Every line must read like a sentence. Never end with a keyword list or a line
-  of separated nouns/adjectives.
-- Return ONLY the description text. No labels, no quotes, no preamble.
-
-DESCRIPTION:"""
-
-    raw = _generate(prompt, json_mode=False, temperature=0.85, max_tokens=800)
-    return (raw or "").strip()
+Do NOT infer materials, movement, characters, reactions, or effects
+from competitor listings. Favorites measure attention, not the quality
+or conversion rate of seller copy. Do not use their phrasing.
+No links, promotional requests, invented popularity or keyword stuffing.
+Return ONLY the actual listing text, no preface or labels."""
+    raw = _generate(prompt, json_mode=False, temperature=0.6, max_tokens=400)
+    return polish_description(raw, keyword, family, title=keyword)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -606,6 +592,10 @@ def forge_description(keyword, family=None):
         "pattern": pattern,
         "description": description,
         "examples": rows[:8],
+        "evidence_note": (
+            "Sampled seller descriptions inform style, not proven CTR or "
+            "causal sales performance. Generated claims are limited to supplied facts."
+        ),
     }
 
 
@@ -622,6 +612,7 @@ def format_forge(result):
     header = [
         f"# 🔨 DESC FORGE — `{kw}`",
         f"_Mined {p.get('sample_size', 0)} clean descriptions in this niche_",
+        "_Favorites and listing styles do not establish description CTR or conversion._",
         "",
         "## 📊 Pattern from top sellers",
         f"• Lines: **{p.get('avg_lines')}** avg",
@@ -652,34 +643,23 @@ def format_forge(result):
 
 
 def pattern_prompt_block(keyword, family=None, max_examples=5):
+    """Read-only style statistics; no competitor text in an AI generation prompt."""
     try:
         rows = _fetch_top_descriptions(keyword, family=family, limit=15)
         if not rows:
             return ""
         pattern = _analyze_patterns(rows)
-
-        lines = [
-            "",
-            "=== REAL TOP DESCRIPTIONS IN THIS NICHE (style-match these) ===",
-            f"Pattern: {pattern.get('avg_lines')} lines avg · "
-            f"{pattern.get('avg_emojis')} emojis avg · "
-            f"{pattern.get('avg_chars')} chars avg · "
-            f"{pattern.get('pct_emoji_first_line')}% have emoji on line 1",
-            f"Common first words: {', '.join(pattern.get('top_first_words') or [])}",
-            f"Common bigrams: {', '.join((pattern.get('top_bigrams') or [])[:8])}",
-            "",
-            "Real examples to copy the STYLE of (not the text):",
-        ]
-        for name, desc, favs, price in rows[:max_examples]:
-            d = (desc or "").strip()[:300]
-            if not d:
-                continue
-            lines.append(f"[{favs:,}♥] {name[:45]}")
-            lines.append(d)
-            lines.append("---")
-        lines.append("")
-
-        return "\n".join(lines)
+        from description_quality import style_guidance
+        return "\n".join([
+            "=== CATEGORY-MATCHED LISTING STYLE OBSERVATIONS ===",
+            f"Sampled descriptions: {pattern.get('sample_size', 0)}",
+            f"Average lines: {pattern.get('avg_lines')}",
+            f"Average characters: {pattern.get('avg_chars')}",
+            f"Average emojis: {pattern.get('avg_emojis')}",
+            "Favorites are NOT clicks, CTR, conversion or evidence of copy quality.",
+            "No verbatim competitor examples are supplied; do not imitate wording.",
+            style_guidance(family),
+        ])
     except Exception as e:
         print(f"[desc_forge] pattern_prompt_block failed: {e}", flush=True)
         return ""
