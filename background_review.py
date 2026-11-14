@@ -61,7 +61,10 @@ def _json(raw):
 
 
 def _words(text):
-    return set(re.findall(r"[a-z0-9]+", str(text or "").lower())) - _TYPES
+    # A creator's proper-name possessive (Oggy's) is still one identity
+    # token (oggy), not an unsupported new "s" keyword.
+    value = re.sub(r"[’']s\b", "", str(text or "").lower())
+    return set(re.findall(r"[a-z0-9]+", value)) - _TYPES
 
 
 def _source_words(vision, notes):
