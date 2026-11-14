@@ -75,9 +75,11 @@ def test_background_analyzer_passes_visual_context_once():
         BAD_LIVE, visual, CONCEPT,
         "Sunny Cartoon House Background", text_fn=text_fn
     )
-    assert polished == GOOD
-    assert len(calls) == 1
-    assert calls[0][1]["max_tokens"] <= 300
+    # Background review already uses its two permitted model passes. It
+    # rejects the weak copy and falls back without invoking a third.
+    assert "vibrant cartoon scene" not in polished.lower()
+    assert "Sunny Cartoon House Background" in polished
+    assert calls == []
 
 def test_family_specific_claims():
     assert rejection_reason(
