@@ -287,12 +287,32 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         related = bool(q_tokens & set(_tokens(name)))
         if related:
             conceptual += 1
+        # Keep stable catalog and creator identifiers for auditable evidence.
+        # Fields can be absent in Roblox search responses; never synthesize IDs.
+        try:
+            asset_id = int(x.get("id"))
+            asset_id = asset_id if asset_id > 0 else None
+        except (TypeError, ValueError):
+            asset_id = None
+        try:
+            creator_id = int(x.get("creatorTargetId"))
+            creator_id = creator_id if creator_id > 0 else None
+        except (TypeError, ValueError):
+            creator_id = None
+        creator_type = x.get("creatorType")
+        if creator_type not in ("User", "Group"):
+            creator_type = None
         competitors.append({
             "name": name[:48],
             "favorites": int(x.get("favoriteCount") or 0),
+            "favorites_known": x.get("favoriteCount") is not None,
             "price": int(x.get("price") or 0),
+            "price_known": x.get("price") is not None,
             "asset_type_id": int(atype or 0),
+            "asset_id": asset_id,
             "creator": (x.get("creatorName") or "")[:40],
+            "creator_id": creator_id,
+            "creator_type": creator_type,
             "related": related,
         })
     # Concept-related competitors first, then by popularity.
