@@ -235,13 +235,19 @@ def _safe_description(value, vision, notes):
     return desc
 
 
-def _polish_background_copy(draft, vision, notes, title):
-    """Keep observable scene details without generic avatar-marketing filler."""
-    from description_quality import polish_description
+def _polish_background_copy(draft, vision, notes, title, text_fn=None):
+    """Rewrite a weak description once, using only observed scene details."""
+    from description_quality import finalize_description
     from background_intelligence import grounded_concept
-    return polish_description(
-        draft, grounded_concept(vision, notes), "backgrounds", title=title
-    )
+    concept = grounded_concept(vision, notes)
+    writer = None
+    if text_fn is not None:
+        writer = lambda prompt: text_fn(
+            prompt, json_mode=False, temperature=0.65, max_tokens=260
+        )
+    return finalize_description(
+        draft, concept, "backgrounds", title=title, rewrite_fn=writer
+    )["text"]
 
 
 def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
@@ -433,7 +439,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
         "description": _polish_background_copy(
             _safe_description(reviewer.get("description"), vision, notes)
-            or listing_description(vision, notes), vision, notes, winner
+            or listing_description(vision, notes), vision, notes, winner,
+            text_fn=text_fn
         ),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
