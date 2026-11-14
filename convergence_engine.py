@@ -32,6 +32,7 @@ FAMILIES = {
     "classic":   [2, 11, 12],
     "clothing":  [64, 65, 66, 67, 68, 69, 70, 71, 72, 2, 11, 12],
     "gear":      [19],
+    "backgrounds": [92],
 }
 
 ASSET_TO_FAMILY = {}
@@ -159,9 +160,9 @@ def _family_clause(family):
     except Exception:
         pass
 
-    # Unknown — no filter (better than returning nothing)
-    print(f"[convergence] unknown family '{family}' — no filter", flush=True)
-    return "", []
+    # Unknown — fail closed; never mix unrelated asset types into a category.
+    print(f"[convergence] unknown family '{family}' — fail closed", flush=True)
+    return " and 1=0", []
 
 
 def _kw_pattern(keyword):

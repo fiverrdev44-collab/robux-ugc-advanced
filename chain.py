@@ -235,7 +235,8 @@ def _fallback_description(concept, family):
             f"Perfect for your next avatar look.")
 
 
-def run_chain(concept, family=None, parent_id=None, live_enrich=True):
+def run_chain(concept, family=None, parent_id=None, live_enrich=True,
+              visual_context=None):
     from gemini_brain import (
         extract_keywords, all_terms, synthesize_hybrid, _generate
     )
@@ -299,7 +300,10 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     understanding = None
     try:
         from product_understanding import merge as _pu_merge
-        understanding = _pu_merge(concept, api_family=None)
+        understanding = _pu_merge(
+            (f"{concept} {visual_context}"
+             if visual_context and family == "backgrounds" else concept),
+            api_family=None)
         if raw_family in ("unknown", "", None) and \
                 understanding["family"] != "unknown":
             family = understanding["family"]
@@ -479,6 +483,10 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
     synth = {}
     try:
         concept_for_ai = concept
+        if visual_context and family == "backgrounds":
+            concept_for_ai += (
+                "\n[BACKGROUND VISUAL OBSERVATIONS — first-pass analysis, "
+                "not independent verification] " + visual_context)
         if parent_context:
             concept_for_ai = f"{concept}\n{parent_context}"
 

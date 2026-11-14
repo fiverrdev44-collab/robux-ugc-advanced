@@ -272,11 +272,14 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         if related:
             conceptual += 1
         competitors.append({
+            "id": int(x.get("id") or 0),
             "name": name[:48],
             "favorites": int(x.get("favoriteCount") or 0),
             "price": int(x.get("price") or 0),
             "asset_type_id": int(atype or 0),
             "creator": (x.get("creatorName") or "")[:40],
+            "created_at": (x.get("itemCreatedUtc")
+                           or x.get("itemUpdatedUtc")),
             "related": related,
         })
     # Concept-related competitors first, then by popularity.
@@ -295,7 +298,10 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         "exact_title_matches": exact,
         "conceptual_matches": conceptual,
         "top_competitors": competitors[:3],
+        "competitors": competitors[:10],
         "verification_timestamp": datetime.now(timezone.utc).isoformat(),
+        "query": keyword,
+        "request_status": "ok",
         "sample_note": (
             f"first {limit * max_pages} results sampled"
             + (" (capped before catalog exhausted)" if capped else "")

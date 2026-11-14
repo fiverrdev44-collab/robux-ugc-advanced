@@ -1023,6 +1023,49 @@ def fallback_title_payload(allow_list, specific_moves, item_type, top_items):
     }
 
 
+_BACKGROUND_VISION_PROMPT = """Analyze 1-4 images of the same Roblox Avatar Background
+(AssetType 92). This is a scene, not a wearable or an emote. Return ONLY JSON:
+
+{{
+  "visual_summary": "2-3 sentences describing the scene",
+  "background_setting": "indoor room, outdoor landscape, fantasy realm, etc.",
+  "background_landmarks": ["recognizable objects/architecture"],
+  "background_lighting": "lighting description",
+  "background_palette": ["dominant colours"],
+  "background_atmosphere": "mood and atmosphere",
+  "background_composition": "focal point, horizon, avatar placement",
+  "visual_colors": ["..."],
+  "visual_style": ["..."],
+  "visual_mood": ["..."],
+  "distinctive_features": ["..."],
+  "search_description": "one sentence usable as a marketplace search phrase",
+  "visual_title_seed": "short scene name; do not add 'Avatar Background'",
+  "composition_notes": "mobile/desktop readability and cropping notes",
+  "ip_reference_warning": "<NONE or clearly name a recognizable third-party reference>",
+  "item_type_visual": "background"
+}}
+
+CREATOR'S NOTES: {desc}
+"""
+
+_BACKGROUND_VERIFY_PROMPT = """Independently verify the same Avatar Background images.
+Do not trust the creator's notes and do not invent features. Return ONLY JSON:
+
+{{
+  "verification_status": "<verified|uncertain|failed>",
+  "verified_setting": "what is actually visible",
+  "verified_landmarks": ["actually visible landmarks"],
+  "verified_colors": ["actually visible dominant colours"],
+  "verified_lighting": "actually visible lighting",
+  "verified_avatar_space": "where an avatar can stand/read clearly",
+  "discrepancies": ["differences from the notes or first-pass description"],
+  "visual_summary": "2-3 sentence independent description"
+}}
+
+CREATOR'S NOTES: {desc}
+"""
+
+
 _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 
 {{
@@ -1065,17 +1108,30 @@ def _parse_vision_result(raw):
     for k in ("item_type_visual","search_description","title_color_match",
               "visual_summary","likely_trend_source","likely_trend_context",
               "ip_reference_warning","target_audience","color_psychology",
-              "composition_notes"):
+              "composition_notes","background_setting","background_lighting",
+              "background_atmosphere","background_composition",
+              "visual_title_seed","verification_status","verified_setting",
+              "verified_lighting","verified_avatar_space"):
         data[k] = str(data.get(k, "")).strip()
+    for k in ("background_landmarks", "background_palette",
+              "verified_landmarks", "verified_colors", "discrepancies"):
+        val = data.get(k, [])
+        if isinstance(val, str):
+            val = [val]
+        if not isinstance(val, list):
+            val = []
+        data[k] = [str(v).strip() for v in val if str(v).strip()]
     data["item_type_visual"] = data["item_type_visual"].lower() or "unknown"
     data["title_color_match"] = data["title_color_match"].upper() or "?"
     return data
 
 
-def analyze_image_for_ugc(images, user_description=""):
+def analyze_image_for_ugc(images, user_description="", prompt_text=None):
     if not _ensure() or not images: return {}
     images = images[:4]
-    prompt_text = _VISION_PROMPT.format(desc=(user_description or "").strip() or "(none)")
+    if not prompt_text:
+        prompt_text = _VISION_PROMPT.format(
+            desc=(user_description or "").strip() or "(none)")
 
     if _client is not None:
         try:

@@ -572,6 +572,14 @@ def register_advanced_commands(bot, get_db):
 
         mode_label = "VARIANT" if parent_id else "NEW"
         interactive = getattr(ctx, "vanta_state", None) is not None
+        visual_context = None
+        if family == "backgrounds":
+            try:
+                from background_analyze import last_visual_context
+                visual_context = last_visual_context(
+                    ctx.author.id, ctx.channel.id)
+            except Exception:
+                visual_context = None
         eta = "~30-60s" if parent_id else ("~20-45s" if interactive else "~60-120s")
         progress = await ctx.send(f"🔗 Running chain [{mode_label}]... ({eta})")
 
@@ -579,7 +587,8 @@ def register_advanced_commands(bot, get_db):
             # Conversational runs stay DB-only: live enrichment is the stage
             # that hangs on 429 backoff and blows the chat timeout.
             return run_chain(concept, family=family, parent_id=parent_id,
-                             live_enrich=not interactive)
+                             live_enrich=not interactive,
+                             visual_context=visual_context)
 
         try:
             result = await asyncio.to_thread(_run)
@@ -594,10 +603,27 @@ def register_advanced_commands(bot, get_db):
         champ = ((result.get("scored_titles") or [{}])[0] or {}).get("title")
         if champ:
             try:
-                from live_market import check_title
-                live = await asyncio.to_thread(check_title, champ)
+                if result.get("family") == "backgrounds":
+                    from convergence_live import verify_niche
+                    checked = await asyncio.to_thread(
+                        verify_niche, champ, "backgrounds", 30, 1)
+                    live = {
+                        "ok": bool(checked.get("ok")),
+                        "results": checked.get("sampled_results"),
+                        "pages": checked.get("pages"),
+                        "exact": checked.get("exact_title_matches"),
+                        "capped": checked.get("capped"),
+                        "status": checked.get("status", "ok"),
+                        "top_competitors": (checked.get("competitors")
+                                            or checked.get("top_competitors")
+                                            or []),
+                    }
+                else:
+                    from live_market import check_title
+                    live = await asyncio.to_thread(check_title, champ)
             except Exception as e:
-                print(f"[chain] live check failed: {e}", flush=True)
+                print(f"[chain] live check failed: {type(e).__name__}",
+                      flush=True)
         try:
             from astra_report import build_analyst_report
             from product_understanding import merge as _pu_merge

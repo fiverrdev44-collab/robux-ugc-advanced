@@ -26,6 +26,8 @@ on:
       - fix/f10-timestamp-integrity
       - fix/f18-sales-source-authentication
       - release/vanta73-final-certification-rc
+      - release/vanta73-operational-gate
+      - feat/background-analyze-intelligence
   pull_request:
     branches:
       - main
@@ -93,6 +95,10 @@ jobs:
         run: python test_public_command_callbacks.py
       - name: Run restricted command callback regressions
         run: python test_restricted_command_callbacks.py
+      - name: Run background analyzer regressions
+        run: |
+          python test_background_analyze.py
+          python test_background_intelligence.py
       - name: Run F-18 sales source security regressions
         run: python test_f18_sales_source_security.py
       - name: Run F-10 timestamp integrity regressions

@@ -711,7 +711,8 @@ def register_ai_commands(bot):
                 "**🧠 AI Status: ONLINE**",
                 f"• Primary: `Gemini` ({gmodel})",
                 f"• Fallback: {'`OpenRouter` (' + omodel + ')' if has_or else '❌ not configured'}",
-                "Commands: `!brainstorm`, `!rescue`, `!analyze_image`, `!ai_debug`",
+                "Commands: `!brainstorm`, `!rescue`, `!analyze_image`, "
+                "`!background_analyze`, `!ai_debug`",
             ]
             await ctx.send("\n".join(lines))
         else:
@@ -1396,9 +1397,67 @@ RULES:
         except Exception:
             pass
 
-    @bot.command(name="analyze_image")
+    async def _run_background_analyze(ctx, notes=""):
+        from background_analyze import analyze as _bg_analyze
+        from background_analyze import format_report as _bg_format
+        from background_analyze import store_last as _bg_store
+
+        attachments = [
+            a for a in (ctx.message.attachments or [])
+            if (a.content_type or "").startswith("image/")
+        ][:4]
+        if not attachments:
+            return await ctx.send(
+                "**Usage:** `!background_analyze <scene notes>` with 1-4 "
+                "attached images.\n"
+                "_The image bytes are required; notes alone are not visual "
+                "verification._")
+        progress = await ctx.send(
+            f"🌌 **Reading {len(attachments)} background image(s)...**")
+        images = []
+        for attachment in attachments:
+            try:
+                payload = await attachment.read()
+            except Exception as exc:
+                await progress.edit(
+                    content=f"❌ Could not read image: `{type(exc).__name__}`")
+                return
+            if len(payload) > 8 * 1024 * 1024:
+                await ctx.send("⚠️ One image exceeded 8MB and was skipped.")
+                continue
+            images.append({"bytes": payload,
+                           "mime": attachment.content_type or "image/png"})
+        if not images:
+            await progress.edit(content="❌ No usable image attachment found.")
+            return
+        await progress.edit(
+            content=("🔎 **Analyzing scene + live AssetType-92 competitors; "
+                     "this can take a moment...**"))
+        try:
+            data = await asyncio.to_thread(_bg_analyze, images, notes, True)
+        except Exception as exc:
+            await progress.edit(
+                content=f"❌ Background analysis failed: `{type(exc).__name__}`")
+            return
+        if data.get("ok"):
+            _bg_store(ctx.author.id, ctx.channel.id, data)
+        try:
+            await progress.delete()
+        except Exception:
+            pass
+        body = _bg_format(data)
+        for i in range(0, len(body), 1900):
+            await ctx.send(body[i:i + 1900])
+
+    @bot.command(name="analyze_image", aliases=["background_analyze"])
     async def analyze_image(ctx, *, description: str = ""):
-        """Analyze an attached image and suggest UGC titles and tags."""
+        """Analyze an attached image and suggest UGC titles and tags.
+
+        ``!background_analyze`` is an alias with AssetType-92 scene analysis,
+        image verification and live background-only marketplace evidence.
+        """
+        if (getattr(ctx, "invoked_with", "") or "").lower() == "background_analyze":
+            return await _run_background_analyze(ctx, description)
         if not is_available():
             await ctx.send("AI is offline. Run `!ai_status`.")
             return

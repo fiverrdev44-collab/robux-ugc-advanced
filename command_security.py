@@ -86,7 +86,8 @@ PUBLIC_MUTATING = USER_SCOPED_WRITE | OWNER_GATED_MUTATION
 PUBLIC_READ_ONLY = PUBLIC_COMMANDS - PUBLIC_RATE_LIMITED - PUBLIC_MUTATING
 
 COMMAND_ALIASES = {
-    "about": "version", "apply_rec": "applied", "certify": "selftest",
+    "about": "version", "apply_rec": "applied", "background_analyze": "analyze_image",
+    "certify": "selftest",
     "cohort": "creator_brain", "gmetrics": "group_metrics",
     "golden": "golden_hour", "healthcheck_db": "selftest_db",
     "hit_rate": "hitrate", "integrity": "data_audit", "labs": "experiments",
