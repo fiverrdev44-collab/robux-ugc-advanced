@@ -290,7 +290,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         ],
         "sample_limits": {
             "stored_database": market.get("scope", "unavailable"),
-            "marketplace": "single bounded AssetType 92 title sample",
+            "marketplace": "at most two bounded AssetType 92 catalog searches",
             "sales": "unavailable", "organic_ctr": "unavailable",
             "algorithm_weights": "not disclosed or validated",
         },
@@ -476,13 +476,16 @@ def format_multi_pass_review(data):
         for check in live_checks[:2]:
             query = _safe(check.get("query"), 75) or "(unknown)"
             if check.get("status") == "ok":
-                lines.append("• " + query + ": " +
+                observation = _safe(check.get("observed_at"), 48)
+            lines.append("• " + query + ": " +
                              str(check.get("asset_type_92_matches")) +
                              " correct-category / " +
                              str(check.get("sampled_results")) +
                              " returned · " + str(check.get("pages")) +
                              " page(s) · " +
-                             ("cached" if check.get("cached") else "live"))
+                             ("cached" if check.get("cached") else "live") +
+                             ((" · observed " + observation) if observation else
+                              " · observation time not supplied"))
             else:
                 lines.append("• " + query + ": unavailable (" +
                              (_safe(check.get("error"), 75) or "no response") + ")")
@@ -492,7 +495,25 @@ def format_multi_pass_review(data):
     lines.append("**Same-category competitor titles**")
     if competitors:
         for row in competitors[:3]:
-            lines.append("• " + row["name"])
+            asset_id = row.get("asset_id")
+            # URLs only for validated numeric IDs supplied by the live API.
+            item_url = (" · https://www.roblox.com/catalog/" + str(asset_id)
+                        if isinstance(asset_id, int) and asset_id > 0 else "")
+            creator = row.get("creator") or ""
+            creator_type = row.get("creator_type")
+            creator_id = row.get("creator_id")
+            creator_label = (
+                " · " + creator_type + " " + str(creator_id)
+                if creator_type in ("User", "Group") and
+                   isinstance(creator_id, int) and creator_id > 0 else
+                (" · creator " + _safe(creator, 50) if creator else "")
+            )
+            favs = (
+                " · " + str(row["favorites"]) + " favorites"
+                if row.get("favorites_known") and
+                   isinstance(row.get("favorites"), int) else ""
+            )
+            lines.append("• " + row["name"] + item_url + creator_label + favs)
     else:
         lines.append("• No verified listing names returned from bounded search.")
     lines.append("• Title overlap is not proof of search ranking, visual similarity "
