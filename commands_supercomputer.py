@@ -1176,12 +1176,25 @@ def register_supercomputer_commands(bot):
 
         def _run():
             from scanner import run_scanner
-            run_scanner()
-            return True
+            return run_scanner()
 
         try:
-            await asyncio.to_thread(_run)
-            await ctx.send("✅ **Scanner finished.** New IDs added to `discovered_items`.")
+            scan = await asyncio.to_thread(_run)
+            search_new = int((scan or {}).get("search_ids_inserted") or 0)
+            window_new = int((scan or {}).get("id_window_upserted") or 0)
+            lines = [
+                "🔭 **Scanner completed**",
+                f"Search: **{(scan or {}).get('search_ids_found', 0):,}** IDs found; "
+                f"**{search_new:,}** newly discovered.",
+                f"ID-window: **{window_new:,}** catalog items upserted.",
+                f"Query errors: **{(scan or {}).get('search_query_errors', 0):,}**.",
+            ]
+            if not search_new and not window_new:
+                lines.append("⚠️ No new data confirmed. Check API, schedule, "
+                             "worker logs, database target and rate limits.")
+            else:
+                lines.append("✅ At least one pipeline path wrote catalog data.")
+            await ctx.send("\n".join(lines))
         except Exception as e:
             await ctx.send(f"⚠️ Scanner failed: {type(e).__name__}: {e}")
 
