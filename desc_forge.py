@@ -300,6 +300,10 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
                     continue
                 if favs < 50:
                     continue
+                # Avatar Backgrounds must be confirmed AssetType 92, not
+                # unknown-type search results from a general catalog query.
+                if conv_family == "backgrounds" and atype != 92:
+                    continue
 
                 # Accessory umbrella — match any sub-type
                 if conv_family == "accessory" and atype not in ACCESSORY_IDS:
@@ -349,33 +353,49 @@ def _fetch_live_descriptions(keyword, family=None, limit=20):
 _KEYWORD_STOP = {
     "the", "a", "an", "for", "with", "and", "of", "to", "my", "our",
     "new", "best", "item", "items", "ugc", "roblox", "edition",
+    "inspired", "inspiration", "based", "create", "description", "title",
+    "premium", "search", "marketplace", "viral", "great", "very",
+    "beautiful", "background", "backgrounds", "avatar", "avatars",
 }
 
 
 def _candidate_keywords(keyword):
-    """Progressively simpler mining keywords so a full item title like
-    'Cute Kitty Fluffy Beanie' still finds top sellers."""
-    words = re.findall(r"[a-z0-9]+", (keyword or "").lower())
-    toks = [w for w in words if w not in _KEYWORD_STOP and len(w) >= 3]
-    candidates = []
-    if (keyword or "").strip():
-        candidates.append(keyword.strip())
-    if len(toks) >= 2:
-        candidates.append(" ".join(toks[-2:]))
-    if toks:
-        candidates.append(toks[-1])
-    if len(toks) >= 2:
-        candidates.append(" ".join(toks[:-1]))
-    for tok in reversed(toks):
-        candidates.append(tok)
-    seen, out = set(), []
-    for c in candidates:
-        c = c.strip().lower()
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    """Prioritize item-shape and feature phrases, not tail-word guesses.
 
+    Creator inputs may be full detailed concepts, not catalog item titles.
+    For 'Oggy-inspired sunny cartoon house with purple roof, ... walkway',
+    search 'cartoon house', 'purple roof', etc., rather than the full
+    sentence or irrelevant 'walkway'. Bounded to avoid API/DB request storms.
+    """
+    source = str(keyword or "").strip()
+    if not source:
+        return []
+    clauses = re.split(r"[,;.]|\bwith\b|\band\b", source, flags=re.I)
+    out = []
+    def append(value):
+        value = " ".join(str(value or "").lower().split()).strip()
+        if value and value not in out and len(out) < 8:
+            out.append(value)
+    if len(source) <= 65 and len(source.split()) <= 7:
+        append(source)
+    primary = re.findall(r"[a-z0-9]+", clauses[0].lower())
+    primary = [t for t in primary if t not in _KEYWORD_STOP and len(t) >= 3]
+    # Main item identity should rank before incidental props.
+    if len(primary) >= 2:
+        append(" ".join(primary[-2:]))
+    if len(primary) >= 3:
+        append(" ".join(primary[-3:]))
+    for clause in clauses[1:]:
+        words = re.findall(r"[a-z0-9]+", clause.lower())
+        words = [w for w in words if w not in _KEYWORD_STOP and len(w) >= 3]
+        if len(words) >= 2:
+            append(" ".join(words[-2:]))
+    if primary:
+        append(primary[-1])
+        if len(primary) > 1:
+            append(primary[-2])
+    # Other single words are lower-confidence and never replace the core item.
+    return out[:8]
 
 def _query_family_fallback(family, limit):
     """Last resort: top items in the family with clean descriptions."""
@@ -432,7 +452,8 @@ def _fetch_top_descriptions(keyword, family=None, limit=20):
     clean = best
     if len(clean) < MIN_DB_RESULTS:
         print(f"[desc_forge] DB thin ({len(clean)} clean) → live fallback", flush=True)
-        live_kw = (_candidate_keywords(keyword) or [keyword])[-1]
+        # Search the main item identity, not a trailing incidental prop.
+        live_kw = (_candidate_keywords(keyword) or [keyword])[0]
         live_rows = _fetch_live_descriptions(live_kw, family, limit)
         live_clean = _filter_clean(live_rows, limit)
 
@@ -659,26 +680,32 @@ def forge_description(keyword, family=None):
     rows, cohort_evidence = _fetch_description_cohorts(
         keyword, family=family, limit=20
     )
-    if not rows:
-        return {
-            "error": f"No items with clean descriptions found for `{keyword}`. "
-                     f"Roblox live search also returned nothing usable."
-        }
-
+    # No comparable listings is an evidence limitation, not a reason to
+    # refuse to write about a creator-supplied item. Do not present this output
+    # as marketplace-optimized or claim that competitors were verified.
+    evidence_status = "observed" if rows else "creator_details_only"
     pattern = _analyze_patterns(rows)
+    if not pattern:
+        pattern = {"sample_size": 0, "avg_lines": None, "avg_emojis": None,
+                   "avg_chars": None, "pct_emoji_first_line": None,
+                   "top_first_words": [], "top_bigrams": []}
     try:
         description = _generate_description(
             keyword, family or "all", rows, pattern,
             cohort_evidence=cohort_evidence,
         )
     except Exception as e:
-        return {"error": f"AI generation failed: {e}",
-                "pattern": pattern, "rows": rows}
+        # Still return a factual draft when the model is unavailable.
+        from description_quality import fallback_description
+        print("[desc_forge] generation fallback " + type(e).__name__, flush=True)
+        description = fallback_description(keyword, family, title="")
+        evidence_status = "creator_details_only" if not rows else "model_fallback"
 
     return {
         "keyword": keyword,
         "family": family or "all",
         "pattern": pattern,
+        "evidence_status": evidence_status,
         "cohort_evidence": cohort_evidence,
         "description": description,
         "examples": rows[:8],
@@ -702,21 +729,26 @@ def format_forge(result):
 
     header = [
         f"# 🔨 DESC FORGE — `{kw}`",
-        f"_Mined {p.get('sample_size', 0)} clean descriptions in this niche_",
+        (f"_Studied {p.get('sample_size', 0)} clean descriptions in this niche_"
+         if rows else "_No verified matching seller descriptions. "
+                      "Copy is based on creator-supplied item details only._"),
         "_Favorites and listing styles do not establish description CTR or conversion._",
         f"• Established sample: **{evidence.get('established_candidates', 0)}**"
         f" · measured rising: **{evidence.get('measured_rising_candidates', 0)}**"
         f" · growth evidence: **{evidence.get('rising_status', 'unknown')}**",
         "_Rising means positive favorite change between distinct snapshots (minimum 6 hours), not sales._",
         "",
+    ]
+    if rows:
+        header.extend([
         "## 📊 Patterns from sampled popular and rising listings",
         f"• Lines: **{p.get('avg_lines')}** avg",
         f"• Emojis: **{p.get('avg_emojis')}** avg",
         f"• Length: **{p.get('avg_chars')}** chars",
         f"• Emoji on line 1: **{p.get('pct_emoji_first_line')}%**",
         f"• Common first words: `{', '.join(p.get('top_first_words') or [])}`",
-        f"• Common phrases: `{', '.join(p.get('top_bigrams')[:8])}`",
-    ]
+        f"• Common phrases: `{', '.join((p.get('top_bigrams') or [])[:8])}`",
+        ])
     chunks.append("\n".join(header))
 
     if result.get("description"):
