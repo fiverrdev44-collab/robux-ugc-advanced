@@ -151,8 +151,15 @@ def _editorial_candidates(vision, notes):
     # interior looking outward (e.g. an underwater city observation room).
     # This is editorial fit, not an assertion of customer search frequency.
     related_phrases = _distinctive_scene_phrases(vision, notes)
+    interior_match = re.search(
+        r"(?i)\b([a-z]{3,24}\s+(?:room|office|hall|lobby|studio))\b",
+        observations(vision)["search_description"] or
+        observations(vision)["visual_summary"])
+    interior = interior_match.group(1).title() if interior_match else ""
     for phrase in related_phrases[:2]:
         pretty = phrase.title()
+        if "window" in source and interior and not _words(interior).issubset(_words(pretty)):
+            out.append(f"{pretty} {interior} Background")
         if _words(pretty) != _words(base):
             if not _words(pretty).issubset(_words(base)):
                 out.append(f"{pretty} {base} Background")
@@ -265,10 +272,17 @@ def _fit(title, vision, notes, live):
             for words in scene_terms
         )
     )
+    interior_match = re.search(
+        r"(?i)\b([a-z]{3,24}\s+(?:room|office|hall|lobby|studio))\b",
+        o["search_description"] or o["visual_summary"])
+    view_and_interior = bool(
+        view_landmark and interior_match
+        and _words(interior_match.group(1)).issubset(title_tokens))
     return {"title": title, "fit": max(0, min(100, identity + detail_score +
             readability + 10 + distinction + hook_bonus + creator_named_bonus
             + distinctive_bonus - missed_scene_penalty - weak_penalty)),
             "view_landmark": view_landmark,
+            "view_and_interior": view_and_interior,
             "overlap": overlap}
 
 
@@ -469,6 +483,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         (_fit(name, vision, notes, live) for name in titles),
         key=lambda row: (
             -int(row.get("view_landmark", False)),
+            -int(row.get("view_and_interior", False)),
             -(row["fit"] + title_pattern_bonus(
                 row["title"], vision, learned)),
             -row["fit"], row["title"].casefold()
