@@ -120,6 +120,25 @@ def _editorial_bad(title, vision, notes):
     return len(tokens & _LOW_SALIENCE) >= 2
 
 
+def _distinctive_scene_phrases(vision, notes):
+    """Scene-setting pairs literally present in creator/visual observations."""
+    obs = observations(vision)
+    source = " ".join([
+        _safe(notes, 300), obs["visual_summary"], obs["search_description"],
+        *obs["distinctive_features"][:4],
+    ])
+    patterns = re.findall(
+        r"(?i)\b(?:underwater|undersea|sunken|floating|moonlit|haunted|"
+        r"sunny|snowy|neon|misty|ancient)\s+"
+        r"(?:city|forest|garden|shrine|castle|house|beach|ocean|room)\b",
+        source)
+    unique = []
+    for phrase in patterns:
+        if phrase.casefold() not in {x.casefold() for x in unique}:
+            unique.append(phrase)
+    return unique[:3]
+
+
 def _editorial_candidates(vision, notes):
     """Deterministic natural alternatives grounded in notes/vision only."""
     anchor = scene_phrase(vision, notes)
@@ -131,11 +150,7 @@ def _editorial_candidates(vision, notes):
     # Preserve the distinctive exterior scene when the artwork shows an
     # interior looking outward (e.g. an underwater city observation room).
     # This is editorial fit, not an assertion of customer search frequency.
-    related_phrases = re.findall(
-        r"(?i)\b(?:underwater|undersea|sunken|floating|moonlit|haunted|"
-        r"sunny|snowy|neon|misty|ancient)\s+"
-        r"(?:city|forest|garden|shrine|castle|house|beach|ocean|room)\b",
-        _safe(notes, 300))
+    related_phrases = _distinctive_scene_phrases(vision, notes)
     for phrase in related_phrases[:2]:
         pretty = phrase.title()
         if _words(pretty) != _words(base):
@@ -220,6 +235,14 @@ def _fit(title, vision, notes, live):
     detail_score = (20 if title_tokens & salient else
                     7 if title_tokens & details else 8)
     source = _source_words(vision, notes)
+    scene_terms = [_words(x) for x in _distinctive_scene_phrases(vision, notes)]
+    distinctive_bonus = (22 if any(words.issubset(title_tokens)
+                                   for words in scene_terms) else 0)
+    # When a broad setting (e.g. "room") has a more distinctive supported
+    # view, don't reward a title that ignores that defining scene.
+    missed_scene_penalty = (12 if scene_terms and
+                            not any(words.issubset(title_tokens)
+                                    for words in scene_terms) else 0)
     hook_bonus = (12 if any(
         _words(phrase).issubset(title_tokens) and
         _words(phrase).issubset(source)
@@ -235,7 +258,7 @@ def _fit(title, vision, notes, live):
                    else 10 if overlap["ratio"] >= .45 else 15)
     return {"title": title, "fit": max(0, min(100, identity + detail_score +
             readability + 10 + distinction + hook_bonus + creator_named_bonus
-            - weak_penalty)),
+            + distinctive_bonus - missed_scene_penalty - weak_penalty)),
             "overlap": overlap}
 
 
@@ -427,6 +450,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "mistake correlation for causation, or claim a top creator "
             "guarantees sales. Choose a clear human-readable scene name "
             "over keyword stacking. "
+            "When multiple verified scene details describe a setting "
+            "and the view outside it, prefer a natural title preserving the "
+            "distinctive setting, not a generic room label. "
             "When a creator explicitly names a franchise, consider a "
             "named candidate alongside descriptive ones, without claiming "
             "authorization or concealing the IP caution. Choose titles "
