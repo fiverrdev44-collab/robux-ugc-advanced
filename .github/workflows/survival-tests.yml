@@ -145,6 +145,8 @@ jobs:
         run: python test_background_grounding.py
       - name: Verify vision-failure background research from grounded creator notes
         run: python test_background_vision_fallback_v1.py
+      - name: Verify real Discord background attachment MIME and byte signatures
+        run: python test_background_attachment_validation.py
       - name: Verify cross-category creator cohort learning
         run: python test_category_creator_learning.py
       - name: Run Avatar Backgrounds routing regressions
