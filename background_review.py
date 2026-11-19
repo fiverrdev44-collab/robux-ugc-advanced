@@ -9,7 +9,8 @@ import re
 from background_intelligence import (
     observations, scene_phrase, candidate_titles, listing_description,
     verified_background_competitors, title_sample_overlap, named_ip_caution,
-    creator_named_subject, _short_text, _is_untrusted_instruction,
+    creator_named_subject, relevant_background_competitors,
+    _short_text, _is_untrusted_instruction,
 )
 from product_understanding import validate_title
 
@@ -127,6 +128,20 @@ def _editorial_candidates(vision, notes):
     source = _source_words(vision, notes)
     base = anchor.title()
     out = []
+    # Preserve the distinctive exterior scene when the artwork shows an
+    # interior looking outward (e.g. an underwater city observation room).
+    # This is editorial fit, not an assertion of customer search frequency.
+    related_phrases = re.findall(
+        r"(?i)\b(?:underwater|undersea|sunken|floating|moonlit|haunted|"
+        r"sunny|snowy|neon|misty|ancient)\s+"
+        r"(?:city|forest|garden|shrine|castle|house|beach|ocean|room)\b",
+        _safe(notes, 300))
+    for phrase in related_phrases[:2]:
+        pretty = phrase.title()
+        if _words(pretty) != _words(base):
+            if not _words(pretty).issubset(_words(base)):
+                out.append(f"{pretty} {base} Background")
+            out.append(f"{pretty} Background")
     # An explicitly named franchise is a naming candidate, not a verified
     # visual fact or proof of permission to publish protected artwork.
     named = creator_named_subject(notes)
@@ -228,6 +243,14 @@ def _safe_description(value, vision, notes):
     desc = _safe(value, 320)
     if len(desc) < 25 or any(c in desc.lower() for c in _CLAIMS):
         return None
+    # The bot cannot know the creator's private motivation for producing
+    # the artwork. These first-person origin stories are hallucinated copy,
+    # even when the scene objects happen to be accurate.
+    if re.search(
+        r"(?i)\b(?:i (?:put|made|created|designed|built|wanted|decided)|"
+        r"my (?:goal|idea|intention|inspiration) was)\b", desc
+    ):
+        return None
     if set(re.findall(r"[a-z0-9]+", desc.lower())) & _UNSUPPORTED:
         return None
     if len(_words(desc) & _source_words(vision, notes)) < 2:
@@ -256,7 +279,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         return {"status": "unavailable", "reason": "image scene unknown"}
     first = observations(vision)
     notes_only = bool(vision.get("creator_notes_only"))
-    competitors = verified_background_competitors(live)
+    competitors = relevant_background_competitors(live, vision, notes, limit=3)
     market = background_market if isinstance(background_market, dict) else {}
     angles = market.get("angles") if market.get("status") == "ok" else []
     angles = angles if isinstance(angles, list) else []
@@ -385,8 +408,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "Act as a skeptical Roblox Avatar Marketplace SEARCH researcher. "
             "Return only JSON with winner (one allowed title), alternatives "
             "(two other allowed titles), challenge, why_winner, and description. "
-            "The description must sound like an individual creator talking "
-            "naturally, not a catalog data dump. Use one specific opening "
+            "The description must sound natural and direct, not a catalog "
+            "data dump. Never invent first-person creator motivations such "
+            "as 'I wanted to make' or 'I put this together because'. "
+            "Use one specific opening "
             "sentence and one vivid but truthful scene-detail sentence. "
             "No 'features a', bland 'scene for your avatar', keyword lists, "
             "forced vibe endings, or unverified properties. "
@@ -516,7 +541,7 @@ def format_multi_pass_review(data):
     else:
         lines.append("• No verified live search evidence supplied.")
     competitors = data.get("competitors") or []
-    lines.append("**Same-category competitor titles**")
+    lines.append("**Scene-relevant AssetType 92 comparables**")
     if competitors:
         for row in competitors[:3]:
             asset_id = row.get("asset_id")
@@ -539,7 +564,8 @@ def format_multi_pass_review(data):
             )
             lines.append("• " + row["name"] + item_url + creator_label + favs)
     else:
-        lines.append("• No verified listing names returned from bounded search.")
+        lines.append("• No scene-relevant comparable titles verified in this bounded "
+                     "sample; broad category hits were excluded.")
     lines.append("• Title overlap is not proof of search ranking, visual similarity "
                  "or a validated niche gap.")
     lines += ["**Searchable listing description**",
