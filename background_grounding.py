@@ -72,6 +72,58 @@ def _safe_features(value):
             if x and not _is_untrusted_instruction(x)]
 
 
+
+_SCENE_EQUIVALENTS = {
+    "cityscape": "city", "skyscrapers": "city", "skyline": "city",
+    "woodland": "forest", "woods": "forest",
+    "oceans": "ocean", "seas": "ocean", "undersea": "underwater",
+}
+_VIEW_CUES = ("panoramic window", "window view", "through the window",
+              "looking out", "overlooking", "view of", "view through",
+              "outside the window")
+_INTERIOR_SETTINGS = {"room", "office", "bedroom", "hallway", "corridor",
+                      "classroom", "library", "hall"}
+_EXTERIOR_SETTINGS = {"city", "forest", "ocean", "sea", "sky", "beach",
+                      "mountain", "mountains", "garden", "street", "village"}
+
+
+def _setting_terms(value):
+    """Normalize visual scene synonyms without interpreting the artwork."""
+    terms = re.findall(r"[a-z]+", str(value or "").lower())
+    return {_SCENE_EQUIVALENTS.get(term, term) for term in terms}
+
+
+def _compatible_viewpoint(creator, first, second, creator_anchor,
+                          first_anchor, second_anchor):
+    """A room looking onto a city is not evidence that the city is absent.
+
+    A view relation needs an actual creator/vision cue, or the scene named by
+    the creator must appear in BOTH independent vision descriptions. Genuine
+    independent forest-vs-security-office contradictions remain conflicts.
+    """
+    creator_terms = _setting_terms(creator_anchor)
+    first_terms = _setting_terms(first_anchor)
+    second_terms = _setting_terms(second_anchor)
+    visual_text_a = " ".join(str(first.get(k) or "") for k in
+                           ("visual_summary", "search_description", "primary_subject"))
+    visual_text_b = " ".join(str(second.get(k) or "") for k in
+                           ("visual_summary", "search_description", "primary_subject"))
+    vision_a, vision_b = _setting_terms(visual_text_a), _setting_terms(visual_text_b)
+    # A two-word creator phrase is not invalidated when both models describe
+    # the same underlying setting using another synonym or a longer phrase.
+    essential = creator_terms - {"dark", "blue", "bright", "sunny",
+                                 "mysterious", "haunted", "misty"}
+    if essential and essential & vision_a and essential & vision_b:
+        return True
+    combined_text = (creator + " " + visual_text_a + " " + visual_text_b).lower()
+    has_view = any(cue in combined_text for cue in _VIEW_CUES)
+    all_interior = bool((creator_terms | first_terms | second_terms) &
+                        _INTERIOR_SETTINGS)
+    all_exterior = bool((creator_terms | first_terms | second_terms) &
+                        _EXTERIOR_SETTINGS)
+    return has_view and all_interior and all_exterior
+
+
 def reconcile_background_vision(first, second, creator_notes=""):
     """Return reconciled vision and short evidence warnings.
 
@@ -111,7 +163,10 @@ def reconcile_background_vision(first, second, creator_notes=""):
     scene_conflict = bool(
         creator_anchor and first_anchor and second_anchor
         and core(first_anchor) == core(second_anchor)
-        and core(creator_anchor) != core(first_anchor))
+        and core(creator_anchor) != core(first_anchor)
+        and not _compatible_viewpoint(
+            creator, first, second, creator_anchor,
+            first_anchor, second_anchor))
 
     notes = []
     if not independent:
