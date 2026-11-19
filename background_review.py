@@ -9,7 +9,8 @@ import re
 from background_intelligence import (
     observations, scene_phrase, candidate_titles, listing_description,
     verified_background_competitors, title_sample_overlap, named_ip_caution,
-    creator_named_subject, _short_text, _is_untrusted_instruction,
+    creator_named_subject, relevant_background_competitors,
+    _short_text, _is_untrusted_instruction,
 )
 from product_understanding import validate_title
 
@@ -119,6 +120,25 @@ def _editorial_bad(title, vision, notes):
     return len(tokens & _LOW_SALIENCE) >= 2
 
 
+def _distinctive_scene_phrases(vision, notes):
+    """Scene-setting pairs literally present in creator/visual observations."""
+    obs = observations(vision)
+    source = " ".join([
+        _safe(notes, 300), obs["visual_summary"], obs["search_description"],
+        *obs["distinctive_features"][:4],
+    ])
+    patterns = re.findall(
+        r"(?i)\b(?:underwater|undersea|sunken|floating|moonlit|haunted|"
+        r"sunny|snowy|neon|misty|ancient)\s+"
+        r"(?:city|forest|garden|shrine|castle|house|beach|ocean|room)\b",
+        source)
+    unique = []
+    for phrase in patterns:
+        if phrase.casefold() not in {x.casefold() for x in unique}:
+            unique.append(phrase)
+    return unique[:3]
+
+
 def _editorial_candidates(vision, notes):
     """Deterministic natural alternatives grounded in notes/vision only."""
     anchor = scene_phrase(vision, notes)
@@ -127,6 +147,23 @@ def _editorial_candidates(vision, notes):
     source = _source_words(vision, notes)
     base = anchor.title()
     out = []
+    # Preserve the distinctive exterior scene when the artwork shows an
+    # interior looking outward (e.g. an underwater city observation room).
+    # This is editorial fit, not an assertion of customer search frequency.
+    related_phrases = _distinctive_scene_phrases(vision, notes)
+    interior_match = re.search(
+        r"(?i)\b([a-z]{3,24}\s+(?:room|office|hall|lobby|studio))\b",
+        observations(vision)["search_description"] or
+        observations(vision)["visual_summary"])
+    interior = interior_match.group(1).title() if interior_match else ""
+    for phrase in related_phrases[:2]:
+        pretty = phrase.title()
+        if "window" in source and interior and not _words(interior).issubset(_words(pretty)):
+            out.append(f"{pretty} {interior} Background")
+        if _words(pretty) != _words(base):
+            if not _words(pretty).issubset(_words(base)):
+                out.append(f"{pretty} {base} Background")
+            out.append(f"{pretty} Background")
     # An explicitly named franchise is a naming candidate, not a verified
     # visual fact or proof of permission to publish protected artwork.
     named = creator_named_subject(notes)
@@ -205,6 +242,14 @@ def _fit(title, vision, notes, live):
     detail_score = (20 if title_tokens & salient else
                     7 if title_tokens & details else 8)
     source = _source_words(vision, notes)
+    scene_terms = [_words(x) for x in _distinctive_scene_phrases(vision, notes)]
+    distinctive_bonus = (22 if any(words.issubset(title_tokens)
+                                   for words in scene_terms) else 0)
+    # When a broad setting (e.g. "room") has a more distinctive supported
+    # view, don't reward a title that ignores that defining scene.
+    missed_scene_penalty = (12 if scene_terms and
+                            not any(words.issubset(title_tokens)
+                                    for words in scene_terms) else 0)
     hook_bonus = (12 if any(
         _words(phrase).issubset(title_tokens) and
         _words(phrase).issubset(source)
@@ -218,9 +263,26 @@ def _fit(title, vision, notes, live):
     overlap = title_sample_overlap(title, verified_background_competitors(live))
     distinction = (0 if overlap["exact"] else 5 if overlap["ratio"] >= .70
                    else 10 if overlap["ratio"] >= .45 else 15)
+    source_text = (" ".join([_safe(notes, 300), o["visual_summary"]])).lower()
+    view_landmark = bool(
+        "window" in source_text and any(
+            words.issubset(title_tokens) and
+            any(term in words for term in ("city", "forest", "ocean",
+                                           "beach", "garden", "castle"))
+            for words in scene_terms
+        )
+    )
+    interior_match = re.search(
+        r"(?i)\b([a-z]{3,24}\s+(?:room|office|hall|lobby|studio))\b",
+        o["search_description"] or o["visual_summary"])
+    view_and_interior = bool(
+        view_landmark and interior_match
+        and _words(interior_match.group(1)).issubset(title_tokens))
     return {"title": title, "fit": max(0, min(100, identity + detail_score +
             readability + 10 + distinction + hook_bonus + creator_named_bonus
-            - weak_penalty)),
+            + distinctive_bonus - missed_scene_penalty - weak_penalty)),
+            "view_landmark": view_landmark,
+            "view_and_interior": view_and_interior,
             "overlap": overlap}
 
 
@@ -228,11 +290,61 @@ def _safe_description(value, vision, notes):
     desc = _safe(value, 320)
     if len(desc) < 25 or any(c in desc.lower() for c in _CLAIMS):
         return None
+    # The bot cannot know the creator's private motivation for producing
+    # the artwork. These first-person origin stories are hallucinated copy,
+    # even when the scene objects happen to be accurate.
+    if re.search(
+        r"(?i)\b(?:i (?:put|made|created|designed|built|wanted|decided)|"
+        r"my (?:goal|idea|intention|inspiration) was)\b", desc
+    ):
+        return None
     if set(re.findall(r"[a-z0-9]+", desc.lower())) & _UNSUPPORTED:
         return None
     if len(_words(desc) & _source_words(vision, notes)) < 2:
         return None
     return desc
+
+
+def _grounded_description_fallback(vision, notes):
+    """Short scene copy when the model invents a creator backstory.
+
+    A creator's explicit view/scene description is usable as creator-provided
+    factual input, not proof of visual verification or market demand.
+    """
+    obs = observations(vision)
+    source = " ".join([
+        _safe(notes, 300), obs["visual_summary"], obs["search_description"],
+        *obs["distinctive_features"][:4],
+    ]).lower()
+    if vision.get("visual_scene_disagreement"):
+        return listing_description(vision, "")
+    scenes = _distinctive_scene_phrases(vision, notes)
+    for phrase in scenes:
+        if "window" not in source or not any(
+            noun in phrase.lower()
+            for noun in ("city", "forest", "ocean", "beach", "garden", "castle")
+        ):
+            continue
+        view = "panoramic window" if "panoramic window" in source else "window"
+        article = "an" if phrase[0].lower() in "aeiou" else "a"
+        line = f"Look out over {article} {phrase.lower()} through the {view}."
+        details = []
+        # Only describe details supplied explicitly in notes or observations.
+        if "amber lights" in source or "amber lighting" in source:
+            details.append("warm amber lights")
+        elif "yellow lights" in source:
+            details.append("yellow lights")
+        if "tiled floor" in source:
+            details.append("tiled floor")
+        if "art deco" in source:
+            details.append("Art Deco architecture")
+        if details:
+            line += " " + details[0].capitalize()
+            if len(details) > 1:
+                line += " and " + details[1]
+            line += " complete the scene."
+        return line[:320]
+    return listing_description(vision, notes)
 
 
 def _polish_background_copy(draft, vision, notes, title, text_fn=None):
@@ -256,7 +368,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         return {"status": "unavailable", "reason": "image scene unknown"}
     first = observations(vision)
     notes_only = bool(vision.get("creator_notes_only"))
-    competitors = verified_background_competitors(live)
+    competitors = relevant_background_competitors(live, vision, notes, limit=3)
     market = background_market if isinstance(background_market, dict) else {}
     angles = market.get("angles") if market.get("status") == "ok" else []
     angles = angles if isinstance(angles, list) else []
@@ -370,6 +482,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     scored = sorted(
         (_fit(name, vision, notes, live) for name in titles),
         key=lambda row: (
+            -int(row.get("view_landmark", False)),
+            -int(row.get("view_and_interior", False)),
             -(row["fit"] + title_pattern_bonus(
                 row["title"], vision, learned)),
             -row["fit"], row["title"].casefold()
@@ -385,8 +499,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "Act as a skeptical Roblox Avatar Marketplace SEARCH researcher. "
             "Return only JSON with winner (one allowed title), alternatives "
             "(two other allowed titles), challenge, why_winner, and description. "
-            "The description must sound like an individual creator talking "
-            "naturally, not a catalog data dump. Use one specific opening "
+            "The description must sound natural and direct, not a catalog "
+            "data dump. Never invent first-person creator motivations such "
+            "as 'I wanted to make' or 'I put this together because'. "
+            "Use one specific opening "
             "sentence and one vivid but truthful scene-detail sentence. "
             "No 'features a', bland 'scene for your avatar', keyword lists, "
             "forced vibe endings, or unverified properties. "
@@ -402,6 +518,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "mistake correlation for causation, or claim a top creator "
             "guarantees sales. Choose a clear human-readable scene name "
             "over keyword stacking. "
+            "When multiple verified scene details describe a setting "
+            "and the view outside it, prefer a natural title preserving the "
+            "distinctive setting, not a generic room label. "
             "When a creator explicitly names a franchise, consider a "
             "named candidate alongside descriptive ones, without claiming "
             "authorization or concealing the IP caution. Choose titles "
@@ -423,6 +542,24 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     def pick(value):
         return allowed.get(_safe(value, 75).casefold())
     picked = pick(reviewer.get("winner"))
+    # If the artwork explicitly describes an exterior landmark visible from
+    # an interior window, the critic cannot discard that defining landmark
+    # solely to select a generic interior label. This is source fidelity,
+    # not a claim about CTR or Roblox search rankings.
+    landmark_phrases = [
+        _words(p) for p in _distinctive_scene_phrases(vision, notes)
+        if any(t in _words(p) for t in ("city", "forest", "ocean", "beach",
+                                       "garden", "castle"))
+    ]
+    scene_source = " ".join([_safe(notes, 300),
+                             observations(vision)["visual_summary"]]).lower()
+    if (picked and "window" in scene_source and landmark_phrases
+            and any(landmark.issubset(_words(first_choice))
+                    for landmark in landmark_phrases)
+            and not any(landmark.issubset(_words(picked))
+                        for landmark in landmark_phrases)):
+        picked = None
+        passes["skeptical_critic"] = "overridden_generic_view_title"
     winner = picked or first_choice
     proposals = reviewer.get("alternatives")
     proposals = proposals if isinstance(proposals, list) else []
@@ -446,7 +583,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
         "description": _polish_background_copy(
             _safe_description(reviewer.get("description"), vision, notes)
-            or listing_description(vision, notes), vision, notes, winner
+            or _grounded_description_fallback(vision, notes),
+            vision, notes, winner
         ),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
@@ -517,6 +655,7 @@ def format_multi_pass_review(data):
         lines.append("• No verified live search evidence supplied.")
     competitors = data.get("competitors") or []
     lines.append("**Same-category competitor titles**")
+    lines.append("_Scene-relevant AssetType 92 comparables only; generic category matches excluded._")
     if competitors:
         for row in competitors[:3]:
             asset_id = row.get("asset_id")
@@ -539,7 +678,8 @@ def format_multi_pass_review(data):
             )
             lines.append("• " + row["name"] + item_url + creator_label + favs)
     else:
-        lines.append("• No verified listing names returned from bounded search.")
+        lines.append("• No scene-relevant comparable titles verified in this bounded "
+                     "sample; broad category hits were excluded.")
     lines.append("• Title overlap is not proof of search ranking, visual similarity "
                  "or a validated niche gap.")
     lines += ["**Searchable listing description**",
