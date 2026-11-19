@@ -639,7 +639,8 @@ def format_multi_pass_review(data):
     else:
         lines.append("• No verified live search evidence supplied.")
     competitors = data.get("competitors") or []
-    lines.append("**Scene-relevant AssetType 92 comparables**")
+    lines.append("**Same-category competitor titles**")
+    lines.append("_Scene-relevant AssetType 92 comparables only; generic category matches excluded._")
     if competitors:
         for row in competitors[:3]:
             asset_id = row.get("asset_id")
