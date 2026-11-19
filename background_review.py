@@ -255,6 +255,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     if not isinstance(vision, dict) or not vision:
         return {"status": "unavailable", "reason": "image scene unknown"}
     first = observations(vision)
+    notes_only = bool(vision.get("creator_notes_only"))
     competitors = verified_background_competitors(live)
     market = background_market if isinstance(background_market, dict) else {}
     angles = market.get("angles") if market.get("status") == "ok" else []
@@ -274,7 +275,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "search_phrase": scene_phrase(vision, notes),
         "visible_features": first["distinctive_features"],
         "independent_visual_check": (
-            vision.get("visual_verification", "not checked")),
+            "unavailable_creator_notes_only" if notes_only
+            else vision.get("visual_verification", "not checked")),
+        "source_disclosure": (
+            "No image features were verified; creator scene details only"
+            if notes_only else "Image observations are tentative"),
         "visual_claim_disagreements": (
             vision.get("visual_verification_notes") or [])[:3],
         "uncertain_details": (vision.get("uncertain_elements") or [])[:3],
@@ -304,14 +309,17 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "algorithm_weights": "not disclosed or validated",
         },
     }
-    passes = {"initial_vision": "ok", "independent_vision": "skipped",
+    passes = {"initial_vision": ("creator_notes_only" if notes_only else "ok"),
+              "independent_vision": ("unavailable" if notes_only else "skipped"),
               "creative": "unavailable", "skeptical_critic": "unavailable"}
     request = (
         "You research Roblox AVATAR MARKETPLACE (AssetType 92) SEARCH, not "
         "the Roblox experience/game recommendation algorithm. Return ONLY "
         "JSON {\"titles\": [\"...\"]}: 8-12 creative, SEARCH-RELEVANT "
-        "names ending in Background, 3-8 words, based on real visible "
-        "scene details. They must sound like NATURAL Roblox product names, "
+        "names ending in Background, 3-8 words, based on verified image "
+        "observations when available or explicitly CREATOR-DESCRIBED scene "
+        "details when visual checking failed. Never describe creator notes "
+        "as image-verified. They must sound like NATURAL Roblox product names, "
         "not concatenated image-recognition tags. If independent visual "
         "observations disagree about an object or its placement, never "
         "build a name around that uncertain detail. "

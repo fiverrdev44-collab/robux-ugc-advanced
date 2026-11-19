@@ -723,8 +723,9 @@ def register_ai_commands(bot):
                 "search-term relevance and grounded naming opportunities. "
                 "No artwork-editing recommendations."
             )
-        if not is_available():
-            return await ctx.send("AI vision is unavailable. Try `!ai_status`.")
+        # Text-grounded research can still run when image providers are
+        # unavailable. Never call creator notes visually verified evidence.
+        image_ai_available = is_available()
         attachments = ctx.message.attachments
         if len(attachments) > 2:
             await ctx.send("Using the first two images only (one artwork and "
@@ -750,34 +751,68 @@ def register_ai_commands(bot):
             return await ctx.send("Attach a PNG, JPEG or BMP under 8 MB.")
         await ctx.send("🔎 Identifying scene search terms and checking "
                        "Roblox Avatar Background Marketplace evidence...")
-        try:
-            image_notes = ("Roblox Avatar Background (AssetType 92). "
-                           + (notes or "")[:400])
-            vision = await asyncio.to_thread(
-                analyze_image_for_ugc, images, image_notes)
-        except Exception as exc:
-            print(f"[background_analyze] vision: {type(exc).__name__}", flush=True)
-            vision = {}
-        if not vision:
+        vision = {}
+        if image_ai_available:
+            try:
+                image_notes = ("Roblox Avatar Background (AssetType 92). "
+                               + (notes or "")[:400])
+                vision = await asyncio.to_thread(
+                    analyze_image_for_ugc, images, image_notes)
+            except Exception as exc:
+                print(f"[background_analyze] vision: {type(exc).__name__}", flush=True)
+                vision = {}
+        # Both provider failure and an empty/invalid result are non-visual
+        # outcomes. The creator may still have supplied a useful scene.
+        has_image_observations = (
+            isinstance(vision, dict)
+            and any(vision.get(key) for key in (
+                "visual_summary", "search_description",
+                "distinctive_features", "scene_focal_point",
+                "primary_subject",
+            ))
+        )
+        if not has_image_observations:
+            if not scene_phrase({}, notes):
+                await ctx.send(
+                    "⚠️ Image recognition is unavailable or returned no "
+                    "usable scene details. Your text also lacked a grounded "
+                    "scene term, so no title or marketplace gap was invented. "
+                    "Try `!ai_debug` and retry with a short description "
+                    "of the actual setting.")
+                return
+            vision = {
+                "creator_notes_only": True,
+                "visual_verification": "unavailable",
+            }
+            visual_check = {
+                "status": "creator_notes_only",
+                "vision": vision,
+                "notes": [
+                    "Image recognition unavailable; research uses creator-"
+                    "provided scene details only. No visual facts verified."
+                ],
+            }
             await ctx.send(
-                "⚠️ Could not identify grounded search terms from the image. "
-                "No algorithm score, competitor gap or title has been invented.")
-            return
-        # Verify the important visible subjects independently with an image-
-        # only prompt. It is deliberately not conditioned on creator claims
-        # or the first model's interpretation. Fail soft on provider errors.
-        second_vision = {}
-        try:
-            second_vision = await asyncio.to_thread(
-                analyze_image_for_ugc, images, "", subject_check=True)
-        except Exception as exc:
-            print("[background_analyze] image cross-check: " +
-                  type(exc).__name__, flush=True)
-        from background_grounding import (
-            reconcile_background_vision, format_visual_verification)
-        visual_check = reconcile_background_vision(
-            vision, second_vision, creator_notes=notes)
-        vision = visual_check["vision"]
+                "⚠️ Image analysis did not produce usable observations. "
+                "Continuing with your written scene description only; "
+                "titles are editorial hypotheses, not image-verified."
+            )
+        else:
+            # Independently cross-check actual image observations. A second
+            # unavailable pass never counts as visual agreement.
+            second_vision = {}
+            try:
+                second_vision = await asyncio.to_thread(
+                    analyze_image_for_ugc, images, "", subject_check=True)
+            except Exception as exc:
+                print("[background_analyze] image cross-check: " +
+                      type(exc).__name__, flush=True)
+            from background_grounding import (
+                reconcile_background_vision)
+            visual_check = reconcile_background_vision(
+                vision, second_vision, creator_notes=notes)
+            vision = visual_check["vision"]
+        from background_grounding import format_visual_verification
         anchor = scene_phrase(vision, notes)
         # Run at most two bounded live searches: the visual scene anchor
         # and the creator's explicitly named subject. Each call remains one
