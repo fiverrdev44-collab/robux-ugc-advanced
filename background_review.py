@@ -516,6 +516,24 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     def pick(value):
         return allowed.get(_safe(value, 75).casefold())
     picked = pick(reviewer.get("winner"))
+    # If the artwork explicitly describes an exterior landmark visible from
+    # an interior window, the critic cannot discard that defining landmark
+    # solely to select a generic interior label. This is source fidelity,
+    # not a claim about CTR or Roblox search rankings.
+    landmark_phrases = [
+        _words(p) for p in _distinctive_scene_phrases(vision, notes)
+        if any(t in _words(p) for t in ("city", "forest", "ocean", "beach",
+                                       "garden", "castle"))
+    ]
+    scene_source = " ".join([_safe(notes, 300),
+                             observations(vision)["visual_summary"]]).lower()
+    if (picked and "window" in scene_source and landmark_phrases
+            and any(landmark.issubset(_words(first_choice))
+                    for landmark in landmark_phrases)
+            and not any(landmark.issubset(_words(picked))
+                        for landmark in landmark_phrases)):
+        picked = None
+        passes["skeptical_critic"] = "overridden_generic_view_title"
     winner = picked or first_choice
     proposals = reviewer.get("alternatives")
     proposals = proposals if isinstance(proposals, list) else []
