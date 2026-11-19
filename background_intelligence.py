@@ -237,6 +237,43 @@ def verified_background_competitors(live, limit=3):
     return out
 
 
+
+_COMP_GENERIC = {"room", "city", "background", "avatar", "roblox", "ugc",
+                 "game", "gaming", "cute", "aesthetic", "dark", "blue",
+                 "red", "pink", "purple", "night", "scene", "anime", "photo"}
+_COMP_SYNONYMS = {"undersea": "underwater", "oceanic": "underwater",
+                  "cityscape": "city", "skyline": "city", "skyscrapers": "city",
+                  "observatory": "observation", "airplane": "aircraft",
+                  "jet": "aircraft", "plane": "aircraft"}
+
+
+def _comparable_terms(value):
+    return {
+        _COMP_SYNONYMS.get(word, word)
+        for word in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        if word not in _COMP_GENERIC and len(word) >= 3
+    }
+
+
+def relevant_background_competitors(live, vision, notes="", limit=3):
+    """Scene-related AssetType 92 examples, not broad category search hits.
+
+    Matching titles is descriptive only, never proof of visual similarity,
+    search demand, sales, CTR or ranking advantage.
+    """
+    obs = observations(vision)
+    source = " ".join([_short_text(notes, 300), obs["visual_summary"],
+                      obs["search_description"], *obs["distinctive_features"]])
+    desired = _comparable_terms(source)
+    rows = []
+    for row in verified_background_competitors(live, limit=12):
+        common = desired & _comparable_terms(row["name"])
+        if common:
+            rows.append((len(common), row))
+    rows.sort(key=lambda x: -x[0])
+    return [row for _, row in rows[:max(1, min(int(limit), 6))]]
+
+
 def title_sample_overlap(title, competitors):
     """Return descriptive token overlap, NEVER visual similarity or CTR."""
     def terms(value):
