@@ -40,7 +40,7 @@ class FakeAttachment:
     content_type = "image/jpeg"
     size = 6
     async def read(self):
-        return b"offline"
+        return b"\xff\xd8\xff\xe0offline-jpeg-stub"
 
 
 def _context():
