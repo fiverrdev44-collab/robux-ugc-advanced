@@ -87,7 +87,7 @@ class FakeAttachment:
     content_type = "image/png"
     size = 6
     async def read(self):
-        return b"sample"
+        return b"\xff\xd8\xff\xe0offline-jpeg-stub"
 
 
 def test_background_handoff_requires_conversation_and_review():
