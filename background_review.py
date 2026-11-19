@@ -281,6 +281,48 @@ def _safe_description(value, vision, notes):
     return desc
 
 
+def _grounded_description_fallback(vision, notes):
+    """Short scene copy when the model invents a creator backstory.
+
+    A creator's explicit view/scene description is usable as creator-provided
+    factual input, not proof of visual verification or market demand.
+    """
+    obs = observations(vision)
+    source = " ".join([
+        _safe(notes, 300), obs["visual_summary"], obs["search_description"],
+        *obs["distinctive_features"][:4],
+    ]).lower()
+    if vision.get("visual_scene_disagreement"):
+        return listing_description(vision, "")
+    scenes = _distinctive_scene_phrases(vision, notes)
+    for phrase in scenes:
+        if "window" not in source or not any(
+            noun in phrase.lower()
+            for noun in ("city", "forest", "ocean", "beach", "garden", "castle")
+        ):
+            continue
+        view = "panoramic window" if "panoramic window" in source else "window"
+        article = "an" if phrase[0].lower() in "aeiou" else "a"
+        line = f"Look out over {article} {phrase.lower()} through the {view}."
+        details = []
+        # Only describe details supplied explicitly in notes or observations.
+        if "amber lights" in source or "amber lighting" in source:
+            details.append("warm amber lights")
+        elif "yellow lights" in source:
+            details.append("yellow lights")
+        if "tiled floor" in source:
+            details.append("tiled floor")
+        if "art deco" in source:
+            details.append("Art Deco architecture")
+        if details:
+            line += " " + details[0].capitalize()
+            if len(details) > 1:
+                line += " and " + details[1]
+            line += " complete the scene."
+        return line[:320]
+    return listing_description(vision, notes)
+
+
 def _polish_background_copy(draft, vision, notes, title, text_fn=None):
     """Apply the grounded gate without exceeding the analyzer's two model passes."""
     from description_quality import finalize_description
@@ -497,7 +539,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "why_winner": _complete_comment(reviewer.get("why_winner"), 165),
         "description": _polish_background_copy(
             _safe_description(reviewer.get("description"), vision, notes)
-            or listing_description(vision, notes), vision, notes, winner
+            or _grounded_description_fallback(vision, notes),
+            vision, notes, winner
         ),
         "competitors": competitors, "opportunity_evidence": market,
         "creator_learning": learned,
