@@ -255,6 +255,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     if not isinstance(vision, dict) or not vision:
         return {"status": "unavailable", "reason": "image scene unknown"}
     first = observations(vision)
+    notes_only = bool(vision.get("creator_notes_only"))
     competitors = verified_background_competitors(live)
     market = background_market if isinstance(background_market, dict) else {}
     angles = market.get("angles") if market.get("status") == "ok" else []
@@ -308,7 +309,6 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "algorithm_weights": "not disclosed or validated",
         },
     }
-    notes_only = bool(vision.get("creator_notes_only"))
     passes = {"initial_vision": ("creator_notes_only" if notes_only else "ok"),
               "independent_vision": ("unavailable" if notes_only else "skipped"),
               "creative": "unavailable", "skeptical_critic": "unavailable"}
