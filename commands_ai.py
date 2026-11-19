@@ -730,25 +730,49 @@ def register_ai_commands(bot):
         if len(attachments) > 2:
             await ctx.send("Using the first two images only (one artwork and "
                            "an optional cropped preview).")
-        allowed_mime = {"image/png", "image/jpeg", "image/bmp"}
+        from background_attachments import (
+            detect_background_image_mime, MAX_BACKGROUND_BYTES)
         images = []
+        rejected = []
+        # Discord often reports content_type=None, "application/octet-stream",
+        # or a stale guessed type even though the actual bytes are a JPEG/PNG.
+        # The file signature, not metadata or extension, determines the MIME
+        # supplied to the image model. Images are bounded before decoding.
         for att in attachments[:2]:
-            ctype = (getattr(att, "content_type", None) or "").split(";")[0].lower()
-            if ctype not in allowed_mime:
-                continue
-            if getattr(att, "size", 0) and att.size > 8 * 1024 * 1024:
-                await ctx.send("Image larger than 8 MB; please export a smaller "
-                               "RGB PNG/JPG.")
+            reported_size = getattr(att, "size", None)
+            if isinstance(reported_size, int) and reported_size > MAX_BACKGROUND_BYTES:
+                rejected.append("over 8 MB")
                 continue
             try:
                 data = await att.read()
-            except Exception:
-                return await ctx.send("The image could not be read. Reattach it.")
-            if not data or len(data) > 8 * 1024 * 1024:
+            except Exception as exc:
+                print("[background_analyze] attachment read " +
+                      type(exc).__name__, flush=True)
+                rejected.append("unreadable")
+                continue
+            if not isinstance(data, bytes) or not data:
+                rejected.append("empty or unreadable")
+                continue
+            if len(data) > MAX_BACKGROUND_BYTES:
+                rejected.append("over 8 MB")
+                continue
+            ctype = detect_background_image_mime(data)
+            if not ctype:
+                rejected.append("unsupported image format")
                 continue
             images.append({"bytes": data, "mime": ctype})
+        if not images and not scene_phrase({}, notes):
+            reasons = ", ".join(sorted(set(rejected))) or "no supported image"
+            return await ctx.send(
+                "⚠️ No supported image could be read (" + reasons + "). "
+                "Attach a PNG, JPEG, BMP or WebP under 8 MB, or describe "
+                "the actual scene in your command for text-only research.")
         if not images:
-            return await ctx.send("Attach a PNG, JPEG or BMP under 8 MB.")
+            await ctx.send(
+                "⚠️ The attachment was not usable for visual inspection "
+                "(" + (", ".join(sorted(set(rejected))) or "unknown format") +
+                "). Continuing from your written scene details only.")
+        image_ai_available = image_ai_available and bool(images)
         await ctx.send("🔎 Identifying scene search terms and checking "
                        "Roblox Avatar Background Marketplace evidence...")
         vision = {}
