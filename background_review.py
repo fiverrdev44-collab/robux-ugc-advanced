@@ -256,9 +256,19 @@ def _fit(title, vision, notes, live):
     overlap = title_sample_overlap(title, verified_background_competitors(live))
     distinction = (0 if overlap["exact"] else 5 if overlap["ratio"] >= .70
                    else 10 if overlap["ratio"] >= .45 else 15)
+    source_text = (" ".join([_safe(notes, 300), o["visual_summary"]])).lower()
+    view_landmark = bool(
+        "window" in source_text and any(
+            words.issubset(title_tokens) and
+            any(term in words for term in ("city", "forest", "ocean",
+                                           "beach", "garden", "castle"))
+            for words in scene_terms
+        )
+    )
     return {"title": title, "fit": max(0, min(100, identity + detail_score +
             readability + 10 + distinction + hook_bonus + creator_named_bonus
             + distinctive_bonus - missed_scene_penalty - weak_penalty)),
+            "view_landmark": view_landmark,
             "overlap": overlap}
 
 
@@ -458,6 +468,7 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
     scored = sorted(
         (_fit(name, vision, notes, live) for name in titles),
         key=lambda row: (
+            -int(row.get("view_landmark", False)),
             -(row["fit"] + title_pattern_bonus(
                 row["title"], vision, learned)),
             -row["fit"], row["title"].casefold()
