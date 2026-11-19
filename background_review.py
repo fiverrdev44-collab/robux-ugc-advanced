@@ -274,7 +274,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "search_phrase": scene_phrase(vision, notes),
         "visible_features": first["distinctive_features"],
         "independent_visual_check": (
-            vision.get("visual_verification", "not checked")),
+            "unavailable_creator_notes_only" if notes_only
+            else vision.get("visual_verification", "not checked")),
+        "source_disclosure": (
+            "No image features were verified; creator scene details only"
+            if notes_only else "Image observations are tentative"),
         "visual_claim_disagreements": (
             vision.get("visual_verification_notes") or [])[:3],
         "uncertain_details": (vision.get("uncertain_elements") or [])[:3],
@@ -304,7 +308,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "algorithm_weights": "not disclosed or validated",
         },
     }
-    passes = {"initial_vision": "ok", "independent_vision": "skipped",
+    notes_only = bool(vision.get("creator_notes_only"))
+    passes = {"initial_vision": ("creator_notes_only" if notes_only else "ok"),
+              "independent_vision": ("unavailable" if notes_only else "skipped"),
               "creative": "unavailable", "skeptical_critic": "unavailable"}
     request = (
         "You research Roblox AVATAR MARKETPLACE (AssetType 92) SEARCH, not "
