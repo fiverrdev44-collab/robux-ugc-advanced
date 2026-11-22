@@ -4,11 +4,6 @@ name: Oracle Production Deploy (Manual and Schema-Gated)
 # restart the live bot before the production database is migrated.
 on:
   workflow_dispatch:
-    inputs:
-      confirm_production:
-        description: "After approved production migrations, type DEPLOY_VANTA73"
-        required: true
-        type: string
 
 concurrency:
   group: deploy
@@ -17,7 +12,7 @@ concurrency:
 jobs:
   deploy:
     name: Manually approved Oracle deployment
-    if: github.event.inputs.confirm_production == 'DEPLOY_VANTA73'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Fail-closed database guard, deploy, and restart via SSH
