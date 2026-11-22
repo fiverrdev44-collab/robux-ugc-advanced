@@ -153,7 +153,7 @@ def analyze_stored_backgrounds(cur, vision, notes="", now=None):
         items.append({"id": ident, "name": name, "favorites": fav,
                       "price": price, "created": _date(raw[4]),
                       "terms": set(_tokens(name))})
-    changes = {}
+    history_rows = []
     # Only inspect known AssetType 92 IDs from the bounded first query.
     if items:
         cur.execute("""
@@ -165,7 +165,8 @@ def analyze_stored_backgrounds(cur, vision, notes="", now=None):
             ORDER BY item_id, snapshot_at
             LIMIT %s
         """, ([x["id"] for x in items], _MAX_HISTORY))
-        changes = _history_gains(cur.fetchall() or [])
+        history_rows = cur.fetchall() or []
+    changes = _history_gains(history_rows)
     now = now or datetime.now(timezone.utc)
     results, related_ids = [], set()
     for phrase in angles:
@@ -198,7 +199,7 @@ def analyze_stored_backgrounds(cur, vision, notes="", now=None):
     return {
         "status": "ok", "family": "backgrounds", "asset_type_id": 92,
         "rows_scanned": len(items), "capped": len(raw_items) >= _MAX_LISTINGS,
-        "history_capped": len(changes) >= _MAX_HISTORY,
+        "history_capped": len(history_rows) >= _MAX_HISTORY,
         "angles": results, "related": related,
         "scope": "bounded, incomplete stored titles; no sales/CTR verification",
     }
@@ -240,6 +241,8 @@ def format_opportunity_evidence(market, limit=5):
     lines.append("• Scanned " + str(m.get("rows_scanned", 0)) +
                  " matching stored titles (bounded" +
                  (", capped" if m.get("capped") else "") + ").")
+    if m.get("history_capped"):
+        lines.append("• The snapshot sample reached its row limit; growth coverage is partial.")
     for x in m.get("angles", [])[:limit]:
         count = x["sample_matches"]
         if count == 0:

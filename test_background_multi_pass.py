@@ -268,7 +268,7 @@ def test_discord_command_checks_scene_and_explicit_oggy_search():
     assert "Oggy" in body
 
 
-def test_discord_command_keeps_one_market_search_and_two_visual_calls():
+def test_discord_command_keeps_two_visual_calls_and_skips_failed_provider_retry():
     bot = FakeBot()
     commands_ai.register_ai_commands(bot)
     channel = Channel()
@@ -295,7 +295,7 @@ def test_discord_command_keeps_one_market_search_and_two_visual_calls():
          mock.patch("gemini_brain._generate", side_effect=text):
         asyncio.run(bot.callbacks["background_analyze"](
             ctx, notes="moonlit shrine with portal"))
-    assert seen == {"market": 1, "vision": 2, "text": 2}, seen
+    assert seen == {"market": 1, "vision": 2, "text": 1}, seen
     assert any("Image evidence check" in (m or "")
                for m in channel.messages)
     assert any("ROBLOX BACKGROUND SEARCH INTELLIGENCE" in (m or "")
@@ -313,5 +313,5 @@ if __name__ == "__main__":
     test_explicit_oggy_name_is_context_not_automatic_title_permission()
     test_failing_named_live_search_never_claims_zero_competitors()
     test_discord_command_checks_scene_and_explicit_oggy_search()
-    test_discord_command_keeps_one_market_search_and_two_visual_calls()
+    test_discord_command_keeps_two_visual_calls_and_skips_failed_provider_retry()
     print("PASS background multi-pass creative director")

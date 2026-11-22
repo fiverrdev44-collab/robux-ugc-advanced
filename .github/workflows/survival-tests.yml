@@ -143,6 +143,8 @@ jobs:
         run: python test_background_multi_pass.py
       - name: Verify Rapture scene relevance and natural title and description
         run: python test_background_scene_editorial_regression.py
+      - name: Verify grounded listing quality through registered command callbacks
+        run: python test_listing_quality_overhaul.py
       - name: Verify creative unbranded Avatar Background title lanes
         run: python test_background_creative_titles.py
       - name: Verify background opportunity evidence and grounded naming

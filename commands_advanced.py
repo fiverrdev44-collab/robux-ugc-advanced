@@ -283,8 +283,11 @@ def register_advanced_commands(bot, get_db):
             await ctx.send("🧠 Scanning all categories...")
             try:
                 data = await asyncio.to_thread(scan_all_families, 3)
-            except Exception as e:
-                return await ctx.send(f"❌ {e}")
+            except Exception as exc:
+                print(f"[converge] all-families scan failed: {type(exc).__name__}", flush=True)
+                return await ctx.send("❌ The all-categories scan is unavailable.")
+            if not any(data.values()):
+                return await ctx.send("No qualified leads in the available category evidence.")
 
             for fam, rows in data.items():
                 if not rows:
@@ -623,7 +626,7 @@ def register_advanced_commands(bot, get_db):
 
     @bot.command(name="tags")
     async def tags_cmd(ctx, *, args: str = ""):
-        """Generate 45 sales-triggering tags. !tags <name> or !tags emotes:<name>"""
+        """Suggest up to 45 relevant listing tags. !tags <name> or !tags emotes:<name>"""
         if not args.strip():
             return await ctx.send(
                 "**Usage:** `!tags <item name>`\n"

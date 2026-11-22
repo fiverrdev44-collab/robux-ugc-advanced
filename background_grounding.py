@@ -62,7 +62,7 @@ def _subject_context(vision):
     # Keep relation anchored to named subject and description; unrelated
     # background windows or wall details are not proof of subject placement.
     relation = _clean((vision or {}).get("subject_relation"), 120)
-    if not relation:
+    if not relation and not subj:
         relation = _clean(o["visual_summary"], 220)
     return subj or _clean(o["visual_summary"], 150), _find_relation(relation)
 
@@ -182,7 +182,7 @@ def reconcile_background_vision(first, second, creator_notes=""):
     if scene_conflict:
         notes.append("Both image interpretations indicate a different setting "
                      "than the creator description; verify scene identity.")
-    if not (subject_conflict or relation_conflict or creator_conflict) and verified:
+    if not (subject_conflict or relation_conflict or creator_conflict or scene_conflict) and verified:
         notes.append("Independent image-only subject check completed; "
                      "agreeing interpretations are still fallible.")
 

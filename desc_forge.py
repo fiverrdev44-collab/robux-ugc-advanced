@@ -615,7 +615,7 @@ def _generate_description(keyword, family, rows, pattern,
                           cohort_evidence=None):
     from gemini_brain import _generate
 
-    from description_quality import finalize_description, style_guidance
+    from description_quality import fact_source, finalize_description, style_guidance
     # Study observed structures, not entire seller copy; favor deduplication
     # over paraphrased plagiarism or a forced template for every category.
     structural_evidence = {
@@ -628,7 +628,7 @@ def _generate_description(keyword, family, rows, pattern,
     prompt = f"""Write ONE Roblox Marketplace listing description.
 
 FAMILY: {family}
-CREATOR'S ITEM DESCRIPTION/TITLE (only known item facts): {keyword}
+CREATOR'S ITEM DESCRIPTION/TITLE (only known item facts): {fact_source(keyword)}
 OBSERVED SAME-FAMILY SELLER STYLE (NOT a conversion study):
 {json.dumps(structural_evidence)}
 MEASURED BREAKOUT AND ESTABLISHED COHORT COUNTS (observational only):
@@ -641,12 +641,16 @@ from competitor listings. Favorites measure attention, not the quality
 or conversion rate of seller copy. Do not use their phrasing.
 No links, promotional requests, invented popularity or keyword stuffing.
 Return ONLY the actual listing text, no preface or labels."""
-    raw = _generate(prompt, json_mode=False, temperature=0.6, max_tokens=400)
+    try:
+        raw = _generate(prompt, json_mode=False, temperature=0.6, max_tokens=400)
+    except Exception as exc:
+        print(f"[desc-forge] provider unavailable: {type(exc).__name__}", flush=True)
+        raw = None
     reviewed = finalize_description(
-        raw, keyword, family, title=keyword,
-        rewrite_fn=lambda instructions: _generate(
+        raw, keyword, family, title=fact_source(keyword),
+        rewrite_fn=(lambda instructions: _generate(
             instructions, json_mode=False, temperature=0.65, max_tokens=260
-        ),
+        )) if raw else None,
     )
     return reviewed["text"]
 
@@ -659,28 +663,22 @@ def forge_description(keyword, family=None):
     rows, cohort_evidence = _fetch_description_cohorts(
         keyword, family=family, limit=20
     )
-    if not rows:
-        return {
-            "error": f"No items with clean descriptions found for `{keyword}`. "
-                     f"Roblox live search also returned nothing usable."
-        }
-
     pattern = _analyze_patterns(rows)
-    try:
+    if rows:
         description = _generate_description(
             keyword, family or "all", rows, pattern,
             cohort_evidence=cohort_evidence,
         )
-    except Exception as e:
-        return {"error": f"AI generation failed: {e}",
-                "pattern": pattern, "rows": rows}
+    else:
+        from description_quality import fact_source, fallback_description
+        description = fallback_description(keyword, family or "all", title=fact_source(keyword))
 
     return {
         "keyword": keyword,
         "family": family or "all",
         "pattern": pattern,
         "cohort_evidence": cohort_evidence,
-        "description": description,
+        "description": description or "Insufficient item detail for grounded listing copy.",
         "examples": rows[:8],
         "evidence_note": (
             "Sampled seller descriptions inform style, not proven CTR or "
@@ -702,21 +700,26 @@ def format_forge(result):
 
     header = [
         f"# 🔨 DESC FORGE — `{kw}`",
-        f"_Mined {p.get('sample_size', 0)} clean descriptions in this niche_",
+        (f"_Sampled {p['sample_size']} clean descriptions in this niche_"
+         if p.get("sample_size") else
+         "_No usable competitor descriptions in this sample. Listing copy uses the supplied item details._"),
         "_Favorites and listing styles do not establish description CTR or conversion._",
         f"• Established sample: **{evidence.get('established_candidates', 0)}**"
         f" · measured rising: **{evidence.get('measured_rising_candidates', 0)}**"
         f" · growth evidence: **{evidence.get('rising_status', 'unknown')}**",
         "_Rising means positive favorite change between distinct snapshots (minimum 6 hours), not sales._",
-        "",
-        "## 📊 Patterns from sampled popular and rising listings",
-        f"• Lines: **{p.get('avg_lines')}** avg",
-        f"• Emojis: **{p.get('avg_emojis')}** avg",
-        f"• Length: **{p.get('avg_chars')}** chars",
-        f"• Emoji on line 1: **{p.get('pct_emoji_first_line')}%**",
-        f"• Common first words: `{', '.join(p.get('top_first_words') or [])}`",
-        f"• Common phrases: `{', '.join(p.get('top_bigrams')[:8])}`",
     ]
+    if p:
+        header.extend([
+            "",
+            "## 📊 Patterns from sampled popular and rising listings",
+            f"• Lines: **{p.get('avg_lines')}** avg",
+            f"• Emojis: **{p.get('avg_emojis')}** avg",
+            f"• Length: **{p.get('avg_chars')}** chars",
+            f"• Emoji on line 1: **{p.get('pct_emoji_first_line')}%**",
+            f"• Common first words: `{', '.join(p.get('top_first_words') or [])}`",
+            f"• Common phrases: `{', '.join(p.get('top_bigrams')[:8])}`",
+        ])
     chunks.append("\n".join(header))
 
     if result.get("description"):

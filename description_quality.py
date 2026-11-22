@@ -12,6 +12,7 @@ GENERIC = (
     "scene for your avatar", "background for your avatar",
     "vibrant cartoon scene", "vibrant scene for", "perfect for cheerful",
     "made for every avatar", "complete your look", "looks great with any",
+    "this background features", "this emote features", "amazing vibes",
 )
 PROMO = ("join our", "join the group", "check out our", "shop now",
          "follow us", "subscribe", "more ugc", "visit our", "discord.gg")
@@ -41,33 +42,23 @@ def words(value):
 
 def fact_source(concept, max_chars=350):
     """Keep creator facts, not appended research and prompt instructions."""
-    value = re.sub(r"\s+", " ", str(concept or "")).strip()
+    value = re.sub(r"[ \t]+", " ", str(concept or "")).strip()
     value = re.sub(r"^(?:backgrounds?|emotes?|hair|hats?|accessory|face|back|neck|waist):", "", value, flags=re.I).strip()
-    value = re.split(
-        r"(?i)(?:\.\s+|\n)(?=(?:create|research|recommend|prioritize|analyze|compare|explain|write|generate|no invented|give)\b)",
-        value, maxsplit=1
-    )[0]
-    return value[:max_chars].strip(" ,.;")
+    action = (r"(?:create|research|recommend|prioritize|analy[sz]e|compare|"
+              r"explain|write|generate|give|suggest|find|optimi[sz]e|"
+              r"no invented|use only|ai image observations|reported visible details|"
+              r"reported colors/style)\b")
+    leading = re.compile(r"(?i)^(?:please\s+)?" + action)
+    while leading.match(value):
+        segments = re.split(r"[.!?;]\s+|\n+", value, maxsplit=1)
+        value = segments[1] if len(segments) > 1 else ""
+    value = re.split(r"(?i)(?:[.!?;]\s+|\n+|,\s+)(?=(?:please\s+)?" +
+                     action + r")", value, maxsplit=1)[0]
+    value = re.sub(r"\s+", " ", value).strip(" ,.;")
+    if len(value) > max_chars:
+        value = value[:max_chars].rsplit(" ", 1)[0].rstrip(" ,.;")
+    return value
 
-def _feature_phrases(concept, limit=3):
-    """Use only literal creator-described features, without fabricating props."""
-    value = fact_source(concept)
-    if re.search(r"\bwith\b", value, re.I):
-        value = re.split(r"\bwith\b", value, maxsplit=1, flags=re.I)[-1]
-    out = []
-    for chunk in re.split(r",|;|\s+and\s+", value, flags=re.I):
-        part = re.sub(r"^(?:a|an|the)\s+", "", chunk.strip(" .!"), flags=re.I)
-        if not 2 <= len(part.split()) <= 6:
-            continue
-        if any(re.search(r"\b" + re.escape(t) + r"\b", part, re.I)
-               for t in ("recommend", "analyze", "research", "prompt", "title",
-                         "marketplace", "compare", "ctr", "description", "command")):
-            continue
-        if part.casefold() not in [v.casefold() for v in out]:
-            out.append(part)
-        if len(out) >= limit:
-            break
-    return out
 
 def style_guidance(family):
     """Only stylistic guidance, not copied competitor text or fake CTR claims."""
@@ -108,6 +99,9 @@ def rejection_reason(description, concept, family, title=""):
     low = text.casefold()
     if any(p in low for p in GENERIC):
         return "generic_template"
+    if re.search(r"(?i)\b(?:i (?:put|made|created|designed|built|wanted|decided|love)|"
+                 r"my (?:goal|idea|intention|inspiration) was)\b", text):
+        return "invented_creator_voice"
     if any(p in low for p in PROMO) or re.search(r"https?://|www\.|discord\.gg|@\w+|#[\w]+", text, re.I):
         return "promo"
     if re.search(r"(?i)\b(?:guaranteed|top[\s-]ranked|best[\s-]seller|high[\s-]ctr|proven sales)\b", text):
@@ -121,11 +115,10 @@ def rejection_reason(description, concept, family, title=""):
         return "uncapitalized_sentence"
     if re.search(r"(?m)[.!?]\s+[a-z]", text):
         return "uncapitalized_sentence"
-    allowed = words(fact_source(concept) + " " + title)
+    allowed = words(fact_source(concept))
     used = words(text)
-    if str(family or "").lower() not in ("emote", "emotes"):
-        if (used & MOTION) - allowed:
-            return "unsupported_motion"
+    if str(family or "").lower() not in ("emote", "emotes") and (used & MOTION) - allowed:
+        return "unsupported_motion"
     for claim in UNSUPPORTED:
         if claim in used and claim not in allowed:
             return "unverified_feature:" + claim
@@ -140,18 +133,21 @@ def fallback_description(concept, family, title=""):
     """Short, factual fallback without invented item properties."""
     heading = re.sub(r"\s+", " ", str(title or "")).strip(" \n.;")[:85]
     source = fact_source(concept)
-    if not heading:
-        heading = " ".join(source.split()[:6]).strip(" .!,") or "Avatar item"
-    parts = _feature_phrases(concept)
-    if len(parts) >= 2:
-        return (heading + "\n" + parts[0][0].upper() + parts[0][1:] +
-                " and " + parts[1] + ".")[:320]
-    if len(parts) == 1:
-        return (heading + "\n" + parts[0][0].upper() + parts[0][1:] + ".")[:320]
-    brief = source[:160].strip(" .!")
-    if brief and brief.casefold() not in heading.casefold() and len(brief.split()) >= 3:
-        return heading + "\n" + brief[0].upper() + brief[1:] + "."
+    if source:
+        # A supplied sentence preserves sequences and relationships that are
+        # lost when the first clause is discarded after "with".
+        brief = source.strip(" .!")
+        if len(brief) > 290:
+            first = re.split(r"(?<=[.!?])\s+", brief, maxsplit=1)[0]
+            brief = first if len(first) <= 290 else brief[:290].rsplit(" ", 1)[0]
+        if brief and not brief.endswith((".", "!", "?")):
+            brief += "."
+        if brief:
+            copy = brief[0].upper() + brief[1:]
+            if rejection_reason(copy, source, family) is None:
+                return copy
     return heading
+
 
 def polish_description(draft, concept, family, title=""):
     """Use grounded item details; reject generic or unsupported generated copy."""
@@ -207,9 +203,8 @@ def finalize_description(draft, concept, family, title="", rewrite_fn=None):
             ):
                 return {"text": _normalize(proposed), "quality_status": "rewritten",
                         "initial_rejection": initial, "rewrite_attempted": True}
-        except Exception:
-            # The model and API can fail. This must remain a safe local fallback.
-            pass
+        except Exception as exc:
+            print(f"[description-quality] rewrite unavailable: {type(exc).__name__}", flush=True)
     return {"text": fallback_description(concept, family, title),
             "quality_status": "factual_fallback",
             "initial_rejection": initial, "rewrite_attempted": attempted}

@@ -54,12 +54,30 @@ def _growth(rows, ids):
         if len(ordered) >= 2:
             days = (ordered[-1][0] - ordered[0][0]).total_seconds() / 86400
             if days >= .5:
-                out[item_id] = ordered[-1][1] - ordered[0][1]
+                change = ordered[-1][1] - ordered[0][1]
+                out[item_id] = (change, change / days, ordered[-1][0])
     return out
 
 
-def learn_from_rows(rows, family, history_rows=(), min_items=2):
+def _recurring_terms(creators):
+    members = defaultdict(lambda: {"creators": set(), "items": set()})
+    for ctype, cid, products in creators:
+        for product in products:
+            for term in set(_tokens(product["name"])):
+                members[term]["creators"].add((ctype, cid))
+                members[term]["items"].add(product["id"])
+    patterns = [
+        {"term": term, "creators": len(stats["creators"]), "items": len(stats["items"])}
+        for term, stats in members.items()
+        if len(stats["creators"]) >= 2 and len(stats["items"]) >= 3
+    ]
+    patterns.sort(key=lambda pattern: (-pattern["creators"], -pattern["items"], pattern["term"]))
+    return patterns[:6]
+
+
+def learn_from_rows(rows, family, history_rows=(), min_items=2, now=None):
     """Pure computation; never conflate similarly named User/Group creators."""
+    now = _date(now) or datetime.now(timezone.utc)
     by_creator = defaultdict(list)
     observed = set()
     for row in list(rows or [])[:_SAMPLE_LIMIT]:
@@ -77,6 +95,7 @@ def learn_from_rows(rows, family, history_rows=(), min_items=2):
         by_creator[(ctype, cid)].append({
             "id": item_id, "name": name,
             "favorite": favorite, "display": _safe_name(row[4]),
+            "created": _date(row[8]) if len(row) > 8 else None,
             "badge": row[5] if isinstance(row[5], bool) else None,
         })
     eligible = []
@@ -101,12 +120,33 @@ def learn_from_rows(rows, family, history_rows=(), min_items=2):
         "sample_capped": len(rows or []) >= _SAMPLE_LIMIT,
         "eligible_creators": len(eligible),
         "measured_items": len(changes),
-        "measured_positive": sum(x > 0 for x in changes.values()),
+        "measured_positive": sum(change[0] > 0 for change in changes.values()),
         "leaders": [], "patterns": [],
+        "emerging_leaders": [], "emerging_patterns": [],
         "top_median_favorites": None,
         "comparison_median_favorites": None,
         "causal": False, "sales_verified": False,
     }
+    rising = []
+    for (ctype, cid), products in by_creator.items():
+        measured = [
+            p for p in products
+            if p["created"] and 0 <= (now - p["created"]).days < 60
+            and p["id"] in changes
+            and 0 <= (now - changes[p["id"]][2]).days < 7
+        ]
+        gaining = [p for p in measured if changes[p["id"]][0] > 0]
+        if len(gaining) >= min_items and len(gaining) * 2 > len(measured):
+            rising.append((median(changes[p["id"]][1] for p in measured),
+                           ctype, cid, gaining))
+    rising.sort(key=lambda row: (-row[0], row[1], row[2]))
+    info["emerging_leaders"] = [
+        {"name": products[0]["display"], "type": ctype, "id": cid,
+         "items": len(products), "median_favorites_per_day": round(rate, 2)}
+        for rate, ctype, cid, products in rising[:3]
+    ]
+    info["emerging_patterns"] = _recurring_terms(
+        (ctype, cid, products) for _, ctype, cid, products in rising)
     if len(eligible) < 4:
         return info
     n_top = max(2, len(eligible) // 3)
@@ -119,23 +159,11 @@ def learn_from_rows(rows, family, history_rows=(), min_items=2):
         {"name": x["name"], "type": x["type"], "id": x["id"],
          "item_count": len(x["items"]), "median_favorites": round(x["median"], 1),
          "badge": x["badge"],
-         "measured_positive": sum(changes.get(p["id"], 0) > 0 for p in x["items"])}
+         "measured_positive": sum(p["id"] in changes and changes[p["id"]][0] > 0 for p in x["items"])}
         for x in top[:3]
     ]
-    members = defaultdict(lambda: {"creators": set(), "items": set()})
-    for creator in top:
-        for product in creator["items"]:
-            for term in set(_tokens(product["name"])):
-                members[term]["creators"].add((creator["type"], creator["id"]))
-                members[term]["items"].add(product["id"])
-    patterns = [
-        {"term": word, "creators": len(stats["creators"]),
-         "items": len(stats["items"])}
-        for word, stats in members.items()
-        if len(stats["creators"]) >= 2 and len(stats["items"]) >= 3
-    ]
-    patterns.sort(key=lambda p: (-p["creators"], -p["items"], p["term"]))
-    info["patterns"] = patterns[:6]
+    info["patterns"] = _recurring_terms(
+        (creator["type"], creator["id"], creator["items"]) for creator in top)
     info["status"] = "observed"
     info["confidence"] = (
         "moderate" if len(eligible) >= 6 and len(observed) >= 24 else "limited")
@@ -172,11 +200,18 @@ def learn_category_creators(cur, family):
     history = []
     if history_ids:
         cur.execute("""
+            WITH ranked AS (
+                SELECT item_id, favorite_count, snapshot_at,
+                       row_number() OVER (PARTITION BY item_id ORDER BY snapshot_at ASC) AS first_rank,
+                       row_number() OVER (PARTITION BY item_id ORDER BY snapshot_at DESC) AS last_rank
+                FROM item_history
+                WHERE item_id = ANY(%s)
+                  AND snapshot_at >= NOW() - INTERVAL '30 days'
+                  AND favorite_count IS NOT NULL
+            )
             SELECT item_id, favorite_count, snapshot_at
-            FROM item_history
-            WHERE item_id = ANY(%s)
-              AND snapshot_at >= NOW() - INTERVAL '30 days'
-              AND favorite_count IS NOT NULL
+            FROM ranked
+            WHERE first_rank = 1 OR last_rank = 1
             ORDER BY item_id, snapshot_at
             LIMIT %s
         """, (history_ids, _HISTORY_LIMIT))
@@ -206,15 +241,46 @@ def lookup_creator_learning(family, db_factory=None):
                 "patterns": [], "reason": type(exc).__name__}
 
 
+def emerging_title_terms(evidence, source):
+    """Independent, recent creator patterns that are also present in the brief."""
+    terms = set(_tokens(source))
+    return [pattern for pattern in (evidence or {}).get("emerging_patterns", [])
+            if pattern["term"] in terms][:3]
+
+
+def format_emerging_creators(evidence, source=""):
+    """Report an action with its observation and keep missing coverage explicit."""
+    leaders = (evidence or {}).get("emerging_leaders") or []
+    if not leaders:
+        return ""
+    leaders_text = ", ".join(
+        f"{row['name']} ({row['type']}, {row['items']} gaining listings, "
+        f"median +{row['median_favorites_per_day']:g} favorites/day)"
+        for row in leaders
+    )
+    lines = ["**Who’s gaining ground in the sample**", leaders_text]
+    patterns = (emerging_title_terms(evidence, source) if source else
+                (evidence.get("emerging_patterns") or [])[:3])
+    if patterns:
+        examples = ", ".join(f"{p['term']} ({p['creators']} creators)" for p in patterns)
+        lines.append(f"Recurring wording to test where it fits your item: {examples}.")
+    lines.append("Growth comes from catalog favorite snapshots. Sales impact is unknown.")
+    return "\n".join(lines)
+
+
 def title_pattern_bonus(title, vision, evidence):
     """Minor observed cross-creator tie-breaker, not a rank/CTR prediction."""
-    if (not isinstance(evidence, dict)
-            or evidence.get("status") != "observed"
-            or evidence.get("eligible_creators", 0) < 4):
+    if not isinstance(evidence, dict):
         return 0
     from background_review import _source_words, _words
     title_words = _words(title)
     visible_words = _source_words(vision, "")
+    recent = sum(p["term"] in title_words for p in
+                 emerging_title_terms(evidence, " ".join(visible_words)))
+    if recent:
+        return min(6, recent * 3)
+    if evidence.get("status") != "observed" or evidence.get("eligible_creators", 0) < 4:
+        return 0
     qualified = [
         p for p in evidence.get("patterns", [])
         if p.get("creators", 0) >= 2 and p.get("term") in title_words
@@ -230,6 +296,9 @@ def format_creator_learning(finding):
         "_Same-family catalog creators with known User/Group identity. "
         "Favorites are not sales; this is not a ranking algorithm._",
     ]
+    emerging = format_emerging_creators(f)
+    if emerging:
+        lines.append(emerging)
     if f.get("status") != "observed":
         lines.append("• " + ("Creator evidence unavailable" if f.get("status") == "unavailable"
                             else "Too few repeat creators in the stored sample") +

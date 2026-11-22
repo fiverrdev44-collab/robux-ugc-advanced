@@ -228,14 +228,9 @@ def _fallback_titles(concept, family, n=8):
 
 
 def _fallback_description(concept, family):
-    base = " ".join(w.capitalize() for w in _short_concept(concept, 4).split())
-    base = base or "New Item"
-    type_word = _TYPE_WORD.get(family, "Item")
-    has_type = type_word.lower() in [w.lower() for w in base.split()]
-    head = base if has_type else f"{base} {type_word}"
-    return (f"{head}\n"
-            f"Made for {base.lower()} fans.\n"
-            f"Perfect for your next avatar look.")
+    from description_quality import fallback_description
+
+    return fallback_description(concept, family)
 
 
 def run_chain(concept, family=None, parent_id=None, live_enrich=True):
@@ -522,6 +517,20 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
 
     # ── Stage 9: Big strategy prompt ──
     synth = {}
+    from category_creator_learning import emerging_title_terms, lookup_creator_learning
+    from description_quality import fact_source
+
+    creator_evidence = lookup_creator_learning(family, db_factory=get_db)
+    recent_terms = emerging_title_terms(creator_evidence, fact_source(concept))
+    recent_creator_note = ""
+    if recent_terms:
+        words = ", ".join(f"{p['term']} ({p['creators']} creators)" for p in recent_terms)
+        recent_creator_note = (
+            f"Recent same-category listings gaining favorites repeat these brief-aligned words: {words}. "
+            "Use a term only if it makes the product immediately clearer. "
+            "Treat this as sampled wording context. Keep the name original."
+        )
+
     try:
         concept_for_ai = concept
         if parent_context:
@@ -595,9 +604,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         keyword_rule = ""
         if best_niche_kw and best_niche_bucket in ("GOLD", "OPPORTUNITY", "VIRGIN"):
             keyword_rule = (
-                f"\n=== MANDATORY KEYWORD ===\n"
-                f"At least 4 of 10 titles MUST contain `{best_niche_kw}` "
-                f"as the FIRST or SECOND token.\n"
+                f"\n=== SAMPLED NICHE WORDING ===\n"
+                f"`{best_niche_kw}` can be tested when it fits the product. "
+                f"Use it only if it makes the title easier to understand.\n"
             )
 
         parent_rule = ""
@@ -607,10 +616,11 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                 f"Variant of `{parent_name}`. Keep core keywords.\n"
             )
 
-        focused_prompt = f"""You are the #1 Roblox UGC naming strategist.
+        focused_prompt = f"""Name this item the way an experienced UGC seller would describe it to a buyer.
 Generate EXACTLY 10 titles for a Roblox {family} item.
 
 CONCEPT: {concept}
+{recent_creator_note}
 
 REAL COMPETITORS (study, do NOT copy):
 {top_comp_lines}
@@ -824,9 +834,9 @@ OUTPUT — ONLY JSON:
         quality = finalize_description(
             merged_description, concept, family,
             title=(scored_titles[0]["title"] if scored_titles else ""),
-            rewrite_fn=lambda prompt: _generate(
+            rewrite_fn=(lambda prompt: _generate(
                 prompt, json_mode=False, temperature=0.65, max_tokens=260
-            ),
+            )) if ai_body else None,
         )
         merged_description = quality["text"]
 
@@ -866,6 +876,7 @@ OUTPUT — ONLY JSON:
         "allow_list": allow_list[:20],
         "desc_examples": desc_examples,
         "desc_cohort_evidence": desc_cohort_evidence,
+        "creator_evidence": creator_evidence,
         "synth": synth,
         "pipeline_report": pipeline_report,
         "niche_intel": niche_intel,
@@ -907,6 +918,11 @@ def format_chain(result):
             f"_Family: `{result['family']}` · Type: `{type_label}`_"
         )
 
+    from category_creator_learning import format_emerging_creators
+    emerging = format_emerging_creators(result.get("creator_evidence"), concept)
+    if emerging:
+        chunks.append(emerging)
+
     # ── NICHE ──
     if result["niche"]:
         emoji_map = {
@@ -920,8 +936,8 @@ def format_chain(result):
             lines.append(
                 f"{e} `{k['keyword']}` — **{k['bucket']}** · "
                 f"supply {k['supply']} · median {k['median_favs']}♥ · "
-                f"demand {k.get('demand_live', k['demand'])} "
-                f"({k.get('demand_volume', 0):,} vol)"
+                f"suggestion rows {k.get('demand_live', k['demand'])} "
+                f"(stored autocomplete score {k.get('demand_volume', 0):,})"
                 + ("" if k.get("demand_reliable", True)
                    else " · low-confidence")
             )
@@ -1070,7 +1086,7 @@ def format_chain(result):
                 + (f" (raw {sc['score']})" if sc.get('final_score') is not None
                    and sc.get('final_score') != sc['score'] else "")
                 + gap_part + opp_part
-                + (f" · unique" if sc['exact_matches'] == 0
+                + (f" · no exact match in the stored sample" if sc['exact_matches'] == 0
                    else f" · {sc['exact_matches']} matches")
             )
             for b in sorted(sc["breakdown"],
@@ -1078,7 +1094,7 @@ def format_chain(result):
                             reverse=True)[:4]:
                 if b.get("no_data"):
                     vol = b.get("demand_volume", 0)
-                    vol_str = f" · {vol:,} volume" if vol else ""
+                    vol_str = f" · autocomplete score {vol:,}" if vol else ""
                     lines.append(f"   ⚫ `{b['word']}` — no niche data "
                                  f"({b['demand']} live{vol_str}) → +0.0")
                     continue
@@ -1091,7 +1107,7 @@ def format_chain(result):
                 gap = b.get("visibility_gap", 0)
                 gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
                 vol = b.get("demand_volume", 0)
-                vol_str = f" · {vol:,} volume" if vol else ""
+                vol_str = f" · autocomplete score {vol:,}" if vol else ""
                 lines.append(
                     f"   {emoji} `{b['word']}` lift {lift}× "
                     f"({b['sample']} items · {b['demand']} live{vol_str}"
@@ -1164,8 +1180,8 @@ def format_chain(result):
         champ_opp = scored[0].get("opportunity") or {}
         if champ_opp:
             final_lines.append(
-                f"**Verified title lane:** {champ_opp.get('verdict')} · "
-                f"demand {champ_opp.get('demand_volume', 0):,} · "
+                f"**Title lane from stored evidence:** {champ_opp.get('verdict')} · "
+                f"stored autocomplete score {champ_opp.get('demand_volume', 0):,} · "
                 f"supply {champ_opp.get('supply', 0)} · "
                 f"exact {champ_opp.get('exact', 0)}"
             )

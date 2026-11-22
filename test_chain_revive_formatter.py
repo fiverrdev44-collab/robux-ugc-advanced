@@ -95,6 +95,20 @@ def test_format_chain_non_variant_is_independent_of_prior_context():
     assert saved.call_args.kwargs["item_id"] is None
 
 
+def test_sample_labels_preserve_autocomplete_provenance():
+    result = _result()
+    result["niche"] = [{
+        "keyword": "hip hop dance", "bucket": "NEUTRAL", "supply": 4,
+        "median_favs": 23, "demand": 3, "demand_live": 3,
+        "demand_volume": 260, "demand_reliable": True,
+    }]
+    with mock.patch.object(chain, "get_db", return_value=_Connection()), \
+         mock.patch("creator_memory.record_run"):
+        body = "\n".join(chain.format_chain(result))
+    assert "suggestion rows 3 (stored autocomplete score 260)" in body
+    assert "260 vol" not in body
+
+
 def test_error_result_never_touches_database():
     with mock.patch.object(
         chain, "get_db", side_effect=AssertionError("No DB on error")
@@ -107,5 +121,6 @@ def test_error_result_never_touches_database():
 if __name__ == "__main__":
     test_format_chain_executes_during_revive_without_name_errors()
     test_format_chain_non_variant_is_independent_of_prior_context()
+    test_sample_labels_preserve_autocomplete_provenance()
     test_error_result_never_touches_database()
     print("PASS revival and standard chain renderer")

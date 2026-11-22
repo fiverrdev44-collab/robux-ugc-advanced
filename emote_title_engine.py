@@ -1078,7 +1078,7 @@ def _relevance(title, description, concepts):
 
 
 def rank_titles(titles, description, concepts, db, live, title_checks=None,
-                identity=None):
+                identity=None, creator_evidence=None):
     """Creative-quality ranking calibrated to recognizable product identity.
 
     Eligibility (ASTRA, motion grounding, protected names) remains a hard gate.
@@ -1089,6 +1089,9 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None,
     exceptional quality. Scores are transparent heuristics, not CTR or sales.
     """
     identity = identity or extract_product_identity(description, concepts)
+    from category_creator_learning import emerging_title_terms
+    emerging = {pattern["term"] for pattern in
+                emerging_title_terms(creator_evidence, description)}
     checks = _title_check_map(title_checks)
     retrieval = _retrieval_score(db, live)
     for t in titles:
@@ -1132,6 +1135,7 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None,
             "market_context": round(kw_context, 3),
             "keyword_sample_context": round(kw_context, 3),
             "unknown_demand": "unknown",
+            "emerging_terms": len(emerging & _tokens(t["title"])),
         }
         t["score"] = round(score, 1)
         t["components"] = comps
@@ -1142,7 +1146,8 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None,
             "partial" if completeness > 0 else "insufficient")
     titles.sort(key=lambda t: (t["score"], t["components"]["product_clarity"],
                                t["components"]["originality"],
-                               t["components"]["natural_readability"]),
+                               t["components"]["natural_readability"],
+                               t["components"]["emerging_terms"]),
                 reverse=True)
     for i, t in enumerate(titles):
         t["recommended"] = (i == 0)
@@ -1152,7 +1157,7 @@ def rank_titles(titles, description, concepts, db, live, title_checks=None,
 
 def generate(description, url=None, *, db_fn=None, live_fn=None,
              meta_fn=None, generate_fn=None, title_db_fn=None,
-             title_live_fn=None, title_live_budget=None):
+             title_live_fn=None, title_live_budget=None, creator_evidence=None):
     raw_description = strip_banned(description).strip()
     protected = extract_protected_names(description)
     keywords = extract_keywords(raw_description, exclude=protected)
@@ -1213,7 +1218,7 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
             final.append(t)
 
     initial = rank_titles(final, raw_description, concepts, db, live,
-                          identity=identity)
+                          identity=identity, creator_evidence=creator_evidence)
 
     # Title verification budget. Interactive default is 0: local DB exact
     # checks only, no extra live requests after keyword research.
@@ -1233,7 +1238,8 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
                                live_fn=title_live_fn)
 
     ranked = rank_titles(final, raw_description, concepts, db, live,
-                         title_checks=checks, identity=identity)
+                         title_checks=checks, identity=identity,
+                         creator_evidence=creator_evidence)
     top5 = ranked[:5]
     not_selected = [
         {"title": t["title"], "score": t["score"],
@@ -1275,6 +1281,7 @@ def generate(description, url=None, *, db_fn=None, live_fn=None,
         "candidates_generated": considered,
         "candidates_eligible": len(final),
         "title_live_budget": budget,
+        "creator_evidence": creator_evidence,
         "not_selected": not_selected,
         "identity": identity,
         "provenance": stats,
@@ -1385,7 +1392,7 @@ def format_report(result):
     live = research.get("live") or []
     tiktok = research.get("tiktok") or {}
 
-    lines = ["# 🎭 EMOTE TITLE ENGINE", ""]
+    lines = ["# Emote title review", ""]
     lines.append("## Recommended title")
     lines.append(f"**{rec}**" if rec else "_No title passed validation._")
     prov = result.get("provenance") or research.get("provenance") or {}
@@ -1471,6 +1478,10 @@ def format_report(result):
         lines.append("- Not run (no validated titles or deferred by rate limit).")
     lines.append("")
 
+    from category_creator_learning import format_emerging_creators
+    emerging = format_emerging_creators(result.get("creator_evidence"), result.get("description"))
+    if emerging:
+        lines.extend([emerging, ""])
     lines.append("## Evidence")
     lines.append(f"- Research concepts: {', '.join(result.get('concepts') or []) or 'none'}")
     if db.get("ok"):

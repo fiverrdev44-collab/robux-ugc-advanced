@@ -32,7 +32,9 @@ def register_emote_commands(bot, get_db):
         progress = await ctx.send("🧪 Building validated emote titles…")
 
         def _run():
-            return generate(description, url=url)
+            from category_creator_learning import lookup_creator_learning
+            evidence = lookup_creator_learning("emote", db_factory=get_db) if get_db else {}
+            return generate(description, url=url, creator_evidence=evidence)
 
         result, timed_out, err = await to_thread_cancellable("emote_title", _run)
         if timed_out:

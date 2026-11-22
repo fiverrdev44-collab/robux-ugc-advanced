@@ -339,14 +339,14 @@ def format_report(s, show_all_words=False):
     lines = [
         f"**`{s['title']}`** — score **{s['score']}**"
         + (f" · gap **{gap_total:.0f}**" if gap_total >= 5 else "")
-        + (f" · unique" if s["exact_matches"] == 0
+        + (f" · no exact match in the stored sample" if s["exact_matches"] == 0
            else f" · {s['exact_matches']} exact")
     ]
     ranked = sorted(s["breakdown"], key=lambda x: x["contribution"], reverse=True)
     for b in ranked:
         if b.get("no_data"):
             vol = b.get("demand_volume", 0)
-            vol_str = f" · {vol:,} volume" if vol else ""
+            vol_str = f" · autocomplete score {vol:,}" if vol else ""
             lines.append(
                 f"  ⚫ `{b['word']}` — no niche data "
                 f"({b['demand']} live{vol_str}) → +0.0"
@@ -361,7 +361,7 @@ def format_report(s, show_all_words=False):
         gap = b.get("visibility_gap", 0)
         gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
         vol = b.get("demand_volume", 0)
-        vol_str = f" · {vol:,} volume" if vol else ""
+        vol_str = f" · autocomplete score {vol:,}" if vol else ""
         lines.append(
             f"  {emoji} `{b['word']}` lift {lift}× "
             f"({b['sample']} items · {b['demand']} live{vol_str}{gap_str}) "

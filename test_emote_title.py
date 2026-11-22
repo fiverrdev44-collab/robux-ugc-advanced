@@ -534,6 +534,22 @@ class CommandTests(unittest.TestCase):
             asyncio.run(bot.commands["emote_title"](ctx, args=LIVE_INPUT))
         self.assertIn("REPORT-BODY", ctx.channel.sent)
 
+    def test_command_passes_same_category_creator_evidence_to_title_engine(self):
+        import commands_emote
+
+        bot = _FakeBot()
+        ctx = _FakeCtx()
+        db = mock.Mock()
+        evidence = {"emerging_patterns": [{"term": "sway", "creators": 2, "items": 4}]}
+        commands_emote.register_emote_commands(bot, db)
+        with mock.patch("category_creator_learning.lookup_creator_learning", return_value=evidence) as load, \
+                mock.patch.object(ete, "generate", return_value={}) as generate, \
+                mock.patch.object(ete, "format_report", return_value="REVIEW"):
+            asyncio.run(bot.commands["emote_title"](ctx, args="Slow shoulder sway"))
+        load.assert_called_once_with("emote", db_factory=db)
+        generate.assert_called_once_with("Slow shoulder sway", url=None, creator_evidence=evidence)
+        self.assertIn("REVIEW", ctx.channel.sent)
+
     def test_command_requires_description(self):
         import commands_emote
         bot = _FakeBot()

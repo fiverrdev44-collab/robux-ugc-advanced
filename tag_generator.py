@@ -879,7 +879,7 @@ def format_tags(result):
     )
 
     if result.get("top_weighted"):
-        lines = ["**ðŸŽ¯ Highest-weight keywords (sales signal):**"]
+        lines = ["**ðŸŽ¯ Highest-weight keywords from listing and search evidence:**"]
         for tag, score in result["top_weighted"][:10]:
             lines.append(f"`{tag}` â€” weight {score:.1f}")
         chunks.append("\n".join(lines))

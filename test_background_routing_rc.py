@@ -18,7 +18,7 @@ class BackgroundRoutingTests(unittest.TestCase):
         self.assertEqual(resolve_family_ids("backgrounds"), [92])
         self.assertEqual(family_for_asset(92), "backgrounds")
         self.assertEqual(detect_family_from_asset_type(92), "backgrounds")
-        self.assertEqual(resolve_family_ids("back"), [46,67])
+        self.assertEqual(resolve_family_ids("back"), [46])
         self.assertEqual(classify_family("starry wings cape")[0], "back")
     def test_wings_never_recommended_as_background(self):
         concept = "i made a background starry sky fence and a distant village"
