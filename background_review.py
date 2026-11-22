@@ -13,6 +13,9 @@ from background_intelligence import (
     _short_text, _is_untrusted_instruction,
 )
 from product_understanding import validate_title
+from background_creative_titles import (
+    creative_lane_candidates, creative_title_issues, brand_sensitive_title,
+)
 
 _TYPES = {"background", "avatar", "roblox", "ugc", "scene", "image", "picture"}
 _UNSUPPORTED = {"animated", "animation", "moving", "interactive", "reactive",
@@ -146,7 +149,7 @@ def _editorial_candidates(vision, notes):
         return []
     source = _source_words(vision, notes)
     base = anchor.title()
-    out = []
+    out = list(creative_lane_candidates(vision, notes))
     # Preserve the distinctive exterior scene when the artwork shows an
     # interior looking outward (e.g. an underwater city observation room).
     # This is editorial fit, not an assertion of customer search frequency.
@@ -181,7 +184,7 @@ def _editorial_candidates(vision, notes):
             out.append(f"{phrase.title()} {base} Background")
     out.append(f"{base} Background" if len(base.split()) >= 2
                else f"{base} Scene Background")
-    return out[:10]
+    return list(dict.fromkeys(out))[:15]
 
 
 def _complete_comment(value, limit=170):
@@ -197,6 +200,12 @@ def _valid_titles(raw_titles, vision, notes, live):
     if not isinstance(raw_titles, list):
         return []
     source = _source_words(vision, notes)
+    obs = observations(vision)
+    scene_source = " ".join([
+        _safe(notes, 300), obs["visual_summary"], obs["search_description"],
+        obs["composition_notes"], *obs["distinctive_features"],
+        *obs["visual_colors"], *obs["visual_style"],
+    ])
     existing = {row["name"].casefold()
                 for row in verified_background_competitors(live)}
     out, seen = [], set()
@@ -212,9 +221,11 @@ def _valid_titles(raw_titles, vision, notes, live):
         meaningful = _words(title)
         if not meaningful or not source or not meaningful & source:
             continue
-        # Adjectival creativity is fine; new unobserved objects, characters
-        # and locations are not. Keep unsupported scene nouns out.
-        if meaningful - source - _CREATIVE_MODIFIERS:
+        # Backgrounds can use memorable metaphors and context-supported
+        # synonyms; literal word-for-word overlap is too restrictive.
+        # Unsupported objects, character names, and unlicensed branding
+        # remain excluded. This never certifies rights in the artwork.
+        if creative_title_issues(title, scene_source, notes):
             continue
         ok, _ = validate_title(notes, title, family="backgrounds")
         if not ok or title.casefold() in existing or title.casefold() in seen:
@@ -428,7 +439,18 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "You research Roblox AVATAR MARKETPLACE (AssetType 92) SEARCH, not "
         "the Roblox experience/game recommendation algorithm. Return ONLY "
         "JSON {\"titles\": [\"...\"]}: 8-12 creative, SEARCH-RELEVANT "
-        "names ending in Background, 3-8 words, based on verified image "
+        "names ending in Background, 3-8 words. Provide 3 clear searchable "
+        "names, 3 distinctive signature names, and 3-4 memorable atmospheric "
+        "names in one list; keep a literal scene hook in every name. "
+        "Allowed imaginative connectors include Beyond, Endless, Horizon, "
+        "and Sunlit ONLY when they fit the actual scene. Do not invent "
+        "characters, destinations, objects, events, or unsupported effects. "
+        "Background titles have MORE editorial naming freedom than emote "
+        "movement titles. Default to ORIGINAL UNBRANDED names; never use "
+        "names of games, fictional worlds, characters, logos, or official "
+        "government affiliation unless independently licensed (no license "
+        "is established by this request). "
+        "Image facts come from verified image "
         "observations when available or explicitly CREATOR-DESCRIBED scene "
         "details when visual checking failed. Never describe creator notes "
         "as image-verified. They must sound like NATURAL Roblox product names, "
@@ -443,10 +465,11 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         "creators show the same term and it actually describes the artwork. "
         "Never copy a top creator's title, treat popularity as proof of "
         "algorithmic causation, or force keywords unrelated to the scene. "
-        "If the CREATOR explicitly named a cartoon/game/franchise, "
-        "include at least two natural candidates featuring that named "
-        "identity alongside scene keywords, and two unbranded options. "
-        "The creator's named identity is not visual proof or IP clearance. "
+        "If the CREATOR names a copyrighted game or fictional world, "
+        "treat it as private contextual inspiration, not permission to use "
+        "its brand in the public title. Generate distinctive, unbranded "
+        "alternatives based on visible environment traits instead. "
+        "Never say a title guarantees copyright or trademark clearance. "
         "Preserve a recognizable search noun, then compare "
         "underused truthful feature angles against same-category titles. "
         "An empty sample is NOT demand or a validated keyword gap. "
@@ -475,7 +498,10 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         vision, notes, live)
     # Prefer editorially grounded phrases. The model must not force a
     # distinctive-looking but awkward combination of incidental detail tokens.
-    titles = list(dict.fromkeys(fallback + generated))[:12]
+    # Reserve room for model originality even when editorial fallbacks
+    # produce many bland literal variants. Keep grounded fallback coverage.
+    titles = list(dict.fromkeys(fallback[:5] + generated[:7] +
+                               fallback[5:]))[:12]
     if not generated and fallback:
         passes["creative"] = "fallback_only"
     from category_creator_learning import title_pattern_bonus
@@ -521,9 +547,12 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "When multiple verified scene details describe a setting "
             "and the view outside it, prefer a natural title preserving the "
             "distinctive setting, not a generic room label. "
-            "When a creator explicitly names a franchise, consider a "
-            "named candidate alongside descriptive ones, without claiming "
-            "authorization or concealing the IP caution. Choose titles "
+            "Prefer a genuinely different memorable alternative over "
+            "three near-identical word-order variants. Searchable wording "
+            "and memorability are hypotheses, not verified CTR. "
+            "If a creator names a franchise, keep it as private scene "
+            "context and prefer unbranded public titles; this does not "
+            "establish rights in the underlying artwork. Choose titles "
             "only from ALLOWED TITLES. Write a short factual, searchable "
             "listing description, not keyword stuffing. No visual/artwork "
             "editing, Photoshop/Photopea, crop or lighting recommendations. "
@@ -685,8 +714,9 @@ def format_multi_pass_review(data):
     lines += ["**Searchable listing description**",
               data.get("description") or "Insufficient grounded scene detail."]
     if data.get("ip_caution"):
-        lines.append("• Named franchise appears in creator notes; verify rights "
-                     "before using protected names or characters commercially.")
+        lines.append("• Unbranded names reduce brand-reference risk, but do NOT "
+                     "clear IP rights in the artwork. Check permissions "
+                     "for any copied or inspired game environment.")
     lines.append("• **Unknown:** organic Marketplace impressions, CTR, "
                  "algorithm weights and competitor sales. Favorites ≠ sales.")
     return "\n".join(lines)
