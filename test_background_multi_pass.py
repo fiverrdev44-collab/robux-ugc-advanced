@@ -139,12 +139,12 @@ def test_prompt_injection_and_ip_claim_guards():
         lambda *a: SECOND, lambda *a, **kw: None)
     assert result["ip_caution"]
     report = br.format_multi_pass_review(result)
-    assert report.count("verify rights") == 1
+    assert "reduce brand-reference risk" in report
     assert "Third-party IP caution" not in report
     assert "authorize protected" not in report
 
 
-def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
+def test_explicit_oggy_name_is_context_not_automatic_title_permission():
     vision = {
         "visual_summary": "Colorful sunny cartoon house with purple roof and garden",
         "search_description": "Cartoon house beside a green garden",
@@ -161,21 +161,21 @@ def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
     assert creator_named_subject("A sunny cartoon house") is None
     titles = br._valid_titles(
         br._editorial_candidates(vision, notes), vision, notes, None)
-    assert "Oggy's Sunny Cartoon House Background" in titles, titles
-    assert "Oggy Cartoon House Background" in titles, titles
+    assert "Sunlit Cartoon House Background" in titles, titles
+    assert not any("Oggy" in name for name in titles)
+
     prompts = []
     def model(prompt, **kwargs):
         prompts.append(prompt)
         if len(prompts) == 1:
             return ('{"titles":["Oggys Sunny Cartoon House Background",'
                     '"Sunny Cartoon House Background",'
-                    '"Colorful Cartoon House Background"]}')
-        return ('{"winner":"Oggy Cartoon House Background",'
-                '"alternatives":["Oggys Sunny Cartoon House Background",'
-                '"Sunny Cartoon House Background"],'
-                '"challenge":"A named identity is creator-supplied, not visually proven.",'
-                '"why_winner":"Recognizable named scene and concise words.",'
-                '"description":"A cheerful cartoon house surrounded by a bright garden."}')
+                    '"Sunlit Cartoon House Background"]}')
+        return ('{"winner":"Sunlit Cartoon House Background",'
+                '"alternatives":["Sunny Cartoon House Background"],'
+                '"challenge":"The source image may reference a protected franchise.",'
+                '"why_winner":"Recognizable house scene and concise words.",'
+                '"description":"A sunny cartoon house surrounded by a bright garden."}')
     live = combine_background_live_checks([
         {"ok": True, "keyword": "cartoon house",
          "search_keyword": "cartoon house background",
@@ -193,9 +193,10 @@ def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
     review = br.build_multi_pass_review(
         vision, [], notes, live, lambda *_: {}, model)
     assert review["status"] == "ok", review
-    assert "Oggy" in review["winner"], review
-    assert "Oggy's Sunny Cartoon House Background" in [
+    assert "Oggy" not in review["winner"], review
+    assert "Sunlit Cartoon House Background" in [
         row["title"] for row in review["scored"]], review
+    assert not any("Oggy" in row["title"] for row in review["scored"])
     assert "Oggy Hat" not in [x["name"] for x in review["competitors"]]
     assert len(prompts) == 2
     assert "creator_named_subject" in prompts[0]
@@ -203,8 +204,7 @@ def test_explicit_oggy_name_is_a_real_candidate_not_blocked():
     assert "cartoon house background" in report
     assert "oggy background" in report
     assert "correct-category" in report
-    assert "verify rights" in report
-    assert "Oggy Cartoon House Background" in report
+    assert "reduce brand-reference risk" in report
 
 
 def test_failing_named_live_search_never_claims_zero_competitors():
@@ -310,7 +310,7 @@ if __name__ == "__main__":
     test_horror_office_titles_reject_awkward_detail_stacking()
     test_unavailable_providers_fail_soft_without_false_evidence()
     test_prompt_injection_and_ip_claim_guards()
-    test_explicit_oggy_name_is_a_real_candidate_not_blocked()
+    test_explicit_oggy_name_is_context_not_automatic_title_permission()
     test_failing_named_live_search_never_claims_zero_competitors()
     test_discord_command_checks_scene_and_explicit_oggy_search()
     test_discord_command_keeps_one_market_search_and_two_visual_calls()
