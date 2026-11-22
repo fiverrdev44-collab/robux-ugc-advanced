@@ -388,6 +388,8 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
         return {"status": "unavailable", "reason": "image scene unknown"}
     from description_quality import fact_source
 
+    from category_creator_learning import emerging_title_terms
+
     raw_notes = notes
     notes = "" if vision.get("visual_scene_disagreement") else fact_source(notes)
     first = observations(vision)
@@ -426,6 +428,9 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             "eligible_creators": learned.get("eligible_creators", 0),
             "top_median_favorites": learned.get("top_median_favorites"),
             "comparison_median_favorites": learned.get("comparison_median_favorites"),
+            "emerging_listing_terms": emerging_title_terms(
+                learned, " ".join([notes, first["visual_summary"], *first["distinctive_features"]])
+            ),
             "cross_creator_terms": [
                 {"term": p.get("term"), "creators": p.get("creators"),
                  "items": p.get("items")}

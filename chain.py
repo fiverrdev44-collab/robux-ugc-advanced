@@ -517,6 +517,20 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
 
     # ── Stage 9: Big strategy prompt ──
     synth = {}
+    from category_creator_learning import emerging_title_terms, lookup_creator_learning
+    from description_quality import fact_source
+
+    creator_evidence = lookup_creator_learning(family, db_factory=get_db)
+    recent_terms = emerging_title_terms(creator_evidence, fact_source(concept))
+    recent_creator_note = ""
+    if recent_terms:
+        words = ", ".join(f"{p['term']} ({p['creators']} creators)" for p in recent_terms)
+        recent_creator_note = (
+            f"Recent same-category listings gaining favorites repeat these brief-aligned words: {words}. "
+            "Use a term only if it makes the product immediately clearer. "
+            "Treat this as sampled wording context. Keep the name original."
+        )
+
     try:
         concept_for_ai = concept
         if parent_context:
@@ -590,9 +604,9 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
         keyword_rule = ""
         if best_niche_kw and best_niche_bucket in ("GOLD", "OPPORTUNITY", "VIRGIN"):
             keyword_rule = (
-                f"\n=== MANDATORY KEYWORD ===\n"
-                f"At least 4 of 10 titles MUST contain `{best_niche_kw}` "
-                f"as the FIRST or SECOND token.\n"
+                f"\n=== SAMPLED NICHE WORDING ===\n"
+                f"`{best_niche_kw}` can be tested when it fits the product. "
+                f"Use it only if it makes the title easier to understand.\n"
             )
 
         parent_rule = ""
@@ -602,10 +616,11 @@ def run_chain(concept, family=None, parent_id=None, live_enrich=True):
                 f"Variant of `{parent_name}`. Keep core keywords.\n"
             )
 
-        focused_prompt = f"""You are the #1 Roblox UGC naming strategist.
+        focused_prompt = f"""Name this item the way an experienced UGC seller would describe it to a buyer.
 Generate EXACTLY 10 titles for a Roblox {family} item.
 
 CONCEPT: {concept}
+{recent_creator_note}
 
 REAL COMPETITORS (study, do NOT copy):
 {top_comp_lines}
@@ -861,6 +876,7 @@ OUTPUT — ONLY JSON:
         "allow_list": allow_list[:20],
         "desc_examples": desc_examples,
         "desc_cohort_evidence": desc_cohort_evidence,
+        "creator_evidence": creator_evidence,
         "synth": synth,
         "pipeline_report": pipeline_report,
         "niche_intel": niche_intel,
@@ -901,6 +917,11 @@ def format_chain(result):
             f"# 🔗 CHAIN — `{result['concept'][:60]}`\n"
             f"_Family: `{result['family']}` · Type: `{type_label}`_"
         )
+
+    from category_creator_learning import format_emerging_creators
+    emerging = format_emerging_creators(result.get("creator_evidence"), concept)
+    if emerging:
+        chunks.append(emerging)
 
     # ── NICHE ──
     if result["niche"]:

@@ -27,7 +27,7 @@ FAMILIES = {
     "neck":     [43],
     "shoulder": [44],
     "front":    [45, 64],
-    "back":     [46, 67],
+    "back":     [46],
     "waist":    [47, 69, 72],
     "tops":      [65, 66, 68],
     "classic":   [2, 11, 12],

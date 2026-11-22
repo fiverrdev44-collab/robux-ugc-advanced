@@ -60,22 +60,21 @@ def select_emerging(cur, limit=COHORT_SIZE["EMERGING"], exclude=None):
     rows = _rows(cur, """
         WITH growth AS (
             SELECT i.creator_type, i.creator_id, i.id,
-                   (max(h.favorite_count) - min(h.favorite_count)) /
+                   ((array_agg(h.favorite_count ORDER BY h.snapshot_at DESC))[1]
+                    - (array_agg(h.favorite_count ORDER BY h.snapshot_at ASC))[1]) /
                    GREATEST(EXTRACT(EPOCH FROM
                        (max(h.snapshot_at) - min(h.snapshot_at))) / 86400.0, 1)
-                       AS velocity,
-                   count(DISTINCT date(h.snapshot_at AT TIME ZONE 'UTC')) AS days,
-                   min(h.favorite_count) AS first_favs,
-                   max(h.favorite_count) AS last_favs
+                       AS velocity
             FROM items i
             JOIN item_history h ON h.item_id = i.id
             WHERE i.creator_id IS NOT NULL
               AND i.creator_type IN ('User', 'Group')
               AND h.favorite_count IS NOT NULL
               AND h.snapshot_at > now() - interval '14 days'
+              AND h.snapshot_at <= now()
             GROUP BY i.creator_type, i.creator_id, i.id
             HAVING count(DISTINCT date(h.snapshot_at AT TIME ZONE 'UTC')) >= %s
-               AND min(h.favorite_count) IS NOT NULL
+               AND max(h.snapshot_at) >= now() - interval '7 days'
         )
         SELECT creator_type, creator_id,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY velocity) AS score,

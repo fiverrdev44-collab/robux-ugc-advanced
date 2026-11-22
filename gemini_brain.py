@@ -591,7 +591,10 @@ def mine_title_patterns(top_items):
     }
 
 
-_SYNTH_PROMPT = """You are the world's #1 Roblox UGC naming strategist.
+_SYNTH_PROMPT = """Advise a Roblox UGC creator in the voice of an experienced marketplace analyst.
+Make the recommendation concrete. Say what you would ship, back it with the
+strongest available observation, and name the uncertainty that could change
+the call. Prefer plain language and a specific creative angle.
 
 === YOUR ROLE ===
 Report what the market data ACTUALLY shows. Do not predict outcomes.
@@ -618,9 +621,8 @@ SATURATED, do NOT describe it as "weak". Use the word "SATURATED".
 2. Every title MUST end with one of these valid type words for this category:
    {type_words}
 3. Every title MUST be UNIQUE.
-4. At least 3 titles MUST include the strongest niche keyword from the NICHE
-   section above. If a keyword is marked GOLD or OPPORTUNITY, that exact word
-   MUST appear in at least 3 titles (as the FIRST token if possible).
+4. Use the strongest niche keyword only when it accurately names the product
+   or a meaningful visible feature. Keep genuinely different creative options.
 5. Titles may ONLY use words from the allow-list + glue words + type words.
 6. NEVER use stopwords as fillers to pad length.
 
@@ -651,10 +653,10 @@ Write short, specific, relaxed human Roblox listing copy, not AI promotional pro
 
 === YOUR TASK ===
 Generate 10 titles TOTAL, grouped into 4 strategic buckets:
-- SAFE (3): mirror what top competitors do, but cleaner
-- DIFFERENTIATED (3): same keywords, unique angle
-- LONGTAIL (2): 4-5 tokens packed with keywords
-- VIRAL (2): meme/trend/sound hook
+- SAFE (3): immediately recognizable product language
+- DIFFERENTIATED (3): a distinctive hook grounded in the product
+- LONGTAIL (2): a specific use, movement, or scene in natural words
+- VIRAL (2): memorable phrasing that passes the same product evidence rules
 
 === OUTPUT — ONLY JSON ===
 {{
@@ -667,7 +669,7 @@ Generate 10 titles TOTAL, grouped into 4 strategic buckets:
   "market_diagnosis": "3-4 sentences on saturation, winners, losers. Reference real stats.",
   "winner_blueprint": "3-4 sentences on what top 10% items in this niche do that bottom 50% don't.",
   "saturation_verdict": "2-3 sentences. Name which seed keywords are SATURATED vs OPPORTUNITY vs GOLD.",
-  "seo_description": "Match the pattern + examples from REAL TOP DESCRIPTIONS above. Match their line count, emoji count, and shape EXACTLY. First sentence MUST contain the top keyword + type word. NO corporate words, NO promo, NO group mentions. Write like a real creator describing their item to a friend. End with a mood or vibe line, NOT a call to action.",
+  "seo_description": "Start with the item and its strongest truthful detail. Add one useful detail in natural language. Keep it brief and avoid promotional filler.",
   "killer_keywords": ["10-15 highest-value keywords from the allow-list"],
   "cross_promotion_play": "2-3 SHORT sentences. Name 2 specific item types buyers would also want.",
   "social_playbook": "2-3 sentences. Specific TikTok hooks or video angles.",

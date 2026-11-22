@@ -69,6 +69,29 @@ def test_growth_requires_multiple_distinct_snapshots():
     assert out["measured_positive"] == 1
 
 
+def test_emerging_creators_require_repeated_recent_signed_growth():
+    from category_creator_learning import emerging_title_terms, format_emerging_creators
+
+    rows = sample()
+    history = []
+    for item_id, _, _, creator_id, *_ in rows:
+        end = NOW - timedelta(days=10) if creator_id == 105 else NOW
+        initial = 100 if creator_id == 103 else 5
+        final = 40 if creator_id == 103 else 35
+        if creator_id == 106 and item_id % 10:
+            continue  # One gaining listing is insufficient.
+        history.extend([(item_id, initial, end - timedelta(days=3)),
+                        (item_id, final, end)])
+    result = learn_from_rows(rows, "backgrounds", history, now=NOW)
+    assert {row["id"] for row in result["emerging_leaders"]} == {101, 102, 104}
+    assert {row["median_favorites_per_day"] for row in result["emerging_leaders"]} == {10}
+    assert emerging_title_terms(result, "moonlit forest") == [
+        {"term": "moonlit", "creators": 2, "items": 4}
+    ]
+    assert emerging_title_terms(result, "sunny house") == []
+    assert "Sales impact is unknown." in format_emerging_creators(result)
+
+
 class FakeCursor:
     def __init__(self, rows):
         self.rows = rows
@@ -122,4 +145,5 @@ if __name__ == "__main__":
     test_query_category_isolation_for_backgrounds_and_emotes()
     test_visual_grounding_only_small_tie_breaker()
     test_missing_db_fails_soft()
+    test_emerging_creators_require_repeated_recent_signed_growth()
     print("PASS same-category creator cohort learning")

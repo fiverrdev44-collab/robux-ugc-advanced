@@ -224,6 +224,55 @@ def test_registered_sales_callback_discloses_partial_history_and_exact_period():
             assert f"last {days} days" in report and "missing source events" in report
 
 
+def test_experiment_baseline_uses_only_pre_change_snapshots():
+    from datetime import datetime, timedelta, timezone
+    from matched_experiments import _velocity_pair
+
+    event = datetime(2026, 11, 10, tzinfo=timezone.utc)
+    snapshots = [(event + timedelta(days=day), count)
+                 for day, count in [(-7, 10), (-2, 20), (1, 50), (7, 70)]]
+
+    class HistoryCursor:
+        def execute(self, sql, params):
+            _, start, end, cut, target = params
+            candidates = [(stamp, count) for stamp, count in snapshots
+                          if start <= stamp <= end
+                          and ((stamp >= cut) if "snapshot_at >=" in sql else (stamp < cut))]
+            self.closest = min(candidates, key=lambda pair: abs(pair[0] - target),
+                               default=None)
+
+        def fetchone(self):
+            if self.closest:
+                return self.closest[::-1]
+
+    result = _velocity_pair(HistoryCursor(), 1, event)
+    assert result["at"] == 20 and result["pre"] == 2
+    assert result["post"] == 5.5556
+
+
+def test_search_visibility_rotates_to_queries_without_recent_samples():
+    from search_visibility import collect
+
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+    assert collect(cursor, limit=20) == 0
+    query, params = cursor.execute.call_args.args
+    assert "ORDER BY history.last_checked_at ASC NULLS FIRST, q.weight DESC" in query
+    assert params == (20,)
+
+
+def test_cartoon_house_comparables_reject_unrelated_haunted_house():
+    from background_intelligence import relevant_background_competitors
+
+    names = ["Haunted House Background", "Sunny Cartoon House Background",
+             "Purple Roof House Background"]
+    live = {"ok": True, "top_competitors": [
+        {"name": name, "asset_type_id": 92} for name in names]}
+    result = relevant_background_competitors(live, {}, "Sunny cartoon house with a purple roof")
+    assert names[0] not in {row["name"] for row in result}
+    assert {row["name"] for row in result} == set(names[1:])
+
+
 if __name__ == "__main__":
     test_background_callback_uses_scene_anchor_and_complete_bounded_sample()
     test_vision_outage_uses_scene_notes_without_importing_instructions()
@@ -232,4 +281,7 @@ if __name__ == "__main__":
     test_registered_converge_reports_an_empty_scan()
     test_malformed_catalog_response_is_distinct_from_an_empty_catalog_sample()
     test_registered_sales_callback_discloses_partial_history_and_exact_period()
+    test_experiment_baseline_uses_only_pre_change_snapshots()
+    test_search_visibility_rotates_to_queries_without_recent_samples()
+    test_cartoon_house_comparables_reject_unrelated_haunted_house()
     print("PASS grounded listing quality and imported sales command paths")

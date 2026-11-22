@@ -129,13 +129,15 @@ def collect(cur, limit=20, max_pages=MAX_PAGES):
     cur.execute("""
         SELECT q.id, q.query
         FROM search_queries q
+        LEFT JOIN (
+            SELECT query_id, max(started_at) AS last_checked_at
+            FROM search_runs
+            GROUP BY query_id
+        ) history ON history.query_id = q.id
         WHERE q.enabled IS TRUE
-          AND NOT EXISTS (
-              SELECT 1 FROM search_runs r
-              WHERE r.query_id = q.id
-                AND r.started_at > now() - interval '6 hours'
-          )
-        ORDER BY q.weight DESC, q.id
+          AND (history.last_checked_at IS NULL
+               OR history.last_checked_at <= now() - interval '6 hours')
+        ORDER BY history.last_checked_at ASC NULLS FIRST, q.weight DESC, q.id
         LIMIT %s
     """, (int(limit),))
     queries = cur.fetchall()

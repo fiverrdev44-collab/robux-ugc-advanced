@@ -300,15 +300,25 @@ def preserves_scene(title, anchor):
 
 def relevant_background_competitors(live, vision, notes="", limit=3):
     """Rank category-92 titles that share the actual scene identity."""
+    from description_quality import fact_source
+
     anchor = scene_phrase(vision, notes)
     obs = observations(vision)
-    desired = identity_terms(anchor) | identity_terms(" ".join(
-        [obs["visual_summary"], obs["search_description"], *obs["distinctive_features"]]))
+    source = " ".join([
+        obs["visual_summary"], obs["search_description"], *obs["distinctive_features"],
+        "" if (vision or {}).get("visual_scene_disagreement") else fact_source(notes),
+    ])
+    desired = identity_terms(anchor) | identity_terms(source)
+    house_details = set(re.findall(r"[a-z]+", source.lower())) - _ANCHOR_STOP - {"house"}
     rows = []
     for row in verified_background_competitors(live, limit=30):
+        terms = identity_terms(row["name"])
+        literal_words = set(re.findall(r"[a-z]+", row["name"].lower()))
+        if anchor == "cartoon house" and "cartoon" not in terms and len(
+                literal_words & house_details) < 2:
+            continue
         if preserves_scene(row["name"], anchor):
-            match = len(desired & identity_terms(row["name"]))
-            rows.append((match, row))
+            rows.append((len(desired & terms), row))
     rows.sort(key=lambda x: -x[0])
     return [row for _, row in rows[:max(1, min(int(limit), 6))]]
 

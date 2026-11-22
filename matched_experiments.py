@@ -12,35 +12,42 @@ from statistics import median
 from bot_core import get_db
 
 
-def _fav_near(cur, item_id, when, tolerance_days=3):
-    cur.execute("""
-        SELECT favorite_count
+def _fav_near(cur, item_id, when, treatment_at, *, post=False, tolerance_days=3):
+    tolerance = timedelta(days=tolerance_days)
+    side = "snapshot_at >= %s" if post else "snapshot_at < %s"
+    cur.execute(f"""
+        SELECT favorite_count, snapshot_at
         FROM item_history
         WHERE item_id = %s
           AND snapshot_at BETWEEN %s AND %s
-        ORDER BY abs(extract(epoch from (snapshot_at - %s)))
+          AND {side}
+          AND favorite_count IS NOT NULL
+        ORDER BY abs(extract(epoch from (snapshot_at - %s))), snapshot_at
         LIMIT 1
-    """, (item_id, when - timedelta(days=tolerance_days),
-          when + timedelta(days=tolerance_days), when))
-    row = cur.fetchone()
-    return None if not row or row[0] is None else int(row[0])
+    """, (item_id, when - tolerance, when + tolerance, treatment_at, when))
+    return cur.fetchone()
 
 
 def _velocity_pair(cur, item_id, treatment_at, window_days=7):
-    before = _fav_near(cur, item_id, treatment_at - timedelta(days=window_days))
-    at = _fav_near(cur, item_id, treatment_at)
-    after = _fav_near(cur, item_id, treatment_at + timedelta(days=window_days))
-    if before is None or at is None or after is None:
+    window = timedelta(days=window_days)
+    before = _fav_near(cur, item_id, treatment_at - window, treatment_at)
+    at = _fav_near(cur, item_id, treatment_at, treatment_at)
+    after = _fav_near(cur, item_id, treatment_at + window, treatment_at, post=True)
+    if not before or not at or not after:
         return None
-    pre = (at - before) / float(window_days)
-    post = (after - at) / float(window_days)
+    elapsed_pre = (at[1] - before[1]).total_seconds() / 86400
+    elapsed_post = (after[1] - at[1]).total_seconds() / 86400
+    if elapsed_pre <= 0 or elapsed_post <= 0:
+        return None
+    pre = (at[0] - before[0]) / elapsed_pre
+    post = (after[0] - at[0]) / elapsed_post
     return {
         "pre": round(pre, 4),
         "post": round(post, 4),
         "delta": round(post - pre, 4),
-        "before": before,
-        "at": at,
-        "after": after,
+        "before": before[0],
+        "at": at[0],
+        "after": after[0],
     }
 
 
@@ -158,6 +165,7 @@ def evaluate(cur, rec_id, window_days=7, max_controls=5):
     if ids:
         fam_sql = " and i.asset_type_id in (" + ",".join(["%s"] * len(ids)) + ")"
         params = list(ids)
+    comparable_created_at = applied_at - timedelta(days=float(base_age or 0))
     cur.execute(f"""
         SELECT i.id, i.name,
                COALESCE((l.features->>'price')::int, i.price) AS price,
@@ -175,8 +183,8 @@ def evaluate(cur, rec_id, window_days=7, max_controls=5):
               WHERE r.item_id = i.id AND r.applied_at IS NOT NULL
           )
         LIMIT 300
-    """, [item_id, applied_at - timedelta(days=30),
-          applied_at + timedelta(days=30),
+    """, [item_id, comparable_created_at - timedelta(days=30),
+          min(applied_at, comparable_created_at + timedelta(days=30)),
           max(0, int((base_price or (fam or {}).get("price", 0)) * 0.6)),
           max(1, int((base_price or (fam or {}).get("price", 0)) * 1.6))] + params)
     candidates = []

@@ -895,14 +895,14 @@ def register_ai_commands(bot):
                 "No fabricated search rankings, algorithm scores, or CTR.")
         from background_opportunities import format_opportunity_evidence
         from category_creator_learning import format_creator_learning
-        for chunk in discord_chunks(format_visual_verification(visual_check)):
-            await ctx.send(chunk)
-        for chunk in discord_chunks(format_opportunity_evidence(background_market)):
-            await ctx.send(chunk)
-        for chunk in discord_chunks(format_creator_learning(creator_learning)):
-            await ctx.send(chunk)
-        for chunk in discord_chunks(review_text):
-            await ctx.send(chunk)
+        for section in (
+            review_text,
+            format_visual_verification(visual_check),
+            format_opportunity_evidence(background_market),
+            format_creator_learning(creator_learning),
+        ):
+            for chunk in discord_chunks(section):
+                await ctx.send(chunk)
         # A background review needs an explicit user-approved handoff; do not
         # silently spend a second AI quota or start a new chain run.
         state = getattr(ctx, "vanta_state", None)

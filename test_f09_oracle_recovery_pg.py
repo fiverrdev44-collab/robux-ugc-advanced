@@ -86,6 +86,24 @@ class OracleRecoveryPostgresTests(unittest.TestCase):
         return oracle_worker.PostgresStore(
             db_factory=(lambda: conn) if conn is not None else self._factory)
 
+    def test_emerging_cohort_excludes_declining_creators(self):
+        from trend_cohorts import select_emerging
+
+        self.cur.execute("""
+            CREATE TABLE item_history (item_id BIGINT, favorite_count INTEGER, snapshot_at TIMESTAMPTZ);
+            INSERT INTO items (id, creator_type, creator_id)
+            SELECT item_id, 'User', CASE WHEN item_id <= 3 THEN 101 ELSE 102 END
+            FROM generate_series(1, 6) AS item_id;
+            INSERT INTO item_history (item_id, favorite_count, snapshot_at)
+            SELECT item_id, CASE WHEN item_id <= 3 THEN 100 - day * 10 ELSE day * 10 END,
+                   now() - (7 - day) * interval '1 day'
+            FROM generate_series(1, 6) AS item_id
+            CROSS JOIN generate_series(0, 7) AS day;
+        """)
+        result = select_emerging(self.cur)
+        self.assertEqual([row["creator_id"] for row in result], [102])
+        self.assertAlmostEqual(result[0]["score"], 10)
+
     def test_recovery_state_survives_new_store_instance(self):
         store = self._store()
         state = {
