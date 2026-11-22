@@ -419,7 +419,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                 r"show\s+me\s+|check\s+)?"
                 r"(?:(?:last|past|previous|this|over)\s+)?"
                 r"(?:(?:[0-9]{1,3}|one|a)\s+)?"
-                r"(?:days?|weeks?|months?|years?|yearly|monthly|weekly)"
+                r"(?:days?|weeks?|months?|years?|yearly|monthly|weekly|annually|annual)"
                 r"(?:\s+(?:sales|revenue|earnings|report))?[?.!]*",
                 low,
             )):
@@ -686,9 +686,12 @@ def parse_sales_window(text):
         if not match:
             match = re.search(
                 r"\b(\d{1,3})\s*" + unit + r"\b", low)
-            if match and not re.search(
+            if match and not (
+                re.fullmatch(r"\s*\d{1,3}\s*" + unit + r"\s*[?.!]*", low)
+                or re.search(
                     r"\b(?:sales?|revenue|robux|earned|earnings|income|"
-                    r"report|how much|last|past|previous|over|within)\b", low):
+                    r"report|how much|last|past|previous|over|within)\b", low)
+            ):
                 match = None
         if match:
             quantity = int(match.group(1))
@@ -696,6 +699,11 @@ def parse_sales_window(text):
                 return 365
             return max(1, min(quantity * factor, 365))
 
+    if re.fullmatch(
+        r"\s*(?:(?:last|past|previous|this)\s+)?(?:one\s+|a\s+)?"
+        r"year\s*[?.!]*", low
+    ):
+        return 365
     if re.search(
         r"\b(?:last|past|previous|this)\s+(?:one\s+|a\s+)?year\b"
         r"|\b(?:yearly|annually|annual)\b", low
