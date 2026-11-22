@@ -42,8 +42,9 @@ def test_year_parser_mappings():
                    "this year", "yearly", "annual", "annually",
                    "sales last year", "sales for the past 12 months",
                    "sales last 365 days", "365 days",
-                   "last 52 weeks", "past 1 year", "12 months sales"):
+                   "past 1 year", "12 months sales"):
         assert vc.parse_sales_window(phrase) == 365, phrase
+    assert vc.parse_sales_window("last 52 weeks") == 364
     assert vc.parse_sales_window("show sales last 30 days") == 30
     assert vc.parse_sales_window("sales last 7 days") == 7
     assert vc.parse_sales_window("last month sales") == 30
