@@ -14,7 +14,7 @@ from background_intelligence import (
 )
 from product_understanding import validate_title
 from background_creative_titles import (
-    creative_lane_candidates, creative_title_issues,
+    creative_lane_candidates, creative_title_issues, requested_background_franchise,
 )
 
 _TYPES = {"background", "avatar", "roblox", "ugc", "scene", "image", "picture"}
@@ -622,11 +622,28 @@ def build_multi_pass_review(vision, images, notes, live, vision_fn, text_fn,
             break
     if picked:
         passes["skeptical_critic"] = "ok"
+    franchise = requested_background_franchise(raw_notes)
+    branded_winner = None
+    if franchise and not vision.get("visual_scene_disagreement"):
+        sampled = verified_background_competitors(live, limit=30)
+        for title in dict.fromkeys([winner, *(row["title"] for row in scored)]):
+            candidate = f"{franchise} {title}"
+            if (len(candidate) <= 65 and len(re.findall(r"[a-z0-9]+", candidate.lower())) <= 8
+                    and not title_sample_overlap(candidate, sampled)["exact"]):
+                branded_winner = candidate
+                break
+
     return {
         "status": "ok", "passes": passes, "scored": scored,
-        "winner": winner, "alternatives": alternatives,
-        "challenge": _editorial_comment(reviewer.get("challenge")) if picked else "",
-        "why_winner": (_editorial_comment(reviewer.get("why_winner")) if picked else "")
+        "winner": branded_winner or winner,
+        "alternatives": ([winner, *alternatives][:2] if branded_winner else alternatives),
+        "requested_franchise_used": bool(branded_winner),
+        "challenge": _editorial_comment(reviewer.get("challenge")) if picked and not branded_winner else "",
+        "why_winner": (
+            "Starts with the requested name and follows it with the recognizable "
+            + scene_phrase(vision, notes) + " setting."
+            if branded_winner else _editorial_comment(reviewer.get("why_winner")) if picked else ""
+        )
         or ("Keeps the " + scene_phrase(vision, notes) +
             " recognizable and avoids an exact match in the sampled titles."
             if competitors else "Keeps the " + scene_phrase(vision, notes) +
@@ -733,7 +750,9 @@ def format_multi_pass_review(data):
                  "or a validated niche gap.")
     lines += ["**Searchable listing description**",
               data.get("description") or "Insufficient grounded scene detail."]
-    if data.get("ip_caution"):
+    if data.get("requested_franchise_used"):
+        lines.append("• Confirm permission to use the franchise name and artwork before publishing.")
+    elif data.get("ip_caution"):
         reference = _safe(data.get("creator_named_subject"), 50)
         if reference:
             reference = reference.upper() if reference in {"fnaf", "tf2"} else reference.title()

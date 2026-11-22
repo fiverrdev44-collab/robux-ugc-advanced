@@ -12,7 +12,8 @@ _IP_PHRASES = (
     "bioshock", "rapture", "gmod", "garry's mod", "garrys mod",
     "gm flatgrass", "gm_flatgrass", "flatgrass", "flattywood",
     "oggy", "five nights at freddy", "fnaf", "fazbear", "freddy",
-    "team fortress", "tf2", "dustbowl",
+    "team fortress", "team fortress 2", "tf2", "dustbowl",
+    "spongebob", "simpsons", "pokemon",
 )
 _OFFICIAL_CLAIMS = ("official", "licensed", "authorized", "certified",
                     "air force one")
@@ -95,6 +96,29 @@ def brand_sensitive_title(title, creator_notes=""):
         if _phrase_present(phrase.replace("_", " "), text):
             return phrase
     return None
+
+_REQUESTED_FRANCHISE = re.compile(
+    r"(?:^|[.!?;]\s+|\n+)(?:please +)?(?:use|include|put|keep) +"
+    r"""["'“]?(?P<name>[a-z0-9'’_ .-]{1,36}?)["'”]? +(?:in|at the start of) +"""
+    r"(?:the |my )?title(?=[.!?;\s]*$|[.!?;\n])",
+    re.IGNORECASE,
+)
+_FRANCHISE_CASE = {"bioshock": "BioShock", "gmod": "GMod", "fnaf": "FNAF",
+                   "tf2": "TF2", "spongebob": "SpongeBob", "pokemon": "Pokémon",
+                   "gm flatgrass": "GM Flatgrass"}
+
+
+def requested_background_franchise(notes):
+    """Read an explicit creator request for a recognized name."""
+    match = _REQUESTED_FRANCHISE.search(str(notes or "")[:400])
+    if not match:
+        return None
+    name = " ".join(match.group("name").lower().replace("’", "'")
+                    .replace("_", " ").split())
+    if name in {phrase.replace("_", " ") for phrase in _IP_PHRASES}:
+        return _FRANCHISE_CASE.get(name, name.title().replace("'S", "'s"))
+    return None
+
 
 def allowed_poetic_tokens(source):
     """Bounded imaginative language with scene-dependent synonyms."""
