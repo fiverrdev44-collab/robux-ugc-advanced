@@ -89,6 +89,11 @@ def register_sales_commands(bot, get_db):
             for d, units, robux in data["daily"][:14]:
                 lines.append(f"• {d} — {units} sales · R${robux}")
 
+        lines.append(
+            "_Source: recorded `my_sales` events imported from the configured "
+            "Discord sales-channel listener/backfill. This report does not "
+            "rescan Discord history or prove every historical sale was imported._"
+        )
         body = "\n".join(lines)
         try:
             await progress.edit(content=body[:1900])
