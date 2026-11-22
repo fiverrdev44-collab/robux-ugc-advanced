@@ -167,17 +167,6 @@ def _editorial_candidates(vision, notes):
             if not _words(pretty).issubset(_words(base)):
                 out.append(f"{pretty} {base} Background")
             out.append(f"{pretty} Background")
-    # An explicitly named franchise is a naming candidate, not a verified
-    # visual fact or proof of permission to publish protected artwork.
-    named = creator_named_subject(notes)
-    if named:
-        possessive = named.title() + ("'" if named.endswith("s") else "'s")
-        descriptor = "Sunny" if "sunny" in source else (
-            "Colorful" if "colorful" in source else "")
-        for prefix in (f"{possessive} {descriptor}".strip(),
-                       f"{named.title()}"):
-            if not _words(prefix).issubset(_words(base)):
-                out.append(f"{prefix} {base} Background")
     for phrase in _SEARCH_HOOKS:
         hook_tokens = _words(phrase)
         if hook_tokens and hook_tokens.issubset(source) and not hook_tokens.issubset(_words(base)):
@@ -199,7 +188,6 @@ def _complete_comment(value, limit=170):
 def _valid_titles(raw_titles, vision, notes, live):
     if not isinstance(raw_titles, list):
         return []
-    source = _source_words(vision, notes)
     obs = observations(vision)
     scene_source = " ".join([
         _safe(notes, 300), obs["visual_summary"], obs["search_description"],
@@ -219,8 +207,11 @@ def _valid_titles(raw_titles, vision, notes, live):
         if _editorial_bad(title, vision, notes):
             continue
         meaningful = _words(title)
-        if not meaningful or not source or not meaningful & source:
+        if not meaningful or not scene_source.strip():
             continue
+        # A conditioned synonym such as 'Sunken Skyline' may have no
+        # literal token overlap with 'underwater city'. The scene validator
+        # must decide grounding, not the older exact-word-match gate.
         # Backgrounds can use memorable metaphors and context-supported
         # synonyms; literal word-for-word overlap is too restrictive.
         # Unsupported objects, character names, and unlicensed branding
