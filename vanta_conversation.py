@@ -410,6 +410,24 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                        concept=state.last_concept, family=family,
                        confidence="high")
 
+    # A bare time-window follow-up after a sales report must reuse the
+    # sales intent, not ask the AI planner to guess a command (which otherwise
+    # defaults to the 30-day sales report).
+    if (state.last_intent == "check_sales" and
+            re.fullmatch(
+                r"(?:and\s+|what\s+about\s+|for\s+|now\s+|"
+                r"show\s+me\s+|check\s+)?"
+                r"(?:(?:last|past|previous|this|over)\s+)?"
+                r"(?:(?:[0-9]{1,3}|one|a)\s+)?"
+                r"(?:days?|weeks?|months?|years?|yearly|monthly|weekly)"
+                r"(?:\s+(?:sales|revenue|earnings|report))?[?.!]*",
+                low,
+            )):
+        period_days = parse_sales_window(low)
+        if period_days:
+            return _intent("check_sales", confidence="followup",
+                           days=period_days, day_offset=parse_sales_offset(low))
+
     # Follow-ups first.
     ordinal = re.search(
         r"\b(\d{1,2}|first|1st|one|second|2nd|two|third|3rd|three|"
@@ -644,19 +662,47 @@ def parse_sales_offset(text):
 
 
 def parse_sales_window(text):
-    """Map a natural-language time phrase to a trailing UTC day window.
+    """Map common trailing-period phrases to UTC date windows (1..365 days).
 
-    Returns an int number of days, or None when no explicit window is given.
+    A 'year' means the most recent 365 UTC dates including today, not the
+    previous calendar year. We do not report a complete 2025 calendar-year
+    result for a 'last year' rolling request. Caller must disclose the
+    exact returned SQL window.
     """
     low = (text or "").lower()
     if parse_sales_offset(low):
         return 1
-    m = re.search(r"\b(?:last|past|previous)\s+(\d{1,3})\s*days?\b", low)
-    if m:
-        return max(1, min(int(m.group(1)), 365))
-    m = re.search(r"\b(\d{1,3})\s*[- ]?days?\b", low)
-    if m and re.search(r"\b(last|past|previous|over)\b", low):
-        return max(1, min(int(m.group(1)), 365))
+
+    # Numeric windows. Treat 12 months as a rolling 365-day year, not
+    # 12 * 30 days; use 30 days per other requested month as an
+    # approximation, with the exact UTC boundary shown in the report.
+    unit_counts = (
+        ("days?", 1), ("weeks?", 7), ("months?", 30), ("years?", 365),
+    )
+    for unit, factor in unit_counts:
+        match = re.search(
+            r"\b(?:last|past|previous|over|within|in the last)\s+"
+            r"(\d{1,3})\s*" + unit + r"\b", low)
+        if not match:
+            match = re.search(
+                r"\b(\d{1,3})\s*" + unit + r"\b", low)
+            if match and not re.search(
+                    r"\b(?:sales?|revenue|robux|earned|earnings|income|"
+                    r"report|how much|last|past|previous|over|within)\b", low):
+                match = None
+        if match:
+            quantity = int(match.group(1))
+            if factor == 30 and quantity == 12:
+                return 365
+            return max(1, min(quantity * factor, 365))
+
+    if re.search(
+        r"\b(?:last|past|previous|this)\s+(?:one\s+|a\s+)?year\b"
+        r"|\b(?:yearly|annually|annual)\b", low
+    ):
+        return 365
+    if re.search(r"\b(?:last|past|previous)\s+12\s+months?\b", low):
+        return 365
     if re.search(r"\btoday\b|\bso far\b|\btonight\b", low):
         return 1
     if re.search(r"\bthis week\b|\blast week\b|\bpast week\b|\bweekly\b", low):
@@ -664,7 +710,6 @@ def parse_sales_window(text):
     if re.search(r"\bthis month\b|\blast month\b|\bpast month\b|\bmonthly\b", low):
         return 30
     return None
-
 
 def _ai_route(text):
     started = time.time()
