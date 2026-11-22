@@ -55,6 +55,8 @@ _CONTEXTUAL = {
     "city": {"cityscape", "city", "skyline", "skyscrapers"},
     "sunken": {"underwater", "undersea", "submerged"},
     "underwater": {"underwater", "undersea", "submerged"},
+    "skies": {"sky"},
+    "shadows": {"dark", "shadow", "shadows"},
     "observatory": {"observation", "observation room", "lookout"},
     "lookout": {"window", "overlook", "panoramic", "observation"},
     "vista": {"window", "panoramic", "view", "overlooking", "skyline"},
@@ -114,7 +116,7 @@ def creative_title_issues(title, scene_source, creator_notes=""):
     if not isinstance(title, str) or not title.lower().endswith(" background"):
         return "not_background"
     parts = re.findall(r"[a-z0-9]+", title.lower())
-    if len(parts) < 3 or len(parts) > 8 or len(title) > 65:
+    if len(parts) < 2 or len(parts) > 8 or len(title) > 65:
         return "length"
     if brand_sensitive_title(title, creator_notes):
         return "unlicensed_identity_or_affiliation"
@@ -161,23 +163,36 @@ def creative_lane_candidates(vision, notes=""):
         add("Open Grassland Background")
         if "green" in w or "hills" in w or "hill" in w:
             add("Endless Green Fields Background")
-            add("Green Horizon Background")
-        if "sky" in w:
-            add("Open Sky Grassland Background")
+        if "hills" in w or "hill" in w:
+            add("Grassland To The Horizon Background")
     if ("underwater" in w or "undersea" in w) and (
         "city" in w or "cityscape" in w or "skyline" in w):
-        add("Deep Blue Underwater City Background") if "blue" in w else None
+        if "blue" in w:
+            add("Deep Blue Underwater City Background")
         add("Sunken Skyline Background")
         if "window" in w:
+            add("Underwater City Lookout Background")
             add("Beyond The Glass Underwater City Background")
+    if {"sky", "blue"} <= w and w & {"grassy", "grass", "grassland", "field"}:
+        add("Grassland Under Blue Skies Background")
     if "house" in w:
-        if "sunny" in w and ("cartoon" in w or "garden" in w):
-            add("Sunlit Cartoon House Background") if "cartoon" in w else None
+        if {"sunny", "cartoon"} <= w:
+            add("Sunlit Cartoon House Background")
         if "purple" in w and "roof" in w:
-            add("Purple Roof House Background")
+            add("The Purple Roof House Background")
+        if "sunny" in w:
+            add("Sunny Little House Background")
+        if "awning" in w or "awnings" in w:
+            add("House With Striped Awnings Background")
     if ("aircraft" in w or "jet" in w or "plane" in w):
-        if "presidential" in w:
-            add("Presidential Jet Arrival Background") if "arrival" in w else None
-        if "carpet" in w:
-            add("Red Carpet Jet Arrival Background") if "red" in w and "arrival" in w else None
-    return candidates[:7]
+        if {"presidential", "arrival"} <= w:
+            add("Presidential Jet Arrival Background")
+        if {"red", "carpet", "arrival"} <= w:
+            add("Red Carpet Jet Arrival Background")
+        add("Ceremonial Aircraft Arrival Background")
+        if "runway" in w:
+            add("Jet On The Runway Background")
+    if {"security", "office"}.issubset(w):
+        add("Silent Security Office Background")
+        add("Security Office Shadows Background")
+    return candidates[:9]

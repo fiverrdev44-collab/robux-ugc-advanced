@@ -406,7 +406,7 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
 
         sales_line = ""
         if data["sales_30d"] > 0:
-            sales_line = f" · 💰 {data['sales_30d']} sales (30d)"
+            sales_line = f" · 💰 {data['sales_30d']} imported sale records (30d)"
         sci = data.get("sales_ci") or {}
         if sci.get("available"):
             u = sci["units_30d"]
@@ -438,8 +438,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
         if opp:
             lines.append(
                 f"**Name lane:** {opp.get('verdict')} · "
-                f"demand {opp.get('demand_live', 0)} "
-                f"({opp.get('demand_volume', 0):,} vol) · "
+                f"stored autocomplete rows {opp.get('demand_live', 0)} "
+                f"(stored autocomplete score {opp.get('demand_volume', 0):,}) · "
                 f"supply {opp.get('supply', 0)} · "
                 f"exact {opp.get('exact', 0)}\n"
             )
@@ -868,8 +868,8 @@ def register_intel_commands(bot, get_db, ASSET_TYPE_NAMES):
                             intel_lines.append(
                                 f"**`{vp['keyword']}`** — supply={vp['supply']}, "
                                 f"median_favs={vp['median_favs']}, "
-                                f"demand={vp['demand']} "
-                                f"({vp.get('demand_volume', 0):,} vol), "
+                                f"suggestion rows={vp['demand']} "
+                                f"(stored autocomplete score {vp.get('demand_volume', 0):,}), "
                                 f"bucket={vp['bucket']}, "
                                 f"visibility proxy (unvalidated)={vp['ctr_proxy']}/100"
                             )
@@ -1408,7 +1408,7 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                             + (f" · gap {sc.get('visibility_gap', 0):.0f}"
                                if sc.get("visibility_gap", 0) >= 5 else "")
                             + opp_part
-                            + (f" · unique" if sc['exact_matches'] == 0
+                            + (f" · no exact match in the stored sample" if sc['exact_matches'] == 0
                                else f" · {sc['exact_matches']} matches")
                         )
                         for b in sorted(sc["breakdown"],
@@ -1420,7 +1420,7 @@ algorithm, tags, "we", fixing, or guarantees. No "flex". 1-3 sentences.
                             emoji = "🟢" if lift >= 2.5 else "🔵" if lift >= 1.5 \
                                     else "⚪" if lift >= 1.0 else "🟠" if lift >= 0.5 else "🔴"
                             vol = b.get("demand_volume", 0)
-                            vol_str = f" · {vol:,} volume" if vol else ""
+                            vol_str = f" · autocomplete score {vol:,}" if vol else ""
                             stat_lines.append(
                                 f"   {emoji} `{b['word']}` lift {lift}× "
                                 f"({b['sample']} items · {b['demand']} live"

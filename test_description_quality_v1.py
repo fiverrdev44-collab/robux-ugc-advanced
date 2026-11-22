@@ -75,7 +75,7 @@ def test_chain_and_background_share_gate():
         "Moonlit Shrine Background",
     )
     assert "elevate" not in polished.lower()
-    assert "Moonlit Shrine Background" in polished
+    assert polished == "Moonlit shrine with a glowing portal."
 
 
 def test_consistent_category_prompt_guidance():

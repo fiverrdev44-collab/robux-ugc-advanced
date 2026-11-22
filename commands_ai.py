@@ -787,14 +787,7 @@ def register_ai_commands(bot):
                 vision = {}
         # Both provider failure and an empty/invalid result are non-visual
         # outcomes. The creator may still have supplied a useful scene.
-        has_image_observations = (
-            isinstance(vision, dict)
-            and any(vision.get(key) for key in (
-                "visual_summary", "search_description",
-                "distinctive_features", "scene_focal_point",
-                "primary_subject",
-            ))
-        )
+        has_image_observations = bool(scene_phrase(vision, ""))
         if not has_image_observations:
             if not scene_phrase({}, notes):
                 await ctx.send(
@@ -1374,7 +1367,7 @@ def register_ai_commands(bot):
             body += (
                 f"\n## 🎯 Best verified title (DB demand)\n"
                 f"• `{title}` — {opp.get('verdict')} · "
-                f"demand {opp.get('demand_volume', 0):,} · "
+                f"stored autocomplete score {opp.get('demand_volume', 0):,} · "
                 f"supply {opp.get('supply', 0)} · "
                 f"exact {opp.get('exact', 0)}"
             )
@@ -1590,7 +1583,7 @@ RULES:
             lines.append("## 🎯 Best verified title (DB demand)")
             lines.append(
                 f"• `{title}` — {opp.get('verdict')} · "
-                f"demand {opp.get('demand_volume', 0):,} · "
+                f"stored autocomplete score {opp.get('demand_volume', 0):,} · "
                 f"supply {opp.get('supply', 0)} · "
                 f"exact {opp.get('exact', 0)}\n"
             )
@@ -1876,7 +1869,7 @@ RULES:
             body += (
                 f"\n## 🎯 Best verified title (DB demand)\n"
                 f"• `{title}` — {opp.get('verdict')} · "
-                f"demand {opp.get('demand_volume', 0):,} · "
+                f"stored autocomplete score {opp.get('demand_volume', 0):,} · "
                 f"supply {opp.get('supply', 0)} · "
                 f"exact {opp.get('exact', 0)}"
             )

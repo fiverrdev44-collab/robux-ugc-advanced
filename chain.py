@@ -228,14 +228,9 @@ def _fallback_titles(concept, family, n=8):
 
 
 def _fallback_description(concept, family):
-    base = " ".join(w.capitalize() for w in _short_concept(concept, 4).split())
-    base = base or "New Item"
-    type_word = _TYPE_WORD.get(family, "Item")
-    has_type = type_word.lower() in [w.lower() for w in base.split()]
-    head = base if has_type else f"{base} {type_word}"
-    return (f"{head}\n"
-            f"Made for {base.lower()} fans.\n"
-            f"Perfect for your next avatar look.")
+    from description_quality import fallback_description
+
+    return fallback_description(concept, family)
 
 
 def run_chain(concept, family=None, parent_id=None, live_enrich=True):
@@ -824,9 +819,9 @@ OUTPUT — ONLY JSON:
         quality = finalize_description(
             merged_description, concept, family,
             title=(scored_titles[0]["title"] if scored_titles else ""),
-            rewrite_fn=lambda prompt: _generate(
+            rewrite_fn=(lambda prompt: _generate(
                 prompt, json_mode=False, temperature=0.65, max_tokens=260
-            ),
+            )) if ai_body else None,
         )
         merged_description = quality["text"]
 
@@ -920,8 +915,8 @@ def format_chain(result):
             lines.append(
                 f"{e} `{k['keyword']}` — **{k['bucket']}** · "
                 f"supply {k['supply']} · median {k['median_favs']}♥ · "
-                f"demand {k.get('demand_live', k['demand'])} "
-                f"({k.get('demand_volume', 0):,} vol)"
+                f"suggestion rows {k.get('demand_live', k['demand'])} "
+                f"(stored autocomplete score {k.get('demand_volume', 0):,})"
                 + ("" if k.get("demand_reliable", True)
                    else " · low-confidence")
             )
@@ -1070,7 +1065,7 @@ def format_chain(result):
                 + (f" (raw {sc['score']})" if sc.get('final_score') is not None
                    and sc.get('final_score') != sc['score'] else "")
                 + gap_part + opp_part
-                + (f" · unique" if sc['exact_matches'] == 0
+                + (f" · no exact match in the stored sample" if sc['exact_matches'] == 0
                    else f" · {sc['exact_matches']} matches")
             )
             for b in sorted(sc["breakdown"],
@@ -1078,7 +1073,7 @@ def format_chain(result):
                             reverse=True)[:4]:
                 if b.get("no_data"):
                     vol = b.get("demand_volume", 0)
-                    vol_str = f" · {vol:,} volume" if vol else ""
+                    vol_str = f" · autocomplete score {vol:,}" if vol else ""
                     lines.append(f"   ⚫ `{b['word']}` — no niche data "
                                  f"({b['demand']} live{vol_str}) → +0.0")
                     continue
@@ -1091,7 +1086,7 @@ def format_chain(result):
                 gap = b.get("visibility_gap", 0)
                 gap_str = f" · gap {gap:.0f}" if gap >= 5 else ""
                 vol = b.get("demand_volume", 0)
-                vol_str = f" · {vol:,} volume" if vol else ""
+                vol_str = f" · autocomplete score {vol:,}" if vol else ""
                 lines.append(
                     f"   {emoji} `{b['word']}` lift {lift}× "
                     f"({b['sample']} items · {b['demand']} live{vol_str}"
@@ -1164,8 +1159,8 @@ def format_chain(result):
         champ_opp = scored[0].get("opportunity") or {}
         if champ_opp:
             final_lines.append(
-                f"**Verified title lane:** {champ_opp.get('verdict')} · "
-                f"demand {champ_opp.get('demand_volume', 0):,} · "
+                f"**Title lane from stored evidence:** {champ_opp.get('verdict')} · "
+                f"stored autocomplete score {champ_opp.get('demand_volume', 0):,} · "
                 f"supply {champ_opp.get('supply', 0)} · "
                 f"exact {champ_opp.get('exact', 0)}"
             )

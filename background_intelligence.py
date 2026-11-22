@@ -19,12 +19,25 @@ _BAD_SCENE_PARTS = {
     "ignore", "instructions", "assistant", "developer", "system", "prompt",
     "token", "password", "secret", "key", "execute", "javascript", "python",
 }
-_SCENE_FALLBACKS = ("shrine", "forest", "city", "space", "sky", "garden",
-                    "portal", "room", "street", "beach", "cave", "castle")
+# Prefer concrete subjects and composed settings over incidental scenery.
+# Canonical forms also let catalog comparisons recognize common synonyms.
+_SCENE_PATTERNS = (
+    (r"(?:underwater|undersea|submerged|sunken|oceanic) (?:\w+ ){0,2}(?:city|cityscape|skyline)", "underwater city"),
+    (r"security office", "security office"),
+    (r"(?:aircraft|airplane|plane|jet) (?:\w+ ){0,4}arrival|arrival (?:\w+ ){0,4}(?:aircraft|airplane|plane|jet)", "aircraft arrival"),
+    (r"grassland|grassy fields?|grass fields?|open fields?|flatgrass", "open grassland"),
+    (r"(?:sunny |colorful |colourful )?cartoon house", "cartoon house"),
+)
+_SCENE_NOUNS = SCENE_ANCHORS | {"aircraft", "airplane", "plane", "jet", "runway",
+                               "tarmac", "grassland", "meadow", "cityscape", "skyline"}
+_WEAK_ANCHORS = {"sky", "horizon", "hill", "hills", "garden", "clouds", "room"}
+_ANCHOR_STOP = _FILLER | {"above", "across", "behind", "beneath", "beside",
+                          "beyond", "inside", "near", "outside", "over", "through",
+                          "under", "overlooking", "past", "into", "looking", "out"}
 _ALLOWED_OBS = (
     "visual_summary", "search_description", "composition_notes",
     "visual_colors", "visual_style", "distinctive_features",
-    "visual_mood", "ip_reference_warning", "scene_focal_point",
+    "visual_mood", "ip_reference_warning", "scene_focal_point", "primary_subject",
     "avatar_clearance_notes", "ground_horizon_notes",
     "mobile_readability_notes", "depth_layers_notes",
     "lighting_notes",
@@ -36,7 +49,7 @@ def _short_text(value, max_chars=_SOURCE_MAX):
     if isinstance(value, (list, dict)):
         return ""
     value = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
-    return re.sub(r"\s+", " ", value).replace("\`", "")[:max_chars]
+    return re.sub(r"\s+", " ", value).replace("`", "")[:max_chars]
 
 
 def _items(value, limit=4):
@@ -72,25 +85,33 @@ def scene_phrase(vision, notes=""):
         anchor = _short_text(vision.get("visual_scene_anchor"), 70)
         if anchor and not _is_untrusted_instruction(anchor):
             return anchor
-    # Prefer creator notes, then visual description, and never guess a place
-    # that neither the creator nor the vision provider mentioned.
-    candidates = [_short_text(notes, 300), o["search_description"],
-                  o["visual_summary"]] + o["distinctive_features"]
-    for text in candidates:
-        if _is_untrusted_instruction(text):
+    from description_quality import fact_source
+
+    candidates = [fact_source(notes), o["search_description"], o["visual_summary"]]
+    candidates += [o["scene_focal_point"], o["primary_subject"]]
+    ranked = []
+    for source_index, text in enumerate(candidates + o["distinctive_features"]):
+        if not text or _is_untrusted_instruction(text):
             continue
-        toks = re.findall(r"[a-z]+", text.lower())
-        for i, tok in enumerate(toks):
-            if tok not in SCENE_ANCHORS and tok not in _SCENE_FALLBACKS:
+        low = re.sub(r"[-_]+", " ", text.casefold())
+        for pattern, phrase in _SCENE_PATTERNS:
+            match = re.search(r"\b(?:" + pattern + r")\b", low)
+            if match:
+                ranked.append((0, source_index, match.start(), phrase))
+        tokens = list(re.finditer(r"[a-z]+", low))
+        for index, token in enumerate(tokens):
+            noun = token.group()
+            if noun not in _SCENE_NOUNS:
                 continue
-            previous = (toks[i - 1] if i else "")
-            following = (toks[i + 1] if i + 1 < len(toks) else "")
-            if previous and previous not in _FILLER and len(previous) > 2:
-                return f"{previous} {tok}"
-            if following and following not in _FILLER and len(following) > 2:
-                return f"{tok} {following}"
-            return tok
-    return None
+            previous = tokens[index - 1] if index else None
+            modifier = (previous.group() if previous and
+                        low[previous.end():token.start()].isspace() else "")
+            if modifier in _ANCHOR_STOP or len(modifier) < 3:
+                modifier = ""
+            phrase = " ".join(filter(None, (modifier, noun)))
+            rank = 2 if noun in _WEAK_ANCHORS else 1
+            ranked.append((rank, source_index, token.start(), phrase))
+    return min(ranked)[-1] if ranked else None
 
 
 def grounded_concept(vision, notes=""):
@@ -180,10 +201,9 @@ def listing_description(vision, notes=""):
         if len(details) >= 2:
             break
     scene = anchor.title()
-    sentence = f"A {scene.lower()} scene for your Roblox avatar."
-    if details:
-        sentence += " Featuring " + " and ".join(details) + "."
-    return sentence[:310]
+    title = scene[0].upper() + scene[1:].lower()
+    details = [detail for detail in details if detail not in anchor.lower()]
+    return title + (" with " + " and ".join(details) if details else "") + "."
 
 
 def verified_background_competitors(live, limit=3):
@@ -195,7 +215,7 @@ def verified_background_competitors(live, limit=3):
     if not isinstance(live, dict) or live.get("ok") is not True:
         return []
     out, seen = [], set()
-    for raw in (live.get("top_competitors") or [])[:10]:
+    for raw in (live.get("background_sample") or live.get("top_competitors") or [])[:30]:
         if not isinstance(raw, dict):
             continue
         try:
@@ -230,7 +250,7 @@ def verified_background_competitors(live, limit=3):
                 value = int(raw.get(field))
             except (TypeError, ValueError):
                 value = None
-            row[field] = value if value is not None and 0 < value < 10**10 else None
+            row[field] = value if value is not None and 0 <= value < 10**10 else None
         out.append(row)
         if len(out) >= limit:
             break
@@ -238,38 +258,57 @@ def verified_background_competitors(live, limit=3):
 
 
 
-_COMP_GENERIC = {"room", "city", "background", "avatar", "roblox", "ugc",
-                 "game", "gaming", "cute", "aesthetic", "dark", "blue",
-                 "red", "pink", "purple", "night", "scene", "anime", "photo"}
+_COMP_GENERIC = _ANCHOR_STOP | {"game", "gaming", "cute", "aesthetic", "dark",
+                               "blue", "red", "pink", "purple", "night", "anime",
+                               "photo", "bright", "colorful"}
 _COMP_SYNONYMS = {"undersea": "underwater", "oceanic": "underwater",
+                  "sunken": "underwater", "submerged": "underwater",
                   "cityscape": "city", "skyline": "city", "skyscrapers": "city",
                   "observatory": "observation", "airplane": "aircraft",
-                  "jet": "aircraft", "plane": "aircraft"}
+                  "jet": "aircraft", "plane": "aircraft", "fields": "grassland",
+                  "field": "grassland", "meadow": "grassland",
+                  "grassy": "grassland", "grass": "grassland",
+                  "woods": "forest", "woodland": "forest", "homes": "house"}
+_BROAD_SCENES = {"room", "city", "office", "hall", "sky", "garden"}
 
 
-def _comparable_terms(value):
+def identity_terms(value):
+    """Canonical scene vocabulary for titles and the bounded catalog sample."""
     return {
         _COMP_SYNONYMS.get(word, word)
-        for word in re.findall(r"[a-z0-9]+", str(value or "").lower())
+        for word in re.findall(r"[a-z0-9]+", str(value or "").casefold())
         if word not in _COMP_GENERIC and len(word) >= 3
     }
 
 
-def relevant_background_competitors(live, vision, notes="", limit=3):
-    """Scene-related AssetType 92 examples, not broad category search hits.
+def preserves_scene(title, anchor):
+    terms = identity_terms(title)
+    key = identity_terms(anchor)
+    if key == {"open", "grassland"}:
+        key = {"grassland"}
+    elif key == {"cartoon", "house"}:
+        key = {"house"}
+    elif key == {"aircraft", "arrival"}:
+        key = {"aircraft"}
+    if not key:
+        return False
+    if key & _BROAD_SCENES:
+        return key.issubset(terms)
+    nouns = key & {_COMP_SYNONYMS.get(word, word) for word in _SCENE_NOUNS}
+    return bool(terms & nouns) if nouns else key.issubset(terms)
 
-    Matching titles is descriptive only, never proof of visual similarity,
-    search demand, sales, CTR or ranking advantage.
-    """
+
+def relevant_background_competitors(live, vision, notes="", limit=3):
+    """Rank category-92 titles that share the actual scene identity."""
+    anchor = scene_phrase(vision, notes)
     obs = observations(vision)
-    source = " ".join([_short_text(notes, 300), obs["visual_summary"],
-                      obs["search_description"], *obs["distinctive_features"]])
-    desired = _comparable_terms(source)
+    desired = identity_terms(anchor) | identity_terms(" ".join(
+        [obs["visual_summary"], obs["search_description"], *obs["distinctive_features"]]))
     rows = []
-    for row in verified_background_competitors(live, limit=12):
-        common = desired & _comparable_terms(row["name"])
-        if common:
-            rows.append((len(common), row))
+    for row in verified_background_competitors(live, limit=30):
+        if preserves_scene(row["name"], anchor):
+            match = len(desired & identity_terms(row["name"]))
+            rows.append((match, row))
     rows.sort(key=lambda x: -x[0])
     return [row for _, row in rows[:max(1, min(int(limit), 6))]]
 
@@ -379,6 +418,7 @@ def combine_background_live_checks(checks):
             "sampled_results": data.get("sampled_results") if ok else None,
             "asset_type_92_matches": data.get("category_correct") if ok else None,
             "pages": data.get("pages") if ok else None,
+            "partial_error": data.get("partial_error") if ok else None,
             "observed_at": _short_text(
                 data.get("observed_at") or data.get("verification_timestamp"), 48)
                 if ok else None,
@@ -389,7 +429,7 @@ def combine_background_live_checks(checks):
             groups.append([])
             continue
         valid = []
-        for item in (data.get("top_competitors") or [])[:3]:
+        for item in (data.get("background_sample") or data.get("top_competitors") or [])[:30]:
             if not isinstance(item, dict):
                 continue
             try:
@@ -406,7 +446,7 @@ def combine_background_live_checks(checks):
     # display slots before the creator-named query gets represented.
     found = []
     seen = set()
-    for position in range(3):
+    for position in range(max(map(len, groups), default=0)):
         for group in groups:
             if position >= len(group):
                 continue
@@ -425,6 +465,7 @@ def combine_background_live_checks(checks):
         "ok": any(x["status"] == "ok" for x in report),
         "search_checks": report,
         "top_competitors": found[:6],
+        "background_sample": found[:30],
     }
 
 
@@ -506,7 +547,7 @@ def format_background_dossier(vision, notes="", image_quality=None,
             parts.append("• Choose a recognizable scene noun and truthful visual "
                          "hook; never insert unverified animation or 3D claims.")
         else:
-            parts.append("• No defensible unique title from the supplied scene "
+            parts.append("• No defensible title from the supplied scene "
                          "and sampled competitors; adjust the concept details.")
     if include_titles:
         ranked = title_dry_run(vision, notes, live)

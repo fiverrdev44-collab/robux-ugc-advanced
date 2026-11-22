@@ -194,6 +194,7 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
     )
     rows, pages, cursor = [], 0, None
     rate_limit_meta = None
+    incomplete_error = None
     try:
         while pages < max_pages:
             params = {"Keyword": search_keyword, "Limit": limit,
@@ -225,36 +226,32 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
                                    else (r.headers or {}).get("Retry-After"))
                     rate_limit_meta = {"deferred": bool(r.deferred),
                                        "retry_after": retry_after}
-                    if rows:
-                        break
-                    return {"ok": False,
-                            "error": r.error or "rate limited (429)",
-                            "retry_after": retry_after,
-                            "deferred": bool(r.deferred),
-                            "keyword": keyword, "cached": False}
-                if status >= 500:
-                    if rows:
-                        break
-                    return {"ok": False, "error": f"server error {status}",
-                            "keyword": keyword, "cached": False}
-                if status:
-                    if rows:
-                        break
-                    return {"ok": False, "error": f"HTTP {status}",
-                            "keyword": keyword, "cached": False}
+                    incomplete_error = r.error or "rate limited (429)"
+                elif status >= 500:
+                    incomplete_error = f"server error {status}"
+                elif status:
+                    incomplete_error = f"HTTP {status}"
+                else:
+                    incomplete_error = r.error or "request failed"
                 if rows:
                     break
-                return {"ok": False, "error": r.error or "request failed",
+                return {"ok": False, "error": incomplete_error, "keyword": keyword,
+                        "cached": False, **(rate_limit_meta or {})}
+            data = r.data
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                incomplete_error = "invalid catalog response"
+                if rows:
+                    break
+                return {"ok": False, "error": incomplete_error,
                         "keyword": keyword, "cached": False}
-            data = r.data or {}
-            batch = data.get("data") or []
-            rows.extend(batch)
+            rows.extend(row for row in data["data"] if isinstance(row, dict))
             cursor = data.get("nextPageCursor")
             if not cursor:
                 break
     except Exception as e:
+        incomplete_error = type(e).__name__
         if not rows:
-            return {"ok": False, "error": type(e).__name__,
+            return {"ok": False, "error": incomplete_error,
                     "keyword": keyword, "cached": False}
 
     capped = bool(cursor)
@@ -303,7 +300,7 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         if creator_type not in ("User", "Group"):
             creator_type = None
         competitors.append({
-            "name": name[:48],
+            "name": name[:80] if is_background else name[:48],
             "favorites": int(x.get("favoriteCount") or 0),
             "favorites_known": x.get("favoriteCount") is not None,
             "price": int(x.get("price") or 0),
@@ -333,17 +330,20 @@ def verify_niche(keyword, family=None, limit=30, max_pages=2, timeout=12,
         "conceptual_matches": conceptual,
         "top_competitors": competitors[:3],
         "verification_timestamp": datetime.now(timezone.utc).isoformat(),
+        "partial_error": incomplete_error,
         "sample_note": (
             f"first {limit * max_pages} results sampled"
             + (" (capped before catalog exhausted)" if capped else "")
         ),
     }
+    if is_background:
+        result["background_sample"] = competitors[:30]
     if rate_limit_meta:
         # Partial results were returned, but the rate-limit evidence is kept.
         result.update(rate_limit_meta)
     result["observed_at"] = result["verification_timestamp"]
     result["cache_age_seconds"] = 0.0
-    if use_cache:
+    if use_cache and not incomplete_error:
         _cache_put(cache_key, result)
     return result
 

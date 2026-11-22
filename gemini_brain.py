@@ -1042,6 +1042,9 @@ _VISION_PROMPT = """Analyze 1-4 images of the same UGC item. Return ONLY JSON:
 For Avatar Background artwork: focus on the 2560x1440 scene, visual identity,
 central avatar clearance, edge-crop risk, foreground/horizon, thumbnail
 readability, and factual visible details for truthful searchable titles.
+Name the primary environment or subject before incidental objects. When
+there is a view through a window, describe the interior and the exterior view
+separately. Report distinctive landmarks in order of visual prominence.
 Do not guess unseen objects, names, owners, game IP, popularity, CTR, sales,
 or animations. Distinguish a figure peeking through a window from a face on
 a poster/screen and say "unknown" if the pixels cannot establish which.
@@ -1079,6 +1082,8 @@ def _parse_vision_result(raw):
         if not m: return {}
         try: data = json.loads(m.group(0))
         except Exception: return {}
+    if not isinstance(data, dict):
+        return {}
     for k in ("visual_colors","visual_style","visual_mood","distinctive_features",
               "likely_aesthetic","vibe_references"):
         val = data.get(k, [])
@@ -1092,7 +1097,7 @@ def _parse_vision_result(raw):
               "ground_horizon_notes", "mobile_readability_notes",
               "depth_layers_notes", "lighting_notes", "primary_subject",
               "subject_relation"):
-        data[k] = str(data.get(k, "")).strip()
+        data[k] = str(data.get(k) or "").strip()
     raw_uncertain = data.get("uncertain_elements")
     data["uncertain_elements"] = [
         str(value).strip()[:160]

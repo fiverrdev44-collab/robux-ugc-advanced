@@ -78,7 +78,7 @@ def test_background_analyzer_passes_visual_context_once():
     # Background review already uses its two permitted model passes. It
     # rejects the weak copy and falls back without invoking a third.
     assert "vibrant cartoon scene" not in polished.lower()
-    assert "Sunny Cartoon House Background" in polished
+    assert polished == "Sunny cartoon house with purple roof and colorful awnings."
     assert calls == []
 
 def test_family_specific_claims():

@@ -25,17 +25,22 @@ def register_sales_commands(bot, get_db):
         )
         progress = await ctx.send(f"📊 Building sales report — {period}...")
 
+        source_note = (
+            "_Source: recorded `my_sales` events imported from the configured "
+            "Discord sales channel. Historical Discord sales may be missing._"
+        )
         try:
             data = await asyncio.to_thread(sales_summary, days, day_offset)
-        except Exception as e:
-            return await progress.edit(content=f"❌ {e}")
+        except Exception as exc:
+            print(f"[sales-report] query unavailable: {type(exc).__name__}", flush=True)
+            return await progress.edit(content="❌ The imported sales report is unavailable.")
 
         if not data["total_units"]:
             return await progress.edit(
                 content=(
-                    f"📊 No sales data for {period}.\n"
+                    f"📊 No imported sales records for {period}.\n"
                     f"Run `!sales_backfill` to import past sales from "
-                    f"the sales channel."
+                    f"the sales channel.\n{source_note}"
                 )
             )
 
@@ -46,7 +51,6 @@ def register_sales_commands(bot, get_db):
         unresolved_robux = (cov.get("unresolved_robux", 0)
                             + cov.get("ambiguous_robux", 0))
         covered = cov.get("event_id", 0)
-        total_units = data["total_units"] or 1
         lines = [
             f"# 📊 SALES REPORT — {period}",
             f"**Window:** {win.get('start')} → {win.get('end_exclusive')} "
@@ -89,11 +93,7 @@ def register_sales_commands(bot, get_db):
             for d, units, robux in data["daily"][:14]:
                 lines.append(f"• {d} — {units} sales · R${robux}")
 
-        lines.append(
-            "_Source: recorded `my_sales` events imported from the configured "
-            "Discord sales-channel listener/backfill. This report does not "
-            "rescan Discord history or prove every historical sale was imported._"
-        )
+        lines.append(source_note)
         body = "\n".join(lines)
         try:
             await progress.edit(content=body[:1900])

@@ -419,7 +419,7 @@ def classify_intent(text, has_attachment=False, state=None, use_ai=False):
                 r"show\s+me\s+|check\s+)?"
                 r"(?:(?:last|past|previous|this|over)\s+)?"
                 r"(?:(?:[0-9]{1,3}|one|a)\s+)?"
-                r"(?:days?|weeks?|months?|years?|yearly|monthly|weekly|annually|annual)"
+                r"(?:days?|weeks?|months?|years?|yearly|monthly|weekly|annually|annual|yesterday|today)"
                 r"(?:\s+(?:sales|revenue|earnings|report))?[?.!]*",
                 low,
             )):
@@ -928,12 +928,14 @@ async def _run_registry(bot, message, route, state):
     family = route.get("family")
     days = route.get("days")
     day_offset = int(route.get("day_offset") or 0)
-    if intent == "check_sales" and not days:
-        # Fallback for AI/planner routes: honour "today"/"last 7 days" etc.
-        days = parse_sales_window(getattr(message, "content", ""))
     if intent == "check_sales":
-        day_offset = parse_sales_offset(getattr(message, "content", ""))
-        # A one-day shifted window is *yesterday*, never "today".
+        # Explicit user periods take precedence even if a planner supplied
+        # an otherwise valid default for the registered command.
+        content = getattr(message, "content", "")
+        explicit_days = parse_sales_window(content)
+        if explicit_days is not None:
+            days = explicit_days
+            day_offset = parse_sales_offset(content)
         if day_offset:
             days = 1
 
