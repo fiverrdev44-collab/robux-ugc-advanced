@@ -61,5 +61,25 @@ class TestBackgroundCoverage(unittest.TestCase):
         self.assertIn("1 stored observation(s)",text)
         self.assertNotIn("/day",text)
 
+class TestEarlyTraction(unittest.TestCase):
+    def test_sparse_history_has_separate_traction(self):
+        cur = Mock()
+        cur.fetchall.return_value = [
+            (1, "Zero", "A", 0, 200, 0.2, NOW, 92, 1),
+            (2, "Strong", "B", 100, 200, 2, NOW-timedelta(days=2), 92, 1),
+            (3, "Young", "C", 30, 200, 0.1, NOW-timedelta(hours=2), 92, 1),
+            (4, "Unknown", "D", None, 200, 1, NOW-timedelta(days=1), 92, 1),
+        ]
+        result = ab.find_background_early_winners(cur, now=NOW)
+        self.assertEqual(result["usable_history"], 0)
+        self.assertEqual(result["ranked"], [])
+        self.assertEqual([r["id"] for r in result["early_traction"]], [2, 3])
+        self.assertEqual(result["early_traction"][1]["estimated_favs_per_day"], 30)
+        output = ab.format_background_early_winners(result)
+        self.assertIn("estimated, not measured growth", output)
+        self.assertIn("50.0/day estimated", output)
+        self.assertNotIn("Zero", output)
+
+
 if __name__=="__main__":
     unittest.main()
