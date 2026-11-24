@@ -4,7 +4,6 @@ Uses the existing rate-limited read-only catalog transports and the existing
 items/item_history schema. Never infers creation time or growth from discovery.
 No new Discord command, migration, credentials, or AI call is required.
 """
-from datetime import timezone
 import threading
 
 from creator_identity import catalog_identity
@@ -69,7 +68,9 @@ def _queries(now):
         for i in range(4)]
 
 
-def discover(now, get=safe_get, circuit=shared_circuit_open):
+def discover(now, get=None, circuit=None):
+    get = get or safe_get
+    circuit = circuit or shared_circuit_open
     found, requests, failures = {}, 0, 0
     for keyword, sort in _queries(now):
         cursor, seen = None, set()
@@ -204,7 +205,7 @@ def run_cycle(db_factory=None, batch_fn=None):
         now = utc_now()
         found, requests, failures, deferred = discover(now)
         snapshots = _with_db(db_factory, lambda c: store_rows(c, found.values()))
-        refreshed, dates, date_requests = 0, 0, 0
+        refreshed, dates, date_requests, refresh_failures = 0, 0, 0, 0
         if not shared_circuit_open("catalog_details"):
             ids = _with_db(db_factory, due_ids)
             if ids:
@@ -217,6 +218,7 @@ def run_cycle(db_factory=None, batch_fn=None):
                 rows = [r for r in rows if r is not None]
                 snapshots += _with_db(db_factory, lambda c: store_rows(c, rows))
                 refreshed = len(rows)
+                refresh_failures = len(ids) - refreshed
         if not shared_circuit_open("catalog_details"):
             missing = _with_db(db_factory, lambda c: missing_dates(c, now))
             verified = []
@@ -231,6 +233,8 @@ def run_cycle(db_factory=None, batch_fn=None):
                     if response.status_code != 200:
                         continue
                     body = response.json() or {}
+                    if not isinstance(body, dict):
+                        continue
                     created = ensure_utc(body.get("Created"))
                     if str(body.get("AssetTypeId")) == "92" and created and created <= utc_now():
                         verified.append((created, iid))
@@ -243,9 +247,10 @@ def run_cycle(db_factory=None, batch_fn=None):
                                     "AND asset_type_id=92 AND created_at IS NULL", row)
                     return len(verified)
                 dates = _with_db(db_factory, update)
-        return {"status": "partial" if deferred or failures else "ok",
+        return {"status": "partial" if deferred or failures or refresh_failures or shared_circuit_open("catalog_details") else "ok",
                 "search_requests": requests, "search_failures": failures,
                 "discovered": len(found), "refreshed": refreshed,
+                "refresh_failures": refresh_failures,
                 "new_daily_snapshots": snapshots, "dates_filled": dates,
                 "date_requests": date_requests,
                 "deferred": deferred or shared_circuit_open("catalog_details")}
