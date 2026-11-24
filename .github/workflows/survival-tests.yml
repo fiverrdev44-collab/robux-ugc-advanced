@@ -127,6 +127,8 @@ jobs:
         run: python test_avatar_backgrounds.py
       - name: Verify background scenes and live marketplace category isolation
         run: python test_background_market_quality.py
+      - name: Verify dedicated background market coverage
+        run: python test_background_market_worker.py
       - name: Verify background convergence sparse-data recovery
         run: python test_background_converge_recovery.py
       - name: Verify background chain category-scoped evidence and scene report
