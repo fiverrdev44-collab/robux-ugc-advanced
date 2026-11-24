@@ -33,6 +33,7 @@ MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL",
     "qwen/qwen-2.5-72b-instruct:free")
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", MODEL_NAME)
 OPENROUTER_VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL",
     "inclusionai/ling-3.0-flash-vl:free")
 
@@ -1109,6 +1110,11 @@ def _parse_vision_result(raw):
     ]
     data["item_type_visual"] = data["item_type_visual"].lower() or "unknown"
     data["title_color_match"] = data["title_color_match"].upper() or "?"
+    def meaningful(value):
+        return isinstance(value, str) and value.strip().casefold() not in {"", "unknown", "none", "n/a", "not visible", "unclear", "unavailable"}
+    if not (any(meaningful(data[k]) for k in ("visual_summary", "search_description", "primary_subject", "scene_focal_point"))
+            or any(meaningful(v) for v in data["distinctive_features"])):
+        return {}
     return data
 
 
@@ -1121,6 +1127,15 @@ def analyze_image_for_ugc(images, user_description="", *, subject_check=False):
                    _VISION_PROMPT.format(
                        desc=(user_description or "").strip() or "(none)"))
 
+    background = subject_check or "avatar background" in (user_description or "").lower()
+    def usable(result):
+        if not result:
+            return False
+        if background:
+            from background_intelligence import scene_phrase
+            return bool(scene_phrase(result, ""))
+        return True
+
     if _client is not None:
         try:
             parts = []
@@ -1128,15 +1143,17 @@ def analyze_image_for_ugc(images, user_description="", *, subject_check=False):
                 parts.append(f"Image {i}:")
                 parts.append(types.Part.from_bytes(data=img["bytes"], mime_type=img["mime"]))
             parts.append(prompt_text)
-            cfg = types.GenerateContentConfig(temperature=0.3, max_output_tokens=1500,
-                                              response_mime_type="application/json")
-            resp = _client.models.generate_content(model=MODEL_NAME, contents=parts, config=cfg)
+            cfg = types.GenerateContentConfig(temperature=0.3, max_output_tokens=4096,
+                                              response_mime_type="application/json",
+                                              http_options=types.HttpOptions(timeout=30000))
+            resp = _client.models.generate_content(model=GEMINI_VISION_MODEL, contents=parts, config=cfg)
             raw = (resp.text or "").strip()
             if raw:
                 result = _parse_vision_result(raw)
-                if result: return result
+                if usable(result): return result
+            print("[vision] Gemini returned no usable scene observations", flush=True)
         except Exception as e:
-            print(f"[vision] gemini failed: {e}")
+            print(f"[vision] Gemini failed: {type(e).__name__}", flush=True)
 
     if _openrouter_client is not None:
         try:
@@ -1150,11 +1167,13 @@ def analyze_image_for_ugc(images, user_description="", *, subject_check=False):
             resp = _openrouter_client.chat.completions.create(
                 model=OPENROUTER_VISION_MODEL,
                 messages=[{"role": "user", "content": content}],
-                temperature=0.3, max_tokens=1500, timeout=90)
+                temperature=0.3, max_tokens=4096, timeout=30)
             raw = (resp.choices[0].message.content or "").strip()
-            if raw: return _parse_vision_result(raw)
+            result = _parse_vision_result(raw)
+            if usable(result): return result
+            print("[vision] OpenRouter returned no usable scene observations", flush=True)
         except Exception as e:
-            print(f"[vision] openrouter failed: {e}")
+            print(f"[vision] OpenRouter failed: {type(e).__name__}", flush=True)
     return {}
 
 
