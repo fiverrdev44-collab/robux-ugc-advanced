@@ -23,13 +23,18 @@ _BAD_SCENE_PARTS = {
 # Canonical forms also let catalog comparisons recognize common synonyms.
 _SCENE_PATTERNS = (
     (r"(?:underwater|undersea|submerged|sunken|oceanic) (?:\w+ ){0,2}(?:city|cityscape|skyline)", "underwater city"),
+    (r"(?:nuclear|atomic) (?:power )?reactor(?: facility)?", "nuclear reactor"),
+    (r"industrial (?:facility|complex|plant|warehouse|hall)", "industrial facility"),
+    (r"(?:underground )?(?:bombsite|bomb site)", "bombsite"),
     (r"security office", "security office"),
     (r"(?:aircraft|airplane|plane|jet) (?:\w+ ){0,4}arrival|arrival (?:\w+ ){0,4}(?:aircraft|airplane|plane|jet)", "aircraft arrival"),
     (r"grassland|grassy fields?|grass fields?|open fields?|flatgrass", "open grassland"),
     (r"(?:sunny |colorful |colourful )?cartoon house", "cartoon house"),
 )
 _SCENE_NOUNS = SCENE_ANCHORS | {"aircraft", "airplane", "plane", "jet", "runway",
-                               "tarmac", "grassland", "meadow", "cityscape", "skyline"}
+                               "tarmac", "grassland", "meadow", "cityscape", "skyline",
+                               "reactor", "facility", "warehouse", "laboratory",
+                               "hangar", "bunker", "bombsite", "plant"}
 _WEAK_ANCHORS = {"sky", "horizon", "hill", "hills", "garden", "clouds", "room"}
 _ANCHOR_STOP = _FILLER | {"above", "across", "behind", "beneath", "beside",
                           "beyond", "inside", "near", "outside", "over", "through",
@@ -97,7 +102,7 @@ def scene_phrase(vision, notes=""):
         for pattern, phrase in _SCENE_PATTERNS:
             match = re.search(r"\b(?:" + pattern + r")\b", low)
             if match:
-                ranked.append((0, source_index, match.start(), phrase))
+                ranked.append((-1 if phrase == "nuclear reactor" else 0, source_index, match.start(), phrase))
         tokens = list(re.finditer(r"[a-z]+", low))
         for index, token in enumerate(tokens):
             noun = token.group()
@@ -392,6 +397,8 @@ def title_dry_run(vision, notes="", live=None):
 _NAMED_IP_CUES = (
     "oggy", "fnaf", "five nights at freddy", "team fortress", "tf2",
     "bioshock", "spongebob", "simpsons", "pokemon",
+    "counter-strike 2", "counter strike 2", "counter-strike", "counter strike",
+    "cs2", "csgo", "cs:go", "gmod", "garry's mod",
 )
 
 
@@ -401,9 +408,12 @@ def creator_named_subject(notes=""):
     Use only bounded known names. No external title, model text or live
     competitor name is allowed to insert a franchise identity.
     """
-    user = _short_text(notes, 300).lower()
+    from description_quality import fact_source
+    user = _short_text(fact_source(notes), 300).lower()
     if _is_untrusted_instruction(user):
         return None
+    if re.search(r"\b(?:counter[- ]strike 2|cs2)\b", user):
+        return "cs2 nuke" if re.search(r"\bnuke\b", user) else "cs2"
     for term in sorted(_NAMED_IP_CUES, key=len, reverse=True):
         if re.search(r"\b" + re.escape(term) + r"\b", user):
             return term
