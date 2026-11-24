@@ -14,6 +14,8 @@ _IP_PHRASES = (
     "oggy", "five nights at freddy", "fnaf", "fazbear", "freddy",
     "team fortress", "team fortress 2", "tf2", "dustbowl",
     "spongebob", "simpsons", "pokemon",
+    "counter-strike 2", "counter strike 2", "counter-strike", "counter strike",
+    "cs2", "csgo", "cs:go",
 )
 _OFFICIAL_CLAIMS = ("official", "licensed", "authorized", "certified",
                     "air force one")
@@ -30,6 +32,7 @@ _SCENE_NOUNS = {
     "mountain", "mountains", "lake", "bridge", "courtyard", "village",
     "temple", "cabin", "window", "lookout", "observatory", "sandbox",
     "world", "ruins", "desert", "arcade", "tower", "hangar",
+    "reactor", "facility", "warehouse", "laboratory", "bunker", "bombsite", "plant",
 }
 # Only poetic descriptors that do NOT assert an additional character,
 # building, animation, event, licensed identity, rarity or product attribute.
@@ -74,6 +77,7 @@ _CONTEXTUAL = {
     "beyond": {"window", "overlooking", "view"},
     "vip": {"vip", "presidential", "limousine", "red carpet"},
     "arrival": {"arrival", "stairs", "staircase", "red carpet", "doorway"},
+    "industrial": {"industrial", "reactor", "factory"},
 }
 
 def words(value):
@@ -105,7 +109,8 @@ _REQUESTED_FRANCHISE = re.compile(
 )
 _FRANCHISE_CASE = {"bioshock": "BioShock", "gmod": "GMod", "fnaf": "FNAF",
                    "tf2": "TF2", "spongebob": "SpongeBob", "pokemon": "Pokémon",
-                   "gm flatgrass": "GM Flatgrass"}
+                   "gm flatgrass": "GM Flatgrass", "cs2": "CS2", "csgo": "CSGO",
+                   "cs:go": "CS:GO", "counter-strike 2": "Counter-Strike 2"}
 
 
 def requested_background_franchise(notes):
@@ -216,6 +221,12 @@ def creative_lane_candidates(vision, notes=""):
         add("Ceremonial Aircraft Arrival Background")
         if "runway" in w:
             add("Jet On The Runway Background")
+    if {"nuclear", "reactor"} <= w:
+        add("Nuclear Reactor Background")
+        if "underground" in w:
+            add("Underground Nuclear Reactor Background")
+        if "industrial" in w:
+            add("Industrial Nuclear Reactor Background")
     if {"security", "office"}.issubset(w):
         add("Silent Security Office Background")
         add("Security Office Shadows Background")

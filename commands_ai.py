@@ -1919,66 +1919,71 @@ RULES:
 
     @bot.command(name="ai_debug")
     async def ai_debug(ctx):
-        """Show AI provider diagnostics."""
+        """Bounded, nonblocking text and actual image-provider diagnostics."""
+        import base64
         from command_security import redact_secrets
-        lines = ["**🔬 AI Debug Report**\n"]
+        from gemini_brain import GEMINI_VISION_MODEL, OPENROUTER_VISION_MODEL
 
+        await ctx.send("🔬 AI diagnostics started: testing text and image requests.")
         gkey = os.getenv("GEMINI_API_KEY", "")
-        gmodel = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        gmodel = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
         okey = os.getenv("OPENROUTER_API_KEY", "")
-        omodel = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+        omodel = os.getenv("OPENROUTER_MODEL", "qwen/qwen-2.5-72b-instruct:free")
+        # A known tiny RGB PNG, not a user attachment or personal data.
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII=")
+        question = "Inspect the attached image. What is its main color? Reply briefly."
 
-        lines.append("**Env vars:**")
-        lines.append(
-            f"• GEMINI_API_KEY: {'configured' if gkey else 'not configured'}")
-        lines.append(f"• GEMINI_MODEL: `{gmodel}`")
-        lines.append(
-            f"• OPENROUTER_API_KEY: "
-            f"{'configured' if okey else 'not configured'}")
-        lines.append(f"• OPENROUTER_MODEL: `{omodel}`")
-        lines.append("")
-
-        lines.append("**Gemini test** (`say hello`):")
-        if not gkey:
-            lines.append("• ❌ GEMINI_API_KEY not set")
-        else:
+        def outcome(fn):
             try:
-                from google import genai as g
-                client = g.Client(api_key=gkey)
-                resp = client.models.generate_content(model=gmodel, contents="Say only the word: hello")
-                text = (resp.text or "").strip()
-                if text:
-                    lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-                else:
-                    lines.append("• ⚠️ Empty response")
-            except Exception as e:
-                lines.append(
-                    f"• ❌ {type(e).__name__}: "
-                    f"`{redact_secrets(str(e))[:200]}`")
-        lines.append("")
+                value = fn()
+                return "✅ nonempty response" if isinstance(value, str) and value.strip() else "⚠️ empty response"
+            except Exception as exc:
+                code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+                return "❌ " + type(exc).__name__ + (f" (HTTP {code})" if isinstance(code, int) else "")
 
-        lines.append("**OpenRouter test** (`say hello`):")
-        if not okey:
-            lines.append("• ❌ OPENROUTER_API_KEY not set")
-        else:
+        def gemini(vision):
+            from google import genai
+            from google.genai import types
+            with genai.Client(api_key=gkey, http_options=types.HttpOptions(timeout=15000)) as client:
+                contents = [types.Part.from_bytes(data=png, mime_type="image/png"), question] if vision else "Say only hello"
+                response = client.models.generate_content(
+                    model=GEMINI_VISION_MODEL if vision else gmodel, contents=contents,
+                    config=types.GenerateContentConfig(max_output_tokens=256))
+                return response.text
+
+        def router(vision):
+            from openai import OpenAI
+            with OpenAI(api_key=okey, base_url="https://openrouter.ai/api/v1",
+                        timeout=15, max_retries=0) as client:
+                content = [{"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}},
+                    {"type": "text", "text": question}] if vision else "Say only hello"
+                response = client.chat.completions.create(
+                    model=OPENROUTER_VISION_MODEL if vision else omodel,
+                    messages=[{"role": "user", "content": content}], max_tokens=256)
+                return response.choices[0].message.content
+
+        async def probe(key, fn, vision):
+            if not key:
+                return "not configured"
             try:
-                from openai import OpenAI
-                or_client = OpenAI(api_key=okey, base_url="https://openrouter.ai/api/v1")
-                resp = or_client.chat.completions.create(
-                    model=omodel,
-                    messages=[{"role": "user", "content": "Say only the word: hello"}],
-                    max_tokens=20,
-                )
-                text = (resp.choices[0].message.content or "").strip()
-                if text:
-                    lines.append(f"• ✅ Response: `{repr(text)[:80]}`")
-                else:
-                    lines.append("• ⚠️ Empty response")
-            except Exception as e:
-                lines.append(
-                    f"• ❌ {type(e).__name__}: "
-                    f"`{redact_secrets(str(e))[:200]}`")
+                return await asyncio.wait_for(asyncio.to_thread(outcome, lambda: fn(vision)), timeout=20)
+            except asyncio.TimeoutError:
+                return "❌ timed out"
 
-        body = redact_secrets("\n".join(lines))
+        gt, gv, ot, ov = await asyncio.gather(
+            probe(gkey, gemini, False), probe(gkey, gemini, True),
+            probe(okey, router, False), probe(okey, router, True))
+        body = redact_secrets("\n".join([
+            "**🔬 AI Debug Report**",
+            f"• GEMINI_API_KEY: {'configured' if gkey else 'not configured'}",
+            f"• OPENROUTER_API_KEY: {'configured' if okey else 'not configured'}",
+            f"• Gemini text (`{gmodel}`): {gt}",
+            f"• Gemini image (`{GEMINI_VISION_MODEL}`): {gv}",
+            f"• OpenRouter text (`{omodel}`): {ot}",
+            f"• OpenRouter image (`{OPENROUTER_VISION_MODEL}`): {ov}",
+            "Image probes test nonempty responses, not verified image understanding."
+        ]))
         for i in range(0, len(body), 1900):
             await ctx.send(body[i:i + 1900])
