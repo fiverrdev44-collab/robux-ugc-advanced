@@ -388,6 +388,7 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
         "status": "ok",
         "ranked": [],
         "insufficient": [],
+        "early_traction": [],
         "candidate_window": 0,
         "usable_history": 0,
         "coverage_pct": 0.0,
@@ -577,6 +578,20 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
         100.0 * usable_history / max(len(rows), 1), 1)
     result["insufficient_count"] = len(insufficient)
     result["non_growing_count"] = len(non_growing)
+    # Rank positive current favorites independently of measured history.
+    # A one-day floor avoids exaggerating the rate of hour-old listings.
+    traction = []
+    for row in insufficient:
+        favs = row.get("current_favorites")
+        age = row.get("listing_age_days")
+        if favs is None or favs <= 0 or age is None or age < 0:
+            continue
+        traction.append(dict(row, estimated_favs_per_day=round(favs / max(age, 1.0), 2)))
+    traction.sort(key=lambda row: (-row["estimated_favs_per_day"],
+                                  -row["current_favorites"], row["id"]))
+    result["early_traction"] = traction[:limit]
+    insufficient.sort(key=lambda row: (row.get("current_favorites") is None,
+                                       -(row.get("current_favorites") or 0), row["id"]))
     result["insufficient"] = insufficient[:5]
     if (len(rows) >= 20 and result["coverage_pct"] >= 50.0):
         result["data_confidence"] = "high"
@@ -601,6 +616,22 @@ def _early_creator_label(creator):
     if not creator:
         return "creator unavailable"
     return f"by `{creator}`"
+
+
+def format_background_traction(data, limit=5):
+    rows = (data or {}).get("early_traction") or []
+    if not rows:
+        return ""
+    lines = ["**Early traction — estimated, not measured growth:**"]
+    for index, row in enumerate(rows[:limit], 1):
+        name = str(row.get("name") or "unnamed").replace("[", "(").replace("]", ")")[:80]
+        lines.append(f"{index}. [{name}]({row['url']}) — "
+                     f"**{row['estimated_favs_per_day']}/day estimated** · "
+                     f"{row['current_favorites']:,} favorites · "
+                     f"{row['listing_age_days']}d old · "
+                     f"{row.get('observations', 0)} stored obs")
+    lines.append("_Current favorites ÷ max(listing age, 1 day). Not verified growth, sales or CTR._")
+    return "\n".join(lines)
 
 
 def format_background_watchlist(data, limit=5):
@@ -643,7 +674,7 @@ def format_background_early_winners(data, days=None):
             "this window. No ranking is claimed. The background collector "
             "must obtain genuine observations on different UTC days. "
             "Use `!xray` to check category coverage.\n" +
-            format_background_watchlist(data))
+            (format_background_traction(data) or format_background_watchlist(data)))
     if status == "no_positive_growth":
         return (
             f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
@@ -651,7 +682,8 @@ def format_background_early_winners(data, days=None):
             f"history: **{data.get('usable_history', 0)}** · coverage "
             f"**{data.get('coverage_pct', 0)}%**.\n"
             "No sampled background had a positive measured favorite gain in "
-            "this window. No ranking is claimed.")
+            "this window. No measured ranking is claimed.\n" +
+            format_background_traction(data))
 
     lines = [f"# ⚡ BACKGROUND EARLY WINNERS — measured, last {window}d", ""]
     lines.append(
@@ -700,11 +732,14 @@ def format_background_early_winners(data, days=None):
         if item.get("missing_data"):
             warning += " · " + "; ".join(item["missing_data"])
         lines.append(f"   {warning}")
+    if data.get("early_traction"):
+        lines.append("")
+        lines.append(format_background_traction(data))
     if data.get("insufficient_count"):
         lines.append("")
         lines.append(
             f"_{data['insufficient_count']} candidate(s) had fewer than two "
-            "valid observations and were not ranked._")
+            "valid observations and were not ranked as measured growth._")
     if data.get("non_growing_count"):
         lines.append(
             f"_{data['non_growing_count']} candidate(s) had no positive "
