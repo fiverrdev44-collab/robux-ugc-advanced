@@ -193,9 +193,10 @@ def _gather_keywords(cur, family=None):
                 cur.execute(f"""
                     select name
                     from items
-                    where name is not null and favorite_count > 5
+                    where name is not null
+                    {'' if is_background else 'and favorite_count > 5'}
                     {fam_sql}
-                    order by favorite_count desc
+                    order by favorite_count desc nulls last
                     limit 5000
                 """, fam_params)
                 counter = Counter()
@@ -217,12 +218,17 @@ def _gather_keywords(cur, family=None):
                     # Backgrounds require an actual descriptive *scene* phrase.
                     # Hats and emotes retain their original unigram/bigram mining.
                     phrase_lengths = (2, 3) if is_background else (2,)
+                    phrases = set()
                     for size in phrase_lengths:
                         for i in range(len(words) - size + 1):
                             phrase = " ".join(words[i:i + size])
                             if (not _is_generic(phrase)
                                     and (not is_background or scene_phrase(phrase))):
-                                counter[phrase] += 1
+                                if is_background:
+                                    phrases.add(phrase)
+                                else:
+                                    counter[phrase] += 1
+                    counter.update(phrases)
                 for kw, cnt in counter.most_common(250):
                     if cnt >= 3:
                         keywords.add(kw)
@@ -339,7 +345,9 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     demand_reliable = demand_live > 0
     demand = demand_live if demand_reliable else demand_all
     volume = volume_live if demand_reliable else volume_all
-    if demand < min_demand:        return _reject("no autocomplete occurrences")
+    is_background = resolve_family_ids(family) == [92]
+    if demand < min_demand and not is_background:
+        return _reject("no autocomplete occurrences")
 
     cur.execute(f"""
         select count(*) from items
@@ -351,7 +359,8 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     cur.execute(f"""
         with s as (
             select ih.item_id,
-                   max(ih.favorite_count) - min(ih.favorite_count) as delta,
+                   (array_agg(ih.favorite_count ORDER BY ih.snapshot_at DESC, ih.id DESC))[1]
+                   - (array_agg(ih.favorite_count ORDER BY ih.snapshot_at, ih.id))[1] as delta,
                    extract(epoch from
                        (max(ih.snapshot_at) - min(ih.snapshot_at))
                    )/86400.0 as days
@@ -359,6 +368,8 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
             join items i on i.id = ih.item_id
             where i.name {match_op} %s
               and ih.snapshot_at > now() - interval '14 days'
+              and ih.snapshot_at <= now()
+              and ih.favorite_count is not null AND ih.favorite_count >= 0
               {fam_sql.replace('asset_type_id', 'i.asset_type_id')}
             group by ih.item_id
             having extract(epoch from
@@ -366,11 +377,18 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
                    )/86400.0 >= 2
         )
         select count(*),
-               avg(delta / days) filter (where delta >= 1)
+               avg(delta / days) filter (where delta >= 1),
+               count(*) filter (where delta >= 1)
         from s
     """, [pat] + fam_params)
     vel_row = cur.fetchone()
     observations = int(vel_row[0] or 0)
+    if is_background and demand < min_demand:
+        # Missing autocomplete is not zero interest. Require corroborated
+        # actual positive favorite movement instead of inventing search demand.
+        positive_items = int(vel_row[2] or 0) if len(vel_row) > 2 else 0
+        if positive_items < 2:
+            return _reject("missing autocomplete and insufficient measured growth")
     velocity_measured = observations > 0
     if not velocity_measured:
         velocity = None

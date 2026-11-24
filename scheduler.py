@@ -348,6 +348,16 @@ def _run_oracle_scan():
         _log(f"❌ [scheduler] ORACLE scan crashed: {type(e).__name__}: {e}")
 
 
+def _run_background_market():
+    """Dedicated category coverage; no work on the Discord event loop."""
+    try:
+        from background_market_worker import run_cycle
+        result = run_cycle()
+        _log(f"[scheduler] Background market: {result}")
+    except Exception as exc:
+        _log(f"[scheduler] Background market failed: {type(exc).__name__}: {exc}")
+
+
 def start_scheduler():
     global _scheduler
     if _scheduler is not None:
@@ -355,6 +365,12 @@ def start_scheduler():
         return _scheduler
 
     _scheduler = BackgroundScheduler(timezone="UTC")
+
+    if os.getenv("BACKGROUND_MARKET_ENABLED", "1") == "1":
+        _scheduler.add_job(_run_background_market, "interval", hours=6,
+            id="background_market", replace_existing=True,
+            next_run_time=utc_now() + timedelta(seconds=90),
+            max_instances=1, coalesce=True, misfire_grace_time=1800)
 
     _scheduler.add_job(_run_snapshot, "cron",
         hour=SNAPSHOT_HOUR_UTC, minute=SNAPSHOT_MINUTE_UTC,

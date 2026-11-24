@@ -665,6 +665,9 @@ def format_report(detailed, verified, family="all"):
                     "ranking. These are examples to investigate, not copied "
                     "concepts or confirmed competitive opportunities._"
                 )
+            elif early.get("insufficient"):
+                from avatar_backgrounds import format_background_watchlist
+                lines.append(format_background_watchlist(early, limit=3))
             elif early.get("status") == "unavailable":
                 lines.append("Early-item history is unavailable; no fallback "
                              "signal was fabricated.")

@@ -353,6 +353,7 @@ def upsert_items(cur, items):
                     creator_verified = COALESCE(EXCLUDED.creator_verified,
                                                 items.creator_verified),
                     asset_type_id = EXCLUDED.asset_type_id,
+                    created_at = COALESCE(items.created_at, EXCLUDED.created_at),
                     fetched_at = CURRENT_TIMESTAMP
             """, (
                 it["id"], it["name"], it["description"], it["favorite_count"],
@@ -382,6 +383,7 @@ def upsert_items(cur, items):
                     creator_verified = COALESCE(EXCLUDED.creator_verified,
                                                 items.creator_verified),
                     asset_type_id = EXCLUDED.asset_type_id,
+                    created_at = COALESCE(items.created_at, EXCLUDED.created_at),
                     fetched_at = CURRENT_TIMESTAMP
             """, (
                 it["id"], it["name"], it["description"], it["favorite_count"],
