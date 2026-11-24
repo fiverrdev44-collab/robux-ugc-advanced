@@ -398,7 +398,7 @@ _NAMED_IP_CUES = (
     "oggy", "fnaf", "five nights at freddy", "team fortress", "tf2",
     "bioshock", "spongebob", "simpsons", "pokemon",
     "counter-strike 2", "counter strike 2", "counter-strike", "counter strike",
-    "cs2", "csgo", "cs:go", "gmod", "garry's mod",
+    "cs2", "csgo", "cs:go",
 )
 
 
