@@ -295,12 +295,13 @@ def _background_candidate_rows(cur, days, candidate_limit):
             WHERE asset_type_id = 92
               AND created_at IS NOT NULL
               AND created_at >= NOW() - INTERVAL '{int(days)} days'
+              AND created_at <= NOW()
             ORDER BY created_at DESC, id DESC
             LIMIT {int(candidate_limit)}
         )
         SELECT c.id, c.name, c.creator_name, c.favorite_count, c.price,
                c.age_days, c.created_at, c.asset_type_id,
-               COUNT(h.id) AS observations
+               COUNT(DISTINCT h.snapshot_at) AS observations
         FROM candidates c
         LEFT JOIN item_history h
                ON h.item_id = c.id
@@ -433,7 +434,14 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
                 cur, usable_ids, days):
             if item_id is None or favs is None or snapshot is None:
                 continue
-            histories.setdefault(item_id, []).append((snapshot, favs))
+            try:
+                observed = _utc(snapshot)
+                count = int(favs)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if count < 0 or observed > _utc(now):
+                continue
+            histories.setdefault(item_id, []).append((observed, count))
     except Exception:
         _rollback(cur)
         result["history_error"] = "history query unavailable"
@@ -445,10 +453,7 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
     for row in rows:
         (item_id, name, creator, current_favs, price, age_days,
          created_at, _atype, _observations) = row
-        points = sorted(
-            histories.get(item_id, []), key=lambda point: point[0])
-        if len(points) >= MIN_EARLY_OBSERVATIONS:
-            usable_history += 1
+        points = sorted(dict(histories.get(item_id, [])).items())
         if len(points) < MIN_EARLY_OBSERVATIONS:
             insufficient.append({
                 "id": item_id,
@@ -460,7 +465,7 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
                 "price": (int(price) if price is not None
                           and int(price) > 0 else None),
                 "listing_age_days": round(float(age_days or 0), 2),
-                "observations": len(points),
+                "observations": min(1, int(_observations or 0)) if not points else len(points),
                 "reason": "fewer than 2 valid favorite observations",
             })
             continue
@@ -484,6 +489,7 @@ def find_background_early_winners(cur, days=7, limit=DEFAULT_EARLY_LIMIT,
             })
             continue
 
+        usable_history += 1
         measured_gain = int(last_favs) - int(first_favs)
         if measured_gain <= 0:
             non_growing.append({
@@ -597,6 +603,22 @@ def _early_creator_label(creator):
     return f"by `{creator}`"
 
 
+def format_background_watchlist(data, limit=5):
+    """Unranked observed listings, not velocity or purchase advice."""
+    rows = (data or {}).get("insufficient") or []
+    if not rows:
+        return ""
+    lines = ["**Unranked recent listings — tracking, not emerging winners:**"]
+    for row in rows[:limit]:
+        name = str(row.get("name") or "unnamed").replace("[", "(").replace("]", ")")[:80]
+        favs = row.get("current_favorites")
+        favs_label = f"{favs:,} current favorites" if favs is not None else "favorites unavailable"
+        lines.append(f"• [{name}]({row['url']}) — {favs_label}; "
+                     f"{row.get('observations', 0)} stored observation(s)")
+    lines.append("_Actual growth requires distinct observations; no sales or CTR inferred._")
+    return "\n".join(lines)
+
+
 def format_background_early_winners(data, days=None):
     if not data:
         return "No Avatar Background early-winner data available."
@@ -618,8 +640,10 @@ def format_background_early_winners(data, days=None):
             f"Candidates: **{data.get('candidate_window', 0)}** · usable "
             f"history: **0** · coverage **0%**.\n"
             "No background had at least two valid favorite observations in "
-            "this window. No ranking is claimed. Try `!early 14 backgrounds` "
-            "or wait for more snapshots.")
+            "this window. No ranking is claimed. The background collector "
+            "must obtain genuine observations on different UTC days. "
+            "Use `!xray` to check category coverage.\n" +
+            format_background_watchlist(data))
     if status == "no_positive_growth":
         return (
             f"# ⚡ BACKGROUND EARLY WINNERS — last {window}d\n\n"
