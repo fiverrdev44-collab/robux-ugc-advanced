@@ -475,75 +475,101 @@ def scan_id_window(cur, count=600):
 
 
 def run_scanner():
+    """Discover catalog IDs, then *always* attempt the bounded ID-window path.
+
+    A catalog search rate-limit, transient 5xx or zero search results must
+    never prevent the independent ID-window supplement from running. The
+    returned counters are operational evidence, not a guarantee of market
+    coverage. No retry storm or extra quota is introduced.
+    """
     log("🚀 Scanner started.")
     setup_database()
     log("📦 DB setup done.")
-
     log(f"🔐 Using primary session; {len(SESSIONS)} configured session(s) "
         f"(no rotation on 429).")
 
     queries = build_all_queries()
     log(f"🚀 Running {len(queries)} queries with {WORKERS} workers "
-        f"(shared endpoint budget/concurrency)...")
-    start = time.time()
+        "(shared endpoint budget/concurrency)...")
+    start_time = time.time()
 
     all_ids = set()
+    query_errors = 0
     with ThreadPoolExecutor(max_workers=WORKERS) as executor:
         futures = {executor.submit(scan_query, q): q for q in queries}
-        done = 0
-        for future in as_completed(futures):
-            done += 1
+        for done, future in enumerate(as_completed(futures), 1):
             try:
                 found = future.result(timeout=QUERY_TIMEOUT)
-                all_ids.update(found)
+                all_ids.update(found or [])
             except Exception as e:
-                log(f"  Query #{done} failed: {e}")
-
+                query_errors += 1
+                log(f"  Query #{done} failed: {type(e).__name__}: {e}")
             if done <= 10 or done % 20 == 0:
-                elapsed = time.time() - start
+                elapsed = time.time() - start_time
                 rate = done / elapsed if elapsed > 0 else 0
                 log(f"  {done}/{len(queries)} — {len(all_ids)} IDs "
                     f"({rate:.1f} q/s)")
+    log(f"✅ Search collected {len(all_ids)} valid IDs "
+        f"in {time.time()-start_time:.1f}s; query errors {query_errors}")
 
-    log(f"✅ Scan collected {len(all_ids)} valid IDs in {time.time()-start:.1f}s")
-
-    if not all_ids:
-        log("⚠️ No IDs collected — bailing.")
-        return
-
-    log("💾 Writing to database...")
-    conn = get_db_connection()
-    cur = conn.cursor()
-    ids_list = [(iid,) for iid in all_ids]
     new_count = 0
-    for i in range(0, len(ids_list), 1000):
-        chunk = ids_list[i:i+1000]
-        execute_values(
-            cur,
-            "INSERT INTO discovered_items (id) VALUES %s ON CONFLICT (id) DO NOTHING",
-            chunk
-        )
-        new_count += cur.rowcount
-        conn.commit()
-    cur.close()
-    conn.close()
-    log(f"✅ Inserted {new_count} NEW item IDs.")
+    if all_ids:
+        log("💾 Writing search IDs to discovered_items...")
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            try:
+                ids_list = [(iid,) for iid in all_ids]
+                for i in range(0, len(ids_list), 1000):
+                    chunk = ids_list[i:i + 1000]
+                    # One INSERT statement per chunk: rowcount reflects all
+                    # rows inserted, not only execute_values's final page.
+                    execute_values(
+                        cur,
+                        "INSERT INTO discovered_items (id) VALUES %s "
+                        "ON CONFLICT (id) DO NOTHING",
+                        chunk,
+                        page_size=1000,
+                    )
+                    new_count += cur.rowcount
+                    conn.commit()
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+    else:
+        log("⚠️ Search returned zero IDs. Still trying the independent "
+            "bounded ID-window supplement.")
 
-    # ── ID stepping supplement (30-item batches) ──
+    window_start, window_found, window_failed = None, 0, 0
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        start, found_n, failed_n = scan_id_window(
+        window_start, window_found, window_failed = scan_id_window(
             cur, count=int(os.getenv("SCANNER_ID_WINDOW", "600")))
         conn.commit()
-        log(f"🪜 ID window from {start}: {found_n} valid, "
-            f"{failed_n} invalid/blocked")
+        log(f"🪜 ID window from {window_start}: {window_found} valid, "
+            f"{window_failed} invalid/blocked")
     except Exception as e:
         conn.rollback()
-        log(f"⚠️ ID stepping failed: {e}")
+        log(f"⚠️ ID stepping failed: {type(e).__name__}: {e}")
     finally:
         cur.close()
         conn.close()
+
+    status = {
+        "search_ids_found": len(all_ids),
+        "search_ids_inserted": new_count,
+        "search_query_errors": query_errors,
+        "id_window_start": window_start,
+        "id_window_upserted": window_found,
+        "id_window_failed": window_failed,
+    }
+    if not all_ids and not window_found:
+        log("⚠️ Scanner found no items on either discovery path. "
+            "Check API responses, rate limits, cookies and scheduling.")
+    log(f"📊 Scanner summary: {status}")
+    return status
 
 
 if __name__ == "__main__":
