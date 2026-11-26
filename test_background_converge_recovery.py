@@ -63,6 +63,24 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
             result = ce.scan_convergence_detailed(family, limit=8, shortlist=8)
         return result, fallback
 
+    def test_repeated_fresh_background_supply_can_surface_as_unvalidated_lead(self):
+        row = candidate("dark green forest", measured=False, recent=2)
+        row["family"] = "backgrounds"
+        self.assertEqual(
+            ce.qualifies(row),
+            (True, "repeated fresh supply; demand and growth unverified"),
+        )
+        row["recent"] = 1
+        self.assertFalse(ce.qualifies(row)[0])
+
+    def test_other_category_keeps_existing_fresh_supply_gate(self):
+        row = candidate("viral dance", measured=False, recent=1)
+        row["family"] = "emotes"
+        self.assertEqual(
+            ce.qualifies(row),
+            (True, "fresh supply (velocity unmeasured)"),
+        )
+
     def test_empty_mined_phrases_still_shows_measured_early_activity(self):
         result, fallback = self._run([], lambda *args, **kw: None)
         self.assertEqual(result["scanned"], 0)
