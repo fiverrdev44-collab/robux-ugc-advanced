@@ -62,13 +62,13 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
                 self.sql = sql
             def fetchall(self):
                 return [
-                    ("Dark Green Forest Background",),
-                    ("Dark Green Forest Path Background",),
+                    ("Misty Forest Background",),
+                    ("Misty Forest Path Background",),
                 ]
         cur = NamesCursor()
         keywords = ce._gather_keywords(cur, family="backgrounds")
-        self.assertIn("green forest", keywords)
-        self.assertIn("dark green forest", keywords)
+        self.assertIn("misty forest", keywords)
+        self.assertIn("misty forest path", keywords)
         self.assertIn("created_at DESC NULLS LAST", cur.sql)
 
     def _run(self, keywords, side_effect, family="backgrounds", early=None):
@@ -81,7 +81,7 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
         return result, fallback
 
     def test_repeated_fresh_background_supply_can_surface_as_unvalidated_lead(self):
-        row = candidate("dark green forest", measured=False, recent=2)
+        row = candidate("misty forest path", measured=False, recent=2)
         row["family"] = "backgrounds"
         self.assertEqual(
             ce.qualifies(row),
