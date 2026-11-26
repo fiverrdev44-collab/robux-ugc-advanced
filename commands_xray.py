@@ -62,7 +62,9 @@ def register_xray_commands(bot, get_db):
 
         body = format_xray(data)
         for i in range(0, len(body), 1900):
-            await ctx.send(body[i:i+1900])
+            # Keep catalog links clickable without Discord's repeated thumbnail
+            # unfurls obscuring the actual research report.
+            await ctx.send(body[i:i+1900], suppress_embeds=True)
             await asyncio.sleep(0.3)
 
     @bot.command(name="early", ignore_extra=False)
