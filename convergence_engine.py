@@ -196,10 +196,7 @@ def _gather_keywords(cur, family=None):
                     where name is not null
                     {'' if is_background else 'and favorite_count > 5'}
                     {fam_sql}
-                    order by {
-                        'created_at DESC NULLS LAST, favorite_count DESC NULLS LAST'
-                        if is_background else 'favorite_count DESC NULLS LAST'
-                    }
+                    order by {order_sql}
                     limit 5000
                 """, fam_params)
                 counter = Counter()
@@ -239,6 +236,10 @@ def _gather_keywords(cur, family=None):
                 for kw, cnt in counter.most_common(250):
                     if cnt >= minimum_support:
                         keywords.add(kw)
+                order_sql = (
+                    "created_at DESC NULLS LAST, favorite_count DESC NULLS LAST"
+                    if is_background else "favorite_count DESC NULLS LAST"
+                )
             except Exception as e:
                 print(f"[convergence] family keyword mining failed: {e}", flush=True)
             print(
