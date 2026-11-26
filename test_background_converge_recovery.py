@@ -54,6 +54,23 @@ def early_rows():
 
 
 class BackgroundConvergenceRecoveryTests(unittest.TestCase):
+    def test_background_keyword_mining_keeps_two_item_recent_scene_phrases(self):
+        class NamesCursor:
+            def __init__(self):
+                self.sql = ""
+            def execute(self, sql, params=None):
+                self.sql = sql
+            def fetchall(self):
+                return [
+                    ("Dark Green Forest Background",),
+                    ("Dark Green Forest Path Background",),
+                ]
+        cur = NamesCursor()
+        keywords = ce._gather_keywords(cur, family="backgrounds")
+        self.assertIn("green forest", keywords)
+        self.assertIn("dark green forest", keywords)
+        self.assertIn("created_at DESC NULLS LAST", cur.sql)
+
     def _run(self, keywords, side_effect, family="backgrounds", early=None):
         with mock.patch.object(ce, "get_research_db", return_value=FakeConn()), \
              mock.patch.object(ce, "_gather_keywords", return_value=keywords), \
