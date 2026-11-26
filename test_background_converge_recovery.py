@@ -54,6 +54,23 @@ def early_rows():
 
 
 class BackgroundConvergenceRecoveryTests(unittest.TestCase):
+    def test_background_keyword_mining_keeps_two_item_recent_scene_phrases(self):
+        class NamesCursor:
+            def __init__(self):
+                self.sql = ""
+            def execute(self, sql, params=None):
+                self.sql = sql
+            def fetchall(self):
+                return [
+                    ("Misty Forest Background",),
+                    ("Misty Forest Path Background",),
+                ]
+        cur = NamesCursor()
+        keywords = ce._gather_keywords(cur, family="backgrounds")
+        self.assertIn("misty forest", keywords)
+        self.assertIn("misty forest", keywords)
+        self.assertIn("created_at DESC NULLS LAST", cur.sql)
+
     def _run(self, keywords, side_effect, family="backgrounds", early=None):
         with mock.patch.object(ce, "get_research_db", return_value=FakeConn()), \
              mock.patch.object(ce, "_gather_keywords", return_value=keywords), \
@@ -62,6 +79,24 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
                                return_value=early or early_rows()) as fallback:
             result = ce.scan_convergence_detailed(family, limit=8, shortlist=8)
         return result, fallback
+
+    def test_repeated_fresh_background_supply_can_surface_as_unvalidated_lead(self):
+        row = candidate("misty forest path", measured=False, recent=2)
+        row["family"] = "backgrounds"
+        self.assertEqual(
+            ce.qualifies(row),
+            (True, "repeated fresh supply; demand and growth unverified"),
+        )
+        row["recent"] = 1
+        self.assertFalse(ce.qualifies(row)[0])
+
+    def test_other_category_keeps_existing_fresh_supply_gate(self):
+        row = candidate("viral dance", measured=False, recent=1)
+        row["family"] = "emotes"
+        self.assertEqual(
+            ce.qualifies(row),
+            (True, "fresh supply (velocity unmeasured)"),
+        )
 
     def test_empty_mined_phrases_still_shows_measured_early_activity(self):
         result, fallback = self._run([], lambda *args, **kw: None)
@@ -90,8 +125,10 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 1)
         self.assertEqual(result["scored"], 1)
         self.assertEqual(result["qualified_count"], 0)
-        self.assertEqual(result["gated"][0]["reason"],
-                         "velocity unmeasured and no fresh supply")
+        self.assertEqual(
+            result["gated"][0]["reason"],
+            "fewer than 2 fresh matching backgrounds",
+        )
         fallback.assert_called_once()
         self.assertIn("1 candidate phrases mined", cl.format_report(result, {},
                                                                    family="backgrounds"))

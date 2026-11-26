@@ -12,6 +12,7 @@ from time_utils import ensure_utc, utc_now
 
 SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details"
 DETAILS_URL = "https://economy.roblox.com/v2/assets/{}/details"
+FAVORITES_URL = "https://catalog.roblox.com/v1/catalog/items/{}/details?itemType=Asset"
 ASSET_TYPE = 92
 # General terms run every cycle; rotating scene seeds expand beyond one query.
 GENERAL = ("avatar background", "background")
@@ -58,6 +59,28 @@ def _normalize(raw, now):
                 price=None if raw.get("price_missing") else _integer(raw.get("price")),
                 creator_name=str(raw.get("creatorName") or raw.get("creator_name") or "")[:200],
                 created_at=created, **identity)
+
+
+def _fetch_favorite_count(item_id):
+    """Read catalog favoriteCount when the batch response omits it.
+
+    Zero is a valid observation. Only a missing field triggers this fallback;
+    rate limits and unavailable responses remain unknown, never zero.
+    """
+    if shared_circuit_open("catalog_details"):
+        return None
+    try:
+        response = safe_get(
+            "catalog_details", FAVORITES_URL.format(int(item_id)), timeout=10)
+        if response.status_code != 200:
+            return None
+        payload = response.json() or {}
+        value = payload.get("favoriteCount")
+        if value is None:
+            return None
+        return _integer(value)
+    except Exception:
+        return None
 
 
 def _queries(now):
@@ -213,11 +236,31 @@ def run_cycle(db_factory=None, batch_fn=None):
                     from roblox_batch_client import fetch_many_items_sync as batch_fn
                 items, _failed = batch_fn(ids, max_batch=30, rate_per_min=30,
                                           max_concurrency=1)
-                rows = [_normalize(dict(d, id=iid), utc_now())
-                        for iid, d in (items or {}).items() if iid in ids]
-                rows = [r for r in rows if r is not None]
+                rows = []
+                favorite_fallback_requests = 0
+                favorite_fallback_failures = 0
+                for iid, detail in (items or {}).items():
+                    try:
+                        item_id = int(iid)
+                    except (TypeError, ValueError):
+                        continue
+                    if item_id not in ids or not isinstance(detail, dict):
+                        continue
+                    normalized_detail = dict(detail, id=item_id)
+                    observed_favs = normalized_detail.get(
+                        "favorite_count", normalized_detail.get("favoriteCount"))
+                    if observed_favs is None:
+                        favorite_fallback_requests += 1
+                        observed_favs = _fetch_favorite_count(item_id)
+                        if observed_favs is None:
+                            favorite_fallback_failures += 1
+                        else:
+                            normalized_detail["favorite_count"] = observed_favs
+                    row = _normalize(normalized_detail, utc_now())
+                    if row is not None:
+                        rows.append(row)
                 snapshots += _with_db(db_factory, lambda c: store_rows(c, rows))
-                refreshed = len(rows)
+                refreshed = sum(r.get("favorite_count") is not None for r in rows)
                 refresh_failures = len(ids) - refreshed
         if not shared_circuit_open("catalog_details"):
             missing = _with_db(db_factory, lambda c: missing_dates(c, now))
@@ -251,6 +294,8 @@ def run_cycle(db_factory=None, batch_fn=None):
                 "search_requests": requests, "search_failures": failures,
                 "discovered": len(found), "refreshed": refreshed,
                 "refresh_failures": refresh_failures,
+                "favorite_fallback_requests": locals().get("favorite_fallback_requests", 0),
+                "favorite_fallback_failures": locals().get("favorite_fallback_failures", 0),
                 "new_daily_snapshots": snapshots, "dates_filled": dates,
                 "date_requests": date_requests,
                 "deferred": deferred or shared_circuit_open("catalog_details")}

@@ -273,7 +273,7 @@ def test_t10_discovery_created_at_preserved():
     enable()
     rows, types = base_setup()
     store = FakeStore(rows, types)
-    created = NOW - timedelta(days=7)
+    created = datetime.now(timezone.utc) - timedelta(days=7)
     disc = item(501)
     disc["created_at"] = created
     batch = item(501)
