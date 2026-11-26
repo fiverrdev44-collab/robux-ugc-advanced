@@ -190,6 +190,10 @@ def _gather_keywords(cur, family=None):
         fam_sql, fam_params = _family_clause(family)
         if fam_sql:
             try:
+                order_sql = (
+                    "created_at DESC NULLS LAST, favorite_count DESC NULLS LAST"
+                    if is_background else "favorite_count DESC NULLS LAST"
+                )
                 cur.execute(f"""
                     select name
                     from items
@@ -236,10 +240,6 @@ def _gather_keywords(cur, family=None):
                 for kw, cnt in counter.most_common(250):
                     if cnt >= minimum_support:
                         keywords.add(kw)
-                order_sql = (
-                    "created_at DESC NULLS LAST, favorite_count DESC NULLS LAST"
-                    if is_background else "favorite_count DESC NULLS LAST"
-                )
             except Exception as e:
                 print(f"[convergence] family keyword mining failed: {e}", flush=True)
             print(
