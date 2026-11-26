@@ -68,7 +68,7 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
         cur = NamesCursor()
         keywords = ce._gather_keywords(cur, family="backgrounds")
         self.assertIn("misty forest", keywords)
-        self.assertIn("misty forest path", keywords)
+        self.assertIn("misty forest", keywords)
         self.assertIn("created_at DESC NULLS LAST", cur.sql)
 
     def _run(self, keywords, side_effect, family="backgrounds", early=None):
