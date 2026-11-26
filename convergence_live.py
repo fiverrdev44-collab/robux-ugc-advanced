@@ -481,9 +481,14 @@ def format_recommendation(candidate, live=None):
     # 2. database evidence
     vel = (f"{candidate['velocity']}/d" if candidate.get("velocity_measured")
            else "unavailable (insufficient history)")
+    supply_label = (
+        "matching listings (all observed favorites)"
+        if candidate.get("family") == "backgrounds"
+        else "supply (favs>5, sampled)"
+    )
     lines.append(
         f"• **Database evidence:** median {candidate.get('median_favs')}♥ · "
-        f"supply {candidate.get('supply')} (favs>5, sampled) · "
+        f"{supply_label} {candidate.get('supply')} · "
         f"recent {candidate.get('recent')} · velocity {vel} · "
         f"concentration {int(candidate.get('concentration', 0)*100)}%"
     )
