@@ -229,8 +229,12 @@ def _gather_keywords(cur, family=None):
                                 else:
                                     counter[phrase] += 1
                     counter.update(phrases)
+                # Background catalogs are smaller than clothing/emote catalogs.
+                # Requiring three identical titles silently erased valid two-item
+                # scene clusters before scoring ever saw them.
+                minimum_support = 2 if is_background else 3
                 for kw, cnt in counter.most_common(250):
-                    if cnt >= 3:
+                    if cnt >= minimum_support:
                         keywords.add(kw)
             except Exception as e:
                 print(f"[convergence] family keyword mining failed: {e}", flush=True)
@@ -307,6 +311,8 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
 
     fam_sql, fam_params = _family_clause(family)
     match_op = "~*" if use_regex else "ilike"
+    is_background = resolve_family_ids(family) == [92]
+    favorite_filter = "" if is_background else "and favorite_count > 5"
 
     cur.execute(f"""
         select count(*),
@@ -315,7 +321,7 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
                coalesce(percentile_cont(0.9) within group
                         (order by favorite_count), 0)
         from items
-        where name {match_op} %s and favorite_count > 5
+        where name {match_op} %s {favorite_filter}
         {fam_sql}
     """, [pat] + fam_params)
     row = cur.fetchone()
@@ -323,10 +329,16 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     median_favs = float(row[1] or 0)
     p90_favs = float(row[2] or 0)
 
-    if supply < 3:                 return _reject("supply < 3")
-    if supply > 500:               return _reject("supply > 500 (saturated)")
-    if median_favs > 50_000:       return _reject("median favorites too high")
-    if median_favs < min_median:   return _reject("median favorites below threshold")
+    if supply < (2 if is_background else 3):
+        return _reject("matching supply below category minimum")
+    if supply > 500:
+        return _reject("supply > 500 (saturated)")
+    if median_favs > 50_000:
+        return _reject("median favorites too high")
+    # A sparse/new background category can have low or missing favorites.
+    # Repeated scene listings remain research leads, not demand evidence.
+    if median_favs < min_median and not is_background:
+        return _reject("median favorites below threshold")
 
     cur.execute(f"""
         select count(*),
@@ -345,7 +357,6 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     demand_reliable = demand_live > 0
     demand = demand_live if demand_reliable else demand_all
     volume = volume_live if demand_reliable else volume_all
-    is_background = resolve_family_ids(family) == [92]
     if demand < min_demand and not is_background:
         return _reject("no autocomplete occurrences")
 
@@ -384,11 +395,14 @@ def _score_keyword(cur, keyword, family=None, min_median=15, min_demand=1,
     vel_row = cur.fetchone()
     observations = int(vel_row[0] or 0)
     if is_background and demand < min_demand:
-        # Missing autocomplete is not zero interest. Require corroborated
-        # actual positive favorite movement instead of inventing search demand.
+        # Missing autocomplete is not zero interest. In a young category,
+        # allow a repeated fresh-supply cluster to surface as a research lead;
+        # this is explicitly not validated demand or measured momentum.
         positive_items = int(vel_row[2] or 0) if len(vel_row) > 2 else 0
-        if positive_items < 2:
-            return _reject("missing autocomplete and insufficient measured growth")
+        if positive_items < 2 and recent < 2:
+            return _reject(
+                "no autocomplete, fewer than 2 fresh listings, and "
+                "insufficient measured growth")
     velocity_measured = observations > 0
     if not velocity_measured:
         velocity = None
@@ -515,7 +529,12 @@ def qualifies(r):
     if _is_generic(r.get("keyword")):
         return False, "generic (non-actionable term)"
     if not r.get("velocity_measured"):
-        if (r.get("recent") or 0) == 0:
+        recent = int(r.get("recent") or 0)
+        if r.get("family") == "backgrounds":
+            if recent < 2:
+                return False, "fewer than 2 fresh matching backgrounds"
+            return True, "repeated fresh supply; demand and growth unverified"
+        if recent == 0:
             return False, "velocity unmeasured and no fresh supply"
         return True, "fresh supply (velocity unmeasured)"
     return True, "measured velocity"
