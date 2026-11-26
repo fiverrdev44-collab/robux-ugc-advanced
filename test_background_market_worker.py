@@ -43,6 +43,24 @@ class TestBackgroundCoverage(unittest.TestCase):
         self.assertEqual((rows,calls,failures,deferred),({},1,1,True))
         self.assertEqual(get.call_count,1)
 
+    def test_favorite_fallback_reads_catalog_count_and_preserves_zero(self):
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"favoriteCount": 17}
+        with mock.patch.object(w, "safe_get", return_value=response) as get:
+            self.assertEqual(w._fetch_favorite_count(12345), 17)
+        self.assertIn("12345", get.call_args.args[1])
+
+        response.json.return_value = {"favoriteCount": 0}
+        with mock.patch.object(w, "safe_get", return_value=response):
+            self.assertEqual(w._fetch_favorite_count(12345), 0)
+
+    def test_favorite_fallback_does_not_mask_rate_limit(self):
+        response = Mock()
+        response.status_code = 429
+        with mock.patch.object(w, "safe_get", return_value=response):
+            self.assertIsNone(w._fetch_favorite_count(12345))
+
     def test_only_observed_favorites_create_history(self):
         cur=Mock()
         cur.rowcount=1
