@@ -125,8 +125,10 @@ class BackgroundConvergenceRecoveryTests(unittest.TestCase):
         self.assertEqual(result["scanned"], 1)
         self.assertEqual(result["scored"], 1)
         self.assertEqual(result["qualified_count"], 0)
-        self.assertEqual(result["gated"][0]["reason"],
-                         "velocity unmeasured and no fresh supply")
+        self.assertEqual(
+            result["gated"][0]["reason"],
+            "fewer than 2 fresh matching backgrounds",
+        )
         fallback.assert_called_once()
         self.assertIn("1 candidate phrases mined", cl.format_report(result, {},
                                                                    family="backgrounds"))
