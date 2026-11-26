@@ -1,6 +1,7 @@
 """Offline regression checks for dedicated background collection."""
 import unittest
 from datetime import datetime, timezone, timedelta
+from unittest import mock
 from unittest.mock import Mock
 import background_market_worker as w
 import avatar_backgrounds as ab
