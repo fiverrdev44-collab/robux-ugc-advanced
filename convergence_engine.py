@@ -196,7 +196,10 @@ def _gather_keywords(cur, family=None):
                     where name is not null
                     {'' if is_background else 'and favorite_count > 5'}
                     {fam_sql}
-                    order by favorite_count desc nulls last
+                    order by {
+                        'created_at DESC NULLS LAST, favorite_count DESC NULLS LAST'
+                        if is_background else 'favorite_count DESC NULLS LAST'
+                    }
                     limit 5000
                 """, fam_params)
                 counter = Counter()
